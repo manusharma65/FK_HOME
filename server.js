@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────
-const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ai-analyse', '/google/pagespeed', '/google/archive', '/google/daily-sales', '/shopify/products'];
+const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ai-analyse', '/google/pagespeed', '/google/daily-sales', '/shopify/products'];
 
 async function requireAuth(req, res, next) {
   if (PUBLIC_PATHS.some(function(p){ return req.path.startsWith(p); })) return next();
@@ -663,8 +663,9 @@ async function initTasksTable() {
       );
     `);
 
-    // Archived Google campaigns — agents archive old/irrelevant campaigns to keep
-    // the dashboard clean. Reversible until manager removes permanently.
+    // Archived/dismissed Google campaigns. Two states:
+    //   'dismissed' — agent flagged with reason, still appears on Active tab with pill
+    //   'archived'  — manager has moved out of view, appears only in Archived tab
     await db.query(`
       CREATE TABLE IF NOT EXISTS google_campaign_archive (
         campaign_id TEXT PRIMARY KEY,
@@ -673,10 +674,14 @@ async function initTasksTable() {
         archived_by TEXT,
         archived_at TIMESTAMP DEFAULT NOW(),
         reason TEXT,
-        department TEXT DEFAULT 'google'
+        department TEXT DEFAULT 'google',
+        state TEXT DEFAULT 'archived'
       );
       CREATE INDEX IF NOT EXISTS idx_archive_archived_at ON google_campaign_archive(archived_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_archive_state ON google_campaign_archive(state);
     `);
+    // Migrate existing rows that don't have state column
+    await db.query("ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'");
 
     try {
       const tasks = await db.query('SELECT id, campaign_name FROM campaign_tasks WHERE campaign_name IS NOT NULL');
@@ -1602,24 +1607,34 @@ async function syncShopifyProducts() {
         headers: { 'X-Shopify-Access-Token': token }
       });
       const orders = orderRes.data.orders || [];
+      // Per-line revenue uses Shopify's "Net sales" definition:
+      //   (item.price * item.quantity) - sum(item.discount_allocations[].amount)
+      // This matches Shopify Analytics → "Net sales" exactly per product.
+      // We don't add shipping or tax because those aren't attributable to a single product.
+      // We don't subtract refunds yet (per Bobby's instruction).
       orders.forEach(function(order) {
         const orderTime = new Date(order.created_at).getTime();
         const dayKey = order.created_at.slice(0, 10); // 'YYYY-MM-DD'
         const isWithin7 = orderTime >= cutoff7;
         (order.line_items || []).forEach(function(item) {
           const pid = String(item.product_id);
-          const lineRevenue = parseFloat(item.price) * item.quantity;
+          const gross = parseFloat(item.price || 0) * (item.quantity || 0);
+          // Sum allocated discounts for this line (cart-level discounts pro-rated to the line)
+          const discountAllocated = (item.discount_allocations || []).reduce(function(s, da){
+            return s + parseFloat(da.amount || 0);
+          }, 0);
+          const lineRevenue = Math.max(0, gross - discountAllocated);
           sales30[pid] = (sales30[pid] || 0) + lineRevenue;
-          units30[pid] = (units30[pid] || 0) + item.quantity;
+          units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
           if (isWithin7) {
             sales7[pid] = (sales7[pid] || 0) + lineRevenue;
-            units7[pid] = (units7[pid] || 0) + item.quantity;
+            units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
           }
           if (!dailySalesByPid[pid]) dailySalesByPid[pid] = {};
           dailySalesByPid[pid][dayKey] = (dailySalesByPid[pid][dayKey] || 0) + lineRevenue;
         });
       });
-      console.log('Shopify orders fetched: ' + orders.length);
+      console.log('Shopify orders fetched: ' + orders.length + ' (using Net sales = price*qty - line discounts)');
     } catch(e) { console.log('Shopify orders skipped (no permission): ' + e.message); }
 
     shopifyState.products = rawProducts.map(function(p) {
@@ -2081,51 +2096,83 @@ app.post('/api/google/pagespeed', async function(req, res) {
 // Campaign Archive — hide old/irrelevant campaigns from main view
 // ─────────────────────────────────────────────────────────────────────────
 
-// Get current archive set (used by frontend to filter)
+// Get current dismiss/archive set (used by frontend to filter and show pills)
 app.get('/api/google/archive', async function(req, res) {
-  if (!db) return res.json({ archived: [] });
+  if (!db) return res.json({ dismissed: [], archived: [] });
   try {
     const r = await db.query(
-      "SELECT campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason FROM google_campaign_archive ORDER BY archived_at DESC"
+      "SELECT campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, state FROM google_campaign_archive ORDER BY archived_at DESC"
     );
-    res.json({ archived: r.rows });
+    const dismissed = r.rows.filter(function(x){ return (x.state || 'archived') === 'dismissed'; });
+    const archived = r.rows.filter(function(x){ return (x.state || 'archived') === 'archived'; });
+    res.json({ dismissed: dismissed, archived: archived });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Archive a campaign — anyone (agent or manager) can do this
-app.post('/api/google/archive', async function(req, res) {
+// Dismiss a campaign — agent action. Stays on Active with a pill.
+app.post('/api/google/dismiss', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const { campaignId, campaignName, campaignType, reason } = req.body;
   if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
-  // Get user from session if available
-  let archivedBy = 'unknown';
-  try {
-    if (req.cookies && req.cookies.session_token) {
-      const u = await db.query("SELECT username FROM users u JOIN user_sessions s ON s.user_id=u.id WHERE s.token=$1", [req.cookies.session_token]);
-      if (u.rows.length) archivedBy = u.rows[0].username;
-    }
-  } catch(e) {}
-
+  if (!reason || !reason.trim()) return res.status(400).json({ error: 'A reason is required when dismissing' });
+  const dismissedBy = (req.user && req.user.name) || 'unknown';
   try {
     await db.query(`
-      INSERT INTO google_campaign_archive (campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, department)
-      VALUES ($1, $2, $3, $4, NOW(), $5, 'google')
+      INSERT INTO google_campaign_archive (campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, department, state)
+      VALUES ($1, $2, $3, $4, NOW(), $5, 'google', 'dismissed')
       ON CONFLICT (campaign_id) DO UPDATE SET
         campaign_name = EXCLUDED.campaign_name,
         campaign_type = EXCLUDED.campaign_type,
         archived_by = EXCLUDED.archived_by,
         archived_at = NOW(),
-        reason = EXCLUDED.reason
-    `, [String(campaignId), campaignName || '', campaignType || '', archivedBy, reason || '']);
-    // Activity log
+        reason = EXCLUDED.reason,
+        state = 'dismissed'
+    `, [String(campaignId), campaignName || '', campaignType || '', dismissedBy, reason.trim()]);
     try {
       await db.query(
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
-        [String(campaignId), campaignName || '', archivedBy, 'campaign_archived', reason || '(no reason given)']
+        [String(campaignId), campaignName || '', dismissedBy, 'campaign_dismissed', reason.trim()]
       );
-    } catch(e) {}
+    } catch(e) { console.error('Dismiss log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Dismiss error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Archive a dismissed campaign — manager only. Removes it from Active.
+app.post('/api/google/archive', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId, campaignName, campaignType, reason } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  const archivedBy = (req.user && req.user.name) || 'unknown';
+  const role = req.user && req.user.role;
+  const isManager = ['manager', 'admin'].includes(role) || ['Bobby', 'Satyam', 'bobby', 'satyam'].includes(archivedBy);
+  if (!isManager) return res.status(403).json({ error: 'Manager only' });
+
+  try {
+    await db.query(`
+      INSERT INTO google_campaign_archive (campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, department, state)
+      VALUES ($1, $2, $3, $4, NOW(), $5, 'google', 'archived')
+      ON CONFLICT (campaign_id) DO UPDATE SET
+        campaign_name = EXCLUDED.campaign_name,
+        campaign_type = EXCLUDED.campaign_type,
+        archived_by = EXCLUDED.archived_by,
+        archived_at = NOW(),
+        reason = COALESCE(EXCLUDED.reason, google_campaign_archive.reason),
+        state = 'archived'
+    `, [String(campaignId), campaignName || '', campaignType || '', archivedBy, reason || null]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), campaignName || '', archivedBy, 'campaign_archived', reason || 'archived from dismissed']
+      );
+    } catch(e) { console.error('Archive log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
     res.json({ success: true });
   } catch(e) {
     console.error('Archive error: ' + e.message);
@@ -2133,49 +2180,41 @@ app.post('/api/google/archive', async function(req, res) {
   }
 });
 
-// Restore a campaign from archive (anyone can restore)
+// Restore a campaign from dismiss or archive — anyone for dismissed, manager-only for archived
 app.post('/api/google/archive/restore', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const { campaignId } = req.body;
   if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
-  let restoredBy = 'unknown';
+  const restoredBy = (req.user && req.user.name) || 'unknown';
+  const role = req.user && req.user.role;
+  const isManager = ['manager', 'admin'].includes(role) || ['Bobby', 'Satyam', 'bobby', 'satyam'].includes(restoredBy);
   try {
-    if (req.cookies && req.cookies.session_token) {
-      const u = await db.query("SELECT username FROM users u JOIN user_sessions s ON s.user_id=u.id WHERE s.token=$1", [req.cookies.session_token]);
-      if (u.rows.length) restoredBy = u.rows[0].username;
-    }
-  } catch(e) {}
-  try {
-    const before = await db.query("SELECT campaign_name FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    const before = await db.query("SELECT campaign_name, state FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    if (!before.rows.length) return res.status(404).json({ error: 'Not found' });
+    const wasArchived = (before.rows[0].state || 'archived') === 'archived';
+    if (wasArchived && !isManager) return res.status(403).json({ error: 'Only manager can restore archived campaigns' });
     await db.query("DELETE FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
     try {
       await db.query(
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
-        [String(campaignId), before.rows[0] ? before.rows[0].campaign_name : '', restoredBy, 'campaign_restored', 'restored from archive']
+        [String(campaignId), before.rows[0].campaign_name, restoredBy, wasArchived ? 'campaign_restored_from_archive' : 'campaign_restored_from_dismiss', 'restored to active']
       );
-    } catch(e) {}
+    } catch(e) { console.error('Restore log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Permanently remove from archive (manager only — checked client-side and here)
+// Permanently remove from archive (manager only)
 app.post('/api/google/archive/remove', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const { campaignId } = req.body;
   if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
-  let removedBy = 'unknown';
-  let isManager = false;
-  try {
-    if (req.cookies && req.cookies.session_token) {
-      const u = await db.query("SELECT username, role FROM users u JOIN user_sessions s ON s.user_id=u.id WHERE s.token=$1", [req.cookies.session_token]);
-      if (u.rows.length) {
-        removedBy = u.rows[0].username;
-        isManager = ['manager', 'admin'].includes(u.rows[0].role) || ['bobby', 'satyam'].includes(u.rows[0].username);
-      }
-    }
-  } catch(e) {}
+  const removedBy = (req.user && req.user.name) || 'unknown';
+  const role = req.user && req.user.role;
+  const isManager = ['manager', 'admin'].includes(role) || ['Bobby', 'Satyam', 'bobby', 'satyam'].includes(removedBy);
   if (!isManager) return res.status(403).json({ error: 'Manager only' });
   try {
     const before = await db.query("SELECT campaign_name FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
@@ -2185,7 +2224,8 @@ app.post('/api/google/archive/remove', async function(req, res) {
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
         [String(campaignId), before.rows[0] ? before.rows[0].campaign_name : '', removedBy, 'campaign_removed', 'permanently removed by manager']
       );
-    } catch(e) {}
+    } catch(e) { console.error('Remove log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -2355,22 +2395,35 @@ app.post('/api/shopify/sync', async function(req, res) {
 });
 
 // ── Google Advertised View — grouped by campaign ──────────────────────────
-// Helper — load current archived campaign IDs (cached briefly to avoid DB hits per request)
-let archivedCampaignsCache = { ids: new Set(), at: 0 };
+// Helper — load currently ARCHIVED campaign IDs (dismissed stay visible on Active with pill).
+// Cached briefly to avoid DB hits per request.
+let archivedCampaignsCache = { ids: new Set(), dismissed: new Map(), at: 0 };
 async function getArchivedCampaignIds() {
-  // 30-second cache
   if (Date.now() - archivedCampaignsCache.at < 30000) return archivedCampaignsCache.ids;
   if (!db) return new Set();
   try {
-    const r = await db.query("SELECT campaign_id FROM google_campaign_archive");
-    const set = new Set(r.rows.map(function(x){ return String(x.campaign_id); }));
-    archivedCampaignsCache = { ids: set, at: Date.now() };
-    return set;
+    const r = await db.query("SELECT campaign_id, state, archived_by, archived_at, reason FROM google_campaign_archive");
+    const archived = new Set();
+    const dismissed = new Map();
+    r.rows.forEach(function(x){
+      const state = x.state || 'archived';
+      if (state === 'archived') archived.add(String(x.campaign_id));
+      else if (state === 'dismissed') dismissed.set(String(x.campaign_id), x);
+    });
+    archivedCampaignsCache = { ids: archived, dismissed: dismissed, at: Date.now() };
+    return archived;
   } catch(e) { return new Set(); }
+}
+
+// Helper — get dismiss info for a campaign (returns row with archived_by, reason, archived_at — or null)
+async function getDismissedInfoMap() {
+  await getArchivedCampaignIds(); // populates cache
+  return archivedCampaignsCache.dismissed || new Map();
 }
 
 app.get('/api/google/products-diagnostic', async function(req, res) {
   const archivedIds = await getArchivedCampaignIds();
+  const dismissedMap = await getDismissedInfoMap();
   const googleProducts = (googleState.products || []).filter(function(gp){
     return !archivedIds.has(String(gp.campaignId));
   });
@@ -2483,6 +2536,14 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
       if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
       return (b.spend || 0) - (a.spend || 0);
     });
+    // Attach dismiss info if present
+    const dismInfo = dismissedMap.get(String(c.campaignId));
+    if (dismInfo) {
+      c.dismissed = true;
+      c.dismissedBy = dismInfo.archived_by;
+      c.dismissedAt = dismInfo.archived_at;
+      c.dismissReason = dismInfo.reason;
+    }
   });
 
   const campaignList = Object.values(byCampaign).sort(function(a, b) {
@@ -2806,17 +2867,149 @@ Be direct, specific, and actionable. No generic advice.`;
     // we've also fetched the page + PageSpeed (the harder reasoning task)
     const model = includePageContent ? 'claude-opus-4-5-20251101' : 'claude-sonnet-4-5-20250929';
 
+    // For deep dive: also fetch the hero image and let Claude actually see it.
+    const imageUrl = product.imageUrl || product.shopifyImageUrl;
+    let messageContent = [{ type: 'text', text: prompt }];
+    let visionUsed = false;
+    if (includePageContent && imageUrl) {
+      try {
+        // Resize hint: ask Shopify CDN for a reasonable size to keep payload small.
+        // Shopify image URLs accept _<size> in the filename (e.g. image_512x.jpg)
+        const sizedUrl = imageUrl.replace(/(\.[a-z]+)(\?.*)?$/i, '_512x$1$2');
+        const imgRes = await axios.get(sizedUrl, {
+          responseType: 'arraybuffer',
+          timeout: 8000,
+          headers: { 'User-Agent': 'Mozilla/5.0 CampaignPulse' }
+        });
+        const contentType = imgRes.headers['content-type'] || 'image/jpeg';
+        // Only proceed if it's a real image
+        if (contentType.startsWith('image/')) {
+          const base64 = Buffer.from(imgRes.data).toString('base64');
+          // Cap at ~1MB to be safe
+          if (base64.length < 1500000) {
+            messageContent = [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: contentType.split(';')[0],
+                  data: base64
+                }
+              },
+              { type: 'text', text: prompt + '\n\nThe attached image is the product\'s hero image as it appears in the Shopify product page and Google Shopping ads. Comment specifically on its quality: is it bright and clean, is the product clearly visible, is it lifestyle or studio, does it look professional, are there any issues that would hurt CTR or conversion?' }
+            ];
+            visionUsed = true;
+          }
+        }
+      } catch(e) {
+        console.log('Image fetch for vision skipped: ' + e.message);
+      }
+    }
+
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: model,
-      max_tokens: 600,
+      max_tokens: 700,
+      messages: [{ role: 'user', content: messageContent }]
+    }, {
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+    });
+
+    res.json({
+      analysis: response.data.content[0].text,
+      modelUsed: model,
+      visionUsed: visionUsed,
+      pageFetched: !!pageSnippet && !pageSnippet.includes('could not fetch')
+    });
+  } catch(e) {
+    console.error('Google AI analyse error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Campaign-level AI analysis — looks at the whole campaign (all products + campaign metrics)
+// and gives campaign-focused advice (which products are dragging it down, are bids right,
+// is the campaign type appropriate, etc.)
+app.post('/api/google/ai-analyse-campaign', async function(req, res) {
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'No API key' });
+  const { campaignId } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  try {
+    // Find all products in this campaign from current Google state
+    const allProducts = (googleState.products || []).filter(function(gp){
+      return String(gp.campaignId) === String(campaignId);
+    });
+    if (!allProducts.length) return res.status(404).json({ error: 'No data for this campaign' });
+
+    const campaignName = allProducts[0].campaignName || 'Unknown campaign';
+    const campaignType = allProducts[0].campaignType || 'Unknown type';
+    const totalSpend = allProducts.reduce(function(s, p){ return s + (p.spend || 0); }, 0);
+    const totalSales = allProducts.reduce(function(s, p){ return s + (p.sales || 0); }, 0);
+    const totalImpressions = allProducts.reduce(function(s, p){ return s + (p.impressions || 0); }, 0);
+    const totalClicks = allProducts.reduce(function(s, p){ return s + (p.clicks || 0); }, 0);
+    const totalConv = allProducts.reduce(function(s, p){ return s + (p.conversions || 0); }, 0);
+    const overallCtr = totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : '0';
+    const overallAcos = totalSales > 0 ? (totalSpend / totalSales * 100).toFixed(1) : 'N/A';
+
+    // Sort products by spend descending so AI sees biggest spenders first
+    const sorted = allProducts.slice().sort(function(a, b){ return (b.spend || 0) - (a.spend || 0); });
+    const top = sorted.slice(0, 15); // limit to 15 to keep prompt manageable
+
+    const productLines = top.map(function(p, i){
+      const name = p.name || p.productName || p.adGroupName || '(unknown)';
+      const spend = (p.spend || 0).toFixed(2);
+      const sales = (p.sales || 0).toFixed(2);
+      const acos = p.acos != null ? p.acos.toFixed(1) + '%' : 'N/A';
+      return (i+1) + '. ' + name.slice(0, 60)
+        + ' — Spend £' + spend + ', Sales £' + sales
+        + ', ' + (p.impressions || 0) + ' impr, ' + (p.clicks || 0) + ' clk, '
+        + (p.conversions || 0) + ' conv, ACOS ' + acos;
+    }).join('\n');
+
+    const remaining = sorted.length - top.length;
+    const remainingNote = remaining > 0
+      ? '\n... and ' + remaining + ' more product rows in this campaign.'
+      : '';
+
+    const prompt = 'You are a Google Ads expert for FK Sports UK (fitness equipment).\n\n'
+      + 'CAMPAIGN: ' + campaignName + '\n'
+      + 'TYPE: ' + campaignType + '\n'
+      + 'PERIOD: Last 7 days\n\n'
+      + 'CAMPAIGN TOTALS:\n'
+      + '- Spend: £' + totalSpend.toFixed(2) + '\n'
+      + '- Google-attributed sales: £' + totalSales.toFixed(2) + ' (note: Google attribution lags hours-to-days)\n'
+      + '- Impressions: ' + totalImpressions + '\n'
+      + '- Clicks: ' + totalClicks + '\n'
+      + '- Conversions: ' + totalConv + '\n'
+      + '- CTR: ' + overallCtr + '%\n'
+      + '- ACOS: ' + overallAcos + '\n'
+      + '- Product rows in campaign: ' + allProducts.length + '\n\n'
+      + 'TOP PRODUCTS BY SPEND:\n' + productLines + remainingNote + '\n\n'
+      + 'Provide a CAMPAIGN-LEVEL analysis (not per-product) covering:\n'
+      + '1. Overall health verdict (one line: scaling / healthy / leaking money / broken)\n'
+      + '2. Which products are dragging this campaign down — name 1-3 specifically, with the spend and ACOS\n'
+      + '3. Which products are working well and could absorb more budget — name 1-3\n'
+      + '4. ONE specific structural change to make this week (e.g. "split out the Walking Pad into its own campaign", "lower bid on Hex Dumbbell Tree by 30%", "exclude product type X")\n'
+      + '5. If this is a Performance Max or Shopping campaign, comment on whether the right products are in scope\n\n'
+      + 'Be direct, specific, named. Reference actual product names and numbers from the data above. No generic advice.';
+
+    // Use Opus for campaign-level reasoning — it's the harder task
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-opus-4-5-20251101',
+      max_tokens: 1000,
       messages: [{ role: 'user', content: prompt }]
     }, {
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
     });
 
-    res.json({ analysis: response.data.content[0].text });
+    res.json({
+      analysis: response.data.content[0].text,
+      campaignName: campaignName,
+      campaignType: campaignType,
+      productCount: allProducts.length,
+      modelUsed: 'claude-opus-4-5-20251101'
+    });
   } catch(e) {
-    console.error('Google AI analyse error: ' + e.message);
+    console.error('Campaign AI analyse error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });

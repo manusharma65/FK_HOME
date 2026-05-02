@@ -236,7 +236,7 @@ table.activity tr:last-child td { border-bottom: none; }
   <div class="page active" id="page-dashboard">
     <div class="metrics-grid">
       <div class="metric-card success">
-        <div class="metric-label">Shopify revenue (7d)</div>
+        <div class="metric-label">Shopify net sales (7d)</div>
         <div class="metric-value" id="m-revenue">—</div>
         <div class="metric-sub" id="m-revenue-sub">—</div>
       </div>
@@ -257,6 +257,9 @@ table.activity tr:last-child td { border-bottom: none; }
       </div>
     </div>
 
+    <!-- DAILY SALES CARD — visual breakdown of Shopify net sales (7d) -->
+    <div id="daily-sales-card" class="section-card" style="margin:-12px 0 24px 0;padding:18px 20px;background:var(--bg);border-radius:12px;border:1px solid var(--border)"></div>
+
     <div class="section-header">
       <div>
         <div class="section-title">Top urgent products</div>
@@ -265,9 +268,6 @@ table.activity tr:last-child td { border-bottom: none; }
       <button class="btn btn-ghost" onclick="showPage('products', document.querySelectorAll('.nav-item')[1])">View all →</button>
     </div>
     <div id="urgent-list"></div>
-
-    <!-- DAILY SALES CARD -->
-    <div id="daily-sales-card" class="section-card" style="margin-top:24px;padding:16px;background:var(--bg);border-radius:10px;border:1px solid var(--border)"></div>
 
     <div class="section-header" style="margin-top:24px">
       <div>
@@ -336,18 +336,20 @@ table.activity tr:last-child td { border-bottom: none; }
 </div>
 
 <!-- ARCHIVE PROMPT MODAL -->
-<div class="modal-bg" id="archive-modal" onclick="if(event.target===this)closeArchiveModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:center;justify-content:center;padding:20px">
+<!-- DISMISS modal: agent flags campaign with a required reason. Stays on Active with pill. -->
+<div class="modal-bg" id="dismiss-modal" onclick="if(event.target===this)closeDismissModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:center;justify-content:center;padding:20px">
   <div style="background:var(--bg);width:100%;max-width:520px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4)">
-    <div style="padding:18px 24px;border-bottom:1px solid var(--border);font-size:16px;font-weight:600">Archive campaign</div>
+    <div style="padding:18px 24px;border-bottom:1px solid var(--border);font-size:16px;font-weight:600">Dismiss campaign</div>
     <div style="padding:20px 24px">
-      <div style="margin-bottom:14px;color:var(--text2);font-size:13px">Hide this campaign from the dashboard. It can be restored from the Archived tab anytime.</div>
-      <div id="archive-campaign-name" style="padding:10px 12px;background:var(--bg2);border-radius:6px;margin-bottom:14px;font-weight:500"></div>
-      <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:6px">Reason (optional)</label>
-      <input id="archive-reason" type="text" placeholder="e.g. old June campaign" style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:14px;font-family:inherit">
+      <div style="margin-bottom:14px;color:var(--text2);font-size:13px">Flag this campaign so the team knows it's been reviewed. It stays visible on the Active tab with your name and reason. A manager can later archive it permanently.</div>
+      <div id="dismiss-campaign-name" style="padding:10px 12px;background:var(--bg2);border-radius:6px;margin-bottom:14px;font-weight:500"></div>
+      <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:6px">Reason <span style="color:var(--red)">*</span></label>
+      <input id="dismiss-reason" type="text" placeholder="e.g. old June campaign — already wound down" style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:14px;font-family:inherit">
+      <div id="dismiss-error" style="color:var(--red);font-size:12px;margin-top:6px;display:none">A reason is required.</div>
     </div>
     <div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="closeArchiveModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitArchive()">Archive</button>
+      <button class="btn btn-ghost" onclick="closeDismissModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitDismiss()">Dismiss</button>
     </div>
   </div>
 </div>
@@ -361,31 +363,55 @@ let archiveData = null;
 let currentUser = null;
 let currentView = 'shopify';
 let currentFilter = 'all';
+let campaignTab = 'active'; // 'active' | 'dismissed' | 'archived'
+
+// ─── Auth helpers (every API call must include the token) ─────────────────
+function getAuthHeaders(extra) {
+  const token = localStorage.getItem('cp_token');
+  const base = token
+    ? { 'x-auth-token': token, 'Content-Type': 'application/json' }
+    : { 'Content-Type': 'application/json' };
+  return Object.assign(base, extra || {});
+}
+async function authedFetch(url, options) {
+  options = options || {};
+  options.headers = Object.assign({}, options.headers || {}, getAuthHeaders());
+  return fetch(url, options);
+}
 
 // ─── Auth & user info ─────────────────────────────────────────────────────
 async function loadMe() {
   try {
-    const r = await fetch('/api/auth/me');
-    if (!r.ok) throw new Error('Not authed');
+    const r = await authedFetch('/api/auth/me');
+    if (!r.ok) {
+      // Not logged in — bounce to login page
+      localStorage.removeItem('cp_token');
+      window.location.replace('/login.html');
+      return;
+    }
     const me = await r.json();
     currentUser = me;
     document.getElementById('user-name').textContent = me.name || me.username || 'User';
     document.getElementById('user-role').textContent = me.role || 'Agent';
     document.getElementById('user-avatar').textContent = (me.name || me.username || 'U').charAt(0).toUpperCase();
-    if (me.role === 'manager' || me.role === 'admin' || me.username === 'bobby' || me.username === 'satyam') {
+    // Manager-only UI bits
+    if (isManager()) {
       document.getElementById('dept-switcher').style.display = 'flex';
+      const aTab = document.getElementById('camp-tab-archived');
+      if (aTab) aTab.style.display = 'inline-block';
     }
   } catch(e) {
-    // No auth, run anyway
-    currentUser = { username: 'bobby', role: 'manager' };
-    document.getElementById('user-name').textContent = 'Bobby';
-    document.getElementById('user-role').textContent = 'Account owner';
-    document.getElementById('dept-switcher').style.display = 'flex';
+    // Network error or similar — fall back to a permissive default so the dashboard still loads
+    currentUser = { name: 'Guest', role: 'agent' };
+    document.getElementById('user-name').textContent = 'Guest';
+    document.getElementById('user-role').textContent = 'No session';
   }
 }
 function isManager() {
   if (!currentUser) return false;
-  return currentUser.role === 'manager' || currentUser.role === 'admin' || ['bobby', 'satyam'].includes(currentUser.username);
+  const role = currentUser.role;
+  const name = (currentUser.name || currentUser.username || '').toLowerCase();
+  return role === 'manager' || role === 'admin' || ['bobby', 'satyam'].includes(name);
 }
 
 // ─── Page navigation ─────────────────────────────────────────────────────
@@ -432,19 +458,19 @@ function sparklineHtml(daily) {
 
 // ─── Data fetch ──────────────────────────────────────────────────────────
 async function fetchAllProducts() {
-  const r = await fetch('/api/google/all-products');
+  const r = await authedFetch('/api/google/all-products');
   if (!r.ok) throw new Error('all-products fetch failed');
   return r.json();
 }
 async function fetchAdvertised() {
-  const r = await fetch('/api/google/products-diagnostic');
+  const r = await authedFetch('/api/google/products-diagnostic');
   if (!r.ok) throw new Error('diagnostic fetch failed');
   return r.json();
 }
 
 async function loadGa4Status() {
   try {
-    const r = await fetch('/api/google/ga4-status');
+    const r = await authedFetch('/api/google/ga4-status');
     const j = await r.json();
     const pill = document.getElementById('ga4-pill');
     if (!j.connected) {
@@ -470,11 +496,11 @@ async function loadGa4Status() {
 }
 
 async function fetchDailySales() {
-  const r = await fetch('/api/google/daily-sales');
+  const r = await authedFetch('/api/google/daily-sales');
   return r.json();
 }
 async function fetchArchive() {
-  const r = await fetch('/api/google/archive');
+  const r = await authedFetch('/api/google/archive');
   return r.json();
 }
 
@@ -542,7 +568,7 @@ function renderDailySalesCard() {
 
   const total = dailySalesData.totalRevenue7d || 0;
   target.innerHTML = '<div class="section-header"><div>'
-    + '<div class="section-title">Sales last 7 days</div>'
+    + '<div class="section-title" style="font-size:14px">Daily breakdown of Net sales (7d)</div>'
     + '<div class="section-sub">' + fmtCurrency(total) + ' total · all products combined</div>'
     + '</div>'
     + '<button class="btn btn-ghost" onclick="openDailySalesModal()">Open full view →</button>'
@@ -698,11 +724,33 @@ function renderGoogleView() {
 function campaignBlock(c) {
   const urgent = c.urgentCount > 0 ? '<span class="priority-pill priority-1">' + c.urgentCount + ' urgent</span>' : '';
   const nameEsc = escapeHtml(c.campaignName).replace(/'/g, "&#39;");
-  return '<div class="campaign-row" id="camp-' + c.campaignId + '">'
+
+  // Dismiss pill — shown for any campaign that's been flagged by an agent
+  let dismissPill = '';
+  if (c.dismissed) {
+    const who = escapeHtml(c.dismissedBy || 'agent');
+    const reason = escapeHtml(c.dismissReason || '');
+    dismissPill = '<div style="margin-top:8px;padding:8px 12px;background:var(--amber-light);border-left:3px solid var(--amber);border-radius:4px;font-size:12px;color:var(--text);display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      + '<strong>DISMISSED by ' + who + ':</strong> "' + reason + '"'
+      + '<button class="btn btn-ghost" style="font-size:11px;padding:3px 10px;margin-left:auto" onclick="event.stopPropagation();restoreCampaign(\'' + c.campaignId + '\')">Restore</button>'
+      + (isManager() ? '<button class="btn btn-ghost" style="font-size:11px;padding:3px 10px" onclick="event.stopPropagation();archiveDismissed(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Archive — moves out of Active view">Archive</button>' : '')
+      + '</div>';
+  }
+
+  // Dismiss button — only show if not already dismissed
+  const dismissBtn = !c.dismissed
+    ? '<button class="btn btn-ghost" style="margin-left:8px;font-size:12px" onclick="event.stopPropagation();promptDismiss(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Flag this campaign with a note">Dismiss</button>'
+    : '';
+
+  // Campaign-level AI button
+  const aiBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();aiAnalyseCampaign(\'' + c.campaignId + '\',\'' + nameEsc + '\')" title="AI analysis of the whole campaign">🪄 Campaign AI</button>';
+
+  return '<div class="campaign-row' + (c.dismissed ? ' is-dismissed' : '') + '" id="camp-' + c.campaignId + '">'
     + '<div class="campaign-header">'
     + '<div onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer;flex:1">'
     + '<div class="campaign-name">' + escapeHtml(c.campaignName) + ' ' + typeBadge(c.campaignType) + '</div>'
     + '<div class="campaign-meta">' + c.productCount + ' rows ' + urgent + '</div>'
+    + dismissPill
     + '</div>'
     + '<div class="campaign-stats">'
     + '<div><div class="stat-label">Spend</div><div class="stat-value">' + fmtCurrency(c.totalSpend) + '</div></div>'
@@ -710,7 +758,7 @@ function campaignBlock(c) {
     + '<div><div class="stat-label">Impr</div><div class="stat-value">' + fmtNum(c.totalImpressions) + '</div></div>'
     + '<div><div class="stat-label">Clicks</div><div class="stat-value">' + fmtNum(c.totalClicks) + '</div></div>'
     + '<div><div class="stat-label">ACOS</div><div class="stat-value">' + fmtPct(c.acos) + '</div></div>'
-    + '<button class="btn btn-ghost" style="margin-left:8px;font-size:12px" onclick="event.stopPropagation();promptArchive(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Archive this campaign from view">Archive</button>'
+    + aiBtn + dismissBtn
     + '<svg class="expand-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer"><path d="M6 4l4 4-4 4"/></svg>'
     + '</div>'
     + '</div>'
@@ -747,8 +795,9 @@ function productSubrow(p) {
 }
 
 // ─── Standalone campaigns page ───────────────────────────────────────────
-let campaignsTab = 'active'; // 'active' | 'archived'
+let campaignsTab = 'active'; // 'active' | 'dismissed' | 'archived'
 function setCampaignsTab(tab, btn) {
+  if (tab === 'archived' && !isManager()) { alert('Only managers can view archived campaigns.'); return; }
   campaignsTab = tab;
   document.querySelectorAll('.campaigns-tab').forEach(function(b){ b.classList.remove('active'); });
   if (btn) btn.classList.add('active');
@@ -759,14 +808,19 @@ function renderCampaignsPage() {
     document.getElementById('campaigns-list').innerHTML = '<div class="empty-state">Loading...</div>';
     return;
   }
+  const dismissedCount = (archiveData && archiveData.dismissed) ? archiveData.dismissed.length : 0;
   const archivedCount = (archiveData && archiveData.archived) ? archiveData.archived.length : 0;
+  const archivedTabBtn = isManager()
+    ? '<button class="campaigns-tab ' + (campaignsTab === 'archived' ? 'active' : '') + '" onclick="setCampaignsTab(\'archived\',this)">Archived (' + archivedCount + ')</button>'
+    : '';
   const tabsHtml = '<div class="view-toggle" style="margin-bottom:14px">'
-    + '<button class="campaigns-tab ' + (campaignsTab === 'active' ? 'active' : '') + '" onclick="setCampaignsTab(\'active\',this)">Active campaigns (' + advertisedData.totalCampaigns + ')</button>'
-    + '<button class="campaigns-tab ' + (campaignsTab === 'archived' ? 'active' : '') + '" onclick="setCampaignsTab(\'archived\',this)">Archived (' + archivedCount + ')</button>'
+    + '<button class="campaigns-tab ' + (campaignsTab === 'active' ? 'active' : '') + '" onclick="setCampaignsTab(\'active\',this)">Active (' + advertisedData.totalCampaigns + ')</button>'
+    + '<button class="campaigns-tab ' + (campaignsTab === 'dismissed' ? 'active' : '') + '" onclick="setCampaignsTab(\'dismissed\',this)">Dismissed (' + dismissedCount + ')</button>'
+    + archivedTabBtn
     + '</div>';
 
   if (campaignsTab === 'archived') {
-    document.getElementById('camp-sub').textContent = archivedCount + ' archived campaigns';
+    document.getElementById('camp-sub').textContent = archivedCount + ' archived campaigns (manager only)';
     const archivedRows = ((archiveData && archiveData.archived) || []).map(function(a){
       const removeBtn = isManager() ? '<button class="btn btn-ghost" style="color:var(--red);font-size:12px" onclick="removeCampaignPermanent(\'' + a.campaign_id + '\',\'' + escapeHtml(a.campaign_name || '').replace(/'/g, "&#39;") + '\')">Remove permanently</button>' : '';
       return '<div style="padding:14px 18px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">'
@@ -777,6 +831,18 @@ function renderCampaignsPage() {
         + '</div>';
     }).join('') || '<div class="empty-state">Nothing archived yet.</div>';
     document.getElementById('campaigns-list').innerHTML = tabsHtml + archivedRows;
+  } else if (campaignsTab === 'dismissed') {
+    document.getElementById('camp-sub').textContent = dismissedCount + ' dismissed campaigns';
+    const dismissedRows = ((archiveData && archiveData.dismissed) || []).map(function(d){
+      const archiveBtn = isManager() ? '<button class="btn btn-ghost" style="font-size:12px" onclick="archiveDismissed(\'' + d.campaign_id + '\',\'' + escapeHtml(d.campaign_name || '').replace(/'/g, "&#39;") + '\',\'' + (d.campaign_type || '') + '\')">Archive</button>' : '';
+      return '<div style="padding:14px 18px;background:var(--amber-light);border:1px solid var(--amber);border-radius:8px;margin-bottom:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">'
+        + '<div style="flex:1;min-width:240px"><div style="font-weight:500;margin-bottom:4px">' + escapeHtml(d.campaign_name || d.campaign_id) + ' ' + typeBadge(d.campaign_type) + '</div>'
+        + '<div style="font-size:12px;color:var(--text2)"><strong>Dismissed by ' + escapeHtml(d.archived_by || 'unknown') + '</strong> · ' + (d.archived_at ? new Date(d.archived_at).toLocaleString('en-GB') : '—') + (d.reason ? ' · "' + escapeHtml(d.reason) + '"' : '') + '</div></div>'
+        + '<button class="btn btn-ghost" onclick="restoreCampaign(\'' + d.campaign_id + '\')">Restore</button>'
+        + archiveBtn
+        + '</div>';
+    }).join('') || '<div class="empty-state">Nothing dismissed yet.</div>';
+    document.getElementById('campaigns-list').innerHTML = tabsHtml + dismissedRows;
   } else {
     document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
     document.getElementById('campaigns-list').innerHTML = tabsHtml + (advertisedData.campaigns || []).map(campaignBlock).join('');
@@ -787,7 +853,7 @@ function renderCampaignsPage() {
 async function loadActivity() {
   document.getElementById('activity-content').innerHTML = '<div class="empty-state">Loading...</div>';
   try {
-    const r = await fetch('/api/activity?department=google&limit=200');
+    const r = await authedFetch('/api/activity?department=google&limit=200');
     const j = await r.json();
     const logs = j.logs || [];
     if (!logs.length) {
@@ -816,7 +882,7 @@ async function aiAnalyse(product, deepDive) {
   document.getElementById('ai-sub').textContent = (product.diagnosis || '') + (deepDive ? ' · Deep dive (Opus + page + speed)' : ' · Quick analysis (Sonnet)');
   document.getElementById('ai-output').textContent = deepDive ? 'Deep analysis running… 15-25 seconds.' : 'Analysing…';
   try {
-    const r = await fetch('/api/google/ai-analyse', {
+    const r = await authedFetch('/api/google/ai-analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ product: product, includePageContent: !!deepDive })
@@ -828,6 +894,24 @@ async function aiAnalyse(product, deepDive) {
   }
 }
 function closeAi() { document.getElementById('ai-modal').classList.remove('show'); }
+
+// Campaign-level AI — looks at the whole campaign's data
+async function aiAnalyseCampaign(campaignId, campaignName) {
+  document.getElementById('ai-modal').classList.add('show');
+  document.getElementById('ai-title').textContent = 'Campaign analysis · ' + campaignName;
+  document.getElementById('ai-sub').textContent = 'Whole-campaign view (Opus) · 15-25 seconds';
+  document.getElementById('ai-output').textContent = 'Analysing campaign…';
+  try {
+    const r = await authedFetch('/api/google/ai-analyse-campaign', {
+      method: 'POST',
+      body: JSON.stringify({ campaignId: campaignId })
+    });
+    const j = await r.json();
+    document.getElementById('ai-output').textContent = j.analysis || j.error || 'No response';
+  } catch(e) {
+    document.getElementById('ai-output').textContent = 'Error: ' + e.message;
+  }
+}
 
 // ─── Big screen-size modal (product detail / daily sales) ────────────────
 function showBigModal(title, bodyHtml) {
@@ -871,8 +955,29 @@ function openProductDetailFromObj(p) {
       + '</div>';
   }).join('');
 
-  const stat = function(label, val, accent){
-    return '<div style="background:var(--bg2);padding:12px 14px;border-radius:8px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">' + label + '</div><div style="font-size:18px;font-weight:600;color:' + (accent || 'var(--text)') + ';font-family:var(--mono)">' + val + '</div></div>';
+  // colourFor → returns a colour-style string given a metric and value.
+  // null means "use default text colour".
+  const colourFor = function(metric, value){
+    if (value == null) return null;
+    const v = Number(value);
+    if (isNaN(v)) return null;
+    if (metric === 'acos')        return v > 30 ? 'var(--red)' : (v > 0 && v < 15 ? 'var(--green)' : null);
+    if (metric === 'cart_rate')   return v < 2  ? 'var(--red)' : null;
+    if (metric === 'bounce_pct')  return v > 70 ? 'var(--red)' : null;
+    if (metric === 'engage_pct')  return v < 30 ? 'var(--red)' : null;
+    if (metric === 'sessions')    return v === 0 ? 'var(--red)' : null;
+    return null;
+  };
+
+  // Bigger, bolder stat tile. Value font is now 22px (was 18px), label 12px (was 11px).
+  // Optionally takes a colourFor metric key to auto-redden bad numbers.
+  const stat = function(label, val, metric){
+    const v = (typeof val === 'string') ? val.replace(/[^\d.\-]/g, '') : val;
+    const colour = metric ? colourFor(metric, v) : null;
+    return '<div style="background:var(--bg2);padding:14px 16px;border-radius:10px;border:1px solid ' + (colour === 'var(--red)' ? 'rgba(192,57,43,0.25)' : 'var(--border)') + '">'
+      + '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:700;color:' + (colour || 'var(--text)') + ';font-family:var(--mono);line-height:1.1">' + val + '</div>'
+      + '</div>';
   };
 
   const key = registerProduct(p);
@@ -880,7 +985,7 @@ function openProductDetailFromObj(p) {
   const body =
     '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px">' + img +
       '<div style="flex:1;min-width:300px">' +
-      '<div style="font-size:22px;font-weight:600;margin-bottom:8px">' + escapeHtml(p.title) + '</div>' +
+      '<div style="font-size:24px;font-weight:700;margin-bottom:10px;letter-spacing:-0.3px">' + escapeHtml(p.title) + '</div>' +
       '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">' + pri + status + '<span style="color:var(--text2)">' + inv + '</span><span style="color:var(--text3)">·</span>' + adStatus + '</div>' +
       '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:10px 14px;border-radius:4px;margin-bottom:8px"><strong>Diagnosis:</strong> ' + escapeHtml(p.diagnosis || 'None') + '</div>' +
       '<div style="background:var(--bg2);border-left:3px solid var(--accent);padding:10px 14px;border-radius:4px"><strong>Action:</strong> ' + escapeHtml(p.action || 'Monitor') + '</div>' +
@@ -907,19 +1012,19 @@ function openProductDetailFromObj(p) {
     stat('CTR', fmtPct(p.googleCtr)) +
     stat('Conversions', fmtNum(p.googleConversions)) +
     stat('Ad sales', fmtCurrency(p.googleSales)) +
-    stat('ACOS', fmtPct(p.googleAcos), p.googleAcos > 30 ? 'var(--red)' : p.googleAcos > 0 && p.googleAcos < 15 ? 'var(--green)' : 'var(--text)') +
+    stat('ACOS', fmtPct(p.googleAcos), 'acos') +
     stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
     '</div>' +
 
     (p.ga4Sessions != null ? '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Funnel (GA4 last 7 days)</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
-    stat('Sessions', fmtNum(p.ga4Sessions)) +
+    stat('Sessions', fmtNum(p.ga4Sessions), 'sessions') +
     stat('Cart adds', fmtNum(p.ga4CartAdditions)) +
-    stat('Cart rate', p.ga4CartRate != null ? p.ga4CartRate + '%' : '—', p.ga4CartRate != null && p.ga4CartRate < 2 ? 'var(--red)' : 'var(--text)') +
+    stat('Cart rate', p.ga4CartRate != null ? p.ga4CartRate + '%' : '—', 'cart_rate') +
     stat('Checkouts', fmtNum(p.ga4Checkouts)) +
     stat('Checkout rate', p.ga4CheckoutRate != null ? p.ga4CheckoutRate + '%' : '—') +
-    stat('Bounce', p.ga4BounceRate != null ? (p.ga4BounceRate * 100).toFixed(0) + '%' : '—', p.ga4BounceRate > 0.7 ? 'var(--red)' : 'var(--text)') +
-    stat('Engagement', p.ga4EngagementRate != null ? (p.ga4EngagementRate * 100).toFixed(0) + '%' : '—') +
+    stat('Bounce', p.ga4BounceRate != null ? (p.ga4BounceRate * 100).toFixed(0) + '%' : '—', 'bounce_pct') +
+    stat('Engagement', p.ga4EngagementRate != null ? (p.ga4EngagementRate * 100).toFixed(0) + '%' : '—', 'engage_pct') +
     stat('Avg time', p.ga4AvgEngagementTime != null ? p.ga4AvgEngagementTime.toFixed(0) + 's' : '—') +
     '</div>' : '<div style="margin-top:20px;padding:12px 16px;background:var(--bg2);border-radius:8px;color:var(--text3);font-size:13px">GA4 funnel data not yet available for this product. Either it has no traffic, or its handle does not match the page path.</div>') +
 
@@ -936,52 +1041,83 @@ function aiAnalyseByKey(key, deep) {
   if (p) aiAnalyse(p, deep);
 }
 
-// ─── Archive flow ────────────────────────────────────────────────────────
-let pendingArchive = null;
-function promptArchive(campaignId, campaignName, campaignType) {
-  pendingArchive = { campaignId: campaignId, campaignName: campaignName, campaignType: campaignType };
-  document.getElementById('archive-campaign-name').textContent = campaignName + (campaignType ? ' · ' + campaignType : '');
-  document.getElementById('archive-reason').value = '';
-  document.getElementById('archive-modal').style.display = 'flex';
-  setTimeout(function(){ document.getElementById('archive-reason').focus(); }, 100);
+// ─── Dismiss / Archive flow ──────────────────────────────────────────────
+let pendingDismiss = null;
+function promptDismiss(campaignId, campaignName, campaignType) {
+  pendingDismiss = { campaignId: campaignId, campaignName: campaignName, campaignType: campaignType };
+  document.getElementById('dismiss-campaign-name').textContent = campaignName + (campaignType ? ' · ' + campaignType : '');
+  document.getElementById('dismiss-reason').value = '';
+  document.getElementById('dismiss-error').style.display = 'none';
+  document.getElementById('dismiss-modal').style.display = 'flex';
+  setTimeout(function(){ document.getElementById('dismiss-reason').focus(); }, 100);
 }
-function closeArchiveModal() {
-  document.getElementById('archive-modal').style.display = 'none';
-  pendingArchive = null;
+function closeDismissModal() {
+  document.getElementById('dismiss-modal').style.display = 'none';
+  pendingDismiss = null;
 }
-async function submitArchive() {
-  if (!pendingArchive) return;
-  const reason = document.getElementById('archive-reason').value || '';
+async function submitDismiss() {
+  if (!pendingDismiss) return;
+  const reason = (document.getElementById('dismiss-reason').value || '').trim();
+  if (!reason) {
+    document.getElementById('dismiss-error').style.display = 'block';
+    return;
+  }
   try {
-    await fetch('/api/google/archive', {
+    const r = await authedFetch('/api/google/dismiss', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...pendingArchive, reason: reason })
+      body: JSON.stringify({ ...pendingDismiss, reason: reason })
     });
-    closeArchiveModal();
+    if (!r.ok) {
+      const j = await r.json();
+      throw new Error(j.error || 'Dismiss failed');
+    }
+    closeDismissModal();
+    refreshAll();
+  } catch(e) {
+    alert('Dismiss failed: ' + e.message);
+  }
+}
+
+// Manager-only: archive a previously-dismissed campaign (moves it out of Active to Archived)
+async function archiveDismissed(campaignId, campaignName, campaignType) {
+  if (!isManager()) { alert('Only managers can archive campaigns.'); return; }
+  if (!confirm('Archive "' + campaignName + '"?\n\nIt will be removed from the Active tab and moved to the Archived tab. You can restore it later.')) return;
+  try {
+    const r = await authedFetch('/api/google/archive', {
+      method: 'POST',
+      body: JSON.stringify({ campaignId: campaignId, campaignName: campaignName, campaignType: campaignType })
+    });
+    if (!r.ok) {
+      const j = await r.json();
+      throw new Error(j.error || 'Archive failed');
+    }
     refreshAll();
   } catch(e) {
     alert('Archive failed: ' + e.message);
   }
 }
+
 async function restoreCampaign(campaignId) {
-  if (!confirm('Restore this campaign back to the main view?')) return;
+  if (!confirm('Restore this campaign back to active view?')) return;
   try {
-    await fetch('/api/google/archive/restore', {
+    const r = await authedFetch('/api/google/archive/restore', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ campaignId: campaignId })
     });
+    if (!r.ok) {
+      const j = await r.json();
+      throw new Error(j.error || 'Restore failed');
+    }
     refreshAll();
   } catch(e) { alert('Restore failed: ' + e.message); }
 }
+
 async function removeCampaignPermanent(campaignId, campaignName) {
   if (!isManager()) { alert('Only managers can permanently remove archived campaigns.'); return; }
   if (!confirm('PERMANENTLY remove "' + campaignName + '" from the archive?\n\nThis cannot be undone.')) return;
   try {
-    const r = await fetch('/api/google/archive/remove', {
+    const r = await authedFetch('/api/google/archive/remove', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ campaignId: campaignId })
     });
     if (!r.ok) {
