@@ -226,6 +226,7 @@ table.activity tr:last-child td { border-bottom: none; }
         <button class="dept-btn" onclick="window.location.href='/index.html'">Amazon</button>
         <button class="dept-btn active">Google</button>
       </div>
+      <div id="ga4-pill" style="display:none;font-size:11px;padding:4px 10px;border-radius:6px;font-family:var(--mono)"></div>
       <div class="sync-info"><div class="sync-dot"></div><span id="sync-time">Loading...</span></div>
       <button class="btn btn-primary" onclick="refreshAll()">↻ Refresh</button>
     </div>
@@ -401,6 +402,33 @@ async function fetchAdvertised() {
   return r.json();
 }
 
+async function loadGa4Status() {
+  try {
+    const r = await fetch('/api/google/ga4-status');
+    const j = await r.json();
+    const pill = document.getElementById('ga4-pill');
+    if (!j.connected) {
+      pill.style.display = 'inline-block';
+      pill.style.background = 'var(--amber-light)';
+      pill.style.color = 'var(--amber)';
+      pill.style.border = '1px solid rgba(180,83,9,0.2)';
+      pill.style.cursor = 'pointer';
+      pill.textContent = '⚠ GA4 not connected — click to connect';
+      pill.onclick = function() { window.location.href = '/api/google/oauth/start'; };
+    } else {
+      pill.style.display = 'inline-block';
+      pill.style.background = 'var(--green-light)';
+      pill.style.color = 'var(--green)';
+      pill.style.border = '1px solid rgba(0,135,90,0.2)';
+      pill.style.cursor = 'default';
+      pill.textContent = 'GA4 ✓ ' + (j.productPathsTracked || 0) + ' pages';
+      pill.onclick = null;
+    }
+  } catch(e) {
+    // silent
+  }
+}
+
 async function refreshAll() {
   document.getElementById('sync-time').textContent = 'Refreshing...';
   try {
@@ -462,6 +490,10 @@ function productCard(p) {
     + statRow('Ad spend', fmtCurrency(p.googleSpend))
     + statRow('Ad clicks', fmtNum(p.googleClicks))
     + statRow('ACOS', fmtPct(p.googleAcos))
+    + (p.ga4Sessions != null ? statRow('Sessions 7d', fmtNum(p.ga4Sessions)) : '')
+    + (p.ga4CartRate != null ? statRow('Cart rate', p.ga4CartRate + '%') : '')
+    + (p.ga4CheckoutRate != null ? statRow('Checkout rate', p.ga4CheckoutRate + '%') : '')
+    + (p.ga4BounceRate != null ? statRow('Bounce', (p.ga4BounceRate * 100).toFixed(0) + '%') : '')
     + '</div>'
     + (p.dailySales7d && p.dailySales7d.some(function(v){ return v > 0; }) ? '<div style="margin-top:10px"><div class="stat-label" style="margin-bottom:4px">Last 7 days revenue</div>' + sparklineHtml(p.dailySales7d) + '</div>' : '')
     + '<div style="margin-top:12px;display:flex;gap:8px">'
@@ -645,9 +677,10 @@ function closeAi() { document.getElementById('ai-modal').classList.remove('show'
 
 // ─── Boot ────────────────────────────────────────────────────────────────
 loadMe();
+loadGa4Status();
 refreshAll();
 setInterval(refreshAll, 5 * 60 * 1000);
+setInterval(loadGa4Status, 60 * 1000);
 </script>
 </body>
 </html>
-<!-- v8.1 -->

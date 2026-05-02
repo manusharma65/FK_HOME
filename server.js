@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────
-const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/shopify/products'];
+const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/shopify/products'];
 
 async function requireAuth(req, res, next) {
   if (PUBLIC_PATHS.some(function(p){ return req.path.startsWith(p); })) return next();
@@ -631,6 +631,36 @@ async function initTasksTable() {
         dismissed_at TIMESTAMP DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_kw_dismiss_term ON keyword_dismissals(search_term, campaign);
+    `);
+
+    // Google OAuth tokens (for GA4 Data API access via user OAuth flow)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS google_oauth_tokens (
+        id SERIAL PRIMARY KEY,
+        purpose TEXT UNIQUE NOT NULL,
+        refresh_token TEXT NOT NULL,
+        access_token TEXT,
+        access_token_expires_at TIMESTAMP,
+        connected_email TEXT,
+        connected_at TIMESTAMP DEFAULT NOW(),
+        last_used TIMESTAMP
+      );
+    `);
+
+    // Per-product GA4 funnel metrics, refreshed daily, joined to shopifyState
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ga4_product_metrics (
+        page_path TEXT PRIMARY KEY,
+        sessions INT DEFAULT 0,
+        visitors INT DEFAULT 0,
+        cart_additions INT DEFAULT 0,
+        checkouts INT DEFAULT 0,
+        purchases INT DEFAULT 0,
+        engagement_rate REAL DEFAULT 0,
+        avg_engagement_time REAL DEFAULT 0,
+        bounce_rate REAL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
     `);
 
     try {
@@ -1712,11 +1742,332 @@ function aggregateGoogleMetrics(rows) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// GA4 OAuth + Data API + PageSpeed Insights
+// ─────────────────────────────────────────────────────────────────────────
+// Path 2 (user OAuth) for Layer 2 funnel data.
+// Persists refresh token to Postgres so it survives Railway redeploys.
+
+const GA4_OAUTH_SCOPE = 'https://www.googleapis.com/auth/analytics.readonly';
+const GA4_OAUTH_PURPOSE = 'ga4';
+
+function getOauthRedirectUri(req) {
+  // Prefer DASHBOARD_URL env var (so prod always uses prod redirect, even when
+  // running on staging). Fall back to the request host.
+  const dash = process.env.DASHBOARD_URL || ('https://' + (req && req.get ? req.get('host') : 'app.fksports.co.uk'));
+  return dash.replace(/\/$/, '') + '/api/google/oauth/callback';
+}
+
+// State holders for runtime
+let ga4State = {
+  connected: false,
+  connectedEmail: null,
+  lastFetch: null,
+  error: null,
+  productMetrics: {} // path -> { sessions, cartAdditions, checkouts, etc. }
+};
+
+async function loadGa4StateFromDb() {
+  if (!db) return;
+  try {
+    const r = await db.query("SELECT connected_email, last_used FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
+    if (r.rows.length) {
+      ga4State.connected = true;
+      ga4State.connectedEmail = r.rows[0].connected_email;
+    }
+    const m = await db.query("SELECT * FROM ga4_product_metrics");
+    ga4State.productMetrics = {};
+    m.rows.forEach(function(row) {
+      ga4State.productMetrics[row.page_path] = {
+        sessions: row.sessions || 0,
+        visitors: row.visitors || 0,
+        cartAdditions: row.cart_additions || 0,
+        checkouts: row.checkouts || 0,
+        purchases: row.purchases || 0,
+        engagementRate: row.engagement_rate || 0,
+        avgEngagementTime: row.avg_engagement_time || 0,
+        bounceRate: row.bounce_rate || 0
+      };
+    });
+    if (m.rows.length) console.log('Loaded GA4 metrics for ' + m.rows.length + ' product paths');
+  } catch(e) { console.error('GA4 state load error: ' + e.message); }
+}
+
+// Step 1: send user to Google OAuth
+app.get('/api/google/oauth/start', function(req, res) {
+  const clientId = process.env.GA4_OAUTH_CLIENT_ID;
+  if (!clientId) return res.status(500).send('GA4_OAUTH_CLIENT_ID not configured');
+  const redirect = getOauthRedirectUri(req);
+  const url = 'https://accounts.google.com/o/oauth2/v2/auth?' +
+    'client_id=' + encodeURIComponent(clientId) +
+    '&redirect_uri=' + encodeURIComponent(redirect) +
+    '&response_type=code' +
+    '&scope=' + encodeURIComponent(GA4_OAUTH_SCOPE) +
+    '&access_type=offline' +
+    '&prompt=consent' +
+    '&include_granted_scopes=true';
+  res.redirect(url);
+});
+
+// Step 2: receive auth code, exchange for tokens, persist refresh token
+app.get('/api/google/oauth/callback', async function(req, res) {
+  const code = req.query.code;
+  const error = req.query.error;
+  if (error) return res.send('<h2>GA4 connect failed</h2><p>' + error + '</p><a href="/google.html">Back to dashboard</a>');
+  if (!code) return res.status(400).send('Missing code');
+  const clientId = process.env.GA4_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GA4_OAUTH_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return res.status(500).send('OAuth credentials not configured');
+
+  try {
+    const redirect = getOauthRedirectUri(req);
+    const tokRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      code: code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirect,
+      grant_type: 'authorization_code'
+    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+    const { refresh_token, access_token, expires_in } = tokRes.data;
+    if (!refresh_token) {
+      return res.send('<h2>GA4 connect — no refresh token</h2><p>Google did not return a refresh token. This usually means the consent was previously given. Revoke access at <a href="https://myaccount.google.com/permissions">Google Account permissions</a>, then try again.</p><a href="/google.html">Back</a>');
+    }
+
+    // Look up the user's email to display on dashboard
+    let email = null;
+    try {
+      const ui = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: 'Bearer ' + access_token }
+      });
+      email = ui.data && ui.data.email;
+    } catch(e) { /* non-fatal */ }
+
+    if (db) {
+      const expAt = new Date(Date.now() + (expires_in - 60) * 1000);
+      await db.query(`
+        INSERT INTO google_oauth_tokens (purpose, refresh_token, access_token, access_token_expires_at, connected_email, connected_at, last_used)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (purpose) DO UPDATE SET
+          refresh_token = EXCLUDED.refresh_token,
+          access_token = EXCLUDED.access_token,
+          access_token_expires_at = EXCLUDED.access_token_expires_at,
+          connected_email = EXCLUDED.connected_email,
+          connected_at = NOW(),
+          last_used = NOW()
+      `, [GA4_OAUTH_PURPOSE, refresh_token, access_token, expAt, email]);
+    }
+
+    ga4State.connected = true;
+    ga4State.connectedEmail = email;
+
+    // Trigger first GA4 fetch in background
+    fetchGa4ProductMetrics().catch(function(e){ console.error('First GA4 fetch error: ' + e.message); });
+
+    res.send('<h2>✅ GA4 connected</h2><p>Account: ' + (email || '(unknown)') + '</p><p>Pulling 7 days of funnel data now. Return to the dashboard in a minute.</p><a href="/google.html">Back to dashboard</a>');
+  } catch(e) {
+    console.error('OAuth callback error: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    res.status(500).send('<h2>GA4 connect failed</h2><pre>' + (e.response ? JSON.stringify(e.response.data, null, 2) : e.message) + '</pre>');
+  }
+});
+
+// Get a fresh GA4 access token using the stored refresh token
+async function getGa4AccessToken() {
+  if (!db) throw new Error('No DB — cannot read OAuth tokens');
+  const r = await db.query("SELECT * FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
+  if (!r.rows.length) throw new Error('GA4 not connected — visit /api/google/oauth/start');
+  const row = r.rows[0];
+
+  // If we have a non-expired access token, reuse it
+  if (row.access_token && row.access_token_expires_at && new Date(row.access_token_expires_at) > new Date()) {
+    return row.access_token;
+  }
+
+  // Refresh
+  const clientId = process.env.GA4_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GA4_OAUTH_CLIENT_SECRET;
+  const tokRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: row.refresh_token,
+    grant_type: 'refresh_token'
+  }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+  const { access_token, expires_in } = tokRes.data;
+  const expAt = new Date(Date.now() + (expires_in - 60) * 1000);
+  await db.query("UPDATE google_oauth_tokens SET access_token=$1, access_token_expires_at=$2, last_used=NOW() WHERE purpose=$3",
+    [access_token, expAt, GA4_OAUTH_PURPOSE]);
+  return access_token;
+}
+
+// Fetch per-product funnel metrics from GA4 Data API
+async function fetchGa4ProductMetrics() {
+  const propertyId = process.env.GA4_PROPERTY_ID;
+  if (!propertyId) { console.log('GA4_PROPERTY_ID not set — skipping GA4 fetch'); return; }
+  if (!db) { console.log('No DB — skipping GA4 fetch'); return; }
+
+  let token;
+  try {
+    token = await getGa4AccessToken();
+  } catch(e) {
+    console.log('GA4 not connected: ' + e.message);
+    ga4State.connected = false;
+    return;
+  }
+
+  try {
+    console.log('Fetching GA4 product metrics (last 7 days)...');
+    const url = 'https://analyticsdata.googleapis.com/v1beta/properties/' + propertyId + ':runReport';
+
+    // Pull two reports: (a) sessions+engagement by pagePath; (b) ecommerce events by pagePath
+    const reportA = await axios.post(url, {
+      dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      dimensions: [{ name: 'pagePath' }],
+      metrics: [
+        { name: 'sessions' },
+        { name: 'totalUsers' },
+        { name: 'engagementRate' },
+        { name: 'averageSessionDuration' },
+        { name: 'bounceRate' }
+      ],
+      dimensionFilter: { filter: { fieldName: 'pagePath', stringFilter: { matchType: 'BEGINS_WITH', value: '/products/' } } },
+      limit: 250
+    }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+
+    // Ecommerce events per pagePath (add_to_cart, begin_checkout, purchase)
+    let reportB;
+    try {
+      reportB = await axios.post(url, {
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+        dimensions: [{ name: 'pagePath' }, { name: 'eventName' }],
+        metrics: [{ name: 'eventCount' }],
+        dimensionFilter: {
+          andGroup: {
+            expressions: [
+              { filter: { fieldName: 'pagePath', stringFilter: { matchType: 'BEGINS_WITH', value: '/products/' } } },
+              { filter: { fieldName: 'eventName', inListFilter: { values: ['add_to_cart', 'begin_checkout', 'purchase'] } } }
+            ]
+          }
+        },
+        limit: 1000
+      }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+    } catch(e) {
+      console.log('GA4 ecommerce events fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    }
+
+    const metrics = {};
+    (reportA.data.rows || []).forEach(function(row) {
+      const path = row.dimensionValues[0].value;
+      const v = row.metricValues || [];
+      metrics[path] = {
+        sessions: parseInt(v[0] && v[0].value) || 0,
+        visitors: parseInt(v[1] && v[1].value) || 0,
+        engagementRate: parseFloat(v[2] && v[2].value) || 0,
+        avgEngagementTime: parseFloat(v[3] && v[3].value) || 0,
+        bounceRate: parseFloat(v[4] && v[4].value) || 0,
+        cartAdditions: 0, checkouts: 0, purchases: 0
+      };
+    });
+
+    if (reportB && reportB.data.rows) {
+      reportB.data.rows.forEach(function(row) {
+        const path = row.dimensionValues[0].value;
+        const event = row.dimensionValues[1].value;
+        const count = parseInt(row.metricValues[0].value) || 0;
+        if (!metrics[path]) {
+          metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
+        }
+        if (event === 'add_to_cart') metrics[path].cartAdditions = count;
+        else if (event === 'begin_checkout') metrics[path].checkouts = count;
+        else if (event === 'purchase') metrics[path].purchases = count;
+      });
+    }
+
+    // Persist
+    await db.query("DELETE FROM ga4_product_metrics");
+    for (const path of Object.keys(metrics)) {
+      const m = metrics[path];
+      await db.query(`
+        INSERT INTO ga4_product_metrics (page_path, sessions, visitors, cart_additions, checkouts, purchases, engagement_rate, avg_engagement_time, bounce_rate, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      `, [path, m.sessions, m.visitors, m.cartAdditions, m.checkouts, m.purchases, m.engagementRate, m.avgEngagementTime, m.bounceRate]);
+    }
+
+    ga4State.productMetrics = metrics;
+    ga4State.lastFetch = new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'});
+    ga4State.error = null;
+    console.log('GA4 fetch complete: ' + Object.keys(metrics).length + ' product paths');
+  } catch(e) {
+    const errBody = e.response ? JSON.stringify(e.response.data) : e.message;
+    console.error('GA4 fetch error: ' + errBody);
+    ga4State.error = errBody;
+  }
+}
+
+// Look up GA4 metrics for a Shopify product (by handle → /products/<handle>)
+function getGa4ForShopifyProduct(shopifyProduct) {
+  if (!shopifyProduct || !shopifyProduct.handle) return null;
+  const path = '/products/' + shopifyProduct.handle;
+  return ga4State.productMetrics[path] || null;
+}
+
+// PageSpeed Insights — called on AI deep-dive only (rate-limited)
+async function getPageSpeedScore(url) {
+  if (!url) return null;
+  try {
+    const apiKey = process.env.PAGESPEED_API_KEY || '';
+    const endpoint = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
+      encodeURIComponent(url) +
+      '&strategy=mobile&category=performance' +
+      (apiKey ? '&key=' + encodeURIComponent(apiKey) : '');
+    const r = await axios.get(endpoint, { timeout: 25000 });
+    const lh = r.data.lighthouseResult || {};
+    const audits = lh.audits || {};
+    const score = lh.categories && lh.categories.performance ? Math.round((lh.categories.performance.score || 0) * 100) : null;
+    return {
+      mobileScore: score,
+      lcpMs: audits['largest-contentful-paint'] && audits['largest-contentful-paint'].numericValue,
+      fcpMs: audits['first-contentful-paint'] && audits['first-contentful-paint'].numericValue,
+      tbtMs: audits['total-blocking-time'] && audits['total-blocking-time'].numericValue,
+      clsRaw: audits['cumulative-layout-shift'] && audits['cumulative-layout-shift'].numericValue,
+      loadTimeMs: audits['speed-index'] && audits['speed-index'].numericValue
+    };
+  } catch(e) {
+    return { error: e.message };
+  }
+}
+
+// Status endpoint for the frontend "Connect GA4" button
+app.get('/api/google/ga4-status', async function(req, res) {
+  res.json({
+    connected: ga4State.connected,
+    connectedEmail: ga4State.connectedEmail,
+    lastFetch: ga4State.lastFetch,
+    productPathsTracked: Object.keys(ga4State.productMetrics).length,
+    error: ga4State.error
+  });
+});
+
+// Manual trigger for fetching GA4 (e.g. after first connect)
+app.post('/api/google/ga4-refresh', async function(req, res) {
+  fetchGa4ProductMetrics().catch(function(e){ console.error('Manual GA4 refresh error: ' + e.message); });
+  res.json({ success: true, message: 'GA4 refresh triggered' });
+});
+
+// PageSpeed endpoint — called from AI analyser (and dashboard if needed)
+app.post('/api/google/pagespeed', async function(req, res) {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'No url' });
+  const result = await getPageSpeedScore(url);
+  res.json(result);
+});
+
 // The unified diagnosis decision tree.
 // priority: 1 = urgent (red), 2 = needs attention (amber), 3 = scale (green), 4 = healthy/info (grey)
 function diagnoseProduct(ctx) {
   const s = ctx.shopify;
   const g = ctx.google;
+  const f = ctx.funnel; // GA4 funnel data — { sessions, cartAdditions, checkouts, purchases, bounceRate, ... } or null
 
   // Catch-all rows (Google's "everything else" bucket)
   if (ctx.itemType === 'catchall') {
@@ -1762,9 +2113,24 @@ function diagnoseProduct(ctx) {
     return { diagnosisType: 'low_ctr', diagnosis: 'Ad showing but nobody clicking — weak listing image/title', action: 'Improve main image and product title', priority: 2 };
   }
 
-  // 7. Clicks but no conversions — landing page or product issue
+  // 7. Clicks but no conversions — use GA4 funnel data when present to pinpoint where
   if (g.clicks > 20 && g.conversions === 0) {
+    if (f && f.sessions > 20) {
+      const cartRate = f.sessions > 0 ? (f.cartAdditions / f.sessions) * 100 : 0;
+      const checkoutRate = f.cartAdditions > 0 ? (f.checkouts / f.cartAdditions) * 100 : 0;
+      if (cartRate < 2) {
+        return { diagnosisType: 'page_problem', diagnosis: 'Visitors not adding to cart (cart rate ' + cartRate.toFixed(1) + '%) — listing or page is the bottleneck', action: 'Improve main image, title, price visibility, trust signals', priority: 1 };
+      }
+      if (cartRate >= 2 && checkoutRate < 30) {
+        return { diagnosisType: 'checkout_friction', diagnosis: 'Cart rate is ok (' + cartRate.toFixed(1) + '%) but checkout drop-off (' + checkoutRate.toFixed(0) + '%) — checkout friction', action: 'Review checkout: shipping cost, trust signals, mobile usability', priority: 1 };
+      }
+    }
     return { diagnosisType: 'landing_page', diagnosis: 'People clicking but not buying — landing page, price, or reviews issue', action: 'Review product page, pricing, images, and reviews', priority: 1 };
+  }
+
+  // 7b. High bounce rate signal (GA4) on a product getting decent ad clicks
+  if (f && f.sessions > 50 && f.bounceRate > 0.7 && g.clicks > 30) {
+    return { diagnosisType: 'high_bounce', diagnosis: 'Bounce rate ' + (f.bounceRate * 100).toFixed(0) + '% — visitors leave immediately. Likely page speed, weak hero image, or wrong intent match', action: 'Check mobile page speed and hero image; verify ad targeting matches product', priority: 2 };
   }
 
   // 8. Conversions recorded but Google attributes no value — tracking issue
@@ -1819,6 +2185,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
       || gp.campaignName
       || '(unknown)';
 
+    const funnel = shopifyProduct ? getGa4ForShopifyProduct(shopifyProduct) : null;
     const dx = diagnoseProduct({
       shopify: shopifyProduct ? {
         status: shopifyProduct.status,
@@ -1835,6 +2202,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
         ctr: gp.ctr || 0,
         acos: gp.acos || 0
       },
+      funnel: funnel,
       hasGoogleData: true,
       itemType: gp.itemType
     });
@@ -1867,6 +2235,15 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
       shopifyUnitsSold30d: shopifyProduct ? shopifyProduct.unitsSold30d : null,
       shopifyUrl: shopifyProduct ? shopifyProduct.shopifyUrl : null,
       shopifyImageUrl: shopifyProduct ? shopifyProduct.imageUrl : null,
+      ga4Sessions: funnel ? funnel.sessions : null,
+      ga4CartAdditions: funnel ? funnel.cartAdditions : null,
+      ga4Checkouts: funnel ? funnel.checkouts : null,
+      ga4Purchases: funnel ? funnel.purchases : null,
+      ga4BounceRate: funnel ? funnel.bounceRate : null,
+      ga4EngagementRate: funnel ? funnel.engagementRate : null,
+      ga4AvgEngagementTime: funnel ? funnel.avgEngagementTime : null,
+      ga4CartRate: funnel && funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : null,
+      ga4CheckoutRate: funnel && funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : null,
       diagnosisType: dx.diagnosisType,
       diagnosis: dx.diagnosis,
       action: dx.action,
@@ -1931,6 +2308,7 @@ app.get('/api/google/all-products', async function(req, res) {
     const googleRows = findGoogleRowsForShopifyProduct(sp.id);
     const agg = aggregateGoogleMetrics(googleRows);
     const hasGoogleData = googleRows.length > 0 && (agg.spend > 0 || agg.impressions > 0);
+    const funnel = getGa4ForShopifyProduct(sp);
 
     const dx = diagnoseProduct({
       shopify: {
@@ -1940,6 +2318,7 @@ app.get('/api/google/all-products', async function(req, res) {
         revenue30d: sp.revenue30d || 0
       },
       google: agg,
+      funnel: funnel,
       hasGoogleData: hasGoogleData,
       itemType: 'product_group'
     });
@@ -1969,6 +2348,15 @@ app.get('/api/google/all-products', async function(req, res) {
       googleAcos: agg.acos,
       campaignsAdvertisedIn: agg.campaignsAdvertisedIn,
       hasGoogleData: hasGoogleData,
+      ga4Sessions: funnel ? funnel.sessions : null,
+      ga4CartAdditions: funnel ? funnel.cartAdditions : null,
+      ga4Checkouts: funnel ? funnel.checkouts : null,
+      ga4Purchases: funnel ? funnel.purchases : null,
+      ga4BounceRate: funnel ? funnel.bounceRate : null,
+      ga4EngagementRate: funnel ? funnel.engagementRate : null,
+      ga4AvgEngagementTime: funnel ? funnel.avgEngagementTime : null,
+      ga4CartRate: funnel && funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : null,
+      ga4CheckoutRate: funnel && funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : null,
       diagnosisType: dx.diagnosisType,
       diagnosis: dx.diagnosis,
       action: dx.action,
@@ -2050,6 +2438,8 @@ async function autoArchiveTasks() {
 const interval = process.env.POLL_INTERVAL_MINUTES || 15;
 cron.schedule('*/' + interval + ' * * * *', function() { syncCampaigns(); });
 cron.schedule('0 */2 * * *', function() { syncShopifyProducts().catch(function(e){ console.error('Shopify cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
+// GA4 funnel data — refresh once a day at 7am UK time (after midnight UTC data settles)
+cron.schedule('0 7 * * *', function() { fetchGa4ProductMetrics().catch(function(e){ console.error('GA4 cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async function() {
@@ -2068,6 +2458,10 @@ app.listen(PORT, '0.0.0.0', async function() {
   setTimeout(function() {
     syncCampaigns().catch(function(err) { console.error('Initial sync failed:', err.message); });
     syncShopifyProducts().catch(function(err) { console.error('Initial Shopify sync failed:', err.message); });
+    loadGa4StateFromDb().then(function() {
+      // Only refresh GA4 if we have a connection and last fetch was > 12h ago (avoid hammering on every restart)
+      fetchGa4ProductMetrics().catch(function(err) { console.error('Initial GA4 fetch failed:', err.message); });
+    });
   }, 30000);
 });
 
@@ -2107,7 +2501,6 @@ app.post('/api/google/ai-analyse', async function(req, res) {
       try {
         const pageRes = await axios.get(productUrl, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0 CampaignPulse' } });
         const html = String(pageRes.data || '');
-        // Extract title, meta description, h1, and first paragraph of body
         const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
         const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
         const h1Match = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
@@ -2119,6 +2512,37 @@ app.post('/api/google/ai-analyse', async function(req, res) {
           + '- OG image: ' + (ogImageMatch ? 'present' : 'MISSING (hurts social/SEO sharing)');
       } catch(e) {
         pageSnippet = '\nLIVE PAGE CONTENT: could not fetch (' + e.message + ')';
+      }
+    }
+
+    // GA4 funnel snippet
+    const f = product.ga4Sessions != null ? {
+      sessions: product.ga4Sessions, cartAdditions: product.ga4CartAdditions, checkouts: product.ga4Checkouts,
+      purchases: product.ga4Purchases, bounceRate: product.ga4BounceRate, engagementRate: product.ga4EngagementRate,
+      avgEngagementTime: product.ga4AvgEngagementTime, cartRate: product.ga4CartRate, checkoutRate: product.ga4CheckoutRate
+    } : null;
+    let funnelSnippet = '';
+    if (f) {
+      funnelSnippet = '\nWEBSITE FUNNEL (GA4, last 7 days):\n'
+        + '- Sessions: ' + f.sessions + '\n'
+        + '- Add-to-carts: ' + f.cartAdditions + (f.cartRate != null ? ' (' + f.cartRate + '% of sessions)' : '') + '\n'
+        + '- Checkouts started: ' + f.checkouts + (f.checkoutRate != null ? ' (' + f.checkoutRate + '% of cart-adds)' : '') + '\n'
+        + '- Purchases: ' + f.purchases + '\n'
+        + '- Bounce rate: ' + (f.bounceRate != null ? (f.bounceRate * 100).toFixed(0) + '%' : '—') + '\n'
+        + '- Engagement rate: ' + (f.engagementRate != null ? (f.engagementRate * 100).toFixed(0) + '%' : '—') + '\n'
+        + '- Avg session duration: ' + (f.avgEngagementTime != null ? f.avgEngagementTime.toFixed(0) + 's' : '—');
+    }
+
+    // PageSpeed snippet — fetched on demand only when asked for deep analysis
+    let speedSnippet = '';
+    if (includePageContent && productUrl) {
+      const ps = await getPageSpeedScore(productUrl);
+      if (ps && !ps.error) {
+        speedSnippet = '\nPAGE SPEED (PageSpeed Insights, mobile):\n'
+          + '- Lighthouse score: ' + (ps.mobileScore != null ? ps.mobileScore + '/100' : '—') + (ps.mobileScore != null && ps.mobileScore < 50 ? ' (POOR)' : ps.mobileScore < 80 ? ' (NEEDS WORK)' : ' (good)') + '\n'
+          + '- Largest Contentful Paint: ' + (ps.lcpMs != null ? (ps.lcpMs / 1000).toFixed(1) + 's' : '—') + (ps.lcpMs > 4000 ? ' (POOR — should be < 2.5s)' : '') + '\n'
+          + '- Speed Index: ' + (ps.loadTimeMs != null ? (ps.loadTimeMs / 1000).toFixed(1) + 's' : '—') + '\n'
+          + '- Total Blocking Time: ' + (ps.tbtMs != null ? ps.tbtMs.toFixed(0) + 'ms' : '—');
       }
     }
 
@@ -2141,7 +2565,7 @@ ${(inventory != null) ? `- Inventory: ${inventory === 0 ? 'OUT OF STOCK' : inven
 ${status ? '- Status: ' + status.toUpperCase() : ''}
 ${rev7d != null ? `- Last 7 days: £${rev7d} / ${units7d || 0} units (Shopify total — includes organic + ads)` : ''}
 ${rev30d != null ? `- Last 30 days: £${rev30d} / ${units30d || 0} units (Shopify total)` : ''}
-${pageSnippet}
+${funnelSnippet}${speedSnippet}${pageSnippet}
 
 CURRENT DIAGNOSIS: ${product.diagnosis || 'None'}
 SUGGESTED ACTION: ${product.action || 'None'}
