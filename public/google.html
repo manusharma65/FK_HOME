@@ -266,6 +266,9 @@ table.activity tr:last-child td { border-bottom: none; }
     </div>
     <div id="urgent-list"></div>
 
+    <!-- DAILY SALES CARD -->
+    <div id="daily-sales-card" class="section-card" style="margin-top:24px;padding:16px;background:var(--bg);border-radius:10px;border:1px solid var(--border)"></div>
+
     <div class="section-header" style="margin-top:24px">
       <div>
         <div class="section-title">Scale these</div>
@@ -321,10 +324,41 @@ table.activity tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
+<!-- BIG MODAL — used for product detail and daily sales drilldown -->
+<div class="modal-bg" id="big-modal" onclick="if(event.target===this)closeBigModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1000;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+  <div style="background:var(--bg);width:100%;max-width:1100px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);border-radius:14px 14px 0 0;z-index:1">
+      <div style="font-size:18px;font-weight:600;color:var(--text)" id="big-modal-title">Detail</div>
+      <button class="btn btn-ghost" onclick="closeBigModal()" style="font-size:18px;padding:4px 12px">×</button>
+    </div>
+    <div id="big-modal-body" style="padding:24px"></div>
+  </div>
+</div>
+
+<!-- ARCHIVE PROMPT MODAL -->
+<div class="modal-bg" id="archive-modal" onclick="if(event.target===this)closeArchiveModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--bg);width:100%;max-width:520px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4)">
+    <div style="padding:18px 24px;border-bottom:1px solid var(--border);font-size:16px;font-weight:600">Archive campaign</div>
+    <div style="padding:20px 24px">
+      <div style="margin-bottom:14px;color:var(--text2);font-size:13px">Hide this campaign from the dashboard. It can be restored from the Archived tab anytime.</div>
+      <div id="archive-campaign-name" style="padding:10px 12px;background:var(--bg2);border-radius:6px;margin-bottom:14px;font-weight:500"></div>
+      <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:6px">Reason (optional)</label>
+      <input id="archive-reason" type="text" placeholder="e.g. old June campaign" style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:14px;font-family:inherit">
+    </div>
+    <div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeArchiveModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitArchive()">Archive</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ─── State ────────────────────────────────────────────────────────────────
 let allProductsData = null;
 let advertisedData = null;
+let dailySalesData = null;
+let archiveData = null;
+let currentUser = null;
 let currentView = 'shopify';
 let currentFilter = 'all';
 
@@ -334,6 +368,7 @@ async function loadMe() {
     const r = await fetch('/api/auth/me');
     if (!r.ok) throw new Error('Not authed');
     const me = await r.json();
+    currentUser = me;
     document.getElementById('user-name').textContent = me.name || me.username || 'User';
     document.getElementById('user-role').textContent = me.role || 'Agent';
     document.getElementById('user-avatar').textContent = (me.name || me.username || 'U').charAt(0).toUpperCase();
@@ -342,10 +377,15 @@ async function loadMe() {
     }
   } catch(e) {
     // No auth, run anyway
+    currentUser = { username: 'bobby', role: 'manager' };
     document.getElementById('user-name').textContent = 'Bobby';
     document.getElementById('user-role').textContent = 'Account owner';
     document.getElementById('dept-switcher').style.display = 'flex';
   }
+}
+function isManager() {
+  if (!currentUser) return false;
+  return currentUser.role === 'manager' || currentUser.role === 'admin' || ['bobby', 'satyam'].includes(currentUser.username);
 }
 
 // ─── Page navigation ─────────────────────────────────────────────────────
@@ -429,12 +469,23 @@ async function loadGa4Status() {
   }
 }
 
+async function fetchDailySales() {
+  const r = await fetch('/api/google/daily-sales');
+  return r.json();
+}
+async function fetchArchive() {
+  const r = await fetch('/api/google/archive');
+  return r.json();
+}
+
 async function refreshAll() {
   document.getElementById('sync-time').textContent = 'Refreshing...';
   try {
-    const [p, a] = await Promise.all([fetchAllProducts(), fetchAdvertised()]);
+    const [p, a, ds, ar] = await Promise.all([fetchAllProducts(), fetchAdvertised(), fetchDailySales(), fetchArchive()]);
     allProductsData = p;
     advertisedData = a;
+    dailySalesData = ds;
+    archiveData = ar;
     renderDashboard();
     renderProductsPage();
     renderCampaignsPage();
@@ -451,12 +502,18 @@ function renderDashboard() {
   document.getElementById('m-revenue').textContent = fmtCurrency(s.totalShopifyRevenue7d);
   document.getElementById('m-revenue-sub').textContent = fmtCurrency(s.totalShopifyRevenue30d) + ' (30d)';
   document.getElementById('m-spend').textContent = fmtCurrency(s.totalGoogleSpend);
-  document.getElementById('m-spend-sub').textContent = s.advertisedProducts + ' of ' + s.totalProducts + ' products advertised';
+  // Three-bucket breakdown
+  const drv = s.drivingTrafficCount || 0;
+  const lq  = s.listedQuietCount || 0;
+  const np  = s.notPromotedCount || 0;
+  document.getElementById('m-spend-sub').innerHTML = '<span style="color:var(--green)">●</span> ' + drv + ' driving · <span style="color:var(--amber)">●</span> ' + lq + ' quiet · <span style="color:var(--text3)">●</span> ' + np + ' not promoted';
   document.getElementById('m-scale').textContent = fmtNum(s.scaleCount);
   document.getElementById('m-urgent').textContent = fmtNum(s.urgentCount);
 
   const navBadge = document.getElementById('nb-action');
   if (s.urgentCount > 0) { navBadge.style.display = 'inline-block'; navBadge.textContent = s.urgentCount; } else { navBadge.style.display = 'none'; }
+
+  renderDailySalesCard();
 
   const urgent = (allProductsData.products || []).filter(function(p){ return p.priority === 1; }).slice(0, 5);
   document.getElementById('urgent-sub').textContent = urgent.length + ' products need urgent action';
@@ -466,21 +523,91 @@ function renderDashboard() {
   document.getElementById('scale-list').innerHTML = scale.length ? scale.map(productCard).join('') : '<div class="empty-state">No clear scale opportunities right now.</div>';
 }
 
+// ─── Daily Sales Card (Live Dashboard) ─────────────────────────────────
+function renderDailySalesCard() {
+  const target = document.getElementById('daily-sales-card');
+  if (!target || !dailySalesData) return;
+  const days = dailySalesData.days || [];
+  const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.total; })));
+
+  const bars = days.map(function(d){
+    const h = max > 0 ? Math.max(2, (d.total / max) * 60) : 2;
+    return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:4px">'
+      + '<div style="font-size:11px;font-family:var(--mono);color:var(--text2);font-weight:600">' + (d.total > 0 ? '£' + Math.round(d.total).toLocaleString('en-GB') : '—') + '</div>'
+      + '<div style="height:60px;width:100%;display:flex;align-items:flex-end;justify-content:center"><div style="width:80%;height:' + h + 'px;background:linear-gradient(180deg,var(--accent),#1976d2);border-radius:4px 4px 0 0"></div></div>'
+      + '<div style="font-size:11px;color:var(--text2);font-weight:600">' + d.day + '</div>'
+      + '<div style="font-size:10px;color:var(--text3)">' + d.shortDate + '</div>'
+      + '</div>';
+  }).join('');
+
+  const total = dailySalesData.totalRevenue7d || 0;
+  target.innerHTML = '<div class="section-header"><div>'
+    + '<div class="section-title">Sales last 7 days</div>'
+    + '<div class="section-sub">' + fmtCurrency(total) + ' total · all products combined</div>'
+    + '</div>'
+    + '<button class="btn btn-ghost" onclick="openDailySalesModal()">Open full view →</button>'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px 8px">' + bars + '</div>';
+}
+
+function openDailySalesModal() {
+  if (!dailySalesData) return;
+  const days = dailySalesData.days || [];
+  const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.total; })));
+
+  const bars = days.map(function(d, i){
+    const h = max > 0 ? Math.max(4, (d.total / max) * 200) : 4;
+    return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:6px;cursor:pointer" onclick="document.getElementById(\'dsm-day-' + i + '\').scrollIntoView({behavior:\'smooth\'})">'
+      + '<div style="font-size:13px;font-family:var(--mono);color:var(--text);font-weight:700">' + (d.total > 0 ? '£' + Math.round(d.total).toLocaleString('en-GB') : '—') + '</div>'
+      + '<div style="height:200px;width:100%;display:flex;align-items:flex-end;justify-content:center"><div style="width:75%;height:' + h + 'px;background:linear-gradient(180deg,var(--accent),#1976d2);border-radius:6px 6px 0 0;box-shadow:0 2px 6px rgba(66,133,244,0.25)"></div></div>'
+      + '<div style="font-size:13px;color:var(--text);font-weight:600">' + d.day + '</div>'
+      + '<div style="font-size:11px;color:var(--text2)">' + d.shortDate + '</div>'
+      + '</div>';
+  }).join('');
+
+  const dayDetails = days.map(function(d, i){
+    const top = (d.top || []).map(function(t){
+      return '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span>' + escapeHtml(t.title) + '</span><span style="font-family:var(--mono);font-weight:600">' + fmtCurrency(t.revenue) + '</span></div>';
+    }).join('') || '<div style="color:var(--text3);padding:6px 0">No sales</div>';
+    return '<div id="dsm-day-' + i + '" style="margin-bottom:18px;padding:14px;background:var(--bg2);border-radius:8px"><div style="display:flex;justify-content:space-between;margin-bottom:8px"><div style="font-weight:600">' + d.day + ' ' + d.shortDate + '</div><div style="font-family:var(--mono);font-weight:700;color:var(--accent)">' + fmtCurrency(d.total) + '</div></div>' + top + '</div>';
+  }).join('');
+
+  showBigModal('Daily sales — last 7 days',
+    '<div style="display:flex;gap:8px;align-items:flex-end;padding:18px 8px;background:var(--bg2);border-radius:10px;margin-bottom:18px">' + bars + '</div>'
+    + '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Top 5 products per day:</div>'
+    + dayDetails);
+}
+
+// Global registry — lookup product object by id when card is clicked (avoids quote-escaping hell)
+const productRegistry = {};
+function registerProduct(p) {
+  const key = String(p.shopifyId || p.productId || (p.title || '') + '|' + (p.campaignName || ''));
+  productRegistry[key] = p;
+  return key;
+}
+function openProductByKey(key) {
+  const p = productRegistry[key];
+  if (!p) return;
+  openProductDetailFromObj(p);
+}
+
 // ─── Products card renderer (used in Shopify view + dashboard) ───────────
 function productCard(p) {
   const img = p.imageUrl ? ('<img class="product-img" src="' + p.imageUrl + '" alt="" onerror="this.outerHTML=\'<div class=&quot;product-img-placeholder&quot;>no image</div>\'">') : '<div class="product-img-placeholder">no image</div>';
   const status = p.status ? ('<span class="' + statusClass(p.status) + '">' + p.status + '</span>') : '';
   const pri = '<span class="priority-pill ' + priorityClass(p.priority) + '">' + priorityLabel(p.priority) + '</span>';
   const inv = p.inventory != null ? (p.inventory === 0 ? '<span style="color:var(--red);font-weight:600">OUT OF STOCK</span>' : (p.inventory + ' in stock')) : '';
-  const campaigns = (p.campaignsAdvertisedIn && p.campaignsAdvertisedIn.length)
-    ? ('<span title="' + escapeHtml(p.campaignsAdvertisedIn.map(function(c){ return c.campaignName; }).join(', ')) + '">' + p.campaignsAdvertisedIn.length + ' campaign' + (p.campaignsAdvertisedIn.length === 1 ? '' : 's') + '</span>')
-    : '<span style="color:var(--text3)">Not advertised</span>';
+  const adStatusPill = p.adStatus === 'driving_traffic' ? '<span style="font-size:11px;color:var(--green);font-weight:600">● Driving</span>'
+    : p.adStatus === 'listed_quiet' ? '<span style="font-size:11px;color:var(--amber);font-weight:600">● Quiet</span>'
+    : p.adStatus === 'not_promoted' ? '<span style="font-size:11px;color:var(--text3);font-weight:600">● Not promoted</span>'
+    : '';
+  const key = registerProduct(p);
 
-  return '<div class="product-card">'
+  return '<div class="product-card" style="cursor:pointer" onclick="openProductByKey(\'' + key.replace(/'/g, "\\'") + '\')">'
     + img
     + '<div class="product-body">'
     + '<div class="product-title">' + escapeHtml(p.title) + '</div>'
-    + '<div class="product-meta">' + pri + status + '<span>' + inv + '</span><span>•</span>' + campaigns + '</div>'
+    + '<div class="product-meta">' + pri + status + adStatusPill + '<span>' + inv + '</span></div>'
     + '<div class="diagnosis-line"><strong>' + escapeHtml(p.diagnosis || '') + '</strong></div>'
     + '<div class="action-line">→ ' + escapeHtml(p.action || '') + '</div>'
     + '<div class="product-stats">'
@@ -492,14 +619,9 @@ function productCard(p) {
     + statRow('ACOS', fmtPct(p.googleAcos))
     + (p.ga4Sessions != null ? statRow('Sessions 7d', fmtNum(p.ga4Sessions)) : '')
     + (p.ga4CartRate != null ? statRow('Cart rate', p.ga4CartRate + '%') : '')
-    + (p.ga4CheckoutRate != null ? statRow('Checkout rate', p.ga4CheckoutRate + '%') : '')
-    + (p.ga4BounceRate != null ? statRow('Bounce', (p.ga4BounceRate * 100).toFixed(0) + '%') : '')
     + '</div>'
     + (p.dailySales7d && p.dailySales7d.some(function(v){ return v > 0; }) ? '<div style="margin-top:10px"><div class="stat-label" style="margin-bottom:4px">Last 7 days revenue</div>' + sparklineHtml(p.dailySales7d) + '</div>' : '')
-    + '<div style="margin-top:12px;display:flex;gap:8px">'
-    + (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '')
-    + '<button class="btn btn-primary" onclick=\'aiAnalyse(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\'>🪄 AI analysis</button>'
-    + '</div>'
+    + '<div style="margin-top:10px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>'
     + '</div>'
     + '</div>';
 }
@@ -536,15 +658,17 @@ function renderShopifyView() {
     all: all.length,
     urgent: all.filter(function(p){ return p.priority === 1; }).length,
     scale: all.filter(function(p){ return p.priority === 3; }).length,
-    notads: all.filter(function(p){ return !p.hasGoogleData && p.status === 'active'; }).length,
-    hasads: all.filter(function(p){ return p.hasGoogleData; }).length,
+    driving: all.filter(function(p){ return p.adStatus === 'driving_traffic'; }).length,
+    quiet: all.filter(function(p){ return p.adStatus === 'listed_quiet'; }).length,
+    notpromoted: all.filter(function(p){ return p.adStatus === 'not_promoted' && p.status === 'active'; }).length,
   };
   const filters = [
     { id: 'all', label: 'All', count: counts.all },
-    { id: 'urgent', label: 'Needs urgent action', count: counts.urgent },
-    { id: 'scale', label: 'Scale opportunities', count: counts.scale },
-    { id: 'notads', label: 'Not advertised', count: counts.notads },
-    { id: 'hasads', label: 'Has ads', count: counts.hasads },
+    { id: 'urgent', label: '🔴 Urgent', count: counts.urgent },
+    { id: 'scale', label: '🟢 Scale', count: counts.scale },
+    { id: 'driving', label: '● Driving traffic', count: counts.driving },
+    { id: 'quiet', label: '● Listed but quiet', count: counts.quiet },
+    { id: 'notpromoted', label: '● Not yet promoted', count: counts.notpromoted },
   ];
   document.getElementById('filter-row').innerHTML = filters.map(function(f){
     return '<button class="filter-chip ' + (currentFilter === f.id ? 'active' : '') + '" onclick="setFilter(\'' + f.id + '\', this)">' + f.label + ' <span class="count">' + f.count + '</span></button>';
@@ -553,8 +677,9 @@ function renderShopifyView() {
   let filtered = all;
   if (currentFilter === 'urgent') filtered = all.filter(function(p){ return p.priority === 1; });
   else if (currentFilter === 'scale') filtered = all.filter(function(p){ return p.priority === 3; });
-  else if (currentFilter === 'notads') filtered = all.filter(function(p){ return !p.hasGoogleData && p.status === 'active'; });
-  else if (currentFilter === 'hasads') filtered = all.filter(function(p){ return p.hasGoogleData; });
+  else if (currentFilter === 'driving') filtered = all.filter(function(p){ return p.adStatus === 'driving_traffic'; });
+  else if (currentFilter === 'quiet') filtered = all.filter(function(p){ return p.adStatus === 'listed_quiet'; });
+  else if (currentFilter === 'notpromoted') filtered = all.filter(function(p){ return p.adStatus === 'not_promoted' && p.status === 'active'; });
 
   document.getElementById('products-content').innerHTML = filtered.length
     ? filtered.map(productCard).join('')
@@ -572,9 +697,10 @@ function renderGoogleView() {
 
 function campaignBlock(c) {
   const urgent = c.urgentCount > 0 ? '<span class="priority-pill priority-1">' + c.urgentCount + ' urgent</span>' : '';
+  const nameEsc = escapeHtml(c.campaignName).replace(/'/g, "&#39;");
   return '<div class="campaign-row" id="camp-' + c.campaignId + '">'
-    + '<div class="campaign-header" onclick="toggleCampaign(\'' + c.campaignId + '\')">'
-    + '<div>'
+    + '<div class="campaign-header">'
+    + '<div onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer;flex:1">'
     + '<div class="campaign-name">' + escapeHtml(c.campaignName) + ' ' + typeBadge(c.campaignType) + '</div>'
     + '<div class="campaign-meta">' + c.productCount + ' rows ' + urgent + '</div>'
     + '</div>'
@@ -584,7 +710,8 @@ function campaignBlock(c) {
     + '<div><div class="stat-label">Impr</div><div class="stat-value">' + fmtNum(c.totalImpressions) + '</div></div>'
     + '<div><div class="stat-label">Clicks</div><div class="stat-value">' + fmtNum(c.totalClicks) + '</div></div>'
     + '<div><div class="stat-label">ACOS</div><div class="stat-value">' + fmtPct(c.acos) + '</div></div>'
-    + '<svg class="expand-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4l4 4-4 4"/></svg>'
+    + '<button class="btn btn-ghost" style="margin-left:8px;font-size:12px" onclick="event.stopPropagation();promptArchive(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Archive this campaign from view">Archive</button>'
+    + '<svg class="expand-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer"><path d="M6 4l4 4-4 4"/></svg>'
     + '</div>'
     + '</div>'
     + '<div class="campaign-products">'
@@ -620,13 +747,40 @@ function productSubrow(p) {
 }
 
 // ─── Standalone campaigns page ───────────────────────────────────────────
+let campaignsTab = 'active'; // 'active' | 'archived'
+function setCampaignsTab(tab, btn) {
+  campaignsTab = tab;
+  document.querySelectorAll('.campaigns-tab').forEach(function(b){ b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  renderCampaignsPage();
+}
 function renderCampaignsPage() {
   if (!advertisedData) {
     document.getElementById('campaigns-list').innerHTML = '<div class="empty-state">Loading...</div>';
     return;
   }
-  document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
-  document.getElementById('campaigns-list').innerHTML = (advertisedData.campaigns || []).map(campaignBlock).join('');
+  const archivedCount = (archiveData && archiveData.archived) ? archiveData.archived.length : 0;
+  const tabsHtml = '<div class="view-toggle" style="margin-bottom:14px">'
+    + '<button class="campaigns-tab ' + (campaignsTab === 'active' ? 'active' : '') + '" onclick="setCampaignsTab(\'active\',this)">Active campaigns (' + advertisedData.totalCampaigns + ')</button>'
+    + '<button class="campaigns-tab ' + (campaignsTab === 'archived' ? 'active' : '') + '" onclick="setCampaignsTab(\'archived\',this)">Archived (' + archivedCount + ')</button>'
+    + '</div>';
+
+  if (campaignsTab === 'archived') {
+    document.getElementById('camp-sub').textContent = archivedCount + ' archived campaigns';
+    const archivedRows = ((archiveData && archiveData.archived) || []).map(function(a){
+      const removeBtn = isManager() ? '<button class="btn btn-ghost" style="color:var(--red);font-size:12px" onclick="removeCampaignPermanent(\'' + a.campaign_id + '\',\'' + escapeHtml(a.campaign_name || '').replace(/'/g, "&#39;") + '\')">Remove permanently</button>' : '';
+      return '<div style="padding:14px 18px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">'
+        + '<div style="flex:1;min-width:240px"><div style="font-weight:500;margin-bottom:4px">' + escapeHtml(a.campaign_name || a.campaign_id) + ' ' + typeBadge(a.campaign_type) + '</div>'
+        + '<div style="font-size:12px;color:var(--text2)">Archived ' + (a.archived_at ? new Date(a.archived_at).toLocaleString('en-GB') : '—') + ' by ' + escapeHtml(a.archived_by || 'unknown') + (a.reason ? ' · "' + escapeHtml(a.reason) + '"' : '') + '</div></div>'
+        + '<button class="btn btn-ghost" onclick="restoreCampaign(\'' + a.campaign_id + '\')">Restore</button>'
+        + removeBtn
+        + '</div>';
+    }).join('') || '<div class="empty-state">Nothing archived yet.</div>';
+    document.getElementById('campaigns-list').innerHTML = tabsHtml + archivedRows;
+  } else {
+    document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
+    document.getElementById('campaigns-list').innerHTML = tabsHtml + (advertisedData.campaigns || []).map(campaignBlock).join('');
+  }
 }
 
 // ─── Activity log ────────────────────────────────────────────────────────
@@ -656,16 +810,16 @@ async function loadActivity() {
 }
 
 // ─── AI analysis modal ───────────────────────────────────────────────────
-async function aiAnalyse(product) {
+async function aiAnalyse(product, deepDive) {
   document.getElementById('ai-modal').classList.add('show');
   document.getElementById('ai-title').textContent = product.title || product.displayName || product.productName || 'Product';
-  document.getElementById('ai-sub').textContent = product.diagnosis || '';
-  document.getElementById('ai-output').textContent = 'Analysing… (this may take a few seconds)';
+  document.getElementById('ai-sub').textContent = (product.diagnosis || '') + (deepDive ? ' · Deep dive (Opus + page + speed)' : ' · Quick analysis (Sonnet)');
+  document.getElementById('ai-output').textContent = deepDive ? 'Deep analysis running… 15-25 seconds.' : 'Analysing…';
   try {
     const r = await fetch('/api/google/ai-analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ product: product, includePageContent: true })
+      body: JSON.stringify({ product: product, includePageContent: !!deepDive })
     });
     const j = await r.json();
     document.getElementById('ai-output').textContent = j.analysis || j.error || 'No response';
@@ -674,6 +828,169 @@ async function aiAnalyse(product) {
   }
 }
 function closeAi() { document.getElementById('ai-modal').classList.remove('show'); }
+
+// ─── Big screen-size modal (product detail / daily sales) ────────────────
+function showBigModal(title, bodyHtml) {
+  document.getElementById('big-modal-title').textContent = title;
+  document.getElementById('big-modal-body').innerHTML = bodyHtml;
+  const m = document.getElementById('big-modal');
+  m.style.display = 'flex';
+}
+function closeBigModal() {
+  document.getElementById('big-modal').style.display = 'none';
+}
+
+// Open a single product in the big modal — full detail
+function openProductDetailFromObj(p) {
+  if (!p) return;
+  // Build big detail view
+  const img = p.imageUrl ? '<img src="' + p.imageUrl + '" style="width:200px;height:200px;object-fit:cover;border-radius:10px;background:var(--bg2)" alt="">' : '<div style="width:200px;height:200px;display:flex;align-items:center;justify-content:center;background:var(--bg2);color:var(--text3);border-radius:10px">no image</div>';
+  const status = p.status ? '<span class="' + statusClass(p.status) + '">' + p.status + '</span>' : '';
+  const pri = '<span class="priority-pill ' + priorityClass(p.priority) + '">' + priorityLabel(p.priority) + '</span>';
+  const inv = p.inventory != null ? (p.inventory === 0 ? '<span style="color:var(--red);font-weight:600">OUT OF STOCK</span>' : (p.inventory + ' in stock')) : '';
+  const adStatus = p.adStatus === 'driving_traffic' ? '<span style="color:var(--green);font-weight:600">● Driving traffic</span>'
+    : p.adStatus === 'listed_quiet' ? '<span style="color:var(--amber);font-weight:600">● Listed but quiet</span>'
+    : '<span style="color:var(--text3);font-weight:600">● Not yet promoted</span>';
+
+  // Daily sales detail
+  const days = [];
+  const now = Date.now();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now - i * 24 * 60 * 60 * 1000);
+    days.push({ day: d.toLocaleDateString('en-GB', { weekday: 'short' }), shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) });
+  }
+  const dailyMax = Math.max.apply(null, [1].concat((p.dailySales7d || [])));
+  const dailyBars = (p.dailySales7d || []).map(function(v, i){
+    const h = dailyMax > 0 ? Math.max(2, (v / dailyMax) * 100) : 2;
+    const dl = days[i] || { day: '?', shortDate: '?' };
+    return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:4px">'
+      + '<div style="font-size:11px;font-family:var(--mono);color:var(--text2);font-weight:600">' + (v > 0 ? '£' + Math.round(v) : '—') + '</div>'
+      + '<div style="height:100px;width:100%;display:flex;align-items:flex-end;justify-content:center"><div style="width:65%;height:' + h + 'px;background:linear-gradient(180deg,var(--accent),#1976d2);border-radius:4px 4px 0 0"></div></div>'
+      + '<div style="font-size:11px;color:var(--text2);font-weight:600">' + dl.day + '</div>'
+      + '<div style="font-size:10px;color:var(--text3)">' + dl.shortDate + '</div>'
+      + '</div>';
+  }).join('');
+
+  const stat = function(label, val, accent){
+    return '<div style="background:var(--bg2);padding:12px 14px;border-radius:8px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">' + label + '</div><div style="font-size:18px;font-weight:600;color:' + (accent || 'var(--text)') + ';font-family:var(--mono)">' + val + '</div></div>';
+  };
+
+  const key = registerProduct(p);
+
+  const body =
+    '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px">' + img +
+      '<div style="flex:1;min-width:300px">' +
+      '<div style="font-size:22px;font-weight:600;margin-bottom:8px">' + escapeHtml(p.title) + '</div>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">' + pri + status + '<span style="color:var(--text2)">' + inv + '</span><span style="color:var(--text3)">·</span>' + adStatus + '</div>' +
+      '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:10px 14px;border-radius:4px;margin-bottom:8px"><strong>Diagnosis:</strong> ' + escapeHtml(p.diagnosis || 'None') + '</div>' +
+      '<div style="background:var(--bg2);border-left:3px solid var(--accent);padding:10px 14px;border-radius:4px"><strong>Action:</strong> ' + escapeHtml(p.action || 'Monitor') + '</div>' +
+      '</div>' +
+    '</div>' +
+
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Sales (Shopify)</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
+    stat('Revenue 7d', fmtCurrency(p.revenue7d)) +
+    stat('Revenue 30d', fmtCurrency(p.revenue30d)) +
+    stat('Units 7d', fmtNum(p.unitsSold7d)) +
+    stat('Units 30d', fmtNum(p.unitsSold30d)) +
+    stat('Price', p.price != null ? fmtCurrency(p.price) : '—') +
+    '</div>' +
+
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Daily revenue (last 7 days)</div>' +
+    '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px;background:var(--bg2);border-radius:8px">' + dailyBars + '</div>' +
+
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Google Ads (last 7 days)</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
+    stat('Ad spend', fmtCurrency(p.googleSpend)) +
+    stat('Impressions', fmtNum(p.googleImpressions)) +
+    stat('Clicks', fmtNum(p.googleClicks)) +
+    stat('CTR', fmtPct(p.googleCtr)) +
+    stat('Conversions', fmtNum(p.googleConversions)) +
+    stat('Ad sales', fmtCurrency(p.googleSales)) +
+    stat('ACOS', fmtPct(p.googleAcos), p.googleAcos > 30 ? 'var(--red)' : p.googleAcos > 0 && p.googleAcos < 15 ? 'var(--green)' : 'var(--text)') +
+    stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
+    '</div>' +
+
+    (p.ga4Sessions != null ? '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Funnel (GA4 last 7 days)</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
+    stat('Sessions', fmtNum(p.ga4Sessions)) +
+    stat('Cart adds', fmtNum(p.ga4CartAdditions)) +
+    stat('Cart rate', p.ga4CartRate != null ? p.ga4CartRate + '%' : '—', p.ga4CartRate != null && p.ga4CartRate < 2 ? 'var(--red)' : 'var(--text)') +
+    stat('Checkouts', fmtNum(p.ga4Checkouts)) +
+    stat('Checkout rate', p.ga4CheckoutRate != null ? p.ga4CheckoutRate + '%' : '—') +
+    stat('Bounce', p.ga4BounceRate != null ? (p.ga4BounceRate * 100).toFixed(0) + '%' : '—', p.ga4BounceRate > 0.7 ? 'var(--red)' : 'var(--text)') +
+    stat('Engagement', p.ga4EngagementRate != null ? (p.ga4EngagementRate * 100).toFixed(0) + '%' : '—') +
+    stat('Avg time', p.ga4AvgEngagementTime != null ? p.ga4AvgEngagementTime.toFixed(0) + 's' : '—') +
+    '</div>' : '<div style="margin-top:20px;padding:12px 16px;background:var(--bg2);border-radius:8px;color:var(--text3);font-size:13px">GA4 funnel data not yet available for this product. Either it has no traffic, or its handle does not match the page path.</div>') +
+
+    '<div style="margin-top:28px;display:flex;gap:8px;flex-wrap:wrap">' +
+    (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
+    '<button class="btn btn-ghost" onclick="aiAnalyseByKey(\'' + key.replace(/'/g, "\\'") + '\', false)">🪄 Quick AI</button>' +
+    '<button class="btn btn-primary" onclick="aiAnalyseByKey(\'' + key.replace(/'/g, "\\'") + '\', true)">🔬 Deep dive AI</button>' +
+    '</div>';
+
+  showBigModal(p.title || 'Product detail', body);
+}
+function aiAnalyseByKey(key, deep) {
+  const p = productRegistry[key];
+  if (p) aiAnalyse(p, deep);
+}
+
+// ─── Archive flow ────────────────────────────────────────────────────────
+let pendingArchive = null;
+function promptArchive(campaignId, campaignName, campaignType) {
+  pendingArchive = { campaignId: campaignId, campaignName: campaignName, campaignType: campaignType };
+  document.getElementById('archive-campaign-name').textContent = campaignName + (campaignType ? ' · ' + campaignType : '');
+  document.getElementById('archive-reason').value = '';
+  document.getElementById('archive-modal').style.display = 'flex';
+  setTimeout(function(){ document.getElementById('archive-reason').focus(); }, 100);
+}
+function closeArchiveModal() {
+  document.getElementById('archive-modal').style.display = 'none';
+  pendingArchive = null;
+}
+async function submitArchive() {
+  if (!pendingArchive) return;
+  const reason = document.getElementById('archive-reason').value || '';
+  try {
+    await fetch('/api/google/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...pendingArchive, reason: reason })
+    });
+    closeArchiveModal();
+    refreshAll();
+  } catch(e) {
+    alert('Archive failed: ' + e.message);
+  }
+}
+async function restoreCampaign(campaignId) {
+  if (!confirm('Restore this campaign back to the main view?')) return;
+  try {
+    await fetch('/api/google/archive/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaignId })
+    });
+    refreshAll();
+  } catch(e) { alert('Restore failed: ' + e.message); }
+}
+async function removeCampaignPermanent(campaignId, campaignName) {
+  if (!isManager()) { alert('Only managers can permanently remove archived campaigns.'); return; }
+  if (!confirm('PERMANENTLY remove "' + campaignName + '" from the archive?\n\nThis cannot be undone.')) return;
+  try {
+    const r = await fetch('/api/google/archive/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaignId })
+    });
+    if (!r.ok) {
+      const j = await r.json();
+      throw new Error(j.error || 'Remove failed');
+    }
+    refreshAll();
+  } catch(e) { alert('Remove failed: ' + e.message); }
+}
 
 // ─── Boot ────────────────────────────────────────────────────────────────
 loadMe();

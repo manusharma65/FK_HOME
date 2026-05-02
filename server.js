@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────
-const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/shopify/products'];
+const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ai-analyse', '/google/pagespeed', '/google/archive', '/google/daily-sales', '/shopify/products'];
 
 async function requireAuth(req, res, next) {
   if (PUBLIC_PATHS.some(function(p){ return req.path.startsWith(p); })) return next();
@@ -661,6 +661,21 @@ async function initTasksTable() {
         bounce_rate REAL DEFAULT 0,
         updated_at TIMESTAMP DEFAULT NOW()
       );
+    `);
+
+    // Archived Google campaigns — agents archive old/irrelevant campaigns to keep
+    // the dashboard clean. Reversible until manager removes permanently.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS google_campaign_archive (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        campaign_type TEXT,
+        archived_by TEXT,
+        archived_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT,
+        department TEXT DEFAULT 'google'
+      );
+      CREATE INDEX IF NOT EXISTS idx_archive_archived_at ON google_campaign_archive(archived_at DESC);
     `);
 
     try {
@@ -2062,6 +2077,174 @@ app.post('/api/google/pagespeed', async function(req, res) {
   res.json(result);
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// Campaign Archive — hide old/irrelevant campaigns from main view
+// ─────────────────────────────────────────────────────────────────────────
+
+// Get current archive set (used by frontend to filter)
+app.get('/api/google/archive', async function(req, res) {
+  if (!db) return res.json({ archived: [] });
+  try {
+    const r = await db.query(
+      "SELECT campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason FROM google_campaign_archive ORDER BY archived_at DESC"
+    );
+    res.json({ archived: r.rows });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Archive a campaign — anyone (agent or manager) can do this
+app.post('/api/google/archive', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId, campaignName, campaignType, reason } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  // Get user from session if available
+  let archivedBy = 'unknown';
+  try {
+    if (req.cookies && req.cookies.session_token) {
+      const u = await db.query("SELECT username FROM users u JOIN user_sessions s ON s.user_id=u.id WHERE s.token=$1", [req.cookies.session_token]);
+      if (u.rows.length) archivedBy = u.rows[0].username;
+    }
+  } catch(e) {}
+
+  try {
+    await db.query(`
+      INSERT INTO google_campaign_archive (campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, department)
+      VALUES ($1, $2, $3, $4, NOW(), $5, 'google')
+      ON CONFLICT (campaign_id) DO UPDATE SET
+        campaign_name = EXCLUDED.campaign_name,
+        campaign_type = EXCLUDED.campaign_type,
+        archived_by = EXCLUDED.archived_by,
+        archived_at = NOW(),
+        reason = EXCLUDED.reason
+    `, [String(campaignId), campaignName || '', campaignType || '', archivedBy, reason || '']);
+    // Activity log
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), campaignName || '', archivedBy, 'campaign_archived', reason || '(no reason given)']
+      );
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Archive error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Restore a campaign from archive (anyone can restore)
+app.post('/api/google/archive/restore', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  let restoredBy = 'unknown';
+  try {
+    if (req.cookies && req.cookies.session_token) {
+      const u = await db.query("SELECT username FROM users u JOIN user_sessions s ON s.user_id=u.id WHERE s.token=$1", [req.cookies.session_token]);
+      if (u.rows.length) restoredBy = u.rows[0].username;
+    }
+  } catch(e) {}
+  try {
+    const before = await db.query("SELECT campaign_name FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    await db.query("DELETE FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), before.rows[0] ? before.rows[0].campaign_name : '', restoredBy, 'campaign_restored', 'restored from archive']
+      );
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Permanently remove from archive (manager only — checked client-side and here)
+app.post('/api/google/archive/remove', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  let removedBy = 'unknown';
+  let isManager = false;
+  try {
+    if (req.cookies && req.cookies.session_token) {
+      const u = await db.query("SELECT username, role FROM users u JOIN user_sessions s ON s.user_id=u.id WHERE s.token=$1", [req.cookies.session_token]);
+      if (u.rows.length) {
+        removedBy = u.rows[0].username;
+        isManager = ['manager', 'admin'].includes(u.rows[0].role) || ['bobby', 'satyam'].includes(u.rows[0].username);
+      }
+    }
+  } catch(e) {}
+  if (!isManager) return res.status(403).json({ error: 'Manager only' });
+  try {
+    const before = await db.query("SELECT campaign_name FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    await db.query("DELETE FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), before.rows[0] ? before.rows[0].campaign_name : '', removedBy, 'campaign_removed', 'permanently removed by manager']
+      );
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Daily Sales — store-wide last 7 days (Mon-Sun aligned to today)
+// ─────────────────────────────────────────────────────────────────────────
+app.get('/api/google/daily-sales', async function(req, res) {
+  // Aggregate from shopifyState (already has dailySales7d per product)
+  const products = shopifyState.products || [];
+  const days = 7;
+  const totals = new Array(days).fill(0);
+  const labels = [];
+
+  // Day labels in order, oldest -> newest (matches dailySales7d shape)
+  const now = Date.now();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now - i * 24 * 60 * 60 * 1000);
+    labels.push({
+      iso: d.toISOString().slice(0, 10),
+      day: d.toLocaleDateString('en-GB', { weekday: 'short' }),
+      shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+    });
+  }
+
+  products.forEach(function(p) {
+    const sparkline = p.dailySales7d || [];
+    sparkline.forEach(function(v, i) {
+      if (i < days) totals[i] = (totals[i] || 0) + (v || 0);
+    });
+  });
+
+  // Top 5 contributors per day
+  const topByDay = labels.map(function(l, i){
+    const contributions = products
+      .filter(function(p){ return (p.dailySales7d || [])[i] > 0; })
+      .map(function(p) {
+        return {
+          shopifyId: p.id,
+          title: p.title,
+          imageUrl: p.imageUrl,
+          revenue: p.dailySales7d[i],
+          units: 0  // could compute from line items if needed
+        };
+      })
+      .sort(function(a,b){ return b.revenue - a.revenue; })
+      .slice(0, 5);
+    return { ...l, total: Math.round(totals[i] * 100) / 100, top: contributions };
+  });
+
+  res.json({
+    days: topByDay,
+    totalRevenue7d: Math.round(totals.reduce(function(s,v){ return s + v; }, 0) * 100) / 100,
+    lastShopifySync: shopifyState.lastSync
+  });
+});
+
 // The unified diagnosis decision tree.
 // priority: 1 = urgent (red), 2 = needs attention (amber), 3 = scale (green), 4 = healthy/info (grey)
 function diagnoseProduct(ctx) {
@@ -2172,8 +2355,25 @@ app.post('/api/shopify/sync', async function(req, res) {
 });
 
 // ── Google Advertised View — grouped by campaign ──────────────────────────
+// Helper — load current archived campaign IDs (cached briefly to avoid DB hits per request)
+let archivedCampaignsCache = { ids: new Set(), at: 0 };
+async function getArchivedCampaignIds() {
+  // 30-second cache
+  if (Date.now() - archivedCampaignsCache.at < 30000) return archivedCampaignsCache.ids;
+  if (!db) return new Set();
+  try {
+    const r = await db.query("SELECT campaign_id FROM google_campaign_archive");
+    const set = new Set(r.rows.map(function(x){ return String(x.campaign_id); }));
+    archivedCampaignsCache = { ids: set, at: Date.now() };
+    return set;
+  } catch(e) { return new Set(); }
+}
+
 app.get('/api/google/products-diagnostic', async function(req, res) {
-  const googleProducts = googleState.products || [];
+  const archivedIds = await getArchivedCampaignIds();
+  const googleProducts = (googleState.products || []).filter(function(gp){
+    return !archivedIds.has(String(gp.campaignId));
+  });
 
   const rows = googleProducts.map(function(gp) {
     const shopifyProduct = matchShopifyProduct(gp);
@@ -2303,12 +2503,29 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
 // ── All Products View — Shopify-led ───────────────────────────────────────
 app.get('/api/google/all-products', async function(req, res) {
   const shopifyProducts = shopifyState.products || [];
+  const archivedIds = await getArchivedCampaignIds();
 
   const rows = shopifyProducts.map(function(sp) {
-    const googleRows = findGoogleRowsForShopifyProduct(sp.id);
+    // Filter google rows for this product, excluding archived campaigns
+    const googleRowsAll = findGoogleRowsForShopifyProduct(sp.id);
+    const googleRows = googleRowsAll.filter(function(r){ return !archivedIds.has(String(r.campaignId)); });
     const agg = aggregateGoogleMetrics(googleRows);
-    const hasGoogleData = googleRows.length > 0 && (agg.spend > 0 || agg.impressions > 0);
+    const hasGoogleData = googleRows.length > 0;
+    const hasGoogleActivity = hasGoogleData && (agg.spend > 0 || agg.impressions > 0);
     const funnel = getGa4ForShopifyProduct(sp);
+
+    // Three-bucket categorisation:
+    //   driving_traffic — has ≥100 impressions OR ≥1 click in 7 days
+    //   listed_quiet   — in feed (has rows) but below threshold
+    //   not_promoted   — no Google rows at all
+    let adStatus;
+    if (!hasGoogleData) {
+      adStatus = 'not_promoted';
+    } else if (agg.impressions >= 100 || agg.clicks >= 1) {
+      adStatus = 'driving_traffic';
+    } else {
+      adStatus = 'listed_quiet';
+    }
 
     const dx = diagnoseProduct({
       shopify: {
@@ -2348,6 +2565,8 @@ app.get('/api/google/all-products', async function(req, res) {
       googleAcos: agg.acos,
       campaignsAdvertisedIn: agg.campaignsAdvertisedIn,
       hasGoogleData: hasGoogleData,
+      hasGoogleActivity: hasGoogleActivity,
+      adStatus: adStatus,
       ga4Sessions: funnel ? funnel.sessions : null,
       ga4CartAdditions: funnel ? funnel.cartAdditions : null,
       ga4Checkouts: funnel ? funnel.checkouts : null,
@@ -2375,6 +2594,9 @@ app.get('/api/google/all-products', async function(req, res) {
     draftProducts: rows.filter(function(r){ return r.status === 'draft'; }).length,
     archivedProducts: rows.filter(function(r){ return r.status === 'archived'; }).length,
     advertisedProducts: rows.filter(function(r){ return r.hasGoogleData; }).length,
+    drivingTrafficCount: rows.filter(function(r){ return r.adStatus === 'driving_traffic'; }).length,
+    listedQuietCount: rows.filter(function(r){ return r.adStatus === 'listed_quiet'; }).length,
+    notPromotedCount: rows.filter(function(r){ return r.adStatus === 'not_promoted'; }).length,
     urgentCount: rows.filter(function(r){ return r.priority === 1; }).length,
     scaleCount: rows.filter(function(r){ return r.priority === 3; }).length,
     totalGoogleSpend: Math.round(rows.reduce(function(s, r){ return s + (r.googleSpend || 0); }, 0) * 100) / 100,
@@ -2580,8 +2802,12 @@ ${includePageContent && productUrl ? '4. Any specific listing-quality issues you
 
 Be direct, specific, and actionable. No generic advice.`;
 
+    // Sonnet for routine analysis (faster, cheaper); Opus for deep dives where
+    // we've also fetched the page + PageSpeed (the harder reasoning task)
+    const model = includePageContent ? 'claude-opus-4-5-20251101' : 'claude-sonnet-4-5-20250929';
+
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-5-20251101',
+      model: model,
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }]
     }, {
