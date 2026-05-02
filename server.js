@@ -1591,51 +1591,131 @@ async function syncShopifyProducts() {
     });
     const rawProducts = prodRes.data.products || [];
 
-    // Fetch last 30 days of orders. We compute both 7-day and 30-day metrics from this.
+    // Fetch last 30 days of orders WITH PAGINATION (FK Sports does 150+ orders/day,
+    // so a single page of 250 captures less than 2 days). Walk Link headers until done.
     const now = Date.now();
     const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
     const cutoff7 = now - 7 * 24 * 60 * 60 * 1000;
 
-    const sales30 = {};
-    const units30 = {};
+    // Per-product totals over 7 and 30 day windows
+    const sales30 = {};        // net (gross - discount - refund)
+    const units30 = {};        // gross units (refunded units NOT subtracted from this — matches Analytics)
     const sales7 = {};
     const units7 = {};
-    const dailySalesByPid = {};   // pid -> { 'YYYY-MM-DD': revenue }
 
+    // Per-product daily breakdown: pid -> { 'YYYY-MM-DD': { gross, discount, refund, net } }
+    const dailyByPid = {};
+
+    // Store-wide daily breakdown for the dashboard "Daily breakdown" card
+    // (pid is keyed too so the modal can show top products per day)
+    const dailyAll = {};       // 'YYYY-MM-DD' -> { gross, discount, refund, net, byPid: { pid: net } }
+
+    function getDay(map, key) {
+      if (!map[key]) map[key] = { gross: 0, discount: 0, refund: 0, net: 0 };
+      return map[key];
+    }
+    function getDayAll(key) {
+      if (!dailyAll[key]) dailyAll[key] = { gross: 0, discount: 0, refund: 0, net: 0, byPid: {} };
+      return dailyAll[key];
+    }
+
+    let totalOrders = 0;
     try {
-      const orderRes = await axios.get('https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&created_at_min=' + since30, {
-        headers: { 'X-Shopify-Access-Token': token }
-      });
-      const orders = orderRes.data.orders || [];
-      // Per-line revenue uses Shopify's "Net sales" definition:
-      //   (item.price * item.quantity) - sum(item.discount_allocations[].amount)
-      // This matches Shopify Analytics → "Net sales" exactly per product.
-      // We don't add shipping or tax because those aren't attributable to a single product.
-      // We don't subtract refunds yet (per Bobby's instruction).
-      orders.forEach(function(order) {
-        const orderTime = new Date(order.created_at).getTime();
-        const dayKey = order.created_at.slice(0, 10); // 'YYYY-MM-DD'
-        const isWithin7 = orderTime >= cutoff7;
-        (order.line_items || []).forEach(function(item) {
-          const pid = String(item.product_id);
-          const gross = parseFloat(item.price || 0) * (item.quantity || 0);
-          // Sum allocated discounts for this line (cart-level discounts pro-rated to the line)
-          const discountAllocated = (item.discount_allocations || []).reduce(function(s, da){
-            return s + parseFloat(da.amount || 0);
-          }, 0);
-          const lineRevenue = Math.max(0, gross - discountAllocated);
-          sales30[pid] = (sales30[pid] || 0) + lineRevenue;
-          units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
-          if (isWithin7) {
-            sales7[pid] = (sales7[pid] || 0) + lineRevenue;
-            units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
-          }
-          if (!dailySalesByPid[pid]) dailySalesByPid[pid] = {};
-          dailySalesByPid[pid][dayKey] = (dailySalesByPid[pid][dayKey] || 0) + lineRevenue;
+      // Paginated fetch — Shopify uses Link header with page_info cursor
+      let url = 'https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&created_at_min=' + since30;
+      let pageCount = 0;
+      const maxPages = 20; // safety cap (5,000 orders should be enough for 30 days even at peak)
+      while (url && pageCount < maxPages) {
+        pageCount++;
+        const orderRes = await axios.get(url, {
+          headers: { 'X-Shopify-Access-Token': token }
         });
-      });
-      console.log('Shopify orders fetched: ' + orders.length + ' (using Net sales = price*qty - line discounts)');
-    } catch(e) { console.log('Shopify orders skipped (no permission): ' + e.message); }
+        const orders = orderRes.data.orders || [];
+        totalOrders += orders.length;
+
+        orders.forEach(function(order) {
+          const dayKey = order.created_at.slice(0, 10); // 'YYYY-MM-DD'
+          const orderTime = new Date(order.created_at).getTime();
+          const isWithin7 = orderTime >= cutoff7;
+
+          (order.line_items || []).forEach(function(item) {
+            const pid = String(item.product_id);
+            const gross = parseFloat(item.price || 0) * (item.quantity || 0);
+            const discountAllocated = (item.discount_allocations || []).reduce(function(s, da){
+              return s + parseFloat(da.amount || 0);
+            }, 0);
+            const lineNet = Math.max(0, gross - discountAllocated);
+
+            // Per-product totals (refunds added separately below)
+            sales30[pid] = (sales30[pid] || 0) + lineNet;
+            units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
+            if (isWithin7) {
+              sales7[pid] = (sales7[pid] || 0) + lineNet;
+              units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
+            }
+
+            // Per-product daily (gross & discount & net — refund applied later by refund date)
+            if (!dailyByPid[pid]) dailyByPid[pid] = {};
+            const d = getDay(dailyByPid[pid], dayKey);
+            d.gross += gross;
+            d.discount += discountAllocated;
+            d.net += lineNet;
+
+            // Store-wide daily — gross/discount/net by ORDER day
+            const ad = getDayAll(dayKey);
+            ad.gross += gross;
+            ad.discount += discountAllocated;
+            ad.net += lineNet;
+            ad.byPid[pid] = (ad.byPid[pid] || 0) + lineNet;
+          });
+
+          // REFUNDS — option B: assign to the day the refund was issued (order.refunds[].created_at).
+          // For each refunded line, calculate refund value (subtotal of refund_line_items) and apply.
+          (order.refunds || []).forEach(function(ref) {
+            const refundDayKey = (ref.created_at || order.created_at).slice(0, 10);
+            const refundTime = new Date(ref.created_at || order.created_at).getTime();
+            const refundIsWithin7 = refundTime >= cutoff7;
+            (ref.refund_line_items || []).forEach(function(rli) {
+              const pid = String(rli.line_item ? rli.line_item.product_id : '');
+              if (!pid) return;
+              const refundAmount = parseFloat(rli.subtotal || 0); // subtotal of refunded line (already discount-adjusted)
+              if (!refundAmount) return;
+
+              // Subtract from net totals
+              sales30[pid] = (sales30[pid] || 0) - refundAmount;
+              if (refundIsWithin7) sales7[pid] = (sales7[pid] || 0) - refundAmount;
+
+              // Per-product daily — apply on refund date
+              if (!dailyByPid[pid]) dailyByPid[pid] = {};
+              const d = getDay(dailyByPid[pid], refundDayKey);
+              d.refund += refundAmount;
+              d.net -= refundAmount;
+
+              // Store-wide daily — apply on refund date
+              const ad = getDayAll(refundDayKey);
+              ad.refund += refundAmount;
+              ad.net -= refundAmount;
+              ad.byPid[pid] = (ad.byPid[pid] || 0) - refundAmount;
+            });
+          });
+        });
+
+        // Look at Link header for next page cursor
+        const linkHeader = orderRes.headers && orderRes.headers.link;
+        let nextUrl = null;
+        if (linkHeader) {
+          const m = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+          if (m) nextUrl = m[1];
+        }
+        url = nextUrl;
+      }
+      if (pageCount >= maxPages) {
+        console.log('Shopify pagination stopped at safety cap of ' + maxPages + ' pages — some old orders may not be included');
+      }
+      console.log('Shopify orders fetched: ' + totalOrders + ' across ' + pageCount + ' page(s); Net = gross - discounts - refunds (refund on day issued)');
+      // Stash store-wide daily for the dashboard
+      shopifyState.dailyBreakdown = dailyAll;
+    } catch(e) { console.log('Shopify orders skipped: ' + e.message); }
 
     shopifyState.products = rawProducts.map(function(p) {
       const pid = String(p.id);
@@ -1644,13 +1724,14 @@ async function syncShopifyProducts() {
       const imageUrl = p.images && p.images[0] ? p.images[0].src : null;
       const tags = (p.tags || '').split(',').map(function(t){ return t.trim(); });
 
-      // Build 7-day daily sparkline (oldest → newest)
-      const daily = dailySalesByPid[pid] || {};
+      // Build 7-day daily sparkline using NET sales (gross - discounts - refunds on issue date)
+      const daily = dailyByPid[pid] || {};
       const sparkline = [];
       for (let i = 6; i >= 0; i--) {
         const d = new Date(now - i * 24 * 60 * 60 * 1000);
         const k = d.toISOString().slice(0, 10);
-        sparkline.push(Math.round((daily[k] || 0) * 100) / 100);
+        const dayData = daily[k];
+        sparkline.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
       }
 
       return {
@@ -1964,10 +2045,18 @@ async function fetchGa4ProductMetrics() {
       limit: 250
     }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
 
-    // Ecommerce events per pagePath (add_to_cart, begin_checkout, purchase)
-    let reportB;
+    // Ecommerce events per product. Important: begin_checkout and purchase events
+    // fire on /checkout, NOT on /products/. So filtering by pagePath would always return 0.
+    // Use itemName dimension instead — GA4 attaches the product item to these events
+    // via Shopify's standard ecommerce parameters, so we can attribute back to the product.
+    // We run two queries:
+    //   reportB1: add_to_cart events filtered by pagePath BEGINS_WITH /products/
+    //             (these fire ON the product page so pagePath works fine)
+    //   reportB2: begin_checkout + purchase events grouped by itemName
+    //             (these fire on /checkout but carry item info)
+    let reportB1, reportB2;
     try {
-      reportB = await axios.post(url, {
+      reportB1 = await axios.post(url, {
         dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
         dimensions: [{ name: 'pagePath' }, { name: 'eventName' }],
         metrics: [{ name: 'eventCount' }],
@@ -1975,14 +2064,28 @@ async function fetchGa4ProductMetrics() {
           andGroup: {
             expressions: [
               { filter: { fieldName: 'pagePath', stringFilter: { matchType: 'BEGINS_WITH', value: '/products/' } } },
-              { filter: { fieldName: 'eventName', inListFilter: { values: ['add_to_cart', 'begin_checkout', 'purchase'] } } }
+              { filter: { fieldName: 'eventName', inListFilter: { values: ['add_to_cart'] } } }
             ]
           }
         },
         limit: 1000
       }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
     } catch(e) {
-      console.log('GA4 ecommerce events fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+      console.log('GA4 add_to_cart fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    }
+
+    try {
+      reportB2 = await axios.post(url, {
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+        dimensions: [{ name: 'itemName' }, { name: 'eventName' }],
+        metrics: [{ name: 'eventCount' }],
+        dimensionFilter: {
+          filter: { fieldName: 'eventName', inListFilter: { values: ['begin_checkout', 'purchase'] } }
+        },
+        limit: 1000
+      }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+    } catch(e) {
+      console.log('GA4 checkout/purchase fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
     }
 
     const metrics = {};
@@ -1999,8 +2102,9 @@ async function fetchGa4ProductMetrics() {
       };
     });
 
-    if (reportB && reportB.data.rows) {
-      reportB.data.rows.forEach(function(row) {
+    // Merge reportB1 (add_to_cart, keyed by pagePath)
+    if (reportB1 && reportB1.data.rows) {
+      reportB1.data.rows.forEach(function(row) {
         const path = row.dimensionValues[0].value;
         const event = row.dimensionValues[1].value;
         const count = parseInt(row.metricValues[0].value) || 0;
@@ -2008,9 +2112,39 @@ async function fetchGa4ProductMetrics() {
           metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
         }
         if (event === 'add_to_cart') metrics[path].cartAdditions = count;
-        else if (event === 'begin_checkout') metrics[path].checkouts = count;
-        else if (event === 'purchase') metrics[path].purchases = count;
       });
+    }
+
+    // Merge reportB2 (begin_checkout + purchase, keyed by itemName).
+    // Map itemName -> pagePath via Shopify product titles.
+    // Shopify stores product titles which often end up verbatim as GA4 itemName.
+    if (reportB2 && reportB2.data.rows) {
+      const titleToPath = {};
+      (shopifyState.products || []).forEach(function(p){
+        if (p.title && p.handle) titleToPath[p.title.toLowerCase().trim()] = '/products/' + p.handle;
+      });
+
+      let unmappedCheckouts = 0, unmappedPurchases = 0;
+      reportB2.data.rows.forEach(function(row) {
+        const itemName = (row.dimensionValues[0].value || '').toLowerCase().trim();
+        const event = row.dimensionValues[1].value;
+        const count = parseInt(row.metricValues[0].value) || 0;
+        if (!itemName) return;
+        const path = titleToPath[itemName];
+        if (!path) {
+          if (event === 'begin_checkout') unmappedCheckouts += count;
+          else if (event === 'purchase') unmappedPurchases += count;
+          return;
+        }
+        if (!metrics[path]) {
+          metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
+        }
+        if (event === 'begin_checkout') metrics[path].checkouts = (metrics[path].checkouts || 0) + count;
+        else if (event === 'purchase')   metrics[path].purchases = (metrics[path].purchases || 0) + count;
+      });
+      if (unmappedCheckouts || unmappedPurchases) {
+        console.log('GA4 itemName -> Shopify mapping miss: ' + unmappedCheckouts + ' checkouts, ' + unmappedPurchases + ' purchases unattributed (item titles not matching Shopify)');
+      }
     }
 
     // Persist
@@ -2236,13 +2370,10 @@ app.post('/api/google/archive/remove', async function(req, res) {
 // Daily Sales — store-wide last 7 days (Mon-Sun aligned to today)
 // ─────────────────────────────────────────────────────────────────────────
 app.get('/api/google/daily-sales', async function(req, res) {
-  // Aggregate from shopifyState (already has dailySales7d per product)
   const products = shopifyState.products || [];
+  const dailyAll = shopifyState.dailyBreakdown || {}; // 'YYYY-MM-DD' -> { gross, discount, refund, net, byPid }
   const days = 7;
-  const totals = new Array(days).fill(0);
   const labels = [];
-
-  // Day labels in order, oldest -> newest (matches dailySales7d shape)
   const now = Date.now();
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(now - i * 24 * 60 * 60 * 1000);
@@ -2253,34 +2384,50 @@ app.get('/api/google/daily-sales', async function(req, res) {
     });
   }
 
-  products.forEach(function(p) {
-    const sparkline = p.dailySales7d || [];
-    sparkline.forEach(function(v, i) {
-      if (i < days) totals[i] = (totals[i] || 0) + (v || 0);
-    });
-  });
+  // For each day: sum gross/discount/refund/net + top 5 contributors by net
+  const productById = {};
+  products.forEach(function(p){ productById[String(p.id)] = p; });
 
-  // Top 5 contributors per day
-  const topByDay = labels.map(function(l, i){
-    const contributions = products
-      .filter(function(p){ return (p.dailySales7d || [])[i] > 0; })
-      .map(function(p) {
+  const result = labels.map(function(l){
+    const dayData = dailyAll[l.iso] || { gross: 0, discount: 0, refund: 0, net: 0, byPid: {} };
+    // Top 5 contributors by NET sales for the day
+    const top = Object.keys(dayData.byPid)
+      .map(function(pid){
+        const p = productById[pid];
         return {
-          shopifyId: p.id,
-          title: p.title,
-          imageUrl: p.imageUrl,
-          revenue: p.dailySales7d[i],
-          units: 0  // could compute from line items if needed
+          shopifyId: pid,
+          title: p ? p.title : '(unknown product)',
+          imageUrl: p ? p.imageUrl : null,
+          revenue: Math.round(dayData.byPid[pid] * 100) / 100
         };
       })
+      .filter(function(x){ return x.revenue !== 0; })
       .sort(function(a,b){ return b.revenue - a.revenue; })
       .slice(0, 5);
-    return { ...l, total: Math.round(totals[i] * 100) / 100, top: contributions };
+    return {
+      ...l,
+      gross: Math.round((dayData.gross || 0) * 100) / 100,
+      discount: Math.round((dayData.discount || 0) * 100) / 100,
+      refund: Math.round((dayData.refund || 0) * 100) / 100,
+      net: Math.round((dayData.net || 0) * 100) / 100,
+      total: Math.round((dayData.net || 0) * 100) / 100, // for backward compat with frontend
+      top: top
+    };
   });
 
+  // 7-day totals
+  const totalGross = result.reduce(function(s, d){ return s + d.gross; }, 0);
+  const totalDiscount = result.reduce(function(s, d){ return s + d.discount; }, 0);
+  const totalRefund = result.reduce(function(s, d){ return s + d.refund; }, 0);
+  const totalNet = result.reduce(function(s, d){ return s + d.net; }, 0);
+
   res.json({
-    days: topByDay,
-    totalRevenue7d: Math.round(totals.reduce(function(s,v){ return s + v; }, 0) * 100) / 100,
+    days: result,
+    totalGross7d: Math.round(totalGross * 100) / 100,
+    totalDiscount7d: Math.round(totalDiscount * 100) / 100,
+    totalRefund7d: Math.round(totalRefund * 100) / 100,
+    totalNet7d: Math.round(totalNet * 100) / 100,
+    totalRevenue7d: Math.round(totalNet * 100) / 100, // backward compat
     lastShopifySync: shopifyState.lastSync
   });
 });
@@ -2829,7 +2976,14 @@ app.post('/api/google/ai-analyse', async function(req, res) {
       }
     }
 
-    const prompt = `You are a Google Ads and e-commerce expert for FK Sports UK (fitness equipment).
+    const prompt = `You are a Google Ads and e-commerce expert advising FK Sports UK.
+
+BUSINESS CONTEXT:
+- FK Sports UK sells home fitness equipment AND baby products on a single Shopify store (fksports.co.uk).
+- Roughly 150+ orders per day across all categories.
+- Currently a single Google Ads account covers both fitness and baby. Plan is to split baby into its own ads account in future.
+- Shopify is the source of truth for actual sales. Google's "Revenue" lags hours-to-days — if Google shows conversions but £0 revenue, that's typically attribution lag, not broken tracking.
+- Critical Shopify data caveat: there's currently a known GA4 checkout-event tracking gap, so the Funnel section may show "0 checkouts" even when Shopify clearly has orders. Don't over-index on the funnel checkout count vs Shopify sales — the discrepancy is almost certainly tracking, not behaviour.
 
 PRODUCT: ${name}${product.campaignName ? '\nCAMPAIGN: ' + product.campaignName : ''}${product.campaignType ? ' (' + product.campaignType + ')' : ''}
 
@@ -2839,29 +2993,27 @@ GOOGLE ADS PERFORMANCE (LAST 7 DAYS):
 - CTR: ${gCtr}%
 - Conversions: ${gConv}
 - Ad Spend: £${gSpend}
-- Revenue (Google-attributed): £${gSales}
+- Revenue (Google-attributed, lagged): £${gSales}
 - ACoS: ${gAcos}%
 
 SHOPIFY DATA:
 ${(price != null) ? `- Price: £${price}` : ''}
 ${(inventory != null) ? `- Inventory: ${inventory === 0 ? 'OUT OF STOCK' : inventory + ' units'}` : ''}
 ${status ? '- Status: ' + status.toUpperCase() : ''}
-${rev7d != null ? `- Last 7 days: £${rev7d} / ${units7d || 0} units (Shopify total — includes organic + ads)` : ''}
-${rev30d != null ? `- Last 30 days: £${rev30d} / ${units30d || 0} units (Shopify total)` : ''}
+${rev7d != null ? `- Last 7 days: £${rev7d} / ${units7d || 0} units (Shopify Net sales — gross minus discounts minus refunds)` : ''}
+${rev30d != null ? `- Last 30 days: £${rev30d} / ${units30d || 0} units (Shopify Net sales)` : ''}
 ${funnelSnippet}${speedSnippet}${pageSnippet}
 
 CURRENT DIAGNOSIS: ${product.diagnosis || 'None'}
 SUGGESTED ACTION: ${product.action || 'None'}
 
-Note: Google "Revenue" lags by hours and may show £0 even with conversions. The Shopify revenue is the source of truth for actual sales.
-
 Provide a concise analysis (4-6 sentences max):
-1. What's the real root cause? (compare Google vs Shopify numbers — is it a ads problem, a listing problem, or a tracking problem?)
-2. One specific action to take this week
-3. Expected impact if action is taken
-${includePageContent && productUrl ? '4. Any specific listing-quality issues you can see (title length, image, description, etc.)' : ''}
+1. What's the real root cause? Compare Google ad spend vs Shopify Net sales. Is this an ads activation problem (selling well organically but no/low ads), an ads-not-working problem (ads running but not converting), a listing problem, an attribution lag, or something else?
+2. One specific action to take this week.
+3. Expected impact if the action is taken.
+${includePageContent && productUrl ? '4. Listing-quality issues you can see (title length, image, description, etc.)' : ''}
 
-Be direct, specific, and actionable. No generic advice.`;
+Be direct, specific, actionable. Reference actual numbers. No generic advice.`;
 
     // Sonnet for routine analysis (faster, cheaper); Opus for deep dives where
     // we've also fetched the page + PageSpeed (the harder reasoning task)
@@ -2970,27 +3122,34 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       ? '\n... and ' + remaining + ' more product rows in this campaign.'
       : '';
 
-    const prompt = 'You are a Google Ads expert for FK Sports UK (fitness equipment).\n\n'
+    const prompt = 'You are a Google Ads expert advising FK Sports UK.\n\n'
+      + 'BUSINESS CONTEXT:\n'
+      + '- FK Sports UK sells home fitness equipment AND baby products on a single Shopify store (fksports.co.uk).\n'
+      + '- Shop volume is roughly 150+ orders per day across all categories.\n'
+      + '- Currently a single Google Ads account covers both fitness and baby. Plan is to split baby out into its own ads account in future, but right now treat them as one.\n'
+      + '- Shopify is the source of truth for actual sales. Google\'s "conversion value" lags hours to days — if Google reports 344 conversions but £0 revenue, that\'s an attribution lag, not necessarily broken tracking.\n'
+      + '- ACOS = ad spend / Google-attributed revenue. If Google revenue is £0 the ACOS field will read N/A even when the campaign is genuinely converting on Shopify.\n\n'
       + 'CAMPAIGN: ' + campaignName + '\n'
       + 'TYPE: ' + campaignType + '\n'
       + 'PERIOD: Last 7 days\n\n'
       + 'CAMPAIGN TOTALS:\n'
       + '- Spend: £' + totalSpend.toFixed(2) + '\n'
-      + '- Google-attributed sales: £' + totalSales.toFixed(2) + ' (note: Google attribution lags hours-to-days)\n'
+      + '- Google-attributed sales (lagged): £' + totalSales.toFixed(2) + '\n'
       + '- Impressions: ' + totalImpressions + '\n'
       + '- Clicks: ' + totalClicks + '\n'
-      + '- Conversions: ' + totalConv + '\n'
+      + '- Conversions recorded: ' + totalConv + '\n'
       + '- CTR: ' + overallCtr + '%\n'
-      + '- ACOS: ' + overallAcos + '\n'
+      + '- ACOS (only meaningful when Google revenue > 0): ' + overallAcos + '\n'
       + '- Product rows in campaign: ' + allProducts.length + '\n\n'
       + 'TOP PRODUCTS BY SPEND:\n' + productLines + remainingNote + '\n\n'
-      + 'Provide a CAMPAIGN-LEVEL analysis (not per-product) covering:\n'
-      + '1. Overall health verdict (one line: scaling / healthy / leaking money / broken)\n'
-      + '2. Which products are dragging this campaign down — name 1-3 specifically, with the spend and ACOS\n'
-      + '3. Which products are working well and could absorb more budget — name 1-3\n'
-      + '4. ONE specific structural change to make this week (e.g. "split out the Walking Pad into its own campaign", "lower bid on Hex Dumbbell Tree by 30%", "exclude product type X")\n'
-      + '5. If this is a Performance Max or Shopping campaign, comment on whether the right products are in scope\n\n'
-      + 'Be direct, specific, named. Reference actual product names and numbers from the data above. No generic advice.';
+      + 'Provide a CAMPAIGN-LEVEL analysis covering:\n'
+      + '1. Overall health verdict in one line (scaling / healthy / leaking money / tracking issue / broken). If conversions > 0 but Google revenue = £0, lean toward "tracking lag" or "tracking gap" rather than "broken" — it usually self-corrects in 24-48 hours.\n'
+      + '2. Which products are dragging this campaign down — name 1-3, with spend and ACOS\n'
+      + '3. Which products are working — name 1-3 that could absorb more budget\n'
+      + '4. ONE specific structural change to make this week (e.g. "split Walking Pad into its own campaign", "lower bid on Hex Dumbbell Tree by 30%", "exclude product type X")\n'
+      + '5. If campaign mixes fitness and baby products, flag it — they convert differently and benefit from separate campaigns\n'
+      + '6. If this is Performance Max or Shopping, comment on whether the right products are in scope\n\n'
+      + 'Be direct, specific, named. Reference actual product names and numbers. No generic advice.';
 
     // Use Opus for campaign-level reasoning — it's the harder task
     const response = await axios.post('https://api.anthropic.com/v1/messages', {

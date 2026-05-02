@@ -186,13 +186,13 @@ table.activity tr:last-child td { border-bottom: none; }
     <div class="logo-product">
       <span style="font-size:17px;font-weight:700;color:#fff">CampaignPulse</span>
     </div>
-    <div class="logo-sub">google.com</div>
+    <div class="logo-sub">fksports.co.uk</div>
   </div>
   <div class="nav">
     <div class="nav-section">Monitor</div>
     <button class="nav-item active" onclick="showPage('dashboard',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
-      <span>Live Dashboard</span>
+      <span>Overview</span>
       <span class="nav-badge" id="nb-action" style="display:none">0</span>
     </button>
     <button class="nav-item" onclick="showPage('products',this)">
@@ -220,7 +220,7 @@ table.activity tr:last-child td { border-bottom: none; }
 <!-- MAIN -->
 <div class="main">
   <div class="topbar">
-    <div class="page-title" id="page-title">Live Dashboard</div>
+    <div class="page-title" id="page-title">Overview</div>
     <div class="topbar-right">
       <div class="dept-switcher" id="dept-switcher" style="display:none">
         <button class="dept-btn" onclick="window.location.href='/index.html'">Amazon</button>
@@ -312,12 +312,12 @@ table.activity tr:last-child td { border-bottom: none; }
 
 </div></div>
 
-<!-- AI MODAL -->
-<div class="modal-bg" id="ai-modal" onclick="if(event.target===this)closeAi()">
-  <div class="modal">
+<!-- AI MODAL — z-index 1200, ABOVE the big product card modal (1000) and dismiss modal (1100) -->
+<div class="modal-bg" id="ai-modal" onclick="if(event.target===this)closeAi()" style="z-index:1200">
+  <div class="modal" style="max-width:720px">
     <div class="modal-title" id="ai-title">AI analysis</div>
     <div class="modal-sub" id="ai-sub"></div>
-    <div class="ai-output" id="ai-output">Analysing…</div>
+    <div class="ai-output" id="ai-output" style="font-size:14px;line-height:1.6">Analysing…</div>
     <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
       <button class="btn btn-ghost" onclick="closeAi()">Close</button>
     </div>
@@ -420,7 +420,7 @@ function showPage(id, btn) {
   document.getElementById('page-' + id).classList.add('active');
   document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
   if (btn) btn.classList.add('active');
-  const titles = { dashboard: 'Live Dashboard', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log' };
+  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log' };
   document.getElementById('page-title').textContent = titles[id] || id;
   if (id === 'campaigns') renderCampaignsPage();
   if (id === 'activity') loadActivity();
@@ -521,7 +521,7 @@ async function refreshAll() {
   }
 }
 
-// ─── Live Dashboard ──────────────────────────────────────────────────────
+// ─── Overview page ──────────────────────────────────────────────────────
 function renderDashboard() {
   if (!allProductsData) return;
   const s = allProductsData.summary;
@@ -549,27 +549,37 @@ function renderDashboard() {
   document.getElementById('scale-list').innerHTML = scale.length ? scale.map(productCard).join('') : '<div class="empty-state">No clear scale opportunities right now.</div>';
 }
 
-// ─── Daily Sales Card (Live Dashboard) ─────────────────────────────────
+// ─── Daily Sales Card (Overview) ─────────────────────────────────
 function renderDailySalesCard() {
   const target = document.getElementById('daily-sales-card');
   if (!target || !dailySalesData) return;
   const days = dailySalesData.days || [];
-  const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.total; })));
+  const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.net; })));
 
   const bars = days.map(function(d){
-    const h = max > 0 ? Math.max(2, (d.total / max) * 60) : 2;
+    const h = max > 0 ? Math.max(2, (d.net / max) * 60) : 2;
     return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:4px">'
-      + '<div style="font-size:11px;font-family:var(--mono);color:var(--text2);font-weight:600">' + (d.total > 0 ? '£' + Math.round(d.total).toLocaleString('en-GB') : '—') + '</div>'
+      + '<div style="font-size:11px;font-family:var(--mono);color:var(--text2);font-weight:600">' + (d.net > 0 ? '£' + Math.round(d.net).toLocaleString('en-GB') : '—') + '</div>'
       + '<div style="height:60px;width:100%;display:flex;align-items:flex-end;justify-content:center"><div style="width:80%;height:' + h + 'px;background:linear-gradient(180deg,var(--accent),#1976d2);border-radius:4px 4px 0 0"></div></div>'
       + '<div style="font-size:11px;color:var(--text2);font-weight:600">' + d.day + '</div>'
       + '<div style="font-size:10px;color:var(--text3)">' + d.shortDate + '</div>'
       + '</div>';
   }).join('');
 
-  const total = dailySalesData.totalRevenue7d || 0;
+  // Compact 4-part breakdown for the dashboard card itself
+  const totalNet = dailySalesData.totalNet7d || dailySalesData.totalRevenue7d || 0;
+  const totalGross = dailySalesData.totalGross7d || 0;
+  const totalDiscount = dailySalesData.totalDiscount7d || 0;
+  const totalRefund = dailySalesData.totalRefund7d || 0;
+
   target.innerHTML = '<div class="section-header"><div>'
     + '<div class="section-title" style="font-size:14px">Daily breakdown of Net sales (7d)</div>'
-    + '<div class="section-sub">' + fmtCurrency(total) + ' total · all products combined</div>'
+    + '<div class="section-sub">'
+    + 'Gross ' + fmtCurrency(totalGross)
+    + ' − Discounts ' + fmtCurrency(totalDiscount)
+    + ' − Refunds ' + fmtCurrency(totalRefund)
+    + ' = <strong style="color:var(--text)">Net ' + fmtCurrency(totalNet) + '</strong>'
+    + '</div>'
     + '</div>'
     + '<button class="btn btn-ghost" onclick="openDailySalesModal()">Open full view →</button>'
     + '</div>'
@@ -579,28 +589,62 @@ function renderDailySalesCard() {
 function openDailySalesModal() {
   if (!dailySalesData) return;
   const days = dailySalesData.days || [];
-  const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.total; })));
+  const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.net; })));
 
   const bars = days.map(function(d, i){
-    const h = max > 0 ? Math.max(4, (d.total / max) * 200) : 4;
+    const h = max > 0 ? Math.max(4, (d.net / max) * 200) : 4;
     return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:6px;cursor:pointer" onclick="document.getElementById(\'dsm-day-' + i + '\').scrollIntoView({behavior:\'smooth\'})">'
-      + '<div style="font-size:13px;font-family:var(--mono);color:var(--text);font-weight:700">' + (d.total > 0 ? '£' + Math.round(d.total).toLocaleString('en-GB') : '—') + '</div>'
+      + '<div style="font-size:13px;font-family:var(--mono);color:var(--text);font-weight:700">' + (d.net > 0 ? '£' + Math.round(d.net).toLocaleString('en-GB') : '—') + '</div>'
       + '<div style="height:200px;width:100%;display:flex;align-items:flex-end;justify-content:center"><div style="width:75%;height:' + h + 'px;background:linear-gradient(180deg,var(--accent),#1976d2);border-radius:6px 6px 0 0;box-shadow:0 2px 6px rgba(66,133,244,0.25)"></div></div>'
       + '<div style="font-size:13px;color:var(--text);font-weight:600">' + d.day + '</div>'
       + '<div style="font-size:11px;color:var(--text2)">' + d.shortDate + '</div>'
       + '</div>';
   }).join('');
 
+  // Header: 4-part totals
+  const totalNet = dailySalesData.totalNet7d || dailySalesData.totalRevenue7d || 0;
+  const totalGross = dailySalesData.totalGross7d || 0;
+  const totalDiscount = dailySalesData.totalDiscount7d || 0;
+  const totalRefund = dailySalesData.totalRefund7d || 0;
+  const breakdownTile = function(label, value, colour){
+    return '<div style="background:var(--bg2);padding:14px 18px;border-radius:10px;border:1px solid var(--border);flex:1;min-width:140px">'
+      + '<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:700;font-family:var(--mono);color:' + (colour || 'var(--text)') + '">' + value + '</div>'
+      + '</div>';
+  };
+  const totalsRow = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">'
+    + breakdownTile('Gross sales', fmtCurrency(totalGross))
+    + breakdownTile('Discounts', '− ' + fmtCurrency(totalDiscount), 'var(--amber)')
+    + breakdownTile('Refunds', '− ' + fmtCurrency(totalRefund), 'var(--red)')
+    + breakdownTile('Net sales', fmtCurrency(totalNet), 'var(--green)')
+    + '</div>';
+
+  // Per-day breakdown rows
   const dayDetails = days.map(function(d, i){
     const top = (d.top || []).map(function(t){
       return '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span>' + escapeHtml(t.title) + '</span><span style="font-family:var(--mono);font-weight:600">' + fmtCurrency(t.revenue) + '</span></div>';
     }).join('') || '<div style="color:var(--text3);padding:6px 0">No sales</div>';
-    return '<div id="dsm-day-' + i + '" style="margin-bottom:18px;padding:14px;background:var(--bg2);border-radius:8px"><div style="display:flex;justify-content:space-between;margin-bottom:8px"><div style="font-weight:600">' + d.day + ' ' + d.shortDate + '</div><div style="font-family:var(--mono);font-weight:700;color:var(--accent)">' + fmtCurrency(d.total) + '</div></div>' + top + '</div>';
+
+    // Per-day breakdown line
+    const dayLine = '<div style="display:flex;gap:14px;font-size:12px;color:var(--text2);font-family:var(--mono);margin-bottom:10px;flex-wrap:wrap">'
+      + '<span>Gross ' + fmtCurrency(d.gross) + '</span>'
+      + (d.discount ? '<span style="color:var(--amber)">− Disc ' + fmtCurrency(d.discount) + '</span>' : '')
+      + (d.refund ? '<span style="color:var(--red)">− Ref ' + fmtCurrency(d.refund) + '</span>' : '')
+      + '<span style="color:var(--green);font-weight:700">= Net ' + fmtCurrency(d.net) + '</span>'
+      + '</div>';
+
+    return '<div id="dsm-day-' + i + '" style="margin-bottom:18px;padding:14px;background:var(--bg2);border-radius:8px">'
+      + '<div style="display:flex;justify-content:space-between;margin-bottom:8px"><div style="font-weight:600">' + d.day + ' ' + d.shortDate + '</div><div style="font-family:var(--mono);font-weight:700;color:var(--accent)">' + fmtCurrency(d.net) + '</div></div>'
+      + dayLine
+      + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Top products</div>'
+      + top
+      + '</div>';
   }).join('');
 
   showBigModal('Daily sales — last 7 days',
-    '<div style="display:flex;gap:8px;align-items:flex-end;padding:18px 8px;background:var(--bg2);border-radius:10px;margin-bottom:18px">' + bars + '</div>'
-    + '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Top 5 products per day:</div>'
+    totalsRow
+    + '<div style="display:flex;gap:8px;align-items:flex-end;padding:18px 8px;background:var(--bg2);border-radius:10px;margin-bottom:18px">' + bars + '</div>'
+    + '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Per-day detail (refunds applied on the day they were issued):</div>'
     + dayDetails);
 }
 
