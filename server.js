@@ -1713,6 +1713,25 @@ async function syncShopifyProducts() {
               ad.net += shippingTotal;
             }
 
+            // ── Store-wide totals: use Shopify's PRE-COMPUTED order fields ─────────
+            // Path 1 — instead of summing line_items + discount_allocations ourselves
+            // (which had drift vs Shopify Analytics), use Shopify's own per-order
+            // numbers. These already match Analytics' "Total sales breakdown".
+            //   subtotal_price        = gross sales − discounts (i.e. what Shopify shows)
+            //   total_discounts       = discounts as Shopify reports them
+            //   gross sales (derived) = subtotal_price + total_discounts
+            const orderSubtotal  = parseFloat(order.subtotal_price || 0);     // already discount-applied
+            const orderDiscounts = parseFloat(order.total_discounts || 0);
+            const orderGross     = orderSubtotal + orderDiscounts;            // back-out gross
+            const orderNetForDay = orderSubtotal;                              // line-net at order level
+
+            const ad = getDayAll(dayKey);
+            ad.gross    += orderGross;
+            ad.discount += orderDiscounts;
+            ad.net      += orderNetForDay;
+            // shipping was already added above
+
+            // ── Per-product totals: keep our line-item math (drives product cards & AI) ──
             (order.line_items || []).forEach(function(item) {
               const pid = String(item.product_id);
               const gross = parseFloat(item.price || 0) * (item.quantity || 0);
@@ -1721,32 +1740,26 @@ async function syncShopifyProducts() {
               }, 0);
               const lineNet = Math.max(0, gross - discountAllocated);
 
-              // 30-day total (includes today)
               sales30[pid] = (sales30[pid] || 0) + lineNet;
               units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
-              // 7-day window (last 7 COMPLETE days, excludes today)
               if (isWithin7) {
                 sales7[pid] = (sales7[pid] || 0) + lineNet;
                 units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
               }
-              // Today separately (incomplete, real-time visibility)
               if (isToday) {
                 salesToday[pid] = (salesToday[pid] || 0) + lineNet;
                 unitsToday[pid] = (unitsToday[pid] || 0) + (item.quantity || 0);
               }
 
-              // Per-product daily (gross & discount & net — refund applied later by refund date)
+              // Per-product daily breakdown (sparkline & per-product modal)
               if (!dailyByPid[pid]) dailyByPid[pid] = {};
               const d = getDay(dailyByPid[pid], dayKey);
               d.gross += gross;
               d.discount += discountAllocated;
-            d.net += lineNet;
+              d.net += lineNet;
 
-              // Store-wide daily — gross/discount/net by ORDER day
-              const ad = getDayAll(dayKey);
-              ad.gross += gross;
-              ad.discount += discountAllocated;
-              ad.net += lineNet;
+              // Store-wide byPid attribution (top products per day) — keep line-item
+              // share since order-level numbers can't be split per product.
               ad.byPid[pid] = (ad.byPid[pid] || 0) + lineNet;
             });
           } // end gross/discount/shipping section (only runs for non-cancelled orders in window)
