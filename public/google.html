@@ -895,10 +895,15 @@ function productSubrow(p) {
   const pri = '<span class="priority-pill ' + priorityClass(p.priority) + '">' + priorityLabel(p.priority) + '</span>';
   const titleAttr = escapeHtml(p.displayName || p.productName || '');
   const payload = JSON.stringify(p).replace(/'/g, "&#39;");
+  // Placeholder for the rule-friction counts — filled in lazily after card renders
+  const productIdForFriction = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
+  const frictionBadge = productIdForFriction
+    ? '<span class="rf-badge" data-product-id="' + productIdForFriction + '" style="display:none;margin-left:6px;font-size:11px;font-family:var(--mono)"></span>'
+    : '';
   return '<div class="product-card" style="padding:10px;margin-top:10px;cursor:pointer" onclick=\'openProductDetailFromCampaignRow(' + payload + ')\'>'
     + img
     + '<div class="product-body">'
-    + '<div class="product-title" style="font-size:12px">' + titleAttr + '</div>'
+    + '<div class="product-title" style="font-size:12px">' + titleAttr + frictionBadge + '</div>'
     + '<div class="product-meta">' + pri + (p.itemType ? '<span>' + p.itemType + '</span>' : '') + '</div>'
     + '<div class="diagnosis-line">' + escapeHtml(p.diagnosis || '') + '</div>'
     + '<div class="product-stats">'
@@ -910,9 +915,35 @@ function productSubrow(p) {
     + statRow('ACOS', fmtPct(p.acos))
     + statRow('Cost/conv', p.costPerConv ? fmtCurrency(p.costPerConv) : '—')
     + '</div>'
-    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();openProductDetailFromCampaignRow(' + payload + ')\'>🪄 Open & analyse</button></div>'
+    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();openProductDetailFromCampaignRow(' + payload + ')\'>🪄 Open &amp; analyse</button></div>'
     + '</div>'
     + '</div>';
+}
+
+// Lazily populate friction badges on visible product cards. Called once after the
+// campaigns page renders. One GET, no AI cost — just reads the rule cache.
+async function populateFrictionBadges() {
+  try {
+    const r = await authedFetch('/api/google/rule-friction/list');
+    const j = await r.json();
+    const byId = {};
+    (j.items || []).forEach(function(it){ byId[String(it.productId)] = it; });
+    document.querySelectorAll('.rf-badge').forEach(function(span){
+      const pid = span.getAttribute('data-product-id');
+      const it = byId[pid];
+      if (!it || !it.counts) return;
+      const c = it.counts;
+      const parts = [];
+      if (c.p1) parts.push('<span style="color:var(--red);font-weight:700">' + c.p1 + ' P1</span>');
+      if (c.p2) parts.push('<span style="color:var(--amber);font-weight:700">' + c.p2 + ' P2</span>');
+      if (c.p3) parts.push('<span style="color:var(--text3)">' + c.p3 + '</span>');
+      if (!parts.length) return;
+      span.innerHTML = parts.join(' · ');
+      span.style.display = 'inline';
+    });
+  } catch(e) {
+    // Non-fatal — badges just don't appear
+  }
 }
 
 // Adapter: campaign-view rows from /api/google/products-diagnostic use flat field
@@ -1005,6 +1036,8 @@ function renderCampaignsPage() {
   } else {
     document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
     document.getElementById('campaigns-list').innerHTML = tabsHtml + (advertisedData.campaigns || []).map(campaignBlock).join('');
+    // After render, lazily populate friction badges (one cheap GET, no AI)
+    setTimeout(populateFrictionBadges, 50);
   }
 }
 
@@ -1063,7 +1096,7 @@ async function loadLandingList() {
       const top1 = (it.topFriction[0] || {});
       const top1Action = (it.topActions[0] || {});
       const stale = it.stale ? '<span style="color:var(--amber);font-size:11px;font-weight:600;margin-left:8px">STALE</span>' : '';
-      return '<div class="product-card" style="cursor:pointer;padding:14px 16px;margin-bottom:10px" onclick="openLandingCritique(\'' + it.productId + '\')">'
+      return '<div class="product-card" style="cursor:pointer;padding:14px 16px;margin-bottom:10px" onclick="openProductFromLandingTab(\'' + it.productId + '\')">'
         + '<div class="product-body" style="margin-left:0">'
         + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px">'
         + '<div style="flex:1;min-width:0">'
@@ -1079,6 +1112,25 @@ async function loadLandingList() {
     }).join('');
   } catch(e) {
     el.innerHTML = '<div class="empty-state">Error loading critiques: ' + e.message + '</div>';
+  }
+}
+
+// Click on a product in the Landing Page AI tab → open the unified product detail modal,
+// which will auto-load the same critique inline. Single point of entry.
+async function openProductFromLandingTab(productId) {
+  try {
+    // Find the Shopify product from the all-products endpoint
+    const r = await authedFetch('/api/google/all-products');
+    const j = await r.json();
+    const sp = (j.products || []).find(function(row){ return String(row.id || row.shopifyId) === String(productId); });
+    if (!sp) {
+      alert('Product not found in Shopify catalogue');
+      return;
+    }
+    // The all-products rows already have shopify-prefixed fields the modal expects
+    openProductDetailFromObj(sp);
+  } catch(e) {
+    alert('Could not open product: ' + e.message);
   }
 }
 
@@ -1181,10 +1233,8 @@ function renderLandingCritiqueInModal(j) {
 // Opens a dedicated big modal showing the campaign analysis. Result is cached
 // in memory so closing and reopening the modal shows the cached analysis instantly.
 async function aiAnalyseCampaign(campaignId, campaignName) {
-  const key = aiCacheKeyForCampaign(campaignId);
-  const cached = aiCache[key];
   const headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:10px;flex-wrap:wrap">'
-    + '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 Campaign analysis</div>'
+    + '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 Campaign analysis <span id="ai-lock-badge-campaign" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>'
     + '<div id="ai-buttons-campaign" style="display:flex;gap:8px;flex-wrap:wrap"></div>'
     + '</div>';
 
@@ -1195,61 +1245,70 @@ async function aiAnalyseCampaign(campaignId, campaignName) {
     + '</div>';
 
   showBigModal('Campaign analysis · ' + campaignName, bodyShell);
-  renderCampaignAiSection(campaignId, campaignName);
 
-  // If never run, fire it once automatically since the user clicked the AI button
-  if (!cached) runCampaignAi(campaignId, campaignName);
+  // Server-side cache handles locking. Always call the endpoint — it returns cached if available.
+  runCampaignAi(campaignId, campaignName, false);
 }
 
-function renderCampaignAiSection(campaignId, campaignName) {
+function renderCampaignAiResult(j, campaignId, campaignName) {
   const buttonsDiv = document.getElementById('ai-buttons-campaign');
   const contentDiv = document.getElementById('ai-content-campaign');
   const metaDiv = document.getElementById('ai-meta-campaign');
-  if (!buttonsDiv || !contentDiv || !metaDiv) return;
+  const lockBadge = document.getElementById('ai-lock-badge-campaign');
+  if (!contentDiv) return;
 
-  const cached = aiCache[aiCacheKeyForCampaign(campaignId)];
-  if (cached) {
-    contentDiv.textContent = cached.analysis;
-    const tags = ['Opus'];
-    tags.push('analysed ' + timeAgo(cached.timestamp));
+  contentDiv.textContent = j.analysis || '';
+
+  const locked = !!j.lockedForAgent;
+  if (lockBadge) lockBadge.innerHTML = locked ? '· 🔒 locked for 24h' : '';
+
+  if (buttonsDiv) {
+    let btns = '';
+    if (!locked) {
+      btns = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\', true)">↻ Re-analyse</button>';
+    } else {
+      btns = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">🔒 Manager can re-analyse</span>';
+    }
+    buttonsDiv.innerHTML = btns;
+  }
+
+  if (metaDiv) {
+    const tags = [];
+    if (j.cached) tags.push('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago');
+    else tags.push('Fresh analysis');
+    if (j.modelUsed) tags.push(j.modelUsed.indexOf('opus') >= 0 ? 'Opus' : 'Sonnet');
+    if (locked) tags.push('Locked for 24h');
     metaDiv.textContent = tags.join(' · ');
-    buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\')">↻ Re-run</button>';
-  } else {
-    contentDiv.innerHTML = '<div style="color:var(--text3)">Running…</div>';
-    metaDiv.textContent = '';
-    buttonsDiv.innerHTML = '';
   }
 }
 
-async function runCampaignAi(campaignId, campaignName) {
+async function runCampaignAi(campaignId, campaignName, forceRefresh) {
   const buttonsDiv = document.getElementById('ai-buttons-campaign');
   const contentDiv = document.getElementById('ai-content-campaign');
   const metaDiv = document.getElementById('ai-meta-campaign');
   if (!contentDiv) return;
 
-  contentDiv.textContent = 'Analysing campaign… 20-30 seconds (Opus reasoning over all products in this campaign).';
-  metaDiv.textContent = '';
-  if (buttonsDiv) buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
+  contentDiv.textContent = 'Loading… checking for cached analysis.';
+  if (metaDiv) metaDiv.textContent = '';
+  if (buttonsDiv) buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Loading…</span>';
 
   try {
     const r = await authedFetch('/api/google/ai-analyse-campaign', {
       method: 'POST',
-      body: JSON.stringify({ campaignId: campaignId })
+      body: JSON.stringify({ campaignId: campaignId, forceRefresh: !!forceRefresh })
     });
     const j = await r.json();
     if (j.error) throw new Error(j.error);
 
-    aiCache[aiCacheKeyForCampaign(campaignId)] = {
-      analysis: j.analysis,
-      timestamp: Date.now(),
-      model: j.modelUsed || 'opus',
-      campaignName: campaignName
-    };
-    renderCampaignAiSection(campaignId, campaignName);
+    if (!j.cached) {
+      // Was a fresh run — show that we're waiting
+      contentDiv.textContent = 'Analysing campaign… 20-30 seconds.';
+    }
+    renderCampaignAiResult(j, campaignId, campaignName);
   } catch(e) {
-    contentDiv.textContent = 'Error: ' + e.message;
-    metaDiv.textContent = '';
-    if (buttonsDiv) buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\')">↻ Retry</button>';
+    if (contentDiv) contentDiv.textContent = 'Error: ' + e.message;
+    if (metaDiv) metaDiv.textContent = '';
+    if (buttonsDiv) buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\', true)">↻ Retry</button>';
   }
 }
 
@@ -1405,97 +1464,274 @@ function openProductDetailFromObj(p) {
     stat('Avg time', p.ga4AvgEngagementTime != null ? p.ga4AvgEngagementTime.toFixed(0) + 's' : '—') +
     '</div>' : '<div style="margin-top:20px;padding:12px 16px;background:var(--bg2);border-radius:8px;color:var(--text3);font-size:13px">GA4 funnel data not yet available for this product. Either it has no traffic, or its handle does not match the page path.</div>') +
 
-    // ─── AI section — lives inside the product card, persists per session ──
-    '<div id="ai-section-product" style="margin-top:28px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
+    // ─── Rule-based friction (free, instant, always-on) ──
+    // Runs as soon as the product modal opens. No AI cost. Identifies obvious
+    // problems by simple thresholds — review count, stock, price visibility,
+    // funnel benchmarks, ad-keyword mismatch, etc.
+    '<div id="rf-section-product" style="margin-top:24px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
-        '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 AI analysis</div>' +
-        '<div id="ai-buttons-product" style="display:flex;gap:8px;flex-wrap:wrap"></div>' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">⚡ Friction check <span id="rf-counts" style="color:var(--text3);font-weight:500;font-size:12px;margin-left:6px"></span></div>' +
+        '<div id="rf-meta" style="font-size:11px;color:var(--text3);font-family:var(--mono)"></div>' +
       '</div>' +
-      '<div id="ai-content-product" style="font-size:14px;line-height:1.65;color:var(--text);white-space:pre-wrap"></div>' +
-      '<div id="ai-meta-product" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>' +
+      '<div id="rf-content" style="font-size:13px;line-height:1.6;color:var(--text)"><div style="color:var(--text3)">Scanning…</div></div>' +
+    '</div>' +
+
+    // ─── Landing page critique — single unified AI section per product ──
+    // Replaces the previous Quick/Deep AI dual buttons. Auto-loads cached critique
+    // on open. Re-analyse forces a fresh Opus run with live page fetch.
+    '<div id="lpc-section-product" style="margin-top:18px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔍 AI deep analysis <span id="lpc-lock-badge" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>' +
+        '<div id="lpc-buttons-product" style="display:flex;gap:8px;flex-wrap:wrap"></div>' +
+      '</div>' +
+      '<div id="lpc-content-product" style="font-size:14px;line-height:1.6;color:var(--text)"></div>' +
+      '<div id="lpc-meta-product" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>' +
     '</div>' +
 
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
-    (p.shopifyId ? '<button class="btn btn-primary" onclick="openLandingCritique(\'' + p.shopifyId + '\')">🔍 Critique landing page</button>' : '') +
     (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
     '</div>';
 
   showBigModal(p.title || 'Product detail', body);
 
+  // Render rule-based friction (free, instant) immediately
+  renderRuleFrictionSection(p);
   // Initialise the AI section with either the cached result or the run buttons
   renderProductAiSection(p);
 }
 
-// Render the AI section inside an open product modal, using cache if available.
-function renderProductAiSection(p) {
-  const buttonsDiv = document.getElementById('ai-buttons-product');
-  const contentDiv = document.getElementById('ai-content-product');
-  const metaDiv = document.getElementById('ai-meta-product');
-  if (!buttonsDiv || !contentDiv || !metaDiv) return;
+// ─── Rule-based friction (free, instant, always visible) ──────────────────
+// Calls the server's rule extractor. No AI. Cached page summary 12h.
+// Renders P1/P2/P3 friction points using the same visual style as AI critique.
+async function renderRuleFrictionSection(p) {
+  const contentDiv = document.getElementById('rf-content');
+  const metaDiv = document.getElementById('rf-meta');
+  const countsSpan = document.getElementById('rf-counts');
+  if (!contentDiv) return;
 
-  const key = registerProduct(p);
-  const quickKey = aiCacheKeyForProduct(p, false);
-  const deepKey = aiCacheKeyForProduct(p, true);
-  const quickCached = aiCache[quickKey];
-  const deepCached = aiCache[deepKey];
+  const productId = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
+  if (!productId) {
+    contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Friction check requires a Shopify-matched product. This row isn\'t linked to one yet.</div>';
+    return;
+  }
 
-  // Prefer deep result if both exist (more thorough)
-  const showCached = deepCached || quickCached;
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Scanning page, ads &amp; funnel for obvious issues…</div>';
 
-  if (showCached) {
-    contentDiv.textContent = showCached.analysis;
-    const tags = [];
-    tags.push(showCached.depth === 'deep' ? '🔬 Deep dive' : '🪄 Quick');
-    if (showCached.model) tags.push(showCached.model.indexOf('opus') >= 0 ? 'Opus' : 'Sonnet');
-    if (showCached.visionUsed) tags.push('image analysed');
-    if (showCached.pageFetched) tags.push('page fetched');
-    tags.push('analysed ' + timeAgo(showCached.timestamp));
-    metaDiv.textContent = tags.join(' · ');
-    buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', false)">↻ Re-run quick</button>'
-      + '<button class="btn btn-ghost" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', true)">↻ Re-run deep</button>';
-  } else {
-    contentDiv.innerHTML = '<div style="color:var(--text3)">Click below to analyse this product. Quick uses Sonnet and finishes in 5-10s. Deep dive uses Opus, fetches the live product page and the hero image, and takes 20-30s.</div>';
-    metaDiv.textContent = '';
-    buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', false)">🪄 Quick AI</button>'
-      + '<button class="btn btn-primary" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', true)">🔬 Deep dive AI</button>';
+  try {
+    const r = await authedFetch('/api/google/rule-friction', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: String(productId) })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Friction scan failed');
+
+    const friction = j.friction || [];
+    const counts = j.counts || {};
+    if (countsSpan) {
+      const parts = [];
+      if (counts.p1) parts.push('<span style="color:var(--red);font-weight:700">' + counts.p1 + ' P1</span>');
+      if (counts.p2) parts.push('<span style="color:var(--amber);font-weight:700">' + counts.p2 + ' P2</span>');
+      if (counts.p3) parts.push('<span style="color:var(--text3)">' + counts.p3 + ' P3</span>');
+      countsSpan.innerHTML = parts.length ? '· ' + parts.join(' · ') : '· no obvious issues';
+    }
+    if (metaDiv) {
+      metaDiv.textContent = j.pageCacheUsed ? 'Page cached' : (j.pageError ? 'Page fetch error: ' + j.pageError : 'Fresh scan');
+    }
+
+    if (!friction.length) {
+      contentDiv.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0">No obvious rule-based issues found on this page. ' + (j.pageError ? '<span style="color:var(--amber)">(Note: page fetch had an error — only funnel & ad rules checked.)</span>' : 'Run AI deep analysis below for nuanced critique.') + '</div>';
+      return;
+    }
+
+    contentDiv.innerHTML = friction.map(function(f){
+      const colour = f.priority === 'P1' ? 'var(--red)' : f.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
+      return '<div style="padding:10px 12px;background:var(--bg);border-left:3px solid ' + colour + ';border-radius:4px;margin-bottom:8px">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">'
+        + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:' + colour + ';margin-right:6px">' + escapeHtml(f.priority || '') + '</span>' + escapeHtml(f.issue || '') + '</div>'
+        + (f.category ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap">' + escapeHtml(f.category) + '</div>' : '')
+        + '</div>'
+        + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(f.evidence || '') + '</div>'
+        + '</div>';
+    }).join('');
+  } catch(e) {
+    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Friction check error: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
-async function runProductAi(productKey, deep) {
-  const p = productRegistry[productKey];
-  if (!p) return;
-  const buttonsDiv = document.getElementById('ai-buttons-product');
-  const contentDiv = document.getElementById('ai-content-product');
-  const metaDiv = document.getElementById('ai-meta-product');
+// Render the AI section inside an open product modal, using cache if available.
+// ─── Landing page critique (per product) — unified replacement for old Quick/Deep AI ──
+// On product modal open: silently checks for cached critique. If <24h, auto-renders inline.
+// If none/stale, shows "Run analysis" button. "Re-analyse" forces a fresh run.
+async function renderProductAiSection(p) {
+  const buttonsDiv = document.getElementById('lpc-buttons-product');
+  const contentDiv = document.getElementById('lpc-content-product');
+  const metaDiv = document.getElementById('lpc-meta-product');
+  if (!buttonsDiv || !contentDiv || !metaDiv) return;
+
+  const productId = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
+  if (!productId) {
+    contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Landing page critique requires a Shopify-matched product. This row isn\'t linked to one yet.</div>';
+    metaDiv.textContent = '';
+    buttonsDiv.innerHTML = '';
+    return;
+  }
+
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Checking for existing critique…</div>';
+  buttonsDiv.innerHTML = '';
+  metaDiv.textContent = '';
+
+  // Peek at the list endpoint first (cheap, no AI call) to know if a cached critique exists
+  try {
+    const listResp = await authedFetch('/api/google/landing-page-critique/list');
+    const listJ = await listResp.json();
+    const cached = (listJ.items || []).find(function(it){ return String(it.productId) === String(productId); });
+
+    if (cached && !cached.stale) {
+      // Fresh cached critique — fetch full and render inline
+      const fullResp = await authedFetch('/api/google/landing-page-critique', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productId: String(productId), forceRefresh: false })
+      });
+      const fullJ = await fullResp.json();
+      if (fullResp.ok) {
+        renderCritiqueInlineInProductModal(fullJ, productId);
+        return;
+      }
+    }
+
+    // No fresh cache — show the run button (and offer to view stale if present)
+    contentDiv.innerHTML = '<div style="color:var(--text);font-size:13px;line-height:1.6">'
+      + '<strong>This is the most powerful analysis</strong> — fetches your live product page, cross-references your ads, GA4 funnel, and Shopify data, then identifies friction and ranks the fixes by impact.<br><br>'
+      + '<span style="color:var(--text3)">Takes 15–25 seconds. Cached for 24 hours afterwards.</span>'
+      + '</div>';
+    let btns = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run landing page critique</button>';
+    if (cached && cached.stale) {
+      btns += ' <button class="btn btn-ghost" onclick="loadCachedProductCritique(\'' + productId + '\')">View last result (' + Math.round(cached.ageHours) + 'h old)</button>';
+    }
+    buttonsDiv.innerHTML = btns;
+    metaDiv.textContent = '';
+  } catch(e) {
+    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + escapeHtml(e.message) + '</div>';
+    buttonsDiv.innerHTML = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run landing page critique</button>';
+  }
+}
+
+async function runProductCritique(productId) {
+  const buttonsDiv = document.getElementById('lpc-buttons-product');
+  const contentDiv = document.getElementById('lpc-content-product');
+  const metaDiv = document.getElementById('lpc-meta-product');
   if (!contentDiv) return;
 
-  contentDiv.textContent = deep
-    ? 'Analysing… Deep dive takes 20-30 seconds (fetching page + image + PageSpeed).'
-    : 'Analysing…';
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Running analysis — fetching live page, cross-referencing ads &amp; funnel, identifying friction… (15–25s)</div>';
+  buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
   metaDiv.textContent = '';
-  if (buttonsDiv) buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
 
   try {
-    const r = await authedFetch('/api/google/ai-analyse', {
+    const r = await authedFetch('/api/google/landing-page-critique', {
       method: 'POST',
-      body: JSON.stringify({ product: p, includePageContent: !!deep })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: String(productId), forceRefresh: true })
     });
     const j = await r.json();
-    if (j.error) throw new Error(j.error);
-
-    aiCache[aiCacheKeyForProduct(p, deep)] = {
-      analysis: j.analysis,
-      timestamp: Date.now(),
-      model: j.modelUsed || (deep ? 'opus' : 'sonnet'),
-      visionUsed: !!j.visionUsed,
-      pageFetched: !!j.pageFetched,
-      depth: deep ? 'deep' : 'quick'
-    };
-    renderProductAiSection(p);
+    if (!r.ok) throw new Error(j.error || 'Critique failed');
+    renderCritiqueInlineInProductModal(j, productId);
   } catch(e) {
-    contentDiv.textContent = 'Error: ' + e.message;
-    metaDiv.textContent = '';
-    renderProductAiSection(p); // restore the buttons so user can retry
+    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + escapeHtml(e.message) + '</div>';
+    buttonsDiv.innerHTML = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">↻ Try again</button>';
+  }
+}
+
+async function loadCachedProductCritique(productId) {
+  const buttonsDiv = document.getElementById('lpc-buttons-product');
+  const contentDiv = document.getElementById('lpc-content-product');
+  if (contentDiv) contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading cached critique…</div>';
+  if (buttonsDiv) buttonsDiv.innerHTML = '';
+  try {
+    const r = await authedFetch('/api/google/landing-page-critique', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: String(productId), forceRefresh: false })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Could not load');
+    renderCritiqueInlineInProductModal(j, productId);
+  } catch(e) {
+    if (contentDiv) contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderCritiqueInlineInProductModal(j, productId) {
+  const buttonsDiv = document.getElementById('lpc-buttons-product');
+  const contentDiv = document.getElementById('lpc-content-product');
+  const metaDiv = document.getElementById('lpc-meta-product');
+  const lockBadge = document.getElementById('lpc-lock-badge');
+  if (!contentDiv) return;
+
+  const friction = (j.friction || []).map(function(f) {
+    const colour = f.priority === 'P1' ? 'var(--red)' : f.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
+    return '<div style="padding:10px 12px;background:var(--bg);border-left:3px solid ' + colour + ';border-radius:4px;margin-bottom:8px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">'
+      + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:' + colour + ';margin-right:6px">' + escapeHtml(f.priority || '') + '</span>' + escapeHtml(f.issue || '') + '</div>'
+      + (f.category ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap">' + escapeHtml(f.category) + '</div>' : '')
+      + '</div>'
+      + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(f.evidence || '') + '</div>'
+      + '</div>';
+  }).join('');
+
+  const actions = (j.actions || []).map(function(a) {
+    return '<div style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:8px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px">'
+      + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:var(--accent);margin-right:6px">#' + (a.rank || '?') + '</span>' + escapeHtml(a.action || '') + '</div>'
+      + (a.effort ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap">Effort: ' + escapeHtml(a.effort) + '</div>' : '')
+      + '</div>'
+      + (a.expectedImpact ? '<div style="font-size:12px;color:var(--text2);line-height:1.5"><strong>Expected impact:</strong> ' + escapeHtml(a.expectedImpact) + '</div>' : '')
+      + '</div>';
+  }).join('');
+
+  const funnelDiag = j.funnelSummary && j.funnelSummary.funnelDiagnosis ? j.funnelSummary.funnelDiagnosis : '';
+  const adCoherence = j.adSummary && j.adSummary.adVsPageCoherence ? j.adSummary.adVsPageCoherence : '';
+  const trustSignals = j.pageSummary && j.pageSummary.trustSignals ? j.pageSummary.trustSignals : '';
+  const summary = j.pageSummary && j.pageSummary.summary ? j.pageSummary.summary : '';
+
+  contentDiv.innerHTML =
+    '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:12px 14px;border-radius:4px;margin-bottom:14px"><strong>Diagnosis:</strong> ' + escapeHtml(j.diagnosis || '(none)') + '</div>'
+    + (summary ? '<div style="padding:12px 14px;background:var(--bg);border-radius:6px;margin-bottom:14px;font-size:13px;line-height:1.6;color:var(--text2)">' + escapeHtml(summary) + '</div>' : '')
+    + (funnelDiag ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Funnel diagnosis</div>'
+        + '<div style="font-size:13px;color:var(--text);line-height:1.6;margin-bottom:14px">' + escapeHtml(funnelDiag) + '</div>' : '')
+    + (friction ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Friction points (AI)</div>' + friction : '')
+    + (actions ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 6px">Specific actions for this week</div>' + actions : '')
+    + (adCoherence ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Ad-vs-page coherence</div>'
+        + '<div style="font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escapeHtml(adCoherence) + '</div>' : '')
+    + (trustSignals ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Trust signals</div>'
+        + '<div style="font-size:13px;color:var(--text2);line-height:1.6">' + escapeHtml(trustSignals) + '</div>' : '');
+
+  // Lock state — only managers can re-analyse if cache <24h
+  const locked = !!j.lockedForAgent;
+  if (lockBadge) {
+    if (locked) {
+      lockBadge.innerHTML = '· 🔒 locked for 24h';
+    } else {
+      lockBadge.innerHTML = '';
+    }
+  }
+
+  if (buttonsDiv) {
+    let btns = '';
+    if (!locked) {
+      // Manager (or no cache yet) — full Re-analyse button
+      btns = '<button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\')">↻ Re-analyse</button>';
+    } else {
+      // Agent inside lock window — show disabled-style explanation
+      btns = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">🔒 Manager can re-analyse</span>';
+    }
+    if (j.productUrl) btns += ' <a class="btn btn-ghost" href="' + j.productUrl + '" target="_blank">View live page ↗</a>';
+    buttonsDiv.innerHTML = btns;
+  }
+  if (metaDiv) {
+    const ageNote = j.cached ? ('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago') : 'Fresh analysis';
+    metaDiv.textContent = ageNote + ' · Opus 4.7' + (locked ? ' · Locked for 24h' : '');
   }
 }
 

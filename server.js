@@ -730,6 +730,28 @@ async function initTasksTable() {
       );
       CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_lpc_score ON landing_page_critiques(score DESC);
+
+      CREATE TABLE IF NOT EXISTS campaign_ai_cache (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        analysis TEXT,
+        model_used TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_cac_generated_at ON campaign_ai_cache(generated_at DESC);
+
+      -- Page summary cache (rule-based friction extraction). Page content rarely changes,
+      -- so we cache the parsed summary for 12h to avoid re-fetching on every modal open.
+      CREATE TABLE IF NOT EXISTS product_page_cache (
+        product_id TEXT PRIMARY KEY,
+        product_url TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        page_summary JSONB,
+        rule_friction JSONB,
+        funnel_friction JSONB,
+        ad_friction JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_ppc_fetched_at ON product_page_cache(fetched_at DESC);
     `);
     // Migrate existing rows that don't have state column
     await db.query("ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'");
@@ -3097,6 +3119,307 @@ cron.schedule('0 7 * * *', function() { fetchGa4ProductMetrics().catch(function(
 
 const PORT = process.env.PORT || 3000;
 // ─────────────────────────────────────────────────────────────────────────
+// Rule-based friction (free, instant, always-on)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Runs immediately when a product card is opened. No AI call. No cost.
+// Identifies obvious problems by simple thresholds against page content +
+// funnel data + ad data. Caches page summary 12h to avoid re-fetching.
+//
+// Output shape mirrors the AI critique's friction format so the front-end
+// can render both in the same component.
+
+const RULE_PAGE_CACHE_HOURS = 12;
+const FUNNEL_BENCHMARKS = {
+  cartRateGood: 3,        // %; under this is flagged
+  cartRateBad: 1,         // %; under this is P1
+  checkoutFromCartGood: 45,   // %; under this is flagged
+  checkoutFromCartBad: 25,    // %; under this is P1
+  bounceBad: 70           // %; over this is flagged
+};
+
+function extractRuleFriction(pageSummary, dossier) {
+  const friction = [];
+  const sig = (pageSummary && pageSummary.signals) || {};
+  const text = (pageSummary && pageSummary.text) || '';
+  const lower = text.toLowerCase();
+
+  // ─── Trust signals ────────────────────────────────────────────────────
+  // Review count — pull a number near "review"
+  const reviewMatch = lower.match(/(\d{1,5})\s*reviews?/);
+  const reviewCount = reviewMatch ? parseInt(reviewMatch[1], 10) : 0;
+  if (reviewCount === 0 && !sig.hasReviewWidget) {
+    friction.push({ priority: 'P1', issue: 'No customer reviews shown', evidence: 'Page has no visible review count or rating widget. With a paid product, social proof is critical.', category: 'trust' });
+  } else if (reviewCount > 0 && reviewCount < 3) {
+    friction.push({ priority: 'P2', issue: 'Very few reviews (' + reviewCount + ')', evidence: 'Page shows only ' + reviewCount + ' review' + (reviewCount === 1 ? '' : 's') + '. Aim for 5+ to build confidence.', category: 'trust' });
+  }
+
+  if (!sig.hasShippingMention) {
+    friction.push({ priority: 'P2', issue: 'Shipping info not visible', evidence: 'No mention of "free delivery" / "next day shipping" detected on page. Shipping clarity is a top conversion lever.', category: 'trust' });
+  }
+  if (!sig.hasReturnsMention) {
+    friction.push({ priority: 'P3', issue: 'Returns / refund policy not visible', evidence: 'No mention of returns or money-back guarantee found. UK shoppers expect this.', category: 'trust' });
+  }
+
+  // ─── Stock / availability ─────────────────────────────────────────────
+  if (lower.indexOf('backordered') >= 0 || lower.indexOf('back order') >= 0) {
+    friction.push({ priority: 'P1', issue: 'Backordered notice on page', evidence: 'Page mentions "backordered" — likely a default variant is out of stock, killing trust at point of sale.', category: 'stock' });
+  }
+  if (lower.indexOf('sold out') >= 0 && !lower.match(/sold\s*out\s*:\s*0/)) {
+    friction.push({ priority: 'P1', issue: 'Sold-out indicator visible', evidence: 'Page contains "sold out" copy — verify default variant is in stock.', category: 'stock' });
+  }
+  if (dossier && dossier.product && dossier.product.inventory === 0) {
+    friction.push({ priority: 'P1', issue: 'Product inventory is zero', evidence: 'Shopify reports 0 in stock. Ads driving traffic to an unpurchasable page.', category: 'stock' });
+  }
+
+  // ─── Page basics ──────────────────────────────────────────────────────
+  if (!sig.hasPrice) {
+    friction.push({ priority: 'P1', issue: 'No price detected on page', evidence: 'Could not find a £ symbol or price marker in page content. Price visibility is the #1 conversion driver.', category: 'price' });
+  }
+  if (!sig.hasViewportMeta) {
+    friction.push({ priority: 'P2', issue: 'No mobile viewport meta tag', evidence: 'Page is missing the viewport meta tag — likely renders poorly on mobile.', category: 'mobile' });
+  }
+  if (sig.h1Count === 0) {
+    friction.push({ priority: 'P3', issue: 'No H1 heading on page', evidence: 'Hurts SEO and screen-reader users. Add a clear product-name H1.', category: 'copy' });
+  } else if (sig.h1Count > 2) {
+    friction.push({ priority: 'P3', issue: 'Multiple H1 headings (' + sig.h1Count + ')', evidence: 'Multiple H1s confuse search engines and users on screen-readers.', category: 'copy' });
+  }
+
+  // ─── Performance / weight ─────────────────────────────────────────────
+  if (sig.imageCount > 30) {
+    friction.push({ priority: 'P2', issue: 'Page has ' + sig.imageCount + ' images', evidence: 'Excessive image count slows mobile load and overwhelms users. Aim for 6–12 hero/gallery images.', category: 'mobile' });
+  }
+  if (sig.pageBytes > 1500000) {
+    friction.push({ priority: 'P3', issue: 'Page is heavy (' + Math.round(sig.pageBytes / 1024) + 'KB)', evidence: 'Large page weight delays interactivity, especially on mobile.', category: 'mobile' });
+  }
+
+  // ─── CTA ──────────────────────────────────────────────────────────────
+  if (sig.addToCartCount === 0) {
+    friction.push({ priority: 'P1', issue: 'No "Add to cart" button text detected', evidence: 'Could not find Add to cart / Add to bag wording. Purchase CTA may be missing or hidden.', category: 'cta' });
+  }
+
+  return friction;
+}
+
+function extractFunnelFriction(funnel) {
+  const friction = [];
+  if (!funnel) return friction;
+
+  const cartRate = funnel.sessions > 0 ? (funnel.cartAdditions / funnel.sessions) * 100 : null;
+  const checkoutFromCart = funnel.cartAdditions > 0 ? (funnel.checkouts / funnel.cartAdditions) * 100 : null;
+  const purchaseFromCheckout = funnel.checkouts > 0 ? (funnel.purchases / funnel.checkouts) * 100 : null;
+  const bounce = funnel.bounceRate != null ? funnel.bounceRate * 100 : null;
+
+  if (cartRate != null && funnel.sessions >= 30) {
+    if (cartRate < FUNNEL_BENCHMARKS.cartRateBad) {
+      friction.push({ priority: 'P1', issue: 'Very low cart-add rate (' + cartRate.toFixed(1) + '%)', evidence: 'Of ' + funnel.sessions + ' sessions, only ' + funnel.cartAdditions + ' added to cart. Benchmark is 3%+. Problem is upstream of cart — landing page, price, or ad relevance.', category: 'funnel' });
+    } else if (cartRate < FUNNEL_BENCHMARKS.cartRateGood) {
+      friction.push({ priority: 'P2', issue: 'Below-benchmark cart-add rate (' + cartRate.toFixed(1) + '%)', evidence: 'Of ' + funnel.sessions + ' sessions, ' + funnel.cartAdditions + ' added to cart. Aim for 3%+.', category: 'funnel' });
+    }
+  }
+
+  if (checkoutFromCart != null && funnel.cartAdditions >= 5) {
+    if (checkoutFromCart < FUNNEL_BENCHMARKS.checkoutFromCartBad) {
+      friction.push({ priority: 'P1', issue: 'Big drop cart→checkout (only ' + checkoutFromCart.toFixed(0) + '%)', evidence: 'Of ' + funnel.cartAdditions + ' carts, only ' + funnel.checkouts + ' reached checkout. Benchmark is 45–60%. Issue is at the cart page (shipping cost, currency, login wall).', category: 'funnel' });
+    } else if (checkoutFromCart < FUNNEL_BENCHMARKS.checkoutFromCartGood) {
+      friction.push({ priority: 'P2', issue: 'Below-benchmark cart→checkout (' + checkoutFromCart.toFixed(0) + '%)', evidence: 'Of ' + funnel.cartAdditions + ' carts, ' + funnel.checkouts + ' reached checkout. Benchmark is 45–60%.', category: 'funnel' });
+    }
+  }
+
+  if (purchaseFromCheckout != null && funnel.checkouts >= 3 && purchaseFromCheckout < 50) {
+    friction.push({ priority: 'P1', issue: 'Checkout abandonment (' + purchaseFromCheckout.toFixed(0) + '% completed)', evidence: 'Of ' + funnel.checkouts + ' checkouts, only ' + funnel.purchases + ' completed. Likely shipping cost, payment, or trust friction at final step.', category: 'funnel' });
+  }
+
+  if (bounce != null && bounce > FUNNEL_BENCHMARKS.bounceBad && funnel.sessions >= 30) {
+    friction.push({ priority: 'P2', issue: 'High bounce rate (' + bounce.toFixed(0) + '%)', evidence: 'Most landings leave without engaging. Page may load slowly, look untrustworthy, or mismatch the ad.', category: 'mobile' });
+  }
+
+  return friction;
+}
+
+function extractAdFriction(dossier) {
+  const friction = [];
+  if (!dossier || !dossier.ads || !dossier.searchKeywords) return friction;
+
+  // If there are search keywords with spend but the ad spend overall is highly inefficient,
+  // surface the top wasted-spend keyword as friction.
+  const totalSpend = dossier.ads.spend || 0;
+  const totalSales = dossier.ads.sales || 0;
+  if (totalSpend < 5) return friction;
+
+  const acos = totalSales > 0 ? (totalSpend / totalSales) * 100 : Infinity;
+  if (acos === Infinity || acos > 100) {
+    friction.push({ priority: 'P1', issue: 'Ad spend not generating sales', evidence: 'Spent £' + totalSpend.toFixed(2) + ' for £' + totalSales.toFixed(2) + ' sales (ACOS ' + (acos === Infinity ? '∞' : acos.toFixed(0) + '%') + '). Either targeting is wrong or landing page isn\'t closing.', category: 'ad-coherence' });
+  } else if (acos > 50) {
+    friction.push({ priority: 'P2', issue: 'High ACOS (' + acos.toFixed(0) + '%)', evidence: 'Spent £' + totalSpend.toFixed(2) + ' for £' + totalSales.toFixed(2) + ' sales. Healthy ACOS is under 30%.', category: 'ad-coherence' });
+  }
+
+  // If using product title keywords and they appear in dossier, check for category mismatch.
+  // Simple heuristic: title's primary noun should appear in at least one converting keyword.
+  if (dossier.product && dossier.product.title && dossier.searchKeywords.length > 0) {
+    const titleWords = dossier.product.title.toLowerCase()
+      .replace(/[^a-z0-9 ]/g, ' ')
+      .split(/\s+/)
+      .filter(function(w){ return w.length > 3; });
+    const wastedKeywords = dossier.searchKeywords.filter(function(k){
+      if (!k.spend || k.spend < 1) return false;
+      if (k.sales > 0) return false;
+      const kwLower = (k.keyword || '').toLowerCase();
+      // Mismatch if NO title word appears in keyword
+      return !titleWords.some(function(w){ return kwLower.indexOf(w) >= 0; });
+    });
+    if (wastedKeywords.length > 0) {
+      const wastedSpend = wastedKeywords.reduce(function(s, k){ return s + (k.spend || 0); }, 0);
+      if (wastedSpend > 2) {
+        friction.push({
+          priority: 'P2',
+          issue: '£' + wastedSpend.toFixed(2) + ' on keywords unrelated to this product',
+          evidence: 'Keywords like "' + wastedKeywords.slice(0, 3).map(function(k){return k.keyword;}).join('", "') + '" cost £' + wastedSpend.toFixed(2) + ' with zero conversions. Add as negatives or move to better-matching ad groups.',
+          category: 'ad-coherence'
+        });
+      }
+    }
+  }
+
+  return friction;
+}
+
+// Main rule-based endpoint. Returns ALL rule-based findings for one product. No AI.
+// Cached at the page-summary level for 12h (the rule evaluation itself runs every call,
+// since dossier data — funnel, ads — refreshes more frequently).
+async function getRuleFrictionForProduct(shopifyProduct) {
+  const productId = String(shopifyProduct.id);
+  const dossier = buildLandingPageDossier(shopifyProduct);
+  if (!dossier) return { friction: [], dossier: null, pageError: 'Could not build dossier' };
+
+  // Check page-summary cache (12h)
+  let pageSummary = null;
+  let pageFetchedAt = null;
+  let cacheUsed = false;
+  if (db) {
+    try {
+      const r = await db.query("SELECT page_summary, fetched_at FROM product_page_cache WHERE product_id=$1", [productId]);
+      if (r.rows.length) {
+        const ageHours = (Date.now() - new Date(r.rows[0].fetched_at).getTime()) / 36e5;
+        if (ageHours < RULE_PAGE_CACHE_HOURS) {
+          pageSummary = r.rows[0].page_summary;
+          pageFetchedAt = r.rows[0].fetched_at;
+          cacheUsed = true;
+        }
+      }
+    } catch(e) { /* fall through to fresh fetch */ }
+  }
+
+  // Fresh fetch if not cached
+  let pageError = null;
+  if (!pageSummary) {
+    if (!dossier.product.url) {
+      pageError = 'Product has no handle / URL';
+    } else {
+      const fetchResult = await fetchProductPageHtml(dossier.product.url);
+      if (!fetchResult.html) {
+        pageError = fetchResult.error || 'Could not fetch page';
+      } else {
+        pageSummary = summariseProductPage(fetchResult.html);
+        pageFetchedAt = new Date();
+        // Persist
+        if (db) {
+          try {
+            await db.query(
+              "INSERT INTO product_page_cache (product_id, product_url, fetched_at, page_summary) VALUES ($1, $2, NOW(), $3) " +
+              "ON CONFLICT (product_id) DO UPDATE SET product_url=EXCLUDED.product_url, fetched_at=NOW(), page_summary=EXCLUDED.page_summary",
+              [productId, dossier.product.url, JSON.stringify(pageSummary)]
+            );
+          } catch(e) { console.error('Page cache persist error: ' + e.message); }
+        }
+      }
+    }
+  }
+
+  // Run rule extractors (always live, even with cached page — funnel & ad data is fresher)
+  const ruleFriction = pageSummary ? extractRuleFriction(pageSummary, dossier) : [];
+  const funnelFriction = extractFunnelFriction(dossier.funnel);
+  const adFriction = extractAdFriction(dossier);
+  const allFriction = [].concat(ruleFriction, funnelFriction, adFriction);
+
+  // Sort by priority (P1 > P2 > P3)
+  allFriction.sort(function(a, b) {
+    const order = { P1: 1, P2: 2, P3: 3 };
+    return (order[a.priority] || 9) - (order[b.priority] || 9);
+  });
+
+  return {
+    friction: allFriction,
+    dossier: dossier,
+    pageSummary: pageSummary,
+    pageError: pageError,
+    pageCacheUsed: cacheUsed,
+    pageFetchedAt: pageFetchedAt,
+    counts: {
+      total: allFriction.length,
+      p1: allFriction.filter(function(f){ return f.priority === 'P1'; }).length,
+      p2: allFriction.filter(function(f){ return f.priority === 'P2'; }).length,
+      p3: allFriction.filter(function(f){ return f.priority === 'P3'; }).length
+    }
+  };
+}
+
+app.post('/api/google/rule-friction', async function(req, res) {
+  try {
+    const productId = String(req.body.productId || '');
+    if (!productId) return res.status(400).json({ error: 'productId required' });
+    const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
+    if (!sp) return res.status(404).json({ error: 'Product not found in Shopify state' });
+    const result = await getRuleFrictionForProduct(sp);
+    res.json(result);
+  } catch(e) {
+    console.error('Rule friction error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Batch endpoint: rule-friction for ALL Shopify-matched products at once.
+// Used by the All Products grid to show per-card friction summary.
+// No AI, just rule scans, but still costs ~50 page fetches first time.
+// Subsequent calls hit the 12h page cache.
+app.get('/api/google/rule-friction/list', async function(req, res) {
+  if (!db) return res.json({ items: [] });
+  try {
+    // Read every product whose page_summary is cached, plus its rule scan
+    const r = await db.query("SELECT product_id, product_url, fetched_at, page_summary FROM product_page_cache");
+    const items = [];
+    const byId = {};
+    r.rows.forEach(function(row) { byId[row.product_id] = row; });
+
+    // Iterate Shopify products that have any signal of activity (Google ads spend OR GA4 sessions)
+    (shopifyState.products || []).forEach(function(sp) {
+      const id = String(sp.id);
+      const cached = byId[id];
+      if (!cached) return;  // skip products we haven't fetched yet
+
+      const dossier = buildLandingPageDossier(sp);
+      if (!dossier) return;
+
+      const ruleFriction = extractRuleFriction(cached.page_summary, dossier);
+      const funnelFriction = extractFunnelFriction(dossier.funnel);
+      const adFriction = extractAdFriction(dossier);
+      const all = [].concat(ruleFriction, funnelFriction, adFriction);
+      all.sort(function(a, b) {
+        const order = { P1: 1, P2: 2, P3: 3 };
+        return (order[a.priority] || 9) - (order[b.priority] || 9);
+      });
+      const counts = { p1: all.filter(function(f){return f.priority==='P1';}).length, p2: all.filter(function(f){return f.priority==='P2';}).length, p3: all.filter(function(f){return f.priority==='P3';}).length };
+      if (all.length === 0) return;
+      items.push({ productId: id, productTitle: sp.title, counts: counts, top: all.slice(0, 3) });
+    });
+
+    res.json({ items: items });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // Layer 4: Landing page critique
 // ─────────────────────────────────────────────────────────────────────────
 //
@@ -3181,7 +3504,12 @@ async function fetchProductPageHtml(url) {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        // Force UK locale so Shopify/Cloudflare serve the GBP-priced page (matches what UK shoppers see).
+        // Without these, Shopify auto-detects server IP location and shows USD/etc, causing false-positive
+        // 'currency mismatch' findings in the AI critique.
         'Accept-Language': 'en-GB,en;q=0.9',
+        'CF-IPCountry': 'GB',
+        'X-Forwarded-For': '81.2.69.142',  // a UK-based residential IP range (BT)
         'Accept-Encoding': 'gzip, deflate, br'
       },
       validateStatus: function(s){ return s >= 200 && s < 400; }
@@ -3509,17 +3837,43 @@ app.post('/api/google/landing-page-critique-debug', async function(req, res) {
 app.post('/api/google/landing-page-critique', async function(req, res) {
   try {
     const productId = String(req.body.productId || '');
-    const forceRefresh = !!req.body.forceRefresh;
+    const requestedRefresh = !!req.body.forceRefresh;
     if (!productId) return res.status(400).json({ error: 'productId required' });
 
     const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
     if (!sp) return res.status(404).json({ error: 'Product not found in Shopify state' });
 
+    // 24h lock: if a critique was generated in the last 24h, return it. Only managers
+    // can override (forceRefresh=true requires manager role).
+    const u = req.user || {};
+    const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
+    let forceRefresh = false;
+    if (requestedRefresh) {
+      if (isManager) {
+        forceRefresh = true;
+      } else {
+        // Agent requested refresh — only allowed if no cache exists yet (first run)
+        const existing = await getCachedCritique(productId);
+        if (existing) {
+          // Cache exists; agent cannot force-refresh, return cached with a notice
+          existing.lockedForAgent = true;
+          existing.lockMessage = 'Already analysed in the last 24h. Manager can re-analyse.';
+          return res.json(existing);
+        }
+        // No cache — agent's first request triggers a fresh run
+        forceRefresh = true;
+      }
+    }
+
     if (!forceRefresh) {
       const cached = await getCachedCritique(productId);
-      if (cached) return res.json(cached);
+      if (cached) {
+        cached.lockedForAgent = !isManager;
+        return res.json(cached);
+      }
     }
     const result = await runCritiqueForProduct(sp, 0);
+    result.lockedForAgent = !isManager;
     res.json(result);
   } catch (e) {
     console.error('LPC single error: ' + e.message);
@@ -3834,7 +4188,38 @@ Be direct. Be specific. Reference the actual numbers above. If the data tells a 
 app.post('/api/google/ai-analyse-campaign', async function(req, res) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'No API key' });
   const { campaignId } = req.body;
+  const requestedRefresh = !!req.body.forceRefresh;
   if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+
+  // 24h lock — manager-only override
+  const u = req.user || {};
+  const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
+
+  // Cache lookup (24h)
+  if (db) {
+    try {
+      const cacheRes = await db.query("SELECT * FROM campaign_ai_cache WHERE campaign_id=$1", [String(campaignId)]);
+      if (cacheRes.rows.length) {
+        const ageHours = (Date.now() - new Date(cacheRes.rows[0].generated_at).getTime()) / 36e5;
+        if (ageHours < 24) {
+          // Inside lock window
+          if (!requestedRefresh || !isManager) {
+            return res.json({
+              analysis: cacheRes.rows[0].analysis,
+              campaignName: cacheRes.rows[0].campaign_name,
+              modelUsed: cacheRes.rows[0].model_used,
+              cached: true,
+              ageHours: Math.round(ageHours * 10) / 10,
+              lockedForAgent: !isManager,
+              lockMessage: !isManager ? 'Already analysed in the last 24h. Manager can re-analyse.' : null
+            });
+          }
+          // Manager forced refresh — fall through to fresh run
+        }
+      }
+    } catch(e) { /* fall through to fresh */ }
+  }
+
   try {
     // Find all products in this campaign from current Google state
     const allProducts = (googleState.products || []).filter(function(gp){
@@ -3930,12 +4315,28 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
     });
 
+    const analysisText = response.data.content[0].text;
+
+    // Persist to 24h cache
+    if (db) {
+      try {
+        await db.query(
+          "INSERT INTO campaign_ai_cache (campaign_id, campaign_name, generated_at, analysis, model_used) " +
+          "VALUES ($1, $2, NOW(), $3, $4) " +
+          "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name=EXCLUDED.campaign_name, generated_at=NOW(), analysis=EXCLUDED.analysis, model_used=EXCLUDED.model_used",
+          [String(campaignId), campaignName, analysisText, 'claude-opus-4-5-20251101']
+        );
+      } catch(e) { console.error('Campaign AI cache persist error: ' + e.message); }
+    }
+
     res.json({
-      analysis: response.data.content[0].text,
+      analysis: analysisText,
       campaignName: campaignName,
       campaignType: campaignType,
       productCount: allProducts.length,
-      modelUsed: 'claude-opus-4-5-20251101'
+      modelUsed: 'claude-opus-4-5-20251101',
+      cached: false,
+      lockedForAgent: !isManager
     });
   } catch(e) {
     console.error('Campaign AI analyse error: ' + e.message);
