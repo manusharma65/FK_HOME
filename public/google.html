@@ -316,13 +316,13 @@ table.activity tr:last-child td { border-bottom: none; }
 <!-- (Old standalone AI modal removed in v11 — AI now lives inside the big product/campaign modals with session caching.) -->
 
 <!-- BIG MODAL — used for product detail and daily sales drilldown -->
-<div class="modal-bg" id="big-modal" onclick="if(event.target===this)closeBigModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1000;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
-  <div style="background:var(--bg);width:100%;max-width:1100px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px">
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);border-radius:14px 14px 0 0;z-index:1">
+<div class="modal-bg" id="big-modal" onclick="if(event.target===this)closeBigModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1000;align-items:flex-start;justify-content:center;padding:0;overflow-y:auto">
+  <div style="background:var(--bg);width:100%;max-width:100%;min-height:100vh;border-radius:0;border:0;box-shadow:none;margin:0">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:1">
       <div style="font-size:18px;font-weight:600;color:var(--text)" id="big-modal-title">Detail</div>
       <button class="btn btn-ghost" onclick="closeBigModal()" style="font-size:18px;padding:4px 12px">×</button>
     </div>
-    <div id="big-modal-body" style="padding:24px"></div>
+    <div id="big-modal-body" style="padding:24px;max-width:1400px;margin:0 auto"></div>
   </div>
 </div>
 
@@ -874,7 +874,8 @@ function productSubrow(p) {
   const img = p.shopifyImageUrl ? ('<img class="product-img" style="width:48px;height:48px" src="' + p.shopifyImageUrl + '">') : '<div class="product-img-placeholder" style="width:48px;height:48px;font-size:9px">—</div>';
   const pri = '<span class="priority-pill ' + priorityClass(p.priority) + '">' + priorityLabel(p.priority) + '</span>';
   const titleAttr = escapeHtml(p.displayName || p.productName || '');
-  return '<div class="product-card" style="padding:10px;margin-top:10px">'
+  const payload = JSON.stringify(p).replace(/'/g, "&#39;");
+  return '<div class="product-card" style="padding:10px;margin-top:10px;cursor:pointer" onclick=\'openProductDetailFromCampaignRow(' + payload + ')\'>'
     + img
     + '<div class="product-body">'
     + '<div class="product-title" style="font-size:12px">' + titleAttr + '</div>'
@@ -889,9 +890,47 @@ function productSubrow(p) {
     + statRow('ACOS', fmtPct(p.acos))
     + statRow('Cost/conv', p.costPerConv ? fmtCurrency(p.costPerConv) : '—')
     + '</div>'
-    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'openProductDetailFromObj(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\'>🪄 Open & analyse</button></div>'
+    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();openProductDetailFromCampaignRow(' + payload + ')\'>🪄 Open & analyse</button></div>'
     + '</div>'
     + '</div>';
+}
+
+// Adapter: campaign-view rows from /api/google/products-diagnostic use flat field
+// names (spend, sales, acos, etc.) and prefixed Shopify fields (shopifyRevenue7d,
+// shopifyTitle, etc.). The detail modal expects google-prefixed names (googleSpend,
+// googleSales, googleAcos) and bare Shopify names (revenue7d, title, price). Map them
+// here so the modal lights up with all three layers (Shopify + Google + GA4).
+function openProductDetailFromCampaignRow(p) {
+  if (!p) return;
+  const merged = Object.assign({}, p, {
+    // Title / image / status / inventory (modal reads bare names)
+    title: p.shopifyTitle || p.displayName || p.productName || p.name || '(unnamed)',
+    imageUrl: p.shopifyImageUrl || null,
+    status: p.shopifyStatus || null,
+    price: (p.shopifyPrice != null ? p.shopifyPrice : null),
+    inventory: (p.shopifyInventory != null ? p.shopifyInventory : null),
+    shopifyUrl: p.shopifyUrl || null,
+    // Shopify revenue / units (modal reads bare names)
+    revenue7d: (p.shopifyRevenue7d != null ? p.shopifyRevenue7d : null),
+    revenue30d: (p.shopifyRevenue30d != null ? p.shopifyRevenue30d : null),
+    unitsSold7d: (p.shopifyUnitsSold7d != null ? p.shopifyUnitsSold7d : null),
+    unitsSold30d: (p.shopifyUnitsSold30d != null ? p.shopifyUnitsSold30d : null),
+    dailySales7d: p.shopifyDailySales7d || p.dailySales7d || [],
+    // Google Ads metrics — modal expects "google" prefix
+    googleSpend: p.spend,
+    googleSales: p.sales,
+    googleImpressions: p.impressions,
+    googleClicks: p.clicks,
+    googleConversions: p.conversions,
+    googleCtr: p.ctr,
+    googleAcos: p.acos,
+    googleCostPerConv: p.costPerConv,
+    campaignsAdvertisedIn: p.campaignName ? [{ campaignId: p.campaignId, campaignName: p.campaignName, campaignType: p.campaignType }] : [],
+    // adStatus — campaign view rows are by definition "driving traffic" if they have impressions,
+    // otherwise "listed_quiet". Set sensible default.
+    adStatus: ((p.impressions || 0) >= 100 || (p.clicks || 0) >= 1) ? 'driving_traffic' : 'listed_quiet'
+  });
+  openProductDetailFromObj(merged);
 }
 
 // ─── Standalone campaigns page ───────────────────────────────────────────
