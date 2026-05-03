@@ -269,18 +269,6 @@ table.activity tr:last-child td { border-bottom: none; }
     <!-- DAILY SALES CARD — visual breakdown of Shopify net sales (7d) -->
     <div id="daily-sales-card" class="section-card" style="margin:-12px 0 24px 0;padding:18px 20px;background:var(--bg);border-radius:12px;border:1px solid var(--border)"></div>
 
-    <!-- CART PAGE FRICTION — store-wide check, free, rule-based, cached 24h -->
-    <div id="cart-friction-card" class="section-card" style="margin:0 0 24px 0;padding:18px 20px;background:var(--bg);border-radius:12px;border:1px solid var(--border)">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">
-        <div>
-          <div class="section-title" style="margin-bottom:2px">🛒 Cart-page friction <span id="cart-friction-counts" style="color:var(--text3);font-weight:500;font-size:13px;margin-left:6px"></span></div>
-          <div class="section-sub" id="cart-friction-sub">Checks the storefront /cart page for missing trust, payment and shipping signals — the most common reasons people add to cart but don't check out.</div>
-        </div>
-        <div id="cart-friction-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>
-      </div>
-      <div id="cart-friction-content"></div>
-    </div>
-
     <div class="section-header">
       <div>
         <div class="section-title">Top urgent products</div>
@@ -353,7 +341,11 @@ table.activity tr:last-child td { border-bottom: none; }
 
     <!-- Filter row -->
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
-      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Status</span>
+      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Type</span>
+      <button class="btn btn-ghost task-filter active" data-filter-type="all" onclick="setTaskFilter('type','all',this)">All</button>
+      <button class="btn btn-ghost task-filter" data-filter-type="problem" onclick="setTaskFilter('type','problem',this)">⚠ Problems</button>
+      <button class="btn btn-ghost task-filter" data-filter-type="scale" onclick="setTaskFilter('type','scale',this)">🚀 Scale</button>
+      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-left:14px">Status</span>
       <button class="btn btn-ghost task-filter active" data-filter-status="active" onclick="setTaskFilter('status','active',this)">Active</button>
       <button class="btn btn-ghost task-filter" data-filter-status="open" onclick="setTaskFilter('status','open',this)">Open</button>
       <button class="btn btn-ghost task-filter" data-filter-status="in_progress" onclick="setTaskFilter('status','in_progress',this)">In progress</button>
@@ -625,8 +617,6 @@ function renderDashboard() {
   if (s.urgentCount > 0) { navBadge.style.display = 'inline-block'; navBadge.textContent = s.urgentCount; } else { navBadge.style.display = 'none'; }
 
   renderDailySalesCard();
-  // Load cart-page friction (free, cached 24h)
-  loadCartFriction();
 
   const urgent = (allProductsData.products || []).filter(function(p){ return p.priority === 1; }).slice(0, 5);
   document.getElementById('urgent-sub').textContent = urgent.length + ' products need urgent action';
@@ -1048,56 +1038,6 @@ async function populateCampaignTaskBadges() {
   });
 }
 
-// ─── Cart-page friction (store-wide, dashboard top section) ─────────────
-async function loadCartFriction() {
-  const card = document.getElementById('cart-friction-card');
-  if (!card) return;
-  const contentDiv = document.getElementById('cart-friction-content');
-  const countsSpan = document.getElementById('cart-friction-counts');
-  const actionsDiv = document.getElementById('cart-friction-actions');
-  if (!contentDiv) return;
-
-  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:8px 0">Scanning /cart page for friction…</div>';
-  if (countsSpan) countsSpan.textContent = '';
-
-  try {
-    const r = await authedFetch('/api/google/cart-friction');
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Cart scan failed');
-
-    const friction = j.friction || [];
-    const counts = j.counts || {};
-    if (countsSpan) {
-      const parts = [];
-      if (counts.p1) parts.push('<span style="color:var(--red);font-weight:700">' + counts.p1 + ' P1</span>');
-      if (counts.p2) parts.push('<span style="color:var(--amber);font-weight:700">' + counts.p2 + ' P2</span>');
-      if (counts.p3) parts.push('<span style="color:var(--text3)">' + counts.p3 + ' P3</span>');
-      countsSpan.innerHTML = parts.length ? '· ' + parts.join(' · ') : '· no obvious issues';
-    }
-    if (actionsDiv) {
-      actionsDiv.innerHTML = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">' + (j.cached ? 'Cached' : 'Fresh') + '</span>';
-    }
-
-    if (!friction.length) {
-      contentDiv.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0">No obvious friction found on cart page. ' + (j.pageError ? '<span style="color:var(--amber)">(Note: page fetch had an error.)</span>' : '') + '</div>';
-      return;
-    }
-
-    contentDiv.innerHTML = friction.map(function(f){
-      const colour = f.priority === 'P1' ? 'var(--red)' : f.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
-      return '<div style="padding:10px 12px;background:var(--bg2);border-left:3px solid ' + colour + ';border-radius:4px;margin-bottom:8px">'
-        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">'
-        + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:' + colour + ';margin-right:6px">' + escapeHtml(f.priority || '') + '</span>' + escapeHtml(f.issue || '') + '</div>'
-        + (f.category ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap">' + escapeHtml(f.category) + '</div>' : '')
-        + '</div>'
-        + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(f.evidence || '') + '</div>'
-        + '</div>';
-    }).join('');
-  } catch(e) {
-    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Cart friction error: ' + escapeHtml(e.message) + '</div>';
-  }
-}
-
 // Adapter: campaign-view rows from /api/google/products-diagnostic use flat field
 // names (spend, sales, acos, etc.) and prefixed Shopify fields (shopifyRevenue7d,
 // shopifyTitle, etc.). The detail modal expects google-prefixed names (googleSpend,
@@ -1196,7 +1136,7 @@ function renderCampaignsPage() {
 // ─── Google Tasks page ───────────────────────────────────────────────────
 // Mirrors Amazon's task workflow but for Google. Self-allocate, 7-day cycle,
 // Day 7 forces decision (carry_on / archive / stop).
-const TASK_FILTERS = { status: 'active', agent: 'all' };
+const TASK_FILTERS = { status: 'active', agent: 'all', type: 'all' };
 let LAST_TASKS_RESPONSE = null;
 
 function setTaskFilter(kind, value, btn) {
@@ -1216,6 +1156,7 @@ async function loadGoogleTasks() {
     const params = new URLSearchParams();
     if (TASK_FILTERS.status) params.set('status', TASK_FILTERS.status);
     if (TASK_FILTERS.agent) params.set('agent', TASK_FILTERS.agent);
+    if (TASK_FILTERS.type) params.set('type', TASK_FILTERS.type);
     const r = await authedFetch('/api/google/tasks?' + params.toString());
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Failed to load tasks');
@@ -1254,81 +1195,171 @@ async function loadGoogleTasks() {
   }
 }
 
+// Map of problem types to display labels and category badges
+const TASK_PROBLEM_LABEL = {
+  no_activity: 'No activity',
+  no_revenue: 'No revenue',
+  high_acos: 'High ACOS',
+  high_cost_per_conv: 'High cost/conv',
+  low_ctr: 'Low CTR',
+  clicks_no_sales: 'Clicks, no sales',
+  product_no_revenue: 'Product: no revenue',
+  product_high_acos: 'Product: high ACOS',
+  product_clicks_no_sales: 'Product: clicks, no sales',
+  product_out_of_stock: 'Out of stock + spend',
+  scale_opportunity: '🚀 Scale opportunity',
+  out_of_budget: 'Out of budget',
+  budget_low: 'Low budget'
+};
+
+function taskTypeLabel(t) { return TASK_PROBLEM_LABEL[t] || t || 'Issue'; }
+
 function taskRow(t) {
-  const days = t.daysOpen != null ? t.daysOpen : 0;
-  const dayBadgeColour = t.atDay7 ? 'var(--red)' : (t.atDay4 ? 'var(--amber)' : 'var(--text3)');
-  const isProductTask = t.problem_type && t.problem_type.indexOf('product_') === 0;
-
-  const problemLabel = ({
-    no_activity: 'No activity', no_revenue: 'No revenue', high_acos: 'High ACOS',
-    product_no_revenue: 'Product: no revenue', product_high_acos: 'Product: high ACOS',
-    out_of_budget: 'Out of budget', budget_low: 'Low budget'
-  })[t.problem_type] || t.problem_type || 'Issue';
-
-  const statusPill = (function(){
-    const s = t.status || 'open';
-    const colour = s === 'in_progress' ? 'var(--accent)' : s === 'discussion' ? 'var(--amber)' : s === 'complete' ? 'var(--green)' : s === 'archived' ? 'var(--text3)' : s === 'dismissed' ? 'var(--text3)' : 'var(--text2)';
-    return '<span style="background:' + colour + '15;color:' + colour + ';padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase">' + escapeHtml(s) + '</span>';
-  })();
-
-  const agentDisplay = t.agent_name === 'Unassigned'
-    ? '<span style="color:var(--text3);font-style:italic">Unassigned</span>'
-    : '<span style="font-weight:600">' + escapeHtml(t.agent_name || '') + '</span>';
-
-  // Action buttons depending on state
-  let actionsHtml = '';
-  if (t.atDay7 && (t.status !== 'archived' && t.status !== 'complete')) {
-    actionsHtml = '<button class="btn btn-primary" onclick="openDay7Decision(' + t.id + ')" style="font-size:11px;padding:5px 12px">📋 Make Day 7 decision</button>';
-  } else if (t.agent_name === 'Unassigned') {
-    actionsHtml = '<button class="btn btn-primary" onclick="takeTask(' + t.id + ')" style="font-size:11px;padding:5px 12px">✋ Take it</button>';
-  } else if (t.status === 'open' || t.status === 'in_progress') {
-    actionsHtml = '<button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 12px">⚒ Working</button>'
-      + ' <button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'discussion\')" style="font-size:11px;padding:5px 12px">💬 Discuss</button>'
-      + ' <button class="btn btn-ghost" onclick="dismissTask(' + t.id + ')" style="font-size:11px;padding:5px 12px;color:var(--red)">✕ Dismiss</button>';
-  } else if (t.status === 'discussion') {
-    actionsHtml = '<button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 12px">⚒ Back to working</button>'
-      + ' <button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'complete\')" style="font-size:11px;padding:5px 12px;color:var(--green)">✓ Complete</button>';
-  }
-
-  // Postgres NUMERIC fields arrive as strings from pg — coerce to numbers before doing math
+  // Postgres NUMERIC arrives as string from pg
   const bSpend = Number(t.baseline_spend) || 0;
   const bSales = Number(t.baseline_sales) || 0;
   const bAcos = Number(t.baseline_acos) || 0;
-  const baseline = bSpend > 0 || bSales > 0
-    ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;font-family:var(--mono)">Baseline: spent £' + bSpend.toFixed(2) + ' · sold £' + bSales.toFixed(2) + (bAcos > 0 ? ' · ACOS ' + Math.round(bAcos) + '%' : '') + '</div>'
+  const bImpr = Number(t.baseline_impressions) || 0;
+  const bCostPerConv = bSpend > 0 && bSales > 0 ? null : null;  // would need conversions field
+
+  const days = t.daysOpen != null ? t.daysOpen : 0;
+  const isProductTask = (t.problem_type && t.problem_type.indexOf('product_') === 0);
+  const isScale = t.task_type === 'scale' || t.problem_type === 'scale_opportunity';
+  const status = t.status || 'open';
+
+  // Coloured priority stripe down the left edge
+  let stripeColour;
+  if (isScale) stripeColour = 'var(--green)';
+  else if (t.atDay7) stripeColour = 'var(--red)';
+  else if (status === 'complete' || status === 'archived') stripeColour = 'var(--text3)';
+  else if (status === 'discussion') stripeColour = 'var(--amber)';
+  else if (status === 'in_progress') stripeColour = 'var(--accent)';
+  else if (days >= 4) stripeColour = 'var(--amber)';
+  else stripeColour = 'var(--accent)';
+
+  // Image — Shopify thumbnail for product tasks, channel icon otherwise
+  const img = (isProductTask && t.product_image_url)
+    ? '<img src="' + escapeHtml(t.product_image_url) + '" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0">'
+    : '<div style="width:48px;height:48px;border-radius:6px;background:var(--bg2);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">' + (isScale ? '🚀' : (isProductTask ? '📦' : '📋')) + '</div>';
+
+  // Status pill
+  const statusPillColours = {
+    open: 'var(--text2)', in_progress: 'var(--accent)', discussion: 'var(--amber)',
+    complete: 'var(--green)', archived: 'var(--text3)', dismissed: 'var(--text3)'
+  };
+  const sColour = statusPillColours[status] || 'var(--text2)';
+  const statusPill = '<span style="background:' + sColour + '15;color:' + sColour + ';padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase">' + escapeHtml(status.replace('_',' ')) + '</span>';
+
+  // Day counter pill
+  const dayColour = t.atDay7 ? 'var(--red)' : (days >= 4 ? 'var(--amber)' : 'var(--text3)');
+  const dayPill = '<span style="font-size:10px;color:' + dayColour + ';font-weight:700;font-family:var(--mono);background:' + dayColour + '15;padding:2px 8px;border-radius:4px">DAY ' + days + ' / 7</span>';
+
+  // Type badge
+  const typeBadge = isScale
+    ? '<span style="font-size:10px;background:var(--green)15;color:var(--green);padding:2px 6px;border-radius:3px;font-weight:700">SCALE</span>'
+    : (isProductTask
+      ? '<span style="font-size:10px;background:var(--accent)15;color:var(--accent);padding:2px 6px;border-radius:3px;font-weight:700">PRODUCT</span>'
+      : '<span style="font-size:10px;background:var(--text3)15;color:var(--text3);padding:2px 6px;border-radius:3px;font-weight:700">CAMPAIGN</span>');
+
+  // Problem type label
+  const problemLabel = '<span style="font-size:11px;color:var(--text2)">' + escapeHtml(taskTypeLabel(t.problem_type)) + '</span>';
+
+  // Campaign type badge (PMax / Search / Shopping)
+  const campTypeBadge = t.portfolio
+    ? '<span style="font-size:10px;background:var(--bg2);color:var(--text3);padding:2px 6px;border-radius:3px;font-weight:600;text-transform:uppercase">' + escapeHtml(t.portfolio.replace('PERFORMANCE_MAX','PMax').replace('SEARCH','Search').replace('SHOPPING','Shopping').slice(0, 12)) + '</span>'
     : '';
 
+  // Stats grid — same style as product card
+  const statsGrid = (bSpend > 0 || bSales > 0 || bImpr > 0)
+    ? '<div class="product-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-top:10px">'
+      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Spend</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">£' + bSpend.toFixed(2) + '</div></div>'
+      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Sales</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">£' + bSales.toFixed(2) + '</div></div>'
+      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">ACOS</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">' + (bAcos > 0 ? bAcos.toFixed(0) + '%' : '—') + '</div></div>'
+      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Impr</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">' + bImpr.toLocaleString('en-GB') + '</div></div>'
+    + '</div>'
+    : '';
+
+  // Notes / dismissal / day7 sections (coloured callouts)
   const dismissedNote = t.dismissed_reason
-    ? '<div style="font-size:12px;color:var(--text3);margin-top:6px;padding:6px 10px;background:var(--bg2);border-radius:4px"><strong>Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'
+    ? '<div style="font-size:12px;color:var(--text2);margin-top:8px;padding:8px 10px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong>Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'
     : '';
   const day7Note = t.day7_note
-    ? '<div style="font-size:12px;color:var(--text3);margin-top:6px;padding:6px 10px;background:var(--bg2);border-radius:4px"><strong>Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'
+    ? '<div style="font-size:12px;color:var(--text);margin-top:8px;padding:8px 10px;background:#fed7aa;border-left:3px solid #ea580c;border-radius:4px"><strong>Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'
+    : '';
+  const agentNote = t.agent_notes
+    ? '<div style="font-size:12px;color:var(--text);margin-top:8px;padding:8px 10px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px"><strong>Notes:</strong> ' + escapeHtml(t.agent_notes) + '</div>'
     : '';
 
-  return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px">'
+  // Action buttons — context-sensitive, on the right
+  let actionsHtml = '';
+  if (t.atDay7 && status !== 'archived' && status !== 'complete') {
+    actionsHtml = '<button class="btn btn-primary" onclick="event.stopPropagation();openDay7Decision(' + t.id + ')" style="font-size:11px;padding:6px 12px">📋 Day 7 decision</button>';
+  } else if (t.agent_name === 'Unassigned') {
+    actionsHtml = '<button class="btn btn-primary" onclick="event.stopPropagation();takeTask(' + t.id + ')" style="font-size:11px;padding:6px 12px">✋ Take it</button>';
+  } else if (status === 'open' || status === 'in_progress') {
+    actionsHtml = '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 10px">⚒ Working</button>'
+      + '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'discussion\')" style="font-size:11px;padding:5px 10px">💬 Discuss</button>'
+      + '<button class="btn btn-ghost" onclick="event.stopPropagation();dismissTask(' + t.id + ')" style="font-size:11px;padding:5px 10px;color:var(--red)">✕ Dismiss</button>';
+  } else if (status === 'discussion') {
+    actionsHtml = '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 10px">⚒ Resume</button>'
+      + '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'complete\')" style="font-size:11px;padding:5px 10px;color:var(--green)">✓ Complete</button>';
+  }
+
+  // Agent display
+  const agentDisplay = t.agent_name === 'Unassigned'
+    ? '<span style="color:var(--text3);font-style:italic">Unassigned</span>'
+    : '<span style="font-weight:600;color:var(--text)">' + escapeHtml(t.agent_name || '') + '</span>';
+
+  // Build a payload the modal can read — works whether product-level or campaign-level
+  // For product-level tasks: extract shopifyId from product_key (format: xxx_xxx_<id>_xxx)
+  let openHandler = '';
+  if (isProductTask && t.product_key) {
+    const parts = String(t.product_key).split('_');
+    const shopifyId = parts.length >= 3 ? parts[2] : null;
+    if (shopifyId) {
+      // Open product modal by shopify id — productCard helper handles this
+      openHandler = 'onclick="openProductDetailFromShopifyId(\'' + shopifyId + '\')"';
+    }
+  }
+
+  return '<div class="task-card" ' + openHandler + ' style="position:relative;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:14px 16px 14px 20px;margin-bottom:10px;' + (openHandler ? 'cursor:pointer;' : '') + 'transition:border-color 0.15s">'
+    + '<div style="position:absolute;top:0;bottom:0;left:0;width:4px;background:' + stripeColour + ';border-radius:12px 0 0 12px"></div>'
     + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">'
-    + '<div style="flex:1;min-width:0">'
-      + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">'
-        + statusPill
-        + '<span style="font-size:11px;color:' + dayBadgeColour + ';font-weight:700;font-family:var(--mono)">Day ' + days + ' / 7</span>'
-        + (isProductTask ? '<span style="font-size:10px;background:var(--accent)15;color:var(--accent);padding:2px 6px;border-radius:3px;font-weight:700">PRODUCT</span>' : '<span style="font-size:10px;background:var(--text3)15;color:var(--text3);padding:2px 6px;border-radius:3px;font-weight:700">CAMPAIGN</span>')
-        + '<span style="font-size:11px;color:var(--text3)">' + escapeHtml(problemLabel) + '</span>'
+      + '<div style="flex:1;min-width:0;display:flex;gap:12px">'
+        + img
+        + '<div style="flex:1;min-width:0">'
+          + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'
+            + statusPill + dayPill + typeBadge + campTypeBadge + problemLabel
+          + '</div>'
+          + '<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.3">' + escapeHtml(t.campaign_name || '(unnamed campaign)') + '</div>'
+          + (t.product_title ? '<div style="font-size:12px;color:var(--text2);margin-bottom:4px">↳ ' + escapeHtml(t.product_title) + '</div>' : '')
+          + '<div style="font-size:13px;color:var(--text2);line-height:1.55;margin-top:4px">' + escapeHtml(t.problem_detail || '') + '</div>'
+          + statsGrid
+          + agentNote
+          + dismissedNote
+          + day7Note
+        + '</div>'
       + '</div>'
-      + '<div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:2px">' + escapeHtml(t.campaign_name || '(unnamed campaign)') + '</div>'
-      + (t.product_title ? '<div style="font-size:12px;color:var(--text2);margin-bottom:2px">↳ ' + escapeHtml(t.product_title) + '</div>' : '')
-      + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(t.problem_detail || '') + '</div>'
-      + baseline
-      + dismissedNote
-      + day7Note
-      + (t.agent_notes ? '<div style="font-size:12px;color:var(--text2);margin-top:6px;padding:6px 10px;background:var(--bg2);border-radius:4px"><strong>Notes:</strong> ' + escapeHtml(t.agent_notes) + '</div>' : '')
-    + '</div>'
-    + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:140px">'
-      + '<div style="font-size:11px;color:var(--text3)">Assigned to</div>'
-      + '<div style="font-size:13px">' + agentDisplay + '</div>'
-      + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-top:4px">' + actionsHtml + '</div>'
-    + '</div>'
+      + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:140px">'
+        + '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Assigned to</div>'
+        + '<div style="font-size:13px">' + agentDisplay + '</div>'
+        + '<div style="display:flex;flex-direction:column;gap:5px;align-items:stretch;margin-top:6px;width:100%">' + actionsHtml + '</div>'
+      + '</div>'
     + '</div>'
     + '</div>';
+}
+
+// Open product modal from a Shopify product ID (used by task-card click handler)
+function openProductDetailFromShopifyId(shopifyId) {
+  if (!shopifyId) return;
+  const allProds = (window.allProductsData && window.allProductsData.products) || [];
+  const sp = allProds.find(function(p){ return String(p.shopifyId) === String(shopifyId); });
+  if (!sp) {
+    // Try finding via shopifyItemId in case allProductsData isn't loaded
+    alert('Product not found in current view. Switch to "All Products" tab and try again.');
+    return;
+  }
+  openProductDetailFromObj(sp);
 }
 
 async function takeTask(id) {

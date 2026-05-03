@@ -859,9 +859,17 @@ async function createAlertTask(campaignId, campaignName, agentName, portfolio, p
 // ─────────────────────────────────────────────────────────────────────────
 
 const GOOGLE_TASK_AGENTS = ['Rahul', 'Anuj'];        // self-allocate — task starts as 'Unassigned'
-const GOOGLE_TASK_ACOS_THRESHOLD = 25;               // % — below this is healthy
-const GOOGLE_TASK_NO_REV_SPEND_MIN = 20;             // £ — must have spent > this with £0 sales
+// FK Sports: 25% margin → 21% after Shopify fees → ads must stay under that to be profitable.
+// 20% ACOS = break-even-ish; flag anything above as a problem.
+// 12% ACOS or below = scale opportunity (campaigns deserving more budget).
+const GOOGLE_TASK_ACOS_THRESHOLD = 20;               // % — above this is a problem
+const GOOGLE_TASK_SCALE_ACOS_THRESHOLD = 12;         // % — below this and meaningful spend = scale opportunity
+const GOOGLE_TASK_NO_REV_SPEND_MIN = 15;             // £ — spent more than this with £0 sales
 const GOOGLE_TASK_HIGH_ACOS_SPEND_MIN = 10;          // £ — high ACOS needs at least this much spend
+const GOOGLE_TASK_COST_PER_CONV_THRESHOLD = 12;      // £ — at £60 AOV, cost/conv > £12 = losing money
+const GOOGLE_TASK_LOW_CTR_THRESHOLD = 0.5;           // % — below this with spend = audience/creative issue
+const GOOGLE_TASK_CLICKS_NO_SALES_MIN = 50;          // clicks — got many clicks but 0 sales = page issue
+const GOOGLE_TASK_SCALE_SPEND_MIN = 10;              // £ — must have spent at least this for scale candidate
 const GOOGLE_TASK_DAILY_TARGET = 10;
 
 function looksLikeGoogleAgent(agentName) {
@@ -888,8 +896,6 @@ async function googleTaskAlreadyExistsToday(campaignId, problemType, productKey)
 
 async function ensureGoogleTaskColumns() {
   if (!db) return;
-  // Each ALTER is its own try/catch so a single failure doesn't block the rest.
-  // CREATE COLUMN IF NOT EXISTS is idempotent so safe to call repeatedly.
   const alters = [
     ["product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
     ["product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
@@ -899,7 +905,10 @@ async function ensureGoogleTaskColumns() {
     ["baseline_impressions", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_impressions INTEGER DEFAULT 0"],
     ["day7_decision", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision TEXT"],
     ["day7_decision_at", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision_at TIMESTAMP"],
-    ["day7_note", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_note TEXT"]
+    ["day7_note", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_note TEXT"],
+    ["task_type", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS task_type TEXT DEFAULT 'problem'"],
+    ["product_image_url", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_image_url TEXT"],
+    ["priority", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 2"]
   ];
   let okCount = 0;
   for (const [name, sql] of alters) {
@@ -927,12 +936,26 @@ async function createGoogleTask(taskRow) {
   if (!db) return false;
   const exists = await googleTaskAlreadyExistsToday(taskRow.campaignId, taskRow.problemType, taskRow.productKey);
   if (exists) return false;
+
+  // Try to enrich with Shopify product image URL (for product-level tasks)
+  let productImageUrl = null;
+  if (taskRow.productKey) {
+    // productKey may be 'shopifyItemId' (e.g. xxx_xxx_<shopifyId>_xxx) or a custom id
+    const parts = String(taskRow.productKey).split('_');
+    const possibleShopifyId = parts.length >= 3 ? parts[2] : null;
+    if (possibleShopifyId) {
+      const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === possibleShopifyId; });
+      if (sp && sp.imageUrl) productImageUrl = sp.imageUrl;
+    }
+  }
+
   try {
     await db.query(
       "INSERT INTO campaign_tasks " +
       "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
-      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions) " +
-      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google',$9,$10,$11,$12,$13,$14)",
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      " task_type, priority, product_image_url) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google',$9,$10,$11,$12,$13,$14,$15,$16,$17)",
       [
         String(taskRow.campaignId),
         taskRow.campaignName,
@@ -947,7 +970,10 @@ async function createGoogleTask(taskRow) {
         taskRow.baselineSpend || 0,
         taskRow.baselineSales || 0,
         taskRow.baselineAcos || 0,
-        taskRow.baselineImpressions || 0
+        taskRow.baselineImpressions || 0,
+        taskRow.taskType || 'problem',
+        taskRow.priority || 2,
+        productImageUrl
       ]
     );
     return true;
@@ -965,6 +991,12 @@ async function runGoogleTaskScheduler() {
   await ensureGoogleTaskColumns();
 
   const candidates = [];
+
+  // Build a lookup from shopifyItemId → Shopify product (for inventory check on out-of-stock rule)
+  const shopifyById = {};
+  (shopifyState.products || []).forEach(function(sp) {
+    shopifyById[String(sp.id)] = sp;
+  });
 
   // ─── Campaign-level scan ────────────────────────────────────────────────
   // Aggregate per-campaign 7d totals from googleState
@@ -990,12 +1022,14 @@ async function runGoogleTaskScheduler() {
 
   Object.values(campaignTotals).forEach(function(c) {
     const acos = c.sales > 0 ? (c.spend / c.sales) * 100 : Infinity;
+    const ctr = c.impressions > 0 ? (c.clicks / c.impressions) * 100 : 0;
+    const costPerConv = c.conversions > 0 ? c.spend / c.conversions : null;
 
-    // Rule 1: No activity — campaign exists but 0 impressions in last 7d (likely paused or no budget)
+    // Rule 1 (P3): No activity — campaign exists but 0 impressions in last 7d
     if (c.impressions === 0 && c.spend === 0) {
       candidates.push({
         campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
-        problemType: 'no_activity',
+        problemType: 'no_activity', taskType: 'problem', priority: 3,
         problemDetail: 'Campaign has 0 impressions in the last 7 days. Likely paused, out of budget, or has no eligible products.',
         score: 5,
         baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: 0, baselineImpressions: c.impressions
@@ -1003,11 +1037,11 @@ async function runGoogleTaskScheduler() {
       return;
     }
 
-    // Rule 2: No revenue despite spend > £20
+    // Rule 2 (P1): No revenue despite spend >= £15
     if (c.sales === 0 && c.spend >= GOOGLE_TASK_NO_REV_SPEND_MIN) {
       candidates.push({
         campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
-        problemType: 'no_revenue',
+        problemType: 'no_revenue', taskType: 'problem', priority: 1,
         problemDetail: 'Spent £' + c.spend.toFixed(2) + ' over 7 days with £0 attributed sales (' + c.clicks + ' clicks, ' + c.conversions + ' conv).',
         score: scoreGoogleTask(c.spend, 0, 'no_revenue'),
         baselineSpend: c.spend, baselineSales: 0, baselineAcos: 0, baselineImpressions: c.impressions
@@ -1015,21 +1049,69 @@ async function runGoogleTaskScheduler() {
       return;
     }
 
-    // Rule 3: High ACOS overall — campaign is selling but inefficiently
+    // Rule 3 (P1): Many clicks, no sales — landing page or product issue
+    if (c.sales === 0 && c.clicks >= GOOGLE_TASK_CLICKS_NO_SALES_MIN) {
+      // Already covered by Rule 2 if spend is high too — but if spend is low and clicks high, this catches it
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'clicks_no_sales', taskType: 'problem', priority: 1,
+        problemDetail: c.clicks + ' clicks but 0 sales in 7 days. Page or product is not closing — check landing page critique and price.',
+        score: scoreGoogleTask(c.spend, 0, 'clicks_no_sales'),
+        baselineSpend: c.spend, baselineSales: 0, baselineAcos: 0, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 4 (P2): High ACOS — campaign selling but losing money
     if (acos !== Infinity && acos > GOOGLE_TASK_ACOS_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN) {
       candidates.push({
         campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
-        problemType: 'high_acos',
+        problemType: 'high_acos', taskType: 'problem', priority: 2,
         problemDetail: 'ACOS ' + acos.toFixed(0) + '% (target ' + GOOGLE_TASK_ACOS_THRESHOLD + '%). Spend £' + c.spend.toFixed(2) + ', sales £' + c.sales.toFixed(2) + ' over 7 days.',
         score: scoreGoogleTask(c.spend, c.sales, 'high_acos'),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 5 (P2): High cost per conversion — even when ACOS reads OK, cost/conv > £12 is unprofitable
+    if (costPerConv !== null && costPerConv > GOOGLE_TASK_COST_PER_CONV_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'high_cost_per_conv', taskType: 'problem', priority: 2,
+        problemDetail: 'Cost per conversion £' + costPerConv.toFixed(2) + ' (target under £' + GOOGLE_TASK_COST_PER_CONV_THRESHOLD + '). Spend £' + c.spend.toFixed(2) + ' / ' + c.conversions + ' conv.',
+        score: scoreGoogleTask(c.spend, c.sales, 'high_cost_per_conv'),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos === Infinity ? 0 : acos, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 6 (P3): Low CTR — ad showing but nobody clicking → wrong audience or weak creative
+    if (ctr < GOOGLE_TASK_LOW_CTR_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN && c.impressions >= 1000) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'low_ctr', taskType: 'problem', priority: 3,
+        problemDetail: 'CTR ' + ctr.toFixed(2) + '% (' + c.clicks + ' clicks of ' + c.impressions + ' impressions). Wrong audience or weak ad creative.',
+        score: Math.round(c.spend),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos === Infinity ? 0 : acos, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // ─── Scale opportunity (separate task type) ───────────────────────────
+    // Campaign performing well — ACOS under 12% with meaningful spend → could absorb more budget
+    if (acos !== Infinity && acos < GOOGLE_TASK_SCALE_ACOS_THRESHOLD && c.spend >= GOOGLE_TASK_SCALE_SPEND_MIN && c.sales >= 30) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'scale_opportunity', taskType: 'scale', priority: 4,
+        problemDetail: 'Healthy ACOS ' + acos.toFixed(0) + '% — well under 12% target. Spend £' + c.spend.toFixed(2) + ' generated £' + c.sales.toFixed(2) + '. Consider increasing budget 20-30%.',
+        score: Math.round(c.sales - c.spend),  // profit = headroom for scaling
         baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos, baselineImpressions: c.impressions
       });
     }
   });
 
   // ─── Product-level scan ────────────────────────────────────────────────
-  // For each product row in googleState, if the product itself is the issue
-  // (within an otherwise-OK campaign), flag at product level.
   (googleState.products || []).forEach(function(p) {
     const cid = String(p.campaignId || '');
     const c = campaignTotals[cid];
@@ -1039,6 +1121,7 @@ async function runGoogleTaskScheduler() {
     const productAcos = p.sales > 0 ? (p.spend / p.sales) * 100 : Infinity;
     const productSpend = p.spend || 0;
     const productSales = p.sales || 0;
+    const productClicks = p.clicks || 0;
     const productKey = p.shopifyItemId || p.productId || (p.adGroupId ? cid + '_' + p.adGroupId : null);
     const productTitle = p.name || p.productName || p.title || '(unknown product)';
 
@@ -1046,15 +1129,33 @@ async function runGoogleTaskScheduler() {
 
     // Skip if the WHOLE campaign already flagged — campaign-level task covers it
     const campaignAlreadyFlagged = candidates.some(function(t){
-      return !t.productKey && t.campaignId === cid;
+      return !t.productKey && t.campaignId === cid && t.taskType === 'problem';
     });
     if (campaignAlreadyFlagged) return;
 
-    // Product-level rule 1: spent > £20 with £0 sales while campaign overall is fine
+    // Product-level Rule 1 (P1): Out of stock with ad spend — sale is literally impossible
+    if (productSpend > 0) {
+      const shopifyId = p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null;
+      const sp = shopifyId ? shopifyById[shopifyId] : null;
+      if (sp && sp.totalInventory != null && Number(sp.totalInventory) <= 0) {
+        candidates.push({
+          campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+          problemType: 'product_out_of_stock', taskType: 'problem', priority: 1,
+          problemDetail: '"' + productTitle + '" has 0 inventory in Shopify but ads are still spending £' + productSpend.toFixed(2) + ' on it. Sale is impossible — pause this product or restock.',
+          score: scoreGoogleTask(productSpend, 0, 'product_out_of_stock') + 50,  // boost score — this is critical
+          productKey: String(productKey),
+          productTitle: productTitle,
+          baselineSpend: productSpend, baselineSales: productSales, baselineAcos: 0, baselineImpressions: p.impressions || 0
+        });
+        return;
+      }
+    }
+
+    // Product-level Rule 2 (P1): spent > £15 with £0 sales while campaign overall is fine
     if (productSales === 0 && productSpend >= GOOGLE_TASK_NO_REV_SPEND_MIN) {
       candidates.push({
         campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
-        problemType: 'product_no_revenue',
+        problemType: 'product_no_revenue', taskType: 'problem', priority: 1,
         problemDetail: '"' + productTitle + '" has spent £' + productSpend.toFixed(2) + ' with £0 sales in 7 days, while the rest of the campaign performs normally.',
         score: scoreGoogleTask(productSpend, 0, 'product_no_revenue'),
         productKey: String(productKey),
@@ -1064,13 +1165,27 @@ async function runGoogleTaskScheduler() {
       return;
     }
 
-    // Product-level rule 2: product ACOS > 25% AND noticeably worse than campaign average AND spend > £10
+    // Product-level Rule 3 (P1): Many clicks no sales (lower threshold for product than campaign — clicks aren't shared)
+    if (productSales === 0 && productClicks >= 25) {
+      candidates.push({
+        campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'product_clicks_no_sales', taskType: 'problem', priority: 1,
+        problemDetail: '"' + productTitle + '" got ' + productClicks + ' clicks but 0 sales in 7 days. Likely landing page or pricing issue.',
+        score: scoreGoogleTask(productSpend, 0, 'product_clicks_no_sales'),
+        productKey: String(productKey),
+        productTitle: productTitle,
+        baselineSpend: productSpend, baselineSales: 0, baselineAcos: 0, baselineImpressions: p.impressions || 0
+      });
+      return;
+    }
+
+    // Product-level Rule 4 (P2): product ACOS > 20% AND noticeably worse than campaign average
     if (productAcos !== Infinity && productAcos > GOOGLE_TASK_ACOS_THRESHOLD
         && productSpend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN
         && (overallAcos === Infinity || productAcos > overallAcos * 1.5)) {
       candidates.push({
         campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
-        problemType: 'product_high_acos',
+        problemType: 'product_high_acos', taskType: 'problem', priority: 2,
         problemDetail: '"' + productTitle + '" ACOS ' + productAcos.toFixed(0) + '% (campaign avg ' + (overallAcos === Infinity ? 'N/A' : overallAcos.toFixed(0) + '%') + '). Spent £' + productSpend.toFixed(2) + ', sales £' + productSales.toFixed(2) + '.',
         score: scoreGoogleTask(productSpend, productSales, 'product_high_acos'),
         productKey: String(productKey),
@@ -1080,10 +1195,14 @@ async function runGoogleTaskScheduler() {
     }
   });
 
-  // Sort by score descending, take top N
-  candidates.sort(function(a, b){ return (b.score || 0) - (a.score || 0); });
-  const target = Math.max(GOOGLE_TASK_DAILY_TARGET, candidates.length >= GOOGLE_TASK_DAILY_TARGET ? GOOGLE_TASK_DAILY_TARGET : candidates.length);
-  const top = candidates.slice(0, target);
+  // Sort by priority (P1 > P2 > P3 > P4-scale) then by score descending
+  candidates.sort(function(a, b){
+    const pa = a.priority || 9;
+    const pb = b.priority || 9;
+    if (pa !== pb) return pa - pb;
+    return (b.score || 0) - (a.score || 0);
+  });
+  const top = candidates.slice(0, GOOGLE_TASK_DAILY_TARGET);
 
   let createdCount = 0;
   for (const taskRow of top) {
@@ -1802,6 +1921,7 @@ app.get('/api/google/tasks', async function(req, res) {
     // Filters: ?status=open|in_progress|discussion|complete|all  ?agent=Rahul|Anuj|Unassigned|all  ?day7=true
     const statusFilter = req.query.status || 'active';   // 'active' = not complete/archived
     const agentFilter = req.query.agent || 'all';
+    const typeFilter = req.query.type || 'all';          // 'problem' | 'scale' | 'all'
 
     let where = "department='google'";
     const params = [];
@@ -1814,14 +1934,18 @@ app.get('/api/google/tasks', async function(req, res) {
       params.push(agentFilter);
       where += " AND agent_name=$" + params.length;
     }
+    if (typeFilter && typeFilter !== 'all') {
+      params.push(typeFilter);
+      where += " AND COALESCE(task_type, 'problem')=$" + params.length;
+    }
     const r = await db.query(
       "SELECT id, campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, " +
       "       days_persisted, total_wasted, score, status, agent_notes, dismissed_reason, paused_reason, " +
-      "       task_source, product_key, product_title, " +
+      "       task_source, product_key, product_title, product_image_url, task_type, priority, " +
       "       baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
       "       day7_decision, day7_decision_at, day7_note, " +
       "       created_date, updated_at, resolved_at, first_action_at " +
-      "FROM campaign_tasks WHERE " + where + " ORDER BY score DESC, created_date DESC LIMIT 500",
+      "FROM campaign_tasks WHERE " + where + " ORDER BY priority ASC, score DESC, created_date DESC LIMIT 500",
       params
     );
 
@@ -3950,135 +4074,6 @@ app.get('/api/google/rule-friction/list', async function(req, res) {
     res.json({ items: items });
   } catch(e) {
     console.error('rule-friction list error: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Cart-page friction (rule-based). Fetches /cart on the storefront once per 24h
-// and applies rules specific to the cart-step decision: shipping clarity, payment
-// options, urgency/scarcity, free-shipping threshold visibility, abandoned-cart copy.
-// Uses the SAME product_page_cache table with key 'cart' so we don't pollute the schema.
-async function getCartPageFriction() {
-  const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
-  const cartUrl = 'https://' + storefrontDomain + '/cart?country=GB&currency=GBP';
-  const cartCacheKey = '__cart__';
-
-  let pageSummary = null;
-  let cacheUsed = false;
-  let pageError = null;
-
-  if (db) {
-    try {
-      const r = await db.query("SELECT page_summary, fetched_at FROM product_page_cache WHERE product_id=$1", [cartCacheKey]);
-      if (r.rows.length) {
-        const ageHours = (Date.now() - new Date(r.rows[0].fetched_at).getTime()) / 36e5;
-        if (ageHours < 24) {
-          pageSummary = r.rows[0].page_summary;
-          cacheUsed = true;
-        }
-      }
-    } catch(e) { /* fall through */ }
-  }
-
-  if (!pageSummary) {
-    const fetchResult = await fetchProductPageHtml(cartUrl);
-    if (!fetchResult.html) {
-      return { friction: [], error: fetchResult.error || 'Could not fetch cart page', pageError: fetchResult.error };
-    }
-    pageSummary = summariseProductPage(fetchResult.html);
-    if (db) {
-      try {
-        await db.query(
-          "INSERT INTO product_page_cache (product_id, product_url, fetched_at, page_summary) VALUES ($1, $2, NOW(), $3) " +
-          "ON CONFLICT (product_id) DO UPDATE SET product_url=EXCLUDED.product_url, fetched_at=NOW(), page_summary=EXCLUDED.page_summary",
-          [cartCacheKey, cartUrl, JSON.stringify(pageSummary)]
-        );
-      } catch(e) { /* ignore */ }
-    }
-  }
-
-  const friction = extractCartFriction(pageSummary);
-  return { friction: friction, pageError: pageError, cacheUsed: cacheUsed, pageSummary: pageSummary };
-}
-
-function extractCartFriction(pageSummary) {
-  const friction = [];
-  const sig = (pageSummary && pageSummary.signals) || {};
-  const text = (pageSummary && pageSummary.text) || '';
-  const lower = text.toLowerCase();
-
-  // Free-shipping threshold visibility
-  const hasFreeShippingThreshold = /spend (£|gbp |over )\d|free (uk )?(delivery|shipping) over|free (delivery|shipping) (when you )?(spend|over)/i.test(text);
-  if (!hasFreeShippingThreshold && !sig.hasShippingMention) {
-    friction.push({ priority: 'P1', issue: 'Cart has no shipping cost / threshold info', evidence: 'Customers see the cart but not what shipping will cost or how to qualify for free delivery. Adding "Spend £X for free delivery" lifts AOV and reduces checkout abandonment.', category: 'shipping' });
-  } else if (!hasFreeShippingThreshold) {
-    friction.push({ priority: 'P2', issue: 'No free-shipping progress bar', evidence: 'Cart mentions shipping but doesn\'t show a "£X away from free shipping" progress bar. This is a top conversion lever for cart upsells.', category: 'shipping' });
-  }
-
-  // Express checkout / payment options
-  const hasShopPay = /shop pay|shoppay/i.test(text);
-  const hasPayPal = /paypal/i.test(text);
-  const hasApplePay = /apple pay|applepay/i.test(text);
-  const hasGooglePay = /google pay|googlepay|g pay/i.test(text);
-  const expressMethodCount = [hasShopPay, hasPayPal, hasApplePay, hasGooglePay].filter(Boolean).length;
-  if (expressMethodCount === 0) {
-    friction.push({ priority: 'P1', issue: 'No express checkout options visible on cart', evidence: 'No mention of Shop Pay, PayPal, Apple Pay or Google Pay on the cart page. Express checkout typically lifts mobile conversion 20-30%.', category: 'payment' });
-  } else if (expressMethodCount === 1) {
-    friction.push({ priority: 'P2', issue: 'Only one express checkout option', evidence: 'Cart shows only one express payment method. Adding more (e.g. Shop Pay + PayPal + Apple Pay) covers more device types and lifts mobile conversion.', category: 'payment' });
-  }
-
-  // Trust signals at cart
-  if (!sig.hasReturnsMention) {
-    friction.push({ priority: 'P2', issue: 'No returns / money-back guarantee on cart page', evidence: 'UK shoppers expect to see returns terms before paying. Add "Free 30-day returns" near the checkout button.', category: 'trust' });
-  }
-
-  // Discount / promo code field handling
-  const hasDiscountField = /discount code|promo code|coupon/i.test(text);
-  if (hasDiscountField && !/apply (a |your )?discount|got a code/i.test(text)) {
-    friction.push({ priority: 'P3', issue: 'Discount code field visible by default', evidence: 'A visible "Discount code" field can prompt buyers to leave the cart and search for codes online, often abandoning. Hide it behind "Got a code?" link.', category: 'cart' });
-  }
-
-  // Empty cart fallback
-  if (lower.indexOf('your cart is empty') >= 0 && !/(continue shopping|browse|popular)/i.test(text)) {
-    friction.push({ priority: 'P3', issue: 'Empty-cart page has no recovery CTAs', evidence: '"Your cart is empty" but no "Continue shopping" or popular-products list. Add product recommendations to recover bounces.', category: 'cart' });
-  }
-
-  // Mobile viewport (re-check, since cart page is its own URL)
-  if (!sig.hasViewportMeta) {
-    friction.push({ priority: 'P2', issue: 'Cart page missing viewport meta tag', evidence: 'Mobile viewport tag missing — cart will render badly on phones. Ensure theme has proper meta viewport.', category: 'mobile' });
-  }
-
-  // No urgency / scarcity copy
-  if (!sig.hasUrgencyBadges && !/(only \d+ left|limited stock|hurry|today only|ends in)/i.test(text)) {
-    friction.push({ priority: 'P3', issue: 'No urgency or scarcity copy on cart', evidence: 'Cart has no "Only X left" / time-limited badges. Genuine urgency lifts checkout-completion modestly.', category: 'urgency' });
-  }
-
-  // Sort by priority
-  friction.sort(function(a, b) {
-    const order = { P1: 1, P2: 2, P3: 3 };
-    return (order[a.priority] || 9) - (order[b.priority] || 9);
-  });
-  return friction;
-}
-
-// Endpoint: returns cart-page friction (rule-based, free, cached 24h).
-// Same shape as /rule-friction so the front-end can render with the same component.
-app.get('/api/google/cart-friction', async function(req, res) {
-  try {
-    const result = await getCartPageFriction();
-    const counts = {
-      total: result.friction.length,
-      p1: result.friction.filter(function(f){ return f.priority === 'P1'; }).length,
-      p2: result.friction.filter(function(f){ return f.priority === 'P2'; }).length,
-      p3: result.friction.filter(function(f){ return f.priority === 'P3'; }).length
-    };
-    res.json({
-      friction: result.friction,
-      counts: counts,
-      cached: result.cacheUsed,
-      pageError: result.pageError
-    });
-  } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
