@@ -208,6 +208,10 @@ table.activity tr:last-child td { border-bottom: none; }
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5"/><path d="M11 11l4 4"/></svg>
       <span>Landing Page AI</span>
     </button>
+    <button class="nav-item" onclick="showPage('tasks',this)">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M5 7l1.5 1.5L9 6M5 11l1.5 1.5L9 10"/></svg>
+      <span>Tasks <span id="nb-tasks" class="nav-badge" style="display:none">0</span></span>
+    </button>
     <button class="nav-item" onclick="showPage('activity',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>
       <span>Activity log</span>
@@ -332,6 +336,42 @@ table.activity tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- ACTIVITY LOG -->
+  <div class="page" id="page-tasks">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Google tasks</div>
+        <div class="section-sub" id="tasks-sub">Daily auto-generated tasks. Self-allocate, work for 3 days, discuss on day 4, decide on day 7.</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="loadGoogleTasks()" id="tasks-refresh-btn">↻ Refresh</button>
+        <button class="btn btn-ghost" onclick="runGoogleTasksNow()" id="tasks-run-btn" title="Manually trigger the daily task creation (manager)">⚙ Run scheduler now</button>
+      </div>
+    </div>
+
+    <!-- Workload summary cards -->
+    <div id="tasks-workload" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px"></div>
+
+    <!-- Filter row -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Status</span>
+      <button class="btn btn-ghost task-filter active" data-filter-status="active" onclick="setTaskFilter('status','active',this)">Active</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="open" onclick="setTaskFilter('status','open',this)">Open</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="in_progress" onclick="setTaskFilter('status','in_progress',this)">In progress</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="discussion" onclick="setTaskFilter('status','discussion',this)">Discussion</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="complete" onclick="setTaskFilter('status','complete',this)">Complete</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="all" onclick="setTaskFilter('status','all',this)">All</button>
+      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-left:14px">Agent</span>
+      <button class="btn btn-ghost task-filter active" data-filter-agent="all" onclick="setTaskFilter('agent','all',this)">All</button>
+      <button class="btn btn-ghost task-filter" data-filter-agent="Unassigned" onclick="setTaskFilter('agent','Unassigned',this)">Unassigned</button>
+      <button class="btn btn-ghost task-filter" data-filter-agent="Rahul" onclick="setTaskFilter('agent','Rahul',this)">Rahul</button>
+      <button class="btn btn-ghost task-filter" data-filter-agent="Anuj" onclick="setTaskFilter('agent','Anuj',this)">Anuj</button>
+    </div>
+
+    <div id="tasks-list">
+      <div class="empty-state">Loading tasks…</div>
+    </div>
+  </div>
+
   <div class="page" id="page-activity">
     <div class="section-header">
       <div>
@@ -463,11 +503,12 @@ function showPage(id, btn) {
   document.getElementById('page-' + id).classList.add('active');
   document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
   if (btn) btn.classList.add('active');
-  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log', landing: 'Landing Page AI — Daily Critique' };
+  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log', landing: 'Landing Page AI — Daily Critique', tasks: 'Tasks' };
   document.getElementById('page-title').textContent = titles[id] || id;
   if (id === 'campaigns') renderCampaignsPage();
   if (id === 'activity') loadActivity();
   if (id === 'landing') renderLandingPage();
+  if (id === 'tasks') loadGoogleTasks();
 }
 
 // ─── Format helpers ──────────────────────────────────────────────────────
@@ -880,7 +921,7 @@ function campaignBlock(c) {
   return '<div class="campaign-row' + (c.dismissed ? ' is-dismissed' : '') + '" id="camp-' + c.campaignId + '">'
     + '<div class="campaign-header">'
     + '<div onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer;flex:1">'
-    + '<div class="campaign-name">' + escapeHtml(c.campaignName) + ' ' + typeBadge(c.campaignType) + '</div>'
+    + '<div class="campaign-name">' + escapeHtml(c.campaignName) + ' ' + typeBadge(c.campaignType) + ' <span class="campaign-task-badge" data-campaign-id="' + c.campaignId + '" style="display:none;font-size:11px;color:var(--text2);font-weight:500;font-family:var(--mono);margin-left:6px"></span></div>'
     + '<div class="campaign-meta">' + c.productCount + ' rows ' + urgent + '</div>'
     + dismissPill
     + '</div>'
@@ -973,6 +1014,38 @@ async function populateFrictionBadges() {
   } catch(e) {
     // Non-fatal — badges just don't appear
   }
+  // Also populate per-campaign task badges (one fetch per visible campaign — small N)
+  populateCampaignTaskBadges();
+}
+
+// Show "📋 Active task — Day X · Rahul" badges on each campaign row in campaign view
+async function populateCampaignTaskBadges() {
+  const badges = document.querySelectorAll('.campaign-task-badge');
+  if (!badges.length) return;
+  const seen = {};
+  badges.forEach(function(span) {
+    const cid = span.getAttribute('data-campaign-id');
+    if (!cid || seen[cid]) return;
+    seen[cid] = true;
+    authedFetch('/api/google/tasks/by-campaign/' + cid).then(function(r){ return r.json(); }).then(function(j) {
+      const tasks = (j && j.tasks) || [];
+      if (!tasks.length) return;
+      // Pick the most-urgent task (Day 7 first, otherwise oldest)
+      tasks.sort(function(a, b){
+        if (a.atDay7 && !b.atDay7) return -1;
+        if (b.atDay7 && !a.atDay7) return 1;
+        return (b.daysOpen || 0) - (a.daysOpen || 0);
+      });
+      const top = tasks[0];
+      const colour = top.atDay7 ? 'var(--red)' : (top.daysOpen >= 4 ? 'var(--amber)' : 'var(--accent)');
+      const label = '📋 Day ' + (top.daysOpen || 0) + '/7 · ' + (top.agent_name || 'Unassigned') + (tasks.length > 1 ? ' · +' + (tasks.length - 1) + ' more' : '');
+      // All matching badges across the page (in case the same campaignId appears in two views)
+      document.querySelectorAll('.campaign-task-badge[data-campaign-id="' + cid + '"]').forEach(function(s){
+        s.innerHTML = '<span style="color:' + colour + '">' + label + '</span>';
+        s.style.display = 'inline';
+      });
+    }).catch(function(_){ /* non-fatal */ });
+  });
 }
 
 // ─── Cart-page friction (store-wide, dashboard top section) ─────────────
@@ -1120,7 +1193,237 @@ function renderCampaignsPage() {
   }
 }
 
-// ─── Activity log ────────────────────────────────────────────────────────
+// ─── Google Tasks page ───────────────────────────────────────────────────
+// Mirrors Amazon's task workflow but for Google. Self-allocate, 7-day cycle,
+// Day 7 forces decision (carry_on / archive / stop).
+const TASK_FILTERS = { status: 'active', agent: 'all' };
+let LAST_TASKS_RESPONSE = null;
+
+function setTaskFilter(kind, value, btn) {
+  TASK_FILTERS[kind] = value;
+  document.querySelectorAll('.task-filter[data-filter-' + kind + ']').forEach(function(b){ b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  loadGoogleTasks();
+}
+
+async function loadGoogleTasks() {
+  const listDiv = document.getElementById('tasks-list');
+  const workloadDiv = document.getElementById('tasks-workload');
+  if (!listDiv) return;
+  listDiv.innerHTML = '<div class="empty-state">Loading…</div>';
+
+  try {
+    const params = new URLSearchParams();
+    if (TASK_FILTERS.status) params.set('status', TASK_FILTERS.status);
+    if (TASK_FILTERS.agent) params.set('agent', TASK_FILTERS.agent);
+    const r = await authedFetch('/api/google/tasks?' + params.toString());
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed to load tasks');
+    LAST_TASKS_RESPONSE = j;
+
+    // Workload summary
+    const summary = j.summary || { byAgent: {}, totals: {} };
+    const totals = summary.totals || {};
+    workloadDiv.innerHTML = (
+      '<div class="metric-card" style="padding:14px 16px"><div class="metric-label">Active</div><div class="metric-value" style="font-size:24px">' + (totals.active || 0) + '</div></div>'
+      + '<div class="metric-card alert" style="padding:14px 16px"><div class="metric-label">At Day 7 — needs decision</div><div class="metric-value" style="font-size:24px">' + (totals.day7 || 0) + '</div></div>'
+      + '<div class="metric-card" style="padding:14px 16px"><div class="metric-label">Unassigned</div><div class="metric-value" style="font-size:24px">' + (totals.unassigned || 0) + '</div></div>'
+      + Object.keys(summary.byAgent || {}).filter(function(a){ return a !== 'Unassigned'; }).map(function(a) {
+        const b = summary.byAgent[a];
+        const total = (b.open || 0) + (b.in_progress || 0) + (b.discussion || 0) + (b.day7 || 0);
+        const day7Tag = (b.day7 > 0) ? ' · <span style="color:var(--red);font-weight:700">' + b.day7 + ' at D7</span>' : '';
+        return '<div class="metric-card" style="padding:14px 16px"><div class="metric-label">' + escapeHtml(a) + '</div><div class="metric-value" style="font-size:24px">' + total + '</div><div class="metric-sub" style="font-size:11px">' + (b.open||0) + ' open · ' + (b.in_progress||0) + ' wip · ' + (b.discussion||0) + ' disc' + day7Tag + '</div></div>';
+      }).join('')
+    );
+
+    // Update sidebar nav badge with active count
+    const nb = document.getElementById('nb-tasks');
+    if (nb) {
+      if (totals.active > 0) { nb.style.display = 'inline-block'; nb.textContent = totals.active; } else { nb.style.display = 'none'; }
+    }
+
+    const tasks = j.tasks || [];
+    if (!tasks.length) {
+      listDiv.innerHTML = '<div class="empty-state">No tasks match the current filter.</div>';
+      return;
+    }
+
+    listDiv.innerHTML = tasks.map(taskRow).join('');
+  } catch (e) {
+    listDiv.innerHTML = '<div class="empty-state" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function taskRow(t) {
+  const days = t.daysOpen != null ? t.daysOpen : 0;
+  const dayBadgeColour = t.atDay7 ? 'var(--red)' : (t.atDay4 ? 'var(--amber)' : 'var(--text3)');
+  const isProductTask = t.problem_type && t.problem_type.indexOf('product_') === 0;
+
+  const problemLabel = ({
+    no_activity: 'No activity', no_revenue: 'No revenue', high_acos: 'High ACOS',
+    product_no_revenue: 'Product: no revenue', product_high_acos: 'Product: high ACOS',
+    out_of_budget: 'Out of budget', budget_low: 'Low budget'
+  })[t.problem_type] || t.problem_type || 'Issue';
+
+  const statusPill = (function(){
+    const s = t.status || 'open';
+    const colour = s === 'in_progress' ? 'var(--accent)' : s === 'discussion' ? 'var(--amber)' : s === 'complete' ? 'var(--green)' : s === 'archived' ? 'var(--text3)' : s === 'dismissed' ? 'var(--text3)' : 'var(--text2)';
+    return '<span style="background:' + colour + '15;color:' + colour + ';padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase">' + escapeHtml(s) + '</span>';
+  })();
+
+  const agentDisplay = t.agent_name === 'Unassigned'
+    ? '<span style="color:var(--text3);font-style:italic">Unassigned</span>'
+    : '<span style="font-weight:600">' + escapeHtml(t.agent_name || '') + '</span>';
+
+  // Action buttons depending on state
+  let actionsHtml = '';
+  if (t.atDay7 && (t.status !== 'archived' && t.status !== 'complete')) {
+    actionsHtml = '<button class="btn btn-primary" onclick="openDay7Decision(' + t.id + ')" style="font-size:11px;padding:5px 12px">📋 Make Day 7 decision</button>';
+  } else if (t.agent_name === 'Unassigned') {
+    actionsHtml = '<button class="btn btn-primary" onclick="takeTask(' + t.id + ')" style="font-size:11px;padding:5px 12px">✋ Take it</button>';
+  } else if (t.status === 'open' || t.status === 'in_progress') {
+    actionsHtml = '<button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 12px">⚒ Working</button>'
+      + ' <button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'discussion\')" style="font-size:11px;padding:5px 12px">💬 Discuss</button>'
+      + ' <button class="btn btn-ghost" onclick="dismissTask(' + t.id + ')" style="font-size:11px;padding:5px 12px;color:var(--red)">✕ Dismiss</button>';
+  } else if (t.status === 'discussion') {
+    actionsHtml = '<button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 12px">⚒ Back to working</button>'
+      + ' <button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'complete\')" style="font-size:11px;padding:5px 12px;color:var(--green)">✓ Complete</button>';
+  }
+
+  const baseline = t.baseline_spend > 0 || t.baseline_sales > 0
+    ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;font-family:var(--mono)">Baseline: spent £' + (t.baseline_spend || 0).toFixed(2) + ' · sold £' + (t.baseline_sales || 0).toFixed(2) + (t.baseline_acos > 0 ? ' · ACOS ' + Math.round(t.baseline_acos) + '%' : '') + '</div>'
+    : '';
+
+  const dismissedNote = t.dismissed_reason
+    ? '<div style="font-size:12px;color:var(--text3);margin-top:6px;padding:6px 10px;background:var(--bg2);border-radius:4px"><strong>Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'
+    : '';
+  const day7Note = t.day7_note
+    ? '<div style="font-size:12px;color:var(--text3);margin-top:6px;padding:6px 10px;background:var(--bg2);border-radius:4px"><strong>Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'
+    : '';
+
+  return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">'
+    + '<div style="flex:1;min-width:0">'
+      + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">'
+        + statusPill
+        + '<span style="font-size:11px;color:' + dayBadgeColour + ';font-weight:700;font-family:var(--mono)">Day ' + days + ' / 7</span>'
+        + (isProductTask ? '<span style="font-size:10px;background:var(--accent)15;color:var(--accent);padding:2px 6px;border-radius:3px;font-weight:700">PRODUCT</span>' : '<span style="font-size:10px;background:var(--text3)15;color:var(--text3);padding:2px 6px;border-radius:3px;font-weight:700">CAMPAIGN</span>')
+        + '<span style="font-size:11px;color:var(--text3)">' + escapeHtml(problemLabel) + '</span>'
+      + '</div>'
+      + '<div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:2px">' + escapeHtml(t.campaign_name || '(unnamed campaign)') + '</div>'
+      + (t.product_title ? '<div style="font-size:12px;color:var(--text2);margin-bottom:2px">↳ ' + escapeHtml(t.product_title) + '</div>' : '')
+      + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(t.problem_detail || '') + '</div>'
+      + baseline
+      + dismissedNote
+      + day7Note
+      + (t.agent_notes ? '<div style="font-size:12px;color:var(--text2);margin-top:6px;padding:6px 10px;background:var(--bg2);border-radius:4px"><strong>Notes:</strong> ' + escapeHtml(t.agent_notes) + '</div>' : '')
+    + '</div>'
+    + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:140px">'
+      + '<div style="font-size:11px;color:var(--text3)">Assigned to</div>'
+      + '<div style="font-size:13px">' + agentDisplay + '</div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-top:4px">' + actionsHtml + '</div>'
+    + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+async function takeTask(id) {
+  // Determine the current user (Rahul or Anuj). Easiest: check global window.currentUser if set,
+  // otherwise prompt.
+  let agent = (window.currentUser && window.currentUser.name) || '';
+  if (agent !== 'Rahul' && agent !== 'Anuj') {
+    agent = prompt('Type your name to claim this task (Rahul or Anuj):', '');
+    if (!agent) return;
+    agent = agent.trim();
+    if (agent.toLowerCase() === 'rahul') agent = 'Rahul';
+    else if (agent.toLowerCase() === 'anuj') agent = 'Anuj';
+    else { alert('Only Rahul or Anuj can take tasks.'); return; }
+  }
+  try {
+    const r = await authedFetch('/api/google/tasks/' + id + '/take', { method: 'POST', body: JSON.stringify({ agent: agent }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTasks();
+  } catch (e) {
+    alert('Could not take task: ' + e.message);
+  }
+}
+
+async function setTaskStatus(id, status) {
+  let notes = '';
+  if (status === 'discussion') {
+    notes = prompt('Optional note for discussion (what should we discuss?):', '') || '';
+  } else if (status === 'complete') {
+    notes = prompt('Note about completion (what was fixed?):', '') || '';
+  }
+  try {
+    const r = await authedFetch('/api/google/tasks/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: status, notes: notes }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTasks();
+  } catch (e) {
+    alert('Could not update task: ' + e.message);
+  }
+}
+
+async function dismissTask(id) {
+  const reason = prompt('Reason for dismissing this task (required):', '');
+  if (!reason || !reason.trim()) {
+    alert('A reason is required to dismiss.');
+    return;
+  }
+  try {
+    const r = await authedFetch('/api/google/tasks/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: 'dismissed', dismissedReason: reason.trim() }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTasks();
+  } catch (e) {
+    alert('Could not dismiss task: ' + e.message);
+  }
+}
+
+async function openDay7Decision(id) {
+  // Three-button decision modal. We use a simple confirm flow.
+  const decision = prompt('Day 7 decision — type one of: carry_on / archive / stop', 'carry_on');
+  if (!decision) return;
+  const allowed = ['carry_on', 'archive', 'stop'];
+  if (!allowed.includes(decision.trim())) {
+    alert('Must be: carry_on, archive, or stop');
+    return;
+  }
+  const note = prompt('Note explaining this decision (required):', '');
+  if (!note || !note.trim()) {
+    alert('A note is required.');
+    return;
+  }
+  try {
+    const r = await authedFetch('/api/google/tasks/' + id + '/day7-decision', { method: 'POST', body: JSON.stringify({ decision: decision.trim(), note: note.trim() }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTasks();
+  } catch (e) {
+    alert('Could not save decision: ' + e.message);
+  }
+}
+
+async function runGoogleTasksNow() {
+  if (!confirm('Run the daily Google task scheduler now? This creates new tasks for any flagged campaigns.')) return;
+  const btn = document.getElementById('tasks-run-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⚙ Running…'; }
+  try {
+    const r = await authedFetch('/api/google/tasks/run-now', { method: 'POST', body: '{}' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    alert('Created ' + (j.result && j.result.created || 0) + ' new tasks (out of ' + (j.result && j.result.candidates || 0) + ' candidates).');
+    loadGoogleTasks();
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚙ Run scheduler now'; }
+  }
+}
+
+
 async function loadActivity() {
   document.getElementById('activity-content').innerHTML = '<div class="empty-state">Loading...</div>';
   try {
@@ -1876,9 +2179,11 @@ function openCritiqueReader(productId) {
     : '';
 
   // Always show raw text section (helps when partial; useful even when complete)
-  const rawSection = j.rawText
+  // Only show the full raw AI output as a fallback when the structured response was partial.
+  // For complete analyses the structured fields above already cover everything — raw text adds noise.
+  const rawSection = (j.partial && j.rawText)
     ? '<div style="margin-top:32px;padding-top:24px;border-top:1px solid #e5e7eb">'
-        + '<div style="font-size:12px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px">Full raw AI output</div>'
+        + '<div style="font-size:12px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px">Full raw AI output (fallback — analysis was truncated)</div>'
         + '<div style="font-size:12px;color:#374151;line-height:1.6;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;max-height:400px;overflow:auto">' + escapeHtml(j.rawText) + '</div>'
       + '</div>'
     : '';

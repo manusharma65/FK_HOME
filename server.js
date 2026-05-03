@@ -843,6 +843,249 @@ async function createAlertTask(campaignId, campaignName, agentName, portfolio, p
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Google task auto-creation (mirrors Amazon's daily scheduler, with Google
+// data sources and a 25%-ACOS threshold). Called by the cron at 03:30 London.
+// Stores tasks in the same campaign_tasks table with department='google' so
+// the Amazon UI never sees them and the Google UI never sees Amazon ones.
+//
+// Two task scopes:
+//   • Campaign-level: when the WHOLE campaign is unhealthy
+//     (no activity OR overall high ACOS OR overall no-revenue-on-spend)
+//   • Product-level: when a single product within a campaign is the issue
+//
+// Target: ~10 tasks created per day. Sorted by wasted-spend score; if more
+// than 10 candidates, top 10 by score wins.
+// ─────────────────────────────────────────────────────────────────────────
+
+const GOOGLE_TASK_AGENTS = ['Rahul', 'Anuj'];        // self-allocate — task starts as 'Unassigned'
+const GOOGLE_TASK_ACOS_THRESHOLD = 25;               // % — below this is healthy
+const GOOGLE_TASK_NO_REV_SPEND_MIN = 20;             // £ — must have spent > this with £0 sales
+const GOOGLE_TASK_HIGH_ACOS_SPEND_MIN = 10;          // £ — high ACOS needs at least this much spend
+const GOOGLE_TASK_DAILY_TARGET = 10;
+
+function looksLikeGoogleAgent(agentName) {
+  return GOOGLE_TASK_AGENTS.includes(agentName) || agentName === 'Unassigned';
+}
+
+async function googleTaskAlreadyExistsToday(campaignId, problemType, productKey) {
+  if (!db) return true;  // fail-safe: assume exists, skip create
+  try {
+    // productKey is null for campaign-level tasks; otherwise a stable identifier per product
+    const r = await db.query(
+      "SELECT id FROM campaign_tasks " +
+      "WHERE department='google' AND campaign_id=$1 AND problem_type=$2 " +
+      "AND COALESCE(product_key, '')=$3 " +
+      "AND created_date=CURRENT_DATE",
+      [String(campaignId), problemType, productKey || '']
+    );
+    return r.rows.length > 0;
+  } catch (e) {
+    console.error('[GTASK] dup-check error: ' + e.message);
+    return true;  // skip on error
+  }
+}
+
+async function ensureGoogleTaskColumns() {
+  if (!db) return;
+  // product_key + baseline metrics are Google-specific extras. Use IF NOT EXISTS so safe to re-run.
+  try {
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_spend NUMERIC DEFAULT 0");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_sales NUMERIC DEFAULT 0");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_acos NUMERIC DEFAULT 0");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_impressions INTEGER DEFAULT 0");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision TEXT");        // 'carry_on' | 'archive' | 'stop' | null
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision_at TIMESTAMP");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_note TEXT");
+  } catch (e) {
+    console.error('[GTASK] column ensure error: ' + e.message);
+  }
+}
+
+function scoreGoogleTask(spend, sales, problemType) {
+  // Wasted spend = spend that didn't generate sales. Higher = more urgent.
+  if (sales <= 0) return Math.round(spend * 100) / 100;
+  const acos = (spend / sales) * 100;
+  const target = 25;
+  if (acos <= target) return 0;
+  // Excess spend over target ACOS = wasted
+  return Math.round((spend - sales * target / 100) * 100) / 100;
+}
+
+async function createGoogleTask(taskRow) {
+  if (!db) return false;
+  const exists = await googleTaskAlreadyExistsToday(taskRow.campaignId, taskRow.problemType, taskRow.productKey);
+  if (exists) return false;
+  try {
+    await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google',$9,$10,$11,$12,$13,$14)",
+      [
+        String(taskRow.campaignId),
+        taskRow.campaignName,
+        'Unassigned',
+        taskRow.campaignType || '',
+        taskRow.problemType,
+        taskRow.problemDetail,
+        Math.max(1, Math.round(taskRow.score)),
+        'auto',
+        taskRow.productKey || null,
+        taskRow.productTitle || null,
+        taskRow.baselineSpend || 0,
+        taskRow.baselineSales || 0,
+        taskRow.baselineAcos || 0,
+        taskRow.baselineImpressions || 0
+      ]
+    );
+    return true;
+  } catch (e) {
+    console.error('[GTASK] insert error: ' + e.message);
+    return false;
+  }
+}
+
+async function runGoogleTaskScheduler() {
+  if (!db) {
+    console.warn('[GTASK] no db — skipping run');
+    return { created: 0 };
+  }
+  await ensureGoogleTaskColumns();
+
+  const candidates = [];
+
+  // ─── Campaign-level scan ────────────────────────────────────────────────
+  // Aggregate per-campaign 7d totals from googleState
+  const campaignTotals = {};
+  (googleState.products || []).forEach(function(p) {
+    const cid = String(p.campaignId || '');
+    if (!cid) return;
+    if (!campaignTotals[cid]) {
+      campaignTotals[cid] = {
+        campaignId: cid,
+        campaignName: p.campaignName || '(unnamed)',
+        campaignType: p.campaignType || '',
+        spend: 0, sales: 0, conversions: 0, impressions: 0, clicks: 0
+      };
+    }
+    const t = campaignTotals[cid];
+    t.spend += p.spend || 0;
+    t.sales += p.sales || 0;
+    t.conversions += p.conversions || 0;
+    t.impressions += p.impressions || 0;
+    t.clicks += p.clicks || 0;
+  });
+
+  Object.values(campaignTotals).forEach(function(c) {
+    const acos = c.sales > 0 ? (c.spend / c.sales) * 100 : Infinity;
+
+    // Rule 1: No activity — campaign exists but 0 impressions in last 7d (likely paused or no budget)
+    if (c.impressions === 0 && c.spend === 0) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'no_activity',
+        problemDetail: 'Campaign has 0 impressions in the last 7 days. Likely paused, out of budget, or has no eligible products.',
+        score: 5,
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: 0, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 2: No revenue despite spend > £20
+    if (c.sales === 0 && c.spend >= GOOGLE_TASK_NO_REV_SPEND_MIN) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'no_revenue',
+        problemDetail: 'Spent £' + c.spend.toFixed(2) + ' over 7 days with £0 attributed sales (' + c.clicks + ' clicks, ' + c.conversions + ' conv).',
+        score: scoreGoogleTask(c.spend, 0, 'no_revenue'),
+        baselineSpend: c.spend, baselineSales: 0, baselineAcos: 0, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 3: High ACOS overall — campaign is selling but inefficiently
+    if (acos !== Infinity && acos > GOOGLE_TASK_ACOS_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'high_acos',
+        problemDetail: 'ACOS ' + acos.toFixed(0) + '% (target ' + GOOGLE_TASK_ACOS_THRESHOLD + '%). Spend £' + c.spend.toFixed(2) + ', sales £' + c.sales.toFixed(2) + ' over 7 days.',
+        score: scoreGoogleTask(c.spend, c.sales, 'high_acos'),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos, baselineImpressions: c.impressions
+      });
+    }
+  });
+
+  // ─── Product-level scan ────────────────────────────────────────────────
+  // For each product row in googleState, if the product itself is the issue
+  // (within an otherwise-OK campaign), flag at product level.
+  (googleState.products || []).forEach(function(p) {
+    const cid = String(p.campaignId || '');
+    const c = campaignTotals[cid];
+    if (!c) return;
+
+    const overallAcos = c.sales > 0 ? (c.spend / c.sales) * 100 : Infinity;
+    const productAcos = p.sales > 0 ? (p.spend / p.sales) * 100 : Infinity;
+    const productSpend = p.spend || 0;
+    const productSales = p.sales || 0;
+    const productKey = p.shopifyItemId || p.productId || (p.adGroupId ? cid + '_' + p.adGroupId : null);
+    const productTitle = p.name || p.productName || p.title || '(unknown product)';
+
+    if (!productKey) return;
+
+    // Skip if the WHOLE campaign already flagged — campaign-level task covers it
+    const campaignAlreadyFlagged = candidates.some(function(t){
+      return !t.productKey && t.campaignId === cid;
+    });
+    if (campaignAlreadyFlagged) return;
+
+    // Product-level rule 1: spent > £20 with £0 sales while campaign overall is fine
+    if (productSales === 0 && productSpend >= GOOGLE_TASK_NO_REV_SPEND_MIN) {
+      candidates.push({
+        campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'product_no_revenue',
+        problemDetail: '"' + productTitle + '" has spent £' + productSpend.toFixed(2) + ' with £0 sales in 7 days, while the rest of the campaign performs normally.',
+        score: scoreGoogleTask(productSpend, 0, 'product_no_revenue'),
+        productKey: String(productKey),
+        productTitle: productTitle,
+        baselineSpend: productSpend, baselineSales: 0, baselineAcos: 0, baselineImpressions: p.impressions || 0
+      });
+      return;
+    }
+
+    // Product-level rule 2: product ACOS > 25% AND noticeably worse than campaign average AND spend > £10
+    if (productAcos !== Infinity && productAcos > GOOGLE_TASK_ACOS_THRESHOLD
+        && productSpend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN
+        && (overallAcos === Infinity || productAcos > overallAcos * 1.5)) {
+      candidates.push({
+        campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'product_high_acos',
+        problemDetail: '"' + productTitle + '" ACOS ' + productAcos.toFixed(0) + '% (campaign avg ' + (overallAcos === Infinity ? 'N/A' : overallAcos.toFixed(0) + '%') + '). Spent £' + productSpend.toFixed(2) + ', sales £' + productSales.toFixed(2) + '.',
+        score: scoreGoogleTask(productSpend, productSales, 'product_high_acos'),
+        productKey: String(productKey),
+        productTitle: productTitle,
+        baselineSpend: productSpend, baselineSales: productSales, baselineAcos: productAcos, baselineImpressions: p.impressions || 0
+      });
+    }
+  });
+
+  // Sort by score descending, take top N
+  candidates.sort(function(a, b){ return (b.score || 0) - (a.score || 0); });
+  const target = Math.max(GOOGLE_TASK_DAILY_TARGET, candidates.length >= GOOGLE_TASK_DAILY_TARGET ? GOOGLE_TASK_DAILY_TARGET : candidates.length);
+  const top = candidates.slice(0, target);
+
+  let createdCount = 0;
+  for (const taskRow of top) {
+    const ok = await createGoogleTask(taskRow);
+    if (ok) createdCount++;
+  }
+
+  console.log('[GTASK] daily run: ' + candidates.length + ' candidates, ' + top.length + ' targeted, ' + createdCount + ' new tasks created');
+  return { created: createdCount, candidates: candidates.length };
+}
+
 async function runDailyTaskScheduler() {
   if (!db) { console.log('No DB - skipping task scheduler'); return; }
   console.log('Running daily task scheduler...');
@@ -1533,6 +1776,246 @@ app.post('/api/tasks/:id/archive', async function(req, res) {
 app.post('/api/tasks/run-now', async function(req, res) {
   runDailyTaskScheduler().catch(function(e){ console.error('Manual task run error: ' + e.message); });
   res.json({ success: true, message: 'Task scheduler triggered' });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Google task endpoints
+// All operate on department='google' rows in campaign_tasks. Mirror the
+// Amazon endpoints but namespaced under /api/google/tasks/*.
+// ─────────────────────────────────────────────────────────────────────────
+
+app.get('/api/google/tasks', async function(req, res) {
+  if (!db) return res.json({ tasks: [], summary: {} });
+  try {
+    // Filters: ?status=open|in_progress|discussion|complete|all  ?agent=Rahul|Anuj|Unassigned|all  ?day7=true
+    const statusFilter = req.query.status || 'active';   // 'active' = not complete/archived
+    const agentFilter = req.query.agent || 'all';
+
+    let where = "department='google'";
+    const params = [];
+    if (statusFilter === 'active') where += " AND status NOT IN ('complete','archived')";
+    else if (statusFilter && statusFilter !== 'all') {
+      params.push(statusFilter);
+      where += " AND status=$" + params.length;
+    }
+    if (agentFilter && agentFilter !== 'all') {
+      params.push(agentFilter);
+      where += " AND agent_name=$" + params.length;
+    }
+    const r = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, " +
+      "       days_persisted, total_wasted, score, status, agent_notes, dismissed_reason, paused_reason, " +
+      "       task_source, product_key, product_title, " +
+      "       baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      "       day7_decision, day7_decision_at, day7_note, " +
+      "       created_date, updated_at, resolved_at, first_action_at " +
+      "FROM campaign_tasks WHERE " + where + " ORDER BY score DESC, created_date DESC LIMIT 500",
+      params
+    );
+
+    // Compute days-since-creation + Day-7 flag inline
+    const now = Date.now();
+    const tasks = r.rows.map(function(row) {
+      const created = row.created_date ? new Date(row.created_date).getTime() : now;
+      const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
+      return Object.assign({}, row, {
+        daysOpen: daysOpen,
+        atDay7: daysOpen >= 7 && !row.day7_decision,
+        atDay4: daysOpen >= 4 && daysOpen < 7
+      });
+    });
+
+    // Workload summary
+    const summary = { byAgent: {}, totals: { active: 0, day7: 0, unassigned: 0, completed: 0 } };
+    GOOGLE_TASK_AGENTS.forEach(function(a){ summary.byAgent[a] = { open: 0, in_progress: 0, discussion: 0, day7: 0 }; });
+    summary.byAgent['Unassigned'] = { open: 0, in_progress: 0, discussion: 0, day7: 0 };
+
+    // Run a separate query for ALL tasks (not just filtered) to compute the workload summary
+    const allRes = await db.query(
+      "SELECT agent_name, status, created_date, day7_decision FROM campaign_tasks WHERE department='google'"
+    );
+    allRes.rows.forEach(function(row) {
+      const agent = row.agent_name || 'Unassigned';
+      const bucket = summary.byAgent[agent] || (summary.byAgent[agent] = { open: 0, in_progress: 0, discussion: 0, day7: 0 });
+      if (row.status === 'complete' || row.status === 'archived') {
+        summary.totals.completed++;
+        return;
+      }
+      summary.totals.active++;
+      if (agent === 'Unassigned') summary.totals.unassigned++;
+      const created = row.created_date ? new Date(row.created_date).getTime() : now;
+      const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
+      if (daysOpen >= 7 && !row.day7_decision) {
+        bucket.day7++;
+        summary.totals.day7++;
+      } else if (row.status === 'in_progress') {
+        bucket.in_progress++;
+      } else if (row.status === 'discussion') {
+        bucket.discussion++;
+      } else {
+        bucket.open++;
+      }
+    });
+
+    res.json({ tasks: tasks, summary: summary });
+  } catch (e) {
+    console.error('[GTASK] /api/google/tasks error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Take ownership of an unassigned task (or steal from another agent).
+// Used for the self-allocate workflow: agent clicks "Take it" on the task board.
+app.post('/api/google/tasks/:id/take', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const u = req.user || {};
+    const me = req.body.agent || u.name || u.username || '';
+    if (!me) return res.status(400).json({ error: 'Could not determine agent name' });
+    if (!GOOGLE_TASK_AGENTS.includes(me)) return res.status(400).json({ error: 'Only Rahul or Anuj can take tasks' });
+    await db.query(
+      "UPDATE campaign_tasks SET agent_name=$1, updated_at=NOW() WHERE id=$2 AND department='google'",
+      [me, req.params.id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,'take',$4,'google')",
+        ['', '', me, 'Took task #' + req.params.id]
+      );
+    } catch(_) { /* best effort */ }
+    res.json({ success: true, agent: me });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update Google task status. Mirrors /api/tasks/:id/status but enforces dept,
+// records dismiss reason requirement, and writes activity log with department='google'.
+app.post('/api/google/tasks/:id/status', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const status = req.body.status;
+  const notes = req.body.notes || '';
+  const dismissedReason = req.body.dismissedReason || '';
+
+  if (!status) return res.status(400).json({ error: 'status required' });
+  if (status === 'dismissed' && !dismissedReason.trim()) {
+    return res.status(400).json({ error: 'A reason is required to dismiss a task.' });
+  }
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found (or not a Google task)' });
+    const task = taskRes.rows[0];
+    const before = task.status;
+
+    let q, p;
+    if (status === 'dismissed') {
+      q = "UPDATE campaign_tasks SET status='dismissed', agent_notes=$1, dismissed_reason=$2, updated_at=NOW(), resolved_at=NOW() WHERE id=$3";
+      p = [notes, dismissedReason, id];
+    } else if (status === 'in_progress') {
+      q = "UPDATE campaign_tasks SET status='in_progress', agent_notes=$1, updated_at=NOW(), first_action_at=COALESCE(first_action_at, NOW()) WHERE id=$2";
+      p = [notes, id];
+    } else if (status === 'discussion') {
+      q = "UPDATE campaign_tasks SET status='discussion', agent_notes=$1, updated_at=NOW() WHERE id=$2";
+      p = [notes, id];
+    } else if (status === 'complete') {
+      q = "UPDATE campaign_tasks SET status='complete', agent_notes=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2";
+      p = [notes, id];
+    } else {
+      q = "UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW() WHERE id=$3";
+      p = [status, notes, id];
+    }
+    await db.query(q, p);
+
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google')",
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', status, notes, before, status, parseInt(id)]
+      );
+    } catch (_) { /* best effort */ }
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Day 7 decision endpoint — mandatory carry_on / archive / stop with note
+app.post('/api/google/tasks/:id/day7-decision', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const decision = req.body.decision;
+  const note = req.body.note || '';
+
+  const allowed = ['carry_on', 'archive', 'stop'];
+  if (!allowed.includes(decision)) return res.status(400).json({ error: 'decision must be carry_on, archive, or stop' });
+  if (!note.trim()) return res.status(400).json({ error: 'A note explaining the decision is required.' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+
+    // Apply the decision
+    let newStatus = task.status;
+    if (decision === 'archive') newStatus = 'archived';
+    if (decision === 'stop') newStatus = 'complete';   // marked done; manager pauses in Google Ads manually
+    // 'carry_on' keeps current status, just records decision
+
+    await db.query(
+      "UPDATE campaign_tasks SET day7_decision=$1, day7_decision_at=NOW(), day7_note=$2, " +
+      "status=$3, updated_at=NOW(), " +
+      "resolved_at=CASE WHEN $1 IN ('archive','stop') THEN NOW() ELSE resolved_at END " +
+      "WHERE id=$4",
+      [decision, note, newStatus, id]
+    );
+
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', 'day7_' + decision, note]
+      );
+    } catch(_) { /* best effort */ }
+
+    res.json({ success: true, decision: decision, newStatus: newStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual trigger — POST to force the daily Google task scheduler to run NOW
+app.post('/api/google/tasks/run-now', async function(req, res) {
+  try {
+    const result = await runGoogleTaskScheduler();
+    res.json({ success: true, result: result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lookup: which Google tasks are open for a given campaign? Used by the campaign
+// view to show the "📋 Active task — Day 3 of 7" badge inline.
+app.get('/api/google/tasks/by-campaign/:campaignId', async function(req, res) {
+  if (!db) return res.json({ tasks: [] });
+  try {
+    const r = await db.query(
+      "SELECT id, agent_name, status, problem_type, product_title, created_date, day7_decision " +
+      "FROM campaign_tasks WHERE department='google' AND campaign_id=$1 AND status NOT IN ('complete','archived','dismissed') " +
+      "ORDER BY created_date DESC",
+      [String(req.params.campaignId)]
+    );
+    const now = Date.now();
+    res.json({
+      tasks: r.rows.map(function(row) {
+        const created = row.created_date ? new Date(row.created_date).getTime() : now;
+        const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
+        return Object.assign({}, row, { daysOpen: daysOpen, atDay7: daysOpen >= 7 && !row.day7_decision });
+      })
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/admin/snapshot', async function(req, res) {
@@ -3099,6 +3582,9 @@ cron.schedule('0 8,13,18 * * *', function() {
 cron.schedule('0 8 * * *', function() {
   console.log('Running scheduled daily tasks at 8am UK time');
   runDailyTaskScheduler().catch(function(e){ console.error('Scheduled task error: ' + e.message); });
+  // Google task auto-creation runs alongside Amazon's at 8am — independent code path,
+  // separate department, won't interfere with each other
+  runGoogleTaskScheduler().catch(function(e){ console.error('[GTASK] scheduled run error: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 cron.schedule('0 0 * * *', function() {
