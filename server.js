@@ -3856,6 +3856,12 @@ async function getCachedCritique(productId) {
       console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h)');
       return null;
     }
+    // Detect partial saves (truncated AI response): friction empty + diagnosis hints partial,
+    // OR diagnosis says "(AI returned non-JSON" / "(Partial".
+    const diagText = row.diagnosis || '';
+    const partialFlag = (diagText.indexOf('(Partial') >= 0)
+      || (diagText.indexOf('non-JSON') >= 0)
+      || (!row.friction_json || (Array.isArray(row.friction_json) && row.friction_json.length === 0));
     return {
       productId: row.product_id,
       productTitle: row.product_title,
@@ -3867,6 +3873,8 @@ async function getCachedCritique(productId) {
       funnelSummary: row.funnel_summary,
       adSummary: row.ad_summary,
       pageSummary: row.page_summary,
+      rawText: row.raw_ai_text || '',
+      partial: !!partialFlag,
       score: parseFloat(row.score) || 0,
       cached: true,
       ageHours: Math.round(ageHours * 10) / 10
@@ -3875,6 +3883,63 @@ async function getCachedCritique(productId) {
     console.error('[LPC] cache read error productId=' + productId + ': ' + e.message);
     return null;
   }
+}
+
+// When max_tokens truncates Claude's response mid-JSON, JSON.parse fails. This helper
+// attempts to extract individual fields with regex so we can salvage what's there
+// rather than showing the agent nothing useful. Marks the result as partial so the
+// front-end can prompt for re-run with more tokens.
+function recoverPartialCritiqueJson(rawText) {
+  const result = {
+    diagnosis: '',
+    funnelDiagnosis: '',
+    frictionPoints: [],
+    actions: [],
+    adVsPageCoherence: '',
+    trustSignals: '',
+    summary: ''
+  };
+
+  // diagnosis — single-line string field
+  const diagMatch = rawText.match(/"diagnosis"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (diagMatch) result.diagnosis = diagMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const funnelMatch = rawText.match(/"funnelDiagnosis"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (funnelMatch) result.funnelDiagnosis = funnelMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const adCoMatch = rawText.match(/"adVsPageCoherence"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (adCoMatch) result.adVsPageCoherence = adCoMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const trustMatch = rawText.match(/"trustSignals"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (trustMatch) result.trustSignals = trustMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sumMatch) result.summary = sumMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  // frictionPoints — array of {priority, issue, evidence, category} objects.
+  // Try to find each complete object even if the whole array isn't complete.
+  const friMatches = rawText.match(/\{\s*"priority"\s*:\s*"P[1-3]"[^{}]*?\}/g);
+  if (friMatches) {
+    friMatches.forEach(function(s){
+      try {
+        const obj = JSON.parse(s);
+        if (obj.priority && obj.issue) result.frictionPoints.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+
+  // actions — array of {rank, action, expectedImpact, effort}
+  const actMatches = rawText.match(/\{\s*"rank"\s*:\s*\d+[^{}]*?\}/g);
+  if (actMatches) {
+    actMatches.forEach(function(s){
+      try {
+        const obj = JSON.parse(s);
+        if (obj.rank && obj.action) result.actions.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+
+  return result;
 }
 
 async function runCritiqueForProduct(shopifyProduct, score) {
@@ -3892,7 +3957,7 @@ async function runCritiqueForProduct(shopifyProduct, score) {
 
   const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
     model: LPC_MODEL,
-    max_tokens: 3000,
+    max_tokens: 4500,
     messages: [{ role: 'user', content: prompt }]
   }, {
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
@@ -3904,19 +3969,16 @@ async function runCritiqueForProduct(shopifyProduct, score) {
   const cleaned = rawText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
 
   let parsed;
+  let partial = false;
   try {
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    // If parse fails, store the raw text so the agent can still see it
-    parsed = {
-      diagnosis: '(AI returned non-JSON — see raw text)',
-      funnelDiagnosis: '',
-      frictionPoints: [],
-      actions: [],
-      adVsPageCoherence: '',
-      trustSignals: '',
-      summary: cleaned.substring(0, 1500)
-    };
+    // JSON parse failed — likely truncated mid-response. Try to recover what we can
+    // by manually extracting individual top-level fields with regex. Mark `partial:true`
+    // so the front-end can show a "complete this" hint.
+    console.warn('[LPC] JSON parse failed, attempting partial recovery: ' + e.message);
+    partial = true;
+    parsed = recoverPartialCritiqueJson(cleaned);
   }
 
   const result = {
@@ -3924,12 +3986,14 @@ async function runCritiqueForProduct(shopifyProduct, score) {
     productTitle: shopifyProduct.title,
     productUrl: dossier.product.url,
     generatedAt: new Date(),
-    diagnosis: parsed.diagnosis || '',
+    diagnosis: parsed.diagnosis || (partial ? '(Partial — see full text below)' : ''),
     friction: parsed.frictionPoints || [],
     actions: parsed.actions || [],
     funnelSummary: { funnel: dossier.funnel, funnelDiagnosis: parsed.funnelDiagnosis || '' },
     adSummary: { ads: dossier.ads, searchKeywords: dossier.searchKeywords, adVsPageCoherence: parsed.adVsPageCoherence || '' },
     pageSummary: { signals: pageSummary.signals, pageTitle: pageSummary.pageTitle, metaDescription: pageSummary.metaDescription, trustSignals: parsed.trustSignals || '', summary: parsed.summary || '' },
+    rawText: rawText,
+    partial: partial,
     score: score || 0,
     cached: false
   };

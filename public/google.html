@@ -1735,12 +1735,19 @@ async function loadCachedProductCritique(productId) {
   }
 }
 
+// In-memory store for the latest critique per product. Used by the reader popup
+// so it can render without re-fetching. Cleared only on full page reload.
+window.lastCritiqueByProductId = window.lastCritiqueByProductId || {};
+
 function renderCritiqueInlineInProductModal(j, productId) {
   const buttonsDiv = document.getElementById('lpc-buttons-product');
   const contentDiv = document.getElementById('lpc-content-product');
   const metaDiv = document.getElementById('lpc-meta-product');
   const lockBadge = document.getElementById('lpc-lock-badge');
   if (!contentDiv) return;
+
+  // Stash for the reader popup to retrieve later without a network call
+  window.lastCritiqueByProductId[String(productId)] = j;
 
   const friction = (j.friction || []).map(function(f) {
     const colour = f.priority === 'P1' ? 'var(--red)' : f.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
@@ -1768,8 +1775,16 @@ function renderCritiqueInlineInProductModal(j, productId) {
   const trustSignals = j.pageSummary && j.pageSummary.trustSignals ? j.pageSummary.trustSignals : '';
   const summary = j.pageSummary && j.pageSummary.summary ? j.pageSummary.summary : '';
 
+  // Partial-output warning banner
+  const partialBanner = j.partial
+    ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-left:3px solid #ea580c;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:13px;color:#9a3412">'
+        + '<strong>⚠ Partial analysis:</strong> the AI output was truncated mid-response. Click <strong>📖 Open in reader</strong> to see the full raw text, or <strong>↻ Re-analyse</strong> for a complete result.'
+      + '</div>'
+    : '';
+
   contentDiv.innerHTML =
-    '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:12px 14px;border-radius:4px;margin-bottom:14px"><strong>Diagnosis:</strong> ' + escapeHtml(j.diagnosis || '(none)') + '</div>'
+    partialBanner
+    + '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:12px 14px;border-radius:4px;margin-bottom:14px"><strong>Diagnosis:</strong> ' + escapeHtml(j.diagnosis || '(none)') + '</div>'
     + (summary ? '<div style="padding:12px 14px;background:var(--bg);border-radius:6px;margin-bottom:14px;font-size:13px;line-height:1.6;color:var(--text2)">' + escapeHtml(summary) + '</div>' : '')
     + (funnelDiag ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Funnel diagnosis</div>'
         + '<div style="font-size:13px;color:var(--text);line-height:1.6;margin-bottom:14px">' + escapeHtml(funnelDiag) + '</div>' : '')
@@ -1791,21 +1806,141 @@ function renderCritiqueInlineInProductModal(j, productId) {
   }
 
   if (buttonsDiv) {
-    let btns = '';
+    // Always show "Open in reader" button when there's an analysis to read
+    let btns = '<button class="btn btn-primary" onclick="openCritiqueReader(\'' + productId + '\')">📖 Open in reader</button>';
     if (!locked) {
-      // Manager (or no cache yet) — full Re-analyse button
-      btns = '<button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\')">↻ Re-analyse</button>';
+      btns += ' <button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\')">↻ Re-analyse</button>';
     } else {
-      // Agent inside lock window — show disabled-style explanation
-      btns = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">🔒 Manager can re-analyse</span>';
+      btns += ' <span style="font-size:11px;color:var(--text3);font-family:var(--mono);align-self:center">🔒 Manager can re-analyse</span>';
     }
     if (j.productUrl) btns += ' <a class="btn btn-ghost" href="' + j.productUrl + '" target="_blank">View live page ↗</a>';
     buttonsDiv.innerHTML = btns;
   }
   if (metaDiv) {
     const ageNote = j.cached ? ('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago') : 'Fresh analysis';
-    metaDiv.textContent = ageNote + ' · Opus 4.7' + (locked ? ' · Locked for 24h' : '');
+    metaDiv.textContent = ageNote + ' · Opus 4.7' + (locked ? ' · Locked for 24h' : '') + (j.partial ? ' · ⚠ Partial' : '');
   }
+}
+
+// ─── Critique reader popup ───────────────────────────────────────────────
+// Full-screen overlay that renders the critique with proper typography and
+// includes a raw-text fallback for partial responses. Reads from the in-memory
+// stash populated by renderCritiqueInlineInProductModal.
+function openCritiqueReader(productId) {
+  const j = window.lastCritiqueByProductId[String(productId)];
+  if (!j) {
+    alert('No analysis loaded for this product. Open the product card and run Landing page critique first.');
+    return;
+  }
+
+  // Build a separate full-screen overlay so it sits ABOVE the product modal.
+  // Cleanly remove any prior reader before adding a new one.
+  const existing = document.getElementById('critique-reader-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'critique-reader-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:40px 20px';
+
+  const friction = (j.friction || []).map(function(f) {
+    const colour = f.priority === 'P1' ? '#dc2626' : f.priority === 'P2' ? '#ea580c' : '#6b7280';
+    return '<div style="padding:14px 16px;background:#f9fafb;border-left:4px solid ' + colour + ';border-radius:6px;margin-bottom:12px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:6px">'
+      + '<div style="font-size:15px;font-weight:700;color:#111"><span style="color:' + colour + ';margin-right:8px">' + escapeHtml(f.priority || '') + '</span>' + escapeHtml(f.issue || '') + '</div>'
+      + (f.category ? '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap;margin-top:3px">' + escapeHtml(f.category) + '</div>' : '')
+      + '</div>'
+      + '<div style="font-size:14px;color:#374151;line-height:1.6">' + escapeHtml(f.evidence || '') + '</div>'
+      + '</div>';
+  }).join('');
+
+  const actions = (j.actions || []).map(function(a) {
+    return '<div style="padding:14px 16px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:12px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:6px">'
+      + '<div style="font-size:15px;font-weight:700;color:#111"><span style="color:#2563eb;margin-right:8px">#' + (a.rank || '?') + '</span>' + escapeHtml(a.action || '') + '</div>'
+      + (a.effort ? '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap;margin-top:3px">Effort: ' + escapeHtml(a.effort) + '</div>' : '')
+      + '</div>'
+      + (a.expectedImpact ? '<div style="font-size:14px;color:#374151;line-height:1.6"><strong>Expected impact:</strong> ' + escapeHtml(a.expectedImpact) + '</div>' : '')
+      + '</div>';
+  }).join('');
+
+  const funnelDiag = j.funnelSummary && j.funnelSummary.funnelDiagnosis ? j.funnelSummary.funnelDiagnosis : '';
+  const adCoherence = j.adSummary && j.adSummary.adVsPageCoherence ? j.adSummary.adVsPageCoherence : '';
+  const trustSignals = j.pageSummary && j.pageSummary.trustSignals ? j.pageSummary.trustSignals : '';
+  const summary = j.pageSummary && j.pageSummary.summary ? j.pageSummary.summary : '';
+  const ageNote = j.cached ? ('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago') : 'Fresh analysis';
+
+  const partialBanner = j.partial
+    ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-left:4px solid #ea580c;padding:14px 16px;border-radius:8px;margin-bottom:20px;color:#9a3412;font-size:14px;line-height:1.5">'
+        + '<strong>⚠ This analysis was truncated.</strong> The structured fields below are partial. The full raw text from the AI is at the bottom of this view.'
+      + '</div>'
+    : '';
+
+  // Always show raw text section (helps when partial; useful even when complete)
+  const rawSection = j.rawText
+    ? '<div style="margin-top:32px;padding-top:24px;border-top:1px solid #e5e7eb">'
+        + '<div style="font-size:12px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px">Full raw AI output</div>'
+        + '<div style="font-size:12px;color:#374151;line-height:1.6;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;max-height:400px;overflow:auto">' + escapeHtml(j.rawText) + '</div>'
+      + '</div>'
+    : '';
+
+  overlay.innerHTML =
+    '<div id="critique-reader-modal" style="background:white;width:100%;max-width:900px;border-radius:12px;padding:32px 36px;box-shadow:0 25px 50px rgba(0,0,0,0.3);position:relative">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;gap:14px">'
+        + '<div>'
+          + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:4px">Landing page critique</div>'
+          + '<div style="font-size:22px;font-weight:700;color:#111;line-height:1.3">' + escapeHtml(j.productTitle || '') + '</div>'
+          + '<div style="font-size:12px;color:#6b7280;margin-top:4px">' + escapeHtml(ageNote) + ' · Opus 4.7' + (j.partial ? ' · ⚠ Partial' : '') + '</div>'
+        + '</div>'
+        + '<button onclick="closeCritiqueReader()" style="background:none;border:1px solid #e5e7eb;border-radius:8px;padding:6px 12px;cursor:pointer;color:#374151;font-size:13px;font-weight:500">Close ✕</button>'
+      + '</div>'
+      + partialBanner
+      + (j.diagnosis
+          ? '<div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:14px 16px;border-radius:8px;margin-bottom:20px;font-size:15px;line-height:1.6;color:#111"><strong>Diagnosis:</strong> ' + escapeHtml(j.diagnosis) + '</div>'
+          : '')
+      + (summary ? '<div style="padding:14px 16px;background:#f9fafb;border-radius:8px;margin-bottom:20px;font-size:14px;line-height:1.7;color:#374151">' + escapeHtml(summary) + '</div>' : '')
+      + (funnelDiag
+          ? '<div style="font-size:13px;font-weight:700;color:#111;text-transform:uppercase;letter-spacing:0.05em;margin:20px 0 8px">Funnel diagnosis</div>'
+            + '<div style="font-size:14px;color:#374151;line-height:1.7;margin-bottom:18px">' + escapeHtml(funnelDiag) + '</div>'
+          : '')
+      + (friction
+          ? '<div style="font-size:13px;font-weight:700;color:#111;text-transform:uppercase;letter-spacing:0.05em;margin:20px 0 8px">Friction points</div>' + friction
+          : '')
+      + (actions
+          ? '<div style="font-size:13px;font-weight:700;color:#111;text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 8px">Specific actions for this week</div>' + actions
+          : '')
+      + (adCoherence
+          ? '<div style="font-size:13px;font-weight:700;color:#111;text-transform:uppercase;letter-spacing:0.05em;margin:20px 0 8px">Ad-vs-page coherence</div>'
+            + '<div style="font-size:14px;color:#374151;line-height:1.7;margin-bottom:18px">' + escapeHtml(adCoherence) + '</div>'
+          : '')
+      + (trustSignals
+          ? '<div style="font-size:13px;font-weight:700;color:#111;text-transform:uppercase;letter-spacing:0.05em;margin:20px 0 8px">Trust signals</div>'
+            + '<div style="font-size:14px;color:#374151;line-height:1.7">' + escapeHtml(trustSignals) + '</div>'
+          : '')
+      + rawSection
+    + '</div>';
+
+  // Click outside modal to close
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) closeCritiqueReader();
+  });
+
+  // Esc to close
+  document.addEventListener('keydown', critiqueReaderEscHandler);
+
+  document.body.appendChild(overlay);
+  // Lock background scroll while reader is open
+  document.body.style.overflow = 'hidden';
+}
+
+function critiqueReaderEscHandler(e) {
+  if (e.key === 'Escape') closeCritiqueReader();
+}
+
+function closeCritiqueReader() {
+  const overlay = document.getElementById('critique-reader-overlay');
+  if (overlay) overlay.remove();
+  document.removeEventListener('keydown', critiqueReaderEscHandler);
+  document.body.style.overflow = '';
 }
 
 // ─── Dismiss / Archive flow ──────────────────────────────────────────────
