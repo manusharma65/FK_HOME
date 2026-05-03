@@ -1056,11 +1056,12 @@ function closeAi() { /* no-op: AI is now inline inside the big modal */ }
 
 // ─── Diagnostics — manager-only debug for refund + GA4 matching issues ───
 async function openDiagnostics() {
-  showBigModal('Diagnostics — refund + GA4 sample',
-    '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">Used to debug data discrepancies. Click each to fetch a live sample. Copy the JSON output and paste back to share with whoever is fixing the issue.</div>'
+  showBigModal('Diagnostics — data discrepancy debug',
+    '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">Used to debug data discrepancies. Click a button to fetch live data. Copy the JSON output and paste back to share with whoever is fixing the issue.</div>'
     + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">'
-    + '<button class="btn btn-primary" onclick="loadDiagSample(\'refund\')">Fetch refund sample</button>'
-    + '<button class="btn btn-primary" onclick="loadDiagSample(\'ga4\')">Fetch GA4 itemName sample</button>'
+    + '<button class="btn btn-primary" onclick="loadDiagSample(\'refund-audit\')">Refund audit (last 14 days, ALL refunds)</button>'
+    + '<button class="btn btn-ghost" onclick="loadDiagSample(\'refund-sample\')">Refund sample (one order)</button>'
+    + '<button class="btn btn-primary" onclick="loadDiagSample(\'ga4\')">GA4 itemName sample</button>'
     + '<button class="btn btn-ghost" onclick="navigator.clipboard.writeText(document.getElementById(\'diag-output\').textContent || \'\')">Copy output</button>'
     + '</div>'
     + '<div style="font-size:12px;color:var(--text2);margin-bottom:6px">Output:</div>'
@@ -1070,8 +1071,13 @@ async function openDiagnostics() {
 async function loadDiagSample(which) {
   const out = document.getElementById('diag-output');
   if (!out) return;
-  const url = which === 'refund' ? '/api/google/debug/refund-sample' : '/api/google/debug/ga4-sample';
-  out.textContent = 'Fetching ' + which + ' sample…';
+  const urls = {
+    'refund-audit': '/api/google/debug/refund-audit',
+    'refund-sample': '/api/google/debug/refund-sample',
+    'ga4': '/api/google/debug/ga4-sample'
+  };
+  const url = urls[which] || urls['refund-sample'];
+  out.textContent = 'Fetching ' + which + '…';
   try {
     const r = await authedFetch(url);
     const j = await r.json();

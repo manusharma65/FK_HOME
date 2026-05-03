@@ -2198,19 +2198,45 @@ async function fetchGa4ProductMetrics() {
       };
     });
 
-    // Build a Shopify title -> pagePath lookup table for matching item-scoped data
+    // Build a Shopify title -> pagePath lookup table for matching item-scoped data.
+    // GA4 truncates itemName at ~100 chars (confirmed from Bobby's data: titles cut
+    // mid-word with no trailing context). So we need TWO match strategies:
+    //   1. Exact match (lowercase + trim)
+    //   2. Prefix match — GA4 itemName is the START of the Shopify title
+    //      (require 30+ char agreement to avoid false positives)
     const titleToPath = {};
+    const lowerTitleList = []; // [{lowerTitle, path}] for prefix matching
     (shopifyState.products || []).forEach(function(p){
-      if (p.title && p.handle) titleToPath[p.title.toLowerCase().trim()] = '/products/' + p.handle;
+      if (p.title && p.handle) {
+        const lt = p.title.toLowerCase().trim();
+        titleToPath[lt] = '/products/' + p.handle;
+        lowerTitleList.push({ lowerTitle: lt, path: '/products/' + p.handle });
+      }
     });
+
+    function findShopifyPath(itemName) {
+      if (!itemName) return null;
+      const lower = itemName.toLowerCase().trim();
+      // Strategy 1: exact match
+      if (titleToPath[lower]) return titleToPath[lower];
+      // Strategy 2: prefix match — only meaningful if itemName is long enough.
+      // Require 30+ chars to avoid e.g. "Yoga Mat" matching the wrong product.
+      if (lower.length < 30) return null;
+      // Find the first Shopify product whose title starts with the GA4 itemName.
+      // GA4 truncates at ~100 chars so itemName <= shopifyTitle (in length).
+      const match = lowerTitleList.find(function(x){
+        return x.lowerTitle.indexOf(lower) === 0;
+      });
+      return match ? match.path : null;
+    }
 
     // Merge item-scoped data (primary).
     // Track which paths we successfully populated cart counts for, so the fallback
     // only fills gaps without overwriting good data.
     const cartFromItemScoped = new Set();
-    let matchedCount = 0, unmatchedCount = 0;
+    let matchedExactCount = 0, matchedPrefixCount = 0, unmatchedCount = 0;
     let totalUnmatchedCart = 0, totalUnmatchedCheckout = 0, totalUnmatchedPurchase = 0;
-    const unmatchedExamples = []; // Cap at 10 for log cleanliness (option B from chat)
+    const unmatchedExamples = []; // Cap at 10 for log cleanliness
 
     if (reportItemScoped && reportItemScoped.data && reportItemScoped.data.rows) {
       reportItemScoped.data.rows.forEach(function(row) {
@@ -2221,7 +2247,10 @@ async function fetchGa4ProductMetrics() {
         const chk  = parseInt(v[1] && v[1].value) || 0;
         const pur  = parseInt(v[2] && v[2].value) || 0;
 
-        const path = titleToPath[itemName.toLowerCase()];
+        const lower = itemName.toLowerCase().trim();
+        const isExact = !!titleToPath[lower];
+        const path = findShopifyPath(itemName);
+
         if (!path) {
           unmatchedCount++;
           totalUnmatchedCart += cart;
@@ -2233,7 +2262,7 @@ async function fetchGa4ProductMetrics() {
           return;
         }
 
-        matchedCount++;
+        if (isExact) matchedExactCount++; else matchedPrefixCount++;
         if (!metrics[path]) {
           metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
         }
@@ -2263,9 +2292,9 @@ async function fetchGa4ProductMetrics() {
       });
     }
 
-    // Diagnostic logging — option B from our chat: log up to 10 unmatched examples
+    // Diagnostic logging — option B: log up to 10 unmatched examples
     // so we can see at a glance how matching is performing without flooding logs.
-    console.log('GA4 itemName matching: ' + matchedCount + ' matched, ' + unmatchedCount + ' unmatched');
+    console.log('GA4 itemName matching: ' + matchedExactCount + ' exact + ' + matchedPrefixCount + ' prefix-matched + ' + unmatchedCount + ' unmatched');
     if (unmatchedCount > 0) {
       console.log('  unattributed totals: ' + totalUnmatchedCart + ' cart adds, ' + totalUnmatchedCheckout + ' checkouts, ' + totalUnmatchedPurchase + ' purchases');
       console.log('  examples (up to 10): ' + unmatchedExamples.join(' | '));
@@ -3431,6 +3460,144 @@ app.get('/api/google/debug/refund-sample', async function(req, res) {
           })
         };
       })
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Comprehensive refund audit — fetches all refunds issued in the last N days and
+// dumps every field we might possibly need to read. This is the source-of-truth
+// view: if Shopify Analytics shows £6.46 in Returns for Sunday and we don't,
+// the answer is in here somewhere. Defaults to last 14 days.
+app.get('/api/google/debug/refund-audit', async function(req, res) {
+  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  const store = process.env.SHOPIFY_STORE;
+  if (!token || !store) return res.status(500).json({ error: 'No Shopify credentials' });
+
+  const days = parseInt(req.query.days || '14', 10);
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    // Use updated_at_min to catch refunds on old orders
+    const orderRes = await axios.get('https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&updated_at_min=' + since, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const orders = orderRes.data.orders || [];
+
+    // Walk every refund and capture EVERY possible source of refund value
+    const refundsFlat = [];
+    let totalLineItemSubtotals = 0;
+    let totalAdjustmentRefundDiscrepancies = 0;
+    let totalAdjustmentShippingRefunds = 0;
+    let totalAdjustmentOther = 0;
+    let totalTransactionRefunds = 0;
+    const adjustmentKindsSeen = {};
+
+    orders.forEach(function(order) {
+      if (!(order.refunds || []).length) return;
+
+      (order.refunds || []).forEach(function(ref) {
+        // Sum all four possible refund-value sources for cross-check
+        const lineSubtotalSum = (ref.refund_line_items || []).reduce(function(s, rli){
+          return s + parseFloat(rli.subtotal || 0);
+        }, 0);
+
+        // order_adjustments by kind — refund_discrepancy, shipping_refund, other
+        const adjBuckets = { refund_discrepancy: 0, shipping_refund: 0, other: 0 };
+        (ref.order_adjustments || []).forEach(function(adj){
+          const kind = adj.kind || 'unknown';
+          adjustmentKindsSeen[kind] = (adjustmentKindsSeen[kind] || 0) + 1;
+          const amt = parseFloat(adj.amount || 0);
+          if (kind === 'refund_discrepancy') adjBuckets.refund_discrepancy += amt;
+          else if (kind === 'shipping_refund') adjBuckets.shipping_refund += amt;
+          else adjBuckets.other += amt;
+        });
+
+        // transactions of kind=refund (the actual money that left)
+        const txnRefundSum = (ref.transactions || []).filter(function(t){
+          return t.kind === 'refund' && t.status === 'success';
+        }).reduce(function(s, t){
+          return s + parseFloat(t.amount || 0);
+        }, 0);
+
+        totalLineItemSubtotals += lineSubtotalSum;
+        totalAdjustmentRefundDiscrepancies += adjBuckets.refund_discrepancy;
+        totalAdjustmentShippingRefunds += adjBuckets.shipping_refund;
+        totalAdjustmentOther += adjBuckets.other;
+        totalTransactionRefunds += txnRefundSum;
+
+        refundsFlat.push({
+          orderName: order.name,
+          orderId: order.id,
+          orderCreatedAt: order.created_at,
+          orderCancelledAt: order.cancelled_at,
+          orderFinancialStatus: order.financial_status,
+          refundCreatedAt: ref.created_at,
+          refundDateLondon: londonDateKey(new Date(ref.created_at)),
+          refundNote: ref.note,
+          // What we currently read (refund_line_items[].subtotal)
+          mySubtotalSum: Math.round(lineSubtotalSum * 100) / 100,
+          // Shipping refunds we currently miss
+          adjShippingRefundSum: Math.round(adjBuckets.shipping_refund * 100) / 100,
+          // Other adjustments
+          adjOtherSum: Math.round(adjBuckets.other * 100) / 100,
+          // Refund discrepancy (these cancel out so usually zero)
+          adjRefundDiscrepancySum: Math.round(adjBuckets.refund_discrepancy * 100) / 100,
+          // The actual money refunded via payment processor — true source of truth
+          txnRefundSum: Math.round(txnRefundSum * 100) / 100,
+          // Item count
+          refundedLineCount: (ref.refund_line_items || []).length,
+          adjustmentCount: (ref.order_adjustments || []).length
+        });
+      });
+    });
+
+    // Sort by refund date descending so most recent is first
+    refundsFlat.sort(function(a, b){ return new Date(b.refundCreatedAt) - new Date(a.refundCreatedAt); });
+
+    // Group by London date to compare against Shopify Analytics' "Returns" line
+    const byDate = {};
+    refundsFlat.forEach(function(r){
+      if (!byDate[r.refundDateLondon]) {
+        byDate[r.refundDateLondon] = { mySubtotalSum: 0, txnRefundSum: 0, adjShippingRefundSum: 0, adjOtherSum: 0, count: 0 };
+      }
+      byDate[r.refundDateLondon].mySubtotalSum += r.mySubtotalSum;
+      byDate[r.refundDateLondon].txnRefundSum += r.txnRefundSum;
+      byDate[r.refundDateLondon].adjShippingRefundSum += r.adjShippingRefundSum;
+      byDate[r.refundDateLondon].adjOtherSum += r.adjOtherSum;
+      byDate[r.refundDateLondon].count += 1;
+    });
+    Object.keys(byDate).forEach(function(k){
+      byDate[k].mySubtotalSum = Math.round(byDate[k].mySubtotalSum * 100) / 100;
+      byDate[k].txnRefundSum = Math.round(byDate[k].txnRefundSum * 100) / 100;
+      byDate[k].adjShippingRefundSum = Math.round(byDate[k].adjShippingRefundSum * 100) / 100;
+      byDate[k].adjOtherSum = Math.round(byDate[k].adjOtherSum * 100) / 100;
+    });
+
+    res.json({
+      windowDays: days,
+      ordersScanned: orders.length,
+      refundsFound: refundsFlat.length,
+      // Totals across the whole window
+      totals: {
+        myCurrentCalcSum: Math.round(totalLineItemSubtotals * 100) / 100,
+        // The truth: sum of refund transactions
+        actualRefundedToCustomerSum: Math.round(totalTransactionRefunds * 100) / 100,
+        // Things I currently miss
+        missedShippingRefunds: Math.round(totalAdjustmentShippingRefunds * 100) / 100,
+        missedOtherAdjustments: Math.round(totalAdjustmentOther * 100) / 100,
+        // Things to ignore (these net to zero typically)
+        refundDiscrepancyAdjustments: Math.round(totalAdjustmentRefundDiscrepancies * 100) / 100,
+      },
+      gapAnalysis: {
+        myCalcVsTransactionTruth: Math.round((totalLineItemSubtotals - totalTransactionRefunds) * 100) / 100,
+        explanation: 'If this is a positive number, my calc is OVER-counting (e.g. counting refunds before they were actually processed). If negative, I am UNDER-counting (e.g. missing shipping refunds). The closer to zero the better.'
+      },
+      adjustmentKindsSeen: adjustmentKindsSeen,
+      byDate: byDate,
+      // Show top 20 individual refunds
+      sampleRefunds: refundsFlat.slice(0, 20)
     });
   } catch(e) {
     res.status(500).json({ error: e.message });
