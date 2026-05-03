@@ -2138,18 +2138,35 @@ async function fetchGa4ProductMetrics() {
       limit: 250
     }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
 
-    // Ecommerce events per product. Important: begin_checkout and purchase events
-    // fire on /checkout, NOT on /products/. So filtering by pagePath would always return 0.
-    // Use itemName dimension instead — GA4 attaches the product item to these events
-    // via Shopify's standard ecommerce parameters, so we can attribute back to the product.
-    // We run two queries:
-    //   reportB1: add_to_cart events filtered by pagePath BEGINS_WITH /products/
-    //             (these fire ON the product page so pagePath works fine)
-    //   reportB2: begin_checkout + purchase events grouped by itemName
-    //             (these fire on /checkout but carry item info)
-    let reportB1, reportB2;
+    // Ecommerce metrics. We use ITEM-SCOPED metrics keyed by itemName for all three
+    // (cart adds, checkouts, purchases). GA4 rejects pairing eventCount with itemName
+    // because they're different scopes — itemsAddedToCart/itemsCheckedOut/itemsPurchased
+    // are the correct item-scoped equivalents.
+    //
+    // We also still query add_to_cart by pagePath as a fallback, because the cart event
+    // fires on the product page so pagePath works reliably even when itemName matching
+    // has gaps (e.g. variant titles, branded prefixes).
+    let reportItemScoped, reportPathFallback;
+
+    // Primary: item-scoped query for all 3 metrics in one call, keyed by itemName
     try {
-      reportB1 = await axios.post(url, {
+      reportItemScoped = await axios.post(url, {
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+        dimensions: [{ name: 'itemName' }],
+        metrics: [
+          { name: 'itemsAddedToCart' },
+          { name: 'itemsCheckedOut' },
+          { name: 'itemsPurchased' }
+        ],
+        limit: 1000
+      }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+    } catch(e) {
+      console.log('GA4 item-scoped fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    }
+
+    // Fallback: add_to_cart by pagePath. Used only when itemName matching fails.
+    try {
+      reportPathFallback = await axios.post(url, {
         dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
         dimensions: [{ name: 'pagePath' }, { name: 'eventName' }],
         metrics: [{ name: 'eventCount' }],
@@ -2164,21 +2181,7 @@ async function fetchGa4ProductMetrics() {
         limit: 1000
       }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
     } catch(e) {
-      console.log('GA4 add_to_cart fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
-    }
-
-    try {
-      reportB2 = await axios.post(url, {
-        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
-        dimensions: [{ name: 'itemName' }, { name: 'eventName' }],
-        metrics: [{ name: 'eventCount' }],
-        dimensionFilter: {
-          filter: { fieldName: 'eventName', inListFilter: { values: ['begin_checkout', 'purchase'] } }
-        },
-        limit: 1000
-      }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
-    } catch(e) {
-      console.log('GA4 checkout/purchase fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+      console.log('GA4 pagePath fallback fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
     }
 
     const metrics = {};
@@ -2195,49 +2198,80 @@ async function fetchGa4ProductMetrics() {
       };
     });
 
-    // Merge reportB1 (add_to_cart, keyed by pagePath)
-    if (reportB1 && reportB1.data.rows) {
-      reportB1.data.rows.forEach(function(row) {
-        const path = row.dimensionValues[0].value;
-        const event = row.dimensionValues[1].value;
-        const count = parseInt(row.metricValues[0].value) || 0;
+    // Build a Shopify title -> pagePath lookup table for matching item-scoped data
+    const titleToPath = {};
+    (shopifyState.products || []).forEach(function(p){
+      if (p.title && p.handle) titleToPath[p.title.toLowerCase().trim()] = '/products/' + p.handle;
+    });
+
+    // Merge item-scoped data (primary).
+    // Track which paths we successfully populated cart counts for, so the fallback
+    // only fills gaps without overwriting good data.
+    const cartFromItemScoped = new Set();
+    let matchedCount = 0, unmatchedCount = 0;
+    let totalUnmatchedCart = 0, totalUnmatchedCheckout = 0, totalUnmatchedPurchase = 0;
+    const unmatchedExamples = []; // Cap at 10 for log cleanliness (option B from chat)
+
+    if (reportItemScoped && reportItemScoped.data && reportItemScoped.data.rows) {
+      reportItemScoped.data.rows.forEach(function(row) {
+        const itemName = (row.dimensionValues[0].value || '').trim();
+        if (!itemName) return;
+        const v = row.metricValues || [];
+        const cart = parseInt(v[0] && v[0].value) || 0;
+        const chk  = parseInt(v[1] && v[1].value) || 0;
+        const pur  = parseInt(v[2] && v[2].value) || 0;
+
+        const path = titleToPath[itemName.toLowerCase()];
+        if (!path) {
+          unmatchedCount++;
+          totalUnmatchedCart += cart;
+          totalUnmatchedCheckout += chk;
+          totalUnmatchedPurchase += pur;
+          if (unmatchedExamples.length < 10 && (cart > 0 || chk > 0 || pur > 0)) {
+            unmatchedExamples.push(itemName + ' (cart:' + cart + ' chk:' + chk + ' pur:' + pur + ')');
+          }
+          return;
+        }
+
+        matchedCount++;
         if (!metrics[path]) {
           metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
         }
-        if (event === 'add_to_cart') metrics[path].cartAdditions = count;
+        metrics[path].cartAdditions = (metrics[path].cartAdditions || 0) + cart;
+        metrics[path].checkouts     = (metrics[path].checkouts     || 0) + chk;
+        metrics[path].purchases     = (metrics[path].purchases     || 0) + pur;
+        if (cart > 0) cartFromItemScoped.add(path);
       });
     }
 
-    // Merge reportB2 (begin_checkout + purchase, keyed by itemName).
-    // Map itemName -> pagePath via Shopify product titles.
-    // Shopify stores product titles which often end up verbatim as GA4 itemName.
-    if (reportB2 && reportB2.data.rows) {
-      const titleToPath = {};
-      (shopifyState.products || []).forEach(function(p){
-        if (p.title && p.handle) titleToPath[p.title.toLowerCase().trim()] = '/products/' + p.handle;
-      });
-
-      let unmappedCheckouts = 0, unmappedPurchases = 0;
-      reportB2.data.rows.forEach(function(row) {
-        const itemName = (row.dimensionValues[0].value || '').toLowerCase().trim();
+    // Fallback: pagePath-based add_to_cart for products where item-scoped didn't match.
+    // We only fill cartAdditions where we don't already have item-scoped data, so we
+    // don't double-count.
+    let cartFromFallback = 0;
+    if (reportPathFallback && reportPathFallback.data && reportPathFallback.data.rows) {
+      reportPathFallback.data.rows.forEach(function(row) {
+        const path = row.dimensionValues[0].value;
         const event = row.dimensionValues[1].value;
         const count = parseInt(row.metricValues[0].value) || 0;
-        if (!itemName) return;
-        const path = titleToPath[itemName];
-        if (!path) {
-          if (event === 'begin_checkout') unmappedCheckouts += count;
-          else if (event === 'purchase') unmappedPurchases += count;
-          return;
-        }
+        if (event !== 'add_to_cart') return;
+        if (cartFromItemScoped.has(path)) return; // already populated from item-scoped
         if (!metrics[path]) {
           metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
         }
-        if (event === 'begin_checkout') metrics[path].checkouts = (metrics[path].checkouts || 0) + count;
-        else if (event === 'purchase')   metrics[path].purchases = (metrics[path].purchases || 0) + count;
+        metrics[path].cartAdditions = count;
+        if (count > 0) cartFromFallback++;
       });
-      if (unmappedCheckouts || unmappedPurchases) {
-        console.log('GA4 itemName -> Shopify mapping miss: ' + unmappedCheckouts + ' checkouts, ' + unmappedPurchases + ' purchases unattributed (item titles not matching Shopify)');
-      }
+    }
+
+    // Diagnostic logging — option B from our chat: log up to 10 unmatched examples
+    // so we can see at a glance how matching is performing without flooding logs.
+    console.log('GA4 itemName matching: ' + matchedCount + ' matched, ' + unmatchedCount + ' unmatched');
+    if (unmatchedCount > 0) {
+      console.log('  unattributed totals: ' + totalUnmatchedCart + ' cart adds, ' + totalUnmatchedCheckout + ' checkouts, ' + totalUnmatchedPurchase + ' purchases');
+      console.log('  examples (up to 10): ' + unmatchedExamples.join(' | '));
+    }
+    if (cartFromFallback > 0) {
+      console.log('GA4 cart fallback by pagePath filled ' + cartFromFallback + ' products');
     }
 
     // Persist
