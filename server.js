@@ -1679,11 +1679,13 @@ async function syncShopifyProducts() {
         totalOrders += orders.length;
 
         orders.forEach(function(order) {
-          // Skip cancelled orders entirely — Shopify Analytics excludes them from
-          // gross sales, discounts, and shipping. Refunds on cancelled orders are
-          // also irrelevant because the order never contributed to gross in the
-          // first place. Match Shopify exactly.
-          if (order.cancelled_at) return;
+          // IMPORTANT: do NOT early-return on cancelled orders. Shopify sets
+          // cancelled_at when a fully-refunded order is automatically cancelled,
+          // so virtually every refunded order has cancelled_at != null.
+          // We do skip GROSS/DISCOUNT/SHIPPING for cancelled orders below
+          // (matches Shopify Analytics) but the REFUND must still be processed
+          // because real money was returned to the customer.
+          const orderIsCancelled = !!order.cancelled_at;
 
           const orderTime = new Date(order.created_at).getTime();
           const dayKey = londonDateKey(new Date(orderTime));
@@ -1695,10 +1697,11 @@ async function syncShopifyProducts() {
           // for orders whose creation falls outside any window of interest.
           const orderInLast30 = orderTime >= new Date(since30).getTime();
 
-          // Gross/discount/shipping for this order are only tallied if the order
-          // was actually CREATED in our 30-day window. Refunds further down are
-          // processed regardless of order age (they're dated by refund issue date).
-          if (orderInLast30) {
+          // Gross/discount/shipping for this order are only tallied if:
+          //   1. The order is NOT cancelled (Shopify Analytics excludes cancelled orders)
+          //   2. The order was CREATED in our 30-day window
+          // Refunds further down are processed regardless of either condition.
+          if (orderInLast30 && !orderIsCancelled) {
             // Shipping at the order level (not per line). Apply to the store-wide
             // day total only, because shipping isn't attributable to any one product.
             const shippingTotal = (order.shipping_lines || []).reduce(function(s, sl){
@@ -1746,7 +1749,7 @@ async function syncShopifyProducts() {
               ad.net += lineNet;
               ad.byPid[pid] = (ad.byPid[pid] || 0) + lineNet;
             });
-          } // end if(orderInLast30) — end gross/discount/shipping section
+          } // end gross/discount/shipping section (only runs for non-cancelled orders in window)
 
           // REFUNDS — process for ALL orders regardless of order age, because we
           // switched to updated_at_min and want to catch refunds on old orders.
@@ -2109,6 +2112,19 @@ async function fetchGa4ProductMetrics() {
   const propertyId = process.env.GA4_PROPERTY_ID;
   if (!propertyId) { console.log('GA4_PROPERTY_ID not set — skipping GA4 fetch'); return; }
   if (!db) { console.log('No DB — skipping GA4 fetch'); return; }
+
+  // GA4 needs Shopify titles to match itemNames. If Shopify products haven't
+  // synced yet (cold start), wait up to 60 seconds for the parallel Shopify
+  // sync to populate. Otherwise itemName matching returns 0 every time.
+  const shopifyWaitStart = Date.now();
+  while ((!shopifyState.products || shopifyState.products.length === 0) && (Date.now() - shopifyWaitStart) < 60000) {
+    console.log('GA4 fetch waiting for Shopify products to load...');
+    await new Promise(function(resolve){ setTimeout(resolve, 5000); });
+  }
+  if (!shopifyState.products || shopifyState.products.length === 0) {
+    console.log('GA4 fetch giving up — no Shopify products after 60s. Skipping; will retry next cron run.');
+    return;
+  }
 
   let token;
   try {
