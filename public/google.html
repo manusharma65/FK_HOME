@@ -227,6 +227,7 @@ table.activity tr:last-child td { border-bottom: none; }
         <button class="dept-btn active">Google</button>
       </div>
       <div id="ga4-pill" style="display:none;font-size:11px;padding:4px 10px;border-radius:6px;font-family:var(--mono)"></div>
+      <button id="diagnostics-btn" class="btn btn-ghost" onclick="openDiagnostics()" style="display:none;font-size:12px" title="Manager: refund + GA4 sample">🔧 Diag</button>
       <div class="sync-info"><div class="sync-dot"></div><span id="sync-time">Loading...</span></div>
       <button class="btn btn-primary" onclick="refreshAll()">↻ Refresh</button>
     </div>
@@ -236,12 +237,12 @@ table.activity tr:last-child td { border-bottom: none; }
   <div class="page active" id="page-dashboard">
     <div class="metrics-grid">
       <div class="metric-card success">
-        <div class="metric-label">Shopify net sales (7d)</div>
+        <div class="metric-label">Shopify net sales (last 7 days)</div>
         <div class="metric-value" id="m-revenue">—</div>
         <div class="metric-sub" id="m-revenue-sub">—</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">Google ad spend (7d)</div>
+        <div class="metric-label">Google ad spend (last 7 days)</div>
         <div class="metric-value" id="m-spend">—</div>
         <div class="metric-sub" id="m-spend-sub">—</div>
       </div>
@@ -408,6 +409,8 @@ async function loadMe() {
       document.getElementById('dept-switcher').style.display = 'flex';
       const aTab = document.getElementById('camp-tab-archived');
       if (aTab) aTab.style.display = 'inline-block';
+      const diagBtn = document.getElementById('diagnostics-btn');
+      if (diagBtn) diagBtn.style.display = 'inline-flex';
     }
   } catch(e) {
     // Network error or similar — fall back to a permissive default so the dashboard still loads
@@ -563,6 +566,7 @@ function renderDailySalesCard() {
   const target = document.getElementById('daily-sales-card');
   if (!target || !dailySalesData) return;
   const days = dailySalesData.days || [];
+  const today = dailySalesData.today || null;
   const max = Math.max.apply(null, [1].concat(days.map(function(d){ return d.net; })));
 
   const bars = days.map(function(d){
@@ -581,8 +585,17 @@ function renderDailySalesCard() {
   const totalRefund = dailySalesData.totalRefund7d || 0;
   const totalShipping = dailySalesData.totalShipping7d || 0;
 
+  // "Today so far" pill — small amber pill alongside the section title so it's visible
+  // but doesn't pollute the 7-day total. Uses the today object if present.
+  const todayPill = today
+    ? '<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:var(--amber-light);color:var(--text);border:1px solid var(--amber);border-radius:14px;font-size:11px;font-weight:600;margin-left:10px;font-family:var(--mono)">'
+      + '<span style="width:6px;height:6px;background:var(--amber);border-radius:50%;display:inline-block"></span>'
+      + 'Today so far: ' + fmtCurrency(today.net || 0)
+      + '</span>'
+    : '';
+
   target.innerHTML = '<div class="section-header"><div>'
-    + '<div class="section-title" style="font-size:14px">Daily breakdown of Net sales (7d)</div>'
+    + '<div class="section-title" style="font-size:14px;display:flex;align-items:center;flex-wrap:wrap">Net sales — last 7 complete days' + todayPill + '</div>'
     + '<div class="section-sub" style="display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px">'
     + '<span>Gross ' + fmtCurrency(totalGross) + '</span>'
     + '<span style="color:var(--amber)">− Discounts ' + fmtCurrency(totalDiscount) + '</span>'
@@ -626,7 +639,7 @@ function openDailySalesModal() {
   };
 
   const breakdownPanel = '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:18px;overflow:hidden">'
-    + '<div style="padding:12px 18px;background:var(--bg);border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Net sales breakdown — last 7 days</div>'
+    + '<div style="padding:12px 18px;background:var(--bg);border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Net sales breakdown — last 7 complete days (excludes today)</div>'
     + breakdownRow('Gross sales', totalGross, '')
     + breakdownRow('Discounts', totalDiscount, '−')
     + breakdownRow('Returns', totalRefund, '−')
@@ -636,6 +649,27 @@ function openDailySalesModal() {
     + '<div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--green)">' + fmtCurrency(totalNet) + '</div>'
     + '</div>'
     + '</div>';
+
+  // Today panel — separate from the 7-day window
+  const today = dailySalesData.today;
+  const todayPanel = today
+    ? '<div style="background:var(--amber-light);border:1px solid var(--amber);border-radius:10px;margin-bottom:18px;overflow:hidden">'
+      + '<div style="padding:12px 18px;border-bottom:1px solid var(--amber);font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;display:flex;justify-content:space-between;align-items:center">'
+      + '<span>Today so far · ' + (today.shortDate || '') + ' (incomplete)</span>'
+      + '<span style="font-family:var(--mono);font-size:14px;font-weight:700;text-transform:none">' + fmtCurrency(today.net) + '</span>'
+      + '</div>'
+      + '<div style="padding:12px 18px;font-size:12px;font-family:var(--mono);color:var(--text2);display:flex;gap:14px;flex-wrap:wrap">'
+      + '<span>Gross ' + fmtCurrency(today.gross || 0) + '</span>'
+      + (today.discount ? '<span style="color:var(--amber)">− Disc ' + fmtCurrency(today.discount) + '</span>' : '')
+      + (today.refund ? '<span style="color:var(--red)">− Ret ' + fmtCurrency(today.refund) + '</span>' : '')
+      + (today.shipping ? '<span style="color:var(--green)">+ Ship ' + fmtCurrency(today.shipping) + '</span>' : '')
+      + '</div>'
+      + ((today.top || []).length ? '<div style="padding:0 18px 14px"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Top products today</div>'
+        + (today.top || []).map(function(t){
+            return '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(0,0,0,0.05)"><span>' + escapeHtml(t.title) + '</span><span style="font-family:var(--mono);font-weight:600">' + fmtCurrency(t.revenue) + '</span></div>';
+          }).join('') + '</div>' : '')
+      + '</div>'
+    : '';
 
   // Per-day breakdown
   const dayDetails = days.map(function(d, i){
@@ -659,8 +693,9 @@ function openDailySalesModal() {
       + '</div>';
   }).join('');
 
-  showBigModal('Sales — last 7 days',
-    breakdownPanel
+  showBigModal('Sales — last 7 complete days',
+    todayPanel
+    + breakdownPanel
     + '<div style="display:flex;gap:8px;align-items:flex-end;padding:18px 8px;background:var(--bg2);border-radius:10px;margin-bottom:18px">' + bars + '</div>'
     + '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Per-day detail (refunds applied on the day they were issued, shipping per order):</div>'
     + dayDetails);
@@ -705,6 +740,7 @@ function productCard(p) {
     + statRow('Ad spend', fmtCurrency(p.googleSpend))
     + statRow('Ad clicks', fmtNum(p.googleClicks))
     + statRow('ACOS', fmtPct(p.googleAcos))
+    + statRow('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—')
     + (p.ga4Sessions != null ? statRow('Sessions 7d', fmtNum(p.ga4Sessions)) : '')
     + (p.ga4CartRate != null ? statRow('Cart rate', p.ga4CartRate + '%') : '')
     + '</div>'
@@ -820,6 +856,7 @@ function campaignBlock(c) {
     + '<div><div class="stat-label">Impr</div><div class="stat-value">' + fmtNum(c.totalImpressions) + '</div></div>'
     + '<div><div class="stat-label">Clicks</div><div class="stat-value">' + fmtNum(c.totalClicks) + '</div></div>'
     + '<div><div class="stat-label">ACOS</div><div class="stat-value">' + fmtPct(c.acos) + '</div></div>'
+    + '<div><div class="stat-label">Cost/conv</div><div class="stat-value">' + (c.costPerConv ? fmtCurrency(c.costPerConv) : '—') + '</div></div>'
     + aiBtn + dismissBtn
     + '<svg class="expand-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer"><path d="M6 4l4 4-4 4"/></svg>'
     + '</div>'
@@ -850,6 +887,7 @@ function productSubrow(p) {
     + statRow('Clicks', fmtNum(p.clicks))
     + statRow('Conv', fmtNum(p.conversions))
     + statRow('ACOS', fmtPct(p.acos))
+    + statRow('Cost/conv', p.costPerConv ? fmtCurrency(p.costPerConv) : '—')
     + '</div>'
     + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'openProductDetailFromObj(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\'>🪄 Open & analyse</button></div>'
     + '</div>'
@@ -1016,6 +1054,33 @@ async function runCampaignAi(campaignId, campaignName) {
 // Legacy stub — closeAi was used by the old standalone AI modal. Kept as no-op for safety.
 function closeAi() { /* no-op: AI is now inline inside the big modal */ }
 
+// ─── Diagnostics — manager-only debug for refund + GA4 matching issues ───
+async function openDiagnostics() {
+  showBigModal('Diagnostics — refund + GA4 sample',
+    '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">Used to debug data discrepancies. Click each to fetch a live sample. Copy the JSON output and paste back to share with whoever is fixing the issue.</div>'
+    + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">'
+    + '<button class="btn btn-primary" onclick="loadDiagSample(\'refund\')">Fetch refund sample</button>'
+    + '<button class="btn btn-primary" onclick="loadDiagSample(\'ga4\')">Fetch GA4 itemName sample</button>'
+    + '<button class="btn btn-ghost" onclick="navigator.clipboard.writeText(document.getElementById(\'diag-output\').textContent || \'\')">Copy output</button>'
+    + '</div>'
+    + '<div style="font-size:12px;color:var(--text2);margin-bottom:6px">Output:</div>'
+    + '<pre id="diag-output" style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:var(--mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow:auto;color:var(--text)">Click a button above to fetch.</pre>');
+}
+
+async function loadDiagSample(which) {
+  const out = document.getElementById('diag-output');
+  if (!out) return;
+  const url = which === 'refund' ? '/api/google/debug/refund-sample' : '/api/google/debug/ga4-sample';
+  out.textContent = 'Fetching ' + which + ' sample…';
+  try {
+    const r = await authedFetch(url);
+    const j = await r.json();
+    out.textContent = JSON.stringify(j, null, 2);
+  } catch(e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+}
+
 // ─── Big screen-size modal (product detail / daily sales) ────────────────
 function showBigModal(title, bodyHtml) {
   document.getElementById('big-modal-title').textContent = title;
@@ -1107,19 +1172,20 @@ function openProductDetailFromObj(p) {
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Daily revenue (last 7 days)</div>' +
     '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px;background:var(--bg2);border-radius:8px">' + dailyBars + '</div>' +
 
-    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Google Ads (last 7 days)</div>' +
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Google Ads (last 7 complete days, excludes today)</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
     stat('Ad spend', fmtCurrency(p.googleSpend)) +
     stat('Impressions', fmtNum(p.googleImpressions)) +
     stat('Clicks', fmtNum(p.googleClicks)) +
     stat('CTR', fmtPct(p.googleCtr)) +
     stat('Conversions', fmtNum(p.googleConversions)) +
-    stat('Ad sales', fmtCurrency(p.googleSales)) +
+    stat('Ad revenue', fmtCurrency(p.googleSales)) +
     stat('ACOS', fmtPct(p.googleAcos), 'acos') +
+    stat('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—') +
     stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
     '</div>' +
 
-    (p.ga4Sessions != null ? '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Funnel (GA4 last 7 days)</div>' +
+    (p.ga4Sessions != null ? '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Funnel (GA4 last 7 complete days)</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
     stat('Sessions', fmtNum(p.ga4Sessions), 'sessions') +
     stat('Cart adds', fmtNum(p.ga4CartAdditions)) +

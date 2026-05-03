@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────
-const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ai-analyse', '/google/pagespeed', '/google/daily-sales', '/shopify/products'];
+const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ai-analyse', '/google/pagespeed', '/google/daily-sales', '/google/debug/', '/shopify/products'];
 
 async function requireAuth(req, res, next) {
   if (PUBLIC_PATHS.some(function(p){ return req.path.startsWith(p); })) return next();
@@ -1595,13 +1595,23 @@ async function syncShopifyProducts() {
     // so a single page of 250 captures less than 2 days). Walk Link headers until done.
     const now = Date.now();
     const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const cutoff7 = now - 7 * 24 * 60 * 60 * 1000;
+    // 7-day window = last 7 COMPLETE days, EXCLUDING today.
+    // Today's sales are tracked separately because Google's revenue attribution
+    // lags 24-48 hours so today's data is unreliable.
+    // Window: [startOfToday - 7 days, startOfToday)
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const cutoff7Start = startOfToday.getTime() - 7 * 24 * 60 * 60 * 1000;  // 7 days ago at 00:00
+    const cutoff7End   = startOfToday.getTime();                              // today at 00:00
+    const todayStart   = startOfToday.getTime();
+    const todayEnd     = todayStart + 24 * 60 * 60 * 1000;
 
-    // Per-product totals over 7 and 30 day windows
-    const sales30 = {};        // net (gross - discount - refund)
-    const units30 = {};        // gross units (refunded units NOT subtracted from this — matches Analytics)
-    const sales7 = {};
+    // Per-product totals over 7 and 30 day windows (7d EXCLUDES today)
+    const sales30 = {};        // net (gross - discount - refund) over last 30 days incl. today
+    const units30 = {};
+    const sales7 = {};         // last 7 COMPLETE days (excludes today)
     const units7 = {};
+    const salesToday = {};     // today only (incomplete)
+    const unitsToday = {};
 
     // Per-product daily breakdown: pid -> { 'YYYY-MM-DD': { gross, discount, refund, net } }
     const dailyByPid = {};
@@ -1636,7 +1646,8 @@ async function syncShopifyProducts() {
         orders.forEach(function(order) {
           const dayKey = order.created_at.slice(0, 10); // 'YYYY-MM-DD'
           const orderTime = new Date(order.created_at).getTime();
-          const isWithin7 = orderTime >= cutoff7;
+          const isWithin7 = orderTime >= cutoff7Start && orderTime < cutoff7End;
+          const isToday = orderTime >= todayStart && orderTime < todayEnd;
 
           // Shipping at the order level (not per line). Apply to the store-wide day total only,
           // because shipping isn't attributable to any one product. Add to NET so it flows through.
@@ -1657,12 +1668,18 @@ async function syncShopifyProducts() {
             }, 0);
             const lineNet = Math.max(0, gross - discountAllocated);
 
-            // Per-product totals (refunds added separately below)
+            // 30-day total (includes today)
             sales30[pid] = (sales30[pid] || 0) + lineNet;
             units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
+            // 7-day window (last 7 COMPLETE days, excludes today)
             if (isWithin7) {
               sales7[pid] = (sales7[pid] || 0) + lineNet;
               units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
+            }
+            // Today separately (incomplete, real-time visibility)
+            if (isToday) {
+              salesToday[pid] = (salesToday[pid] || 0) + lineNet;
+              unitsToday[pid] = (unitsToday[pid] || 0) + (item.quantity || 0);
             }
 
             // Per-product daily (gross & discount & net — refund applied later by refund date)
@@ -1685,7 +1702,8 @@ async function syncShopifyProducts() {
           (order.refunds || []).forEach(function(ref) {
             const refundDayKey = (ref.created_at || order.created_at).slice(0, 10);
             const refundTime = new Date(ref.created_at || order.created_at).getTime();
-            const refundIsWithin7 = refundTime >= cutoff7;
+            const refundIsWithin7 = refundTime >= cutoff7Start && refundTime < cutoff7End;
+            const refundIsToday = refundTime >= todayStart && refundTime < todayEnd;
             (ref.refund_line_items || []).forEach(function(rli) {
               const pid = String(rli.line_item ? rli.line_item.product_id : '');
               if (!pid) return;
@@ -1695,6 +1713,7 @@ async function syncShopifyProducts() {
               // Subtract from net totals
               sales30[pid] = (sales30[pid] || 0) - refundAmount;
               if (refundIsWithin7) sales7[pid] = (sales7[pid] || 0) - refundAmount;
+              if (refundIsToday) salesToday[pid] = (salesToday[pid] || 0) - refundAmount;
 
               // Per-product daily — apply on refund date
               if (!dailyByPid[pid]) dailyByPid[pid] = {};
@@ -1735,11 +1754,13 @@ async function syncShopifyProducts() {
       const imageUrl = p.images && p.images[0] ? p.images[0].src : null;
       const tags = (p.tags || '').split(',').map(function(t){ return t.trim(); });
 
-      // Build 7-day daily sparkline using NET sales (gross - discounts - refunds on issue date)
+      // Build 7-day sparkline of NET sales — 7 COMPLETE days ENDING YESTERDAY.
+      // (today excluded because Google attribution lags, and we want a comparable view)
+      // Order: oldest (7 days ago) → newest (yesterday)
       const daily = dailyByPid[pid] || {};
       const sparkline = [];
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date(now - i * 24 * 60 * 60 * 1000);
+      for (let i = 7; i >= 1; i--) {
+        const d = new Date(todayStart - i * 24 * 60 * 60 * 1000);
         const k = d.toISOString().slice(0, 10);
         const dayData = daily[k];
         sparkline.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
@@ -1762,6 +1783,8 @@ async function syncShopifyProducts() {
         unitsSold7d: units7[pid] || 0,
         revenue30d: Math.round((sales30[pid] || 0) * 100) / 100,
         unitsSold30d: units30[pid] || 0,
+        revenueToday: Math.round((salesToday[pid] || 0) * 100) / 100,
+        unitsSoldToday: unitsToday[pid] || 0,
         dailySales7d: sparkline,
         variantCount: (p.variants || []).length,
         createdAt: p.created_at
@@ -1860,6 +1883,8 @@ function aggregateGoogleMetrics(rows) {
     conversions: Math.round(totals.conversions * 10) / 10,
     ctr: totals.impressions > 0 ? Math.round((totals.clicks / totals.impressions) * 100 * 100) / 100 : 0,
     acos: totals.sales > 0 ? Math.round((totals.spend / totals.sales) * 1000) / 10 : 0,
+    // Cost per conversion — works even when revenue is lagged/zero. Useful when ACOS reads N/A.
+    costPerConv: totals.conversions > 0 ? Math.round((totals.spend / totals.conversions) * 100) / 100 : 0,
     campaignsAdvertisedIn: Object.values(campaigns)
   };
 }
@@ -2382,25 +2407,26 @@ app.post('/api/google/archive/remove', async function(req, res) {
 // ─────────────────────────────────────────────────────────────────────────
 app.get('/api/google/daily-sales', async function(req, res) {
   const products = shopifyState.products || [];
-  const dailyAll = shopifyState.dailyBreakdown || {}; // 'YYYY-MM-DD' -> { gross, discount, refund, net, byPid }
-  const days = 7;
+  const dailyAll = shopifyState.dailyBreakdown || {}; // 'YYYY-MM-DD' -> { gross, discount, refund, shipping, net, byPid }
+
+  // 7-day labels = today−7 to today−1 (excludes today, oldest first)
   const labels = [];
-  const now = Date.now();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now - i * 24 * 60 * 60 * 1000);
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  for (let i = 7; i >= 1; i--) {
+    const d = new Date(startOfToday.getTime() - i * 24 * 60 * 60 * 1000);
     labels.push({
       iso: d.toISOString().slice(0, 10),
       day: d.toLocaleDateString('en-GB', { weekday: 'short' }),
       shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
     });
   }
+  const todayIso = startOfToday.toISOString().slice(0, 10);
 
-  // For each day: sum gross/discount/refund/net + top 5 contributors by net
   const productById = {};
   products.forEach(function(p){ productById[String(p.id)] = p; });
 
-  const result = labels.map(function(l){
-    const dayData = dailyAll[l.iso] || { gross: 0, discount: 0, refund: 0, net: 0, byPid: {} };
+  function buildDay(l){
+    const dayData = dailyAll[l.iso] || { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0, byPid: {} };
     // Top 5 contributors by NET sales for the day
     const top = Object.keys(dayData.byPid)
       .map(function(pid){
@@ -2422,12 +2448,24 @@ app.get('/api/google/daily-sales', async function(req, res) {
       refund: Math.round((dayData.refund || 0) * 100) / 100,
       shipping: Math.round((dayData.shipping || 0) * 100) / 100,
       net: Math.round((dayData.net || 0) * 100) / 100,
-      total: Math.round((dayData.net || 0) * 100) / 100, // for backward compat with frontend
+      total: Math.round((dayData.net || 0) * 100) / 100, // backward compat
       top: top
     };
-  });
+  }
 
-  // 7-day totals
+  const result = labels.map(buildDay);
+
+  // Today as a separate object
+  const todayData = dailyAll[todayIso];
+  const today = todayData
+    ? buildDay({
+        iso: todayIso,
+        day: 'Today',
+        shortDate: startOfToday.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+      })
+    : null;
+
+  // 7-day totals (excluding today)
   const totalGross = result.reduce(function(s, d){ return s + d.gross; }, 0);
   const totalDiscount = result.reduce(function(s, d){ return s + d.discount; }, 0);
   const totalRefund = result.reduce(function(s, d){ return s + d.refund; }, 0);
@@ -2436,6 +2474,8 @@ app.get('/api/google/daily-sales', async function(req, res) {
 
   res.json({
     days: result,
+    today: today,                 // separate "today so far" snapshot (incomplete day)
+    windowLabel: 'Last 7 complete days (excludes today)',
     totalGross7d: Math.round(totalGross * 100) / 100,
     totalDiscount7d: Math.round(totalDiscount * 100) / 100,
     totalRefund7d: Math.round(totalRefund * 100) / 100,
@@ -2636,6 +2676,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
       partitionType: gp.partitionType || null,
       spend: gp.spend, sales: gp.sales, impressions: gp.impressions,
       clicks: gp.clicks, conversions: gp.conversions, ctr: gp.ctr, acos: gp.acos,
+      costPerConv: (gp.conversions > 0) ? Math.round((gp.spend / gp.conversions) * 100) / 100 : 0,
       agentName: gp.agentName,
       shopifyMatched: !!shopifyProduct,
       shopifyTitle: shopifyProduct ? shopifyProduct.title : null,
@@ -2674,7 +2715,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
         campaignId: r.campaignId,
         campaignName: r.campaignName,
         campaignType: r.campaignType,
-        totalSpend: 0, totalSales: 0, totalImpressions: 0, totalClicks: 0,
+        totalSpend: 0, totalSales: 0, totalImpressions: 0, totalClicks: 0, totalConversions: 0,
         urgentCount: 0, productCount: 0,
         products: []
       };
@@ -2684,6 +2725,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
     c.totalSales += r.sales || 0;
     c.totalImpressions += r.impressions || 0;
     c.totalClicks += r.clicks || 0;
+    c.totalConversions += r.conversions || 0;
     c.productCount += 1;
     if (r.priority === 1) c.urgentCount += 1;
     c.products.push(r);
@@ -2693,6 +2735,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
     c.totalSpend = Math.round(c.totalSpend * 100) / 100;
     c.totalSales = Math.round(c.totalSales * 100) / 100;
     c.acos = c.totalSales > 0 ? Math.round((c.totalSpend / c.totalSales) * 1000) / 10 : 0;
+    c.costPerConv = c.totalConversions > 0 ? Math.round((c.totalSpend / c.totalConversions) * 100) / 100 : 0;
     c.products.sort(function(a, b) {
       if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
       return (b.spend || 0) - (a.spend || 0);
@@ -2785,6 +2828,7 @@ app.get('/api/google/all-products', async function(req, res) {
       googleConversions: agg.conversions,
       googleCtr: agg.ctr,
       googleAcos: agg.acos,
+      googleCostPerConv: agg.costPerConv,
       campaignsAdvertisedIn: agg.campaignsAdvertisedIn,
       hasGoogleData: hasGoogleData,
       hasGoogleActivity: hasGoogleActivity,
@@ -3027,17 +3071,19 @@ SHOPIFY (TRUTH):
 ${(price != null) ? `- Price: ${fmt(price)}` : ''}
 ${(inventory != null) ? `- Inventory: ${inventory === 0 ? 'OUT OF STOCK' : inventory + ' units'}` : ''}
 ${status ? '- Status: ' + status.toUpperCase() : ''}
-${rev7d != null ? `- Net sales last 7 days: ${fmt(rev7d)} / ${units7d || 0} units` : ''}
+${rev7d != null ? `- Net sales last 7 COMPLETE days (excludes today): ${fmt(rev7d)} / ${units7d || 0} units` : ''}
+${(product.revenueToday != null || product.shopifyRevenueToday != null) ? `- Net sales TODAY so far (incomplete): ${fmt(product.revenueToday != null ? product.revenueToday : product.shopifyRevenueToday)}` : ''}
 ${rev30d != null ? `- Net sales last 30 days: ${fmt(rev30d)} / ${units30d || 0} units` : ''}
-- Daily net sales (Mon → today): ${dailyLine}
+- Daily net sales (last 7 complete days, oldest → newest): ${dailyLine}
 
 GOOGLE ADS (LAST 7 DAYS):
 - Impressions: ${gImp}
 - Clicks: ${gClk} (CTR ${gCtr}%)
 - Conversions recorded: ${gConv}
 - Ad spend: ${fmt(gSpend)}
-- Google-attributed revenue (lagged): ${fmt(gSales)}
-- ACOS: ${gAcos}% (only meaningful when Google revenue > 0; otherwise reads N/A)
+- Google-attributed revenue (lagged 24-48h): ${fmt(gSales)}
+- ACOS: ${gAcos}% (only meaningful when Google revenue > 0; reads N/A or 0 otherwise)
+- Cost/conv (cost per conversion): ${gConv > 0 ? '£' + (gSpend / gConv).toFixed(2) : 'N/A (no conversions)'} — useful when ACOS is N/A; tells you what one conversion costs regardless of revenue lag
 
 ${signalsLine ? 'DERIVED SIGNALS:\n' + signalsLine + '\n' : ''}
 ${funnelSnippet ? funnelSnippet + '\n' : ''}${speedSnippet}${pageSnippet}
@@ -3139,6 +3185,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
     const totalConv = allProducts.reduce(function(s, p){ return s + (p.conversions || 0); }, 0);
     const overallCtr = totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : '0';
     const overallAcos = totalSales > 0 ? (totalSpend / totalSales * 100).toFixed(1) : 'N/A';
+    const overallCostPerConv = totalConv > 0 ? (totalSpend / totalConv).toFixed(2) : 'N/A';
 
     // Sort products by spend descending so AI sees biggest spenders first
     const sorted = allProducts.slice().sort(function(a, b){ return (b.spend || 0) - (a.spend || 0); });
@@ -3160,13 +3207,16 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       const spend = (p.spend || 0).toFixed(2);
       const sales = (p.sales || 0).toFixed(2);
       const acos = (p.acos != null && p.acos > 0) ? p.acos.toFixed(1) + '%' : 'N/A';
+      const costPerConv = (p.conversions > 0) ? '£' + (p.spend / p.conversions).toFixed(2) : 'N/A';
       const shopifyNet = getShopifyNet7d(p);
       const shopifyPart = shopifyNet != null ? ', Shopify net 7d £' + shopifyNet.toFixed(0) : '';
       return (i+1) + '. ' + name.slice(0, 60)
-        + ' — Spend £' + spend + ', Google revenue £' + sales
+        + ' — Spend £' + spend + ', Google rev (lagged) £' + sales
         + shopifyPart
-        + ', ' + (p.impressions || 0) + ' impr, ' + (p.clicks || 0) + ' clk, '
-        + (p.conversions || 0) + ' conv, ACOS ' + acos;
+        + ', ' + (p.conversions || 0) + ' conv'
+        + ', Cost/conv ' + costPerConv
+        + ', ACOS ' + acos
+        + ' (' + (p.impressions || 0) + ' impr, ' + (p.clicks || 0) + ' clk)';
     }).join('\n');
 
     const remaining = sorted.length - top.length;
@@ -3191,6 +3241,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       + '- Clicks: ' + totalClicks + ' (CTR ' + overallCtr + '%)\n'
       + '- Conversions: ' + totalConv + '\n'
       + '- ACOS: ' + overallAcos + '\n'
+      + '- Cost per conversion: £' + overallCostPerConv + ' (use this when ACOS is N/A — tells you what one sale costs regardless of revenue lag)\n'
       + '- Product rows in campaign: ' + allProducts.length + '\n\n'
       + 'TOP PRODUCTS BY SPEND (with Shopify-side truth):\n' + productLines + remainingNote + '\n\n'
       + 'THE QUESTION:\n'
@@ -3223,5 +3274,158 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
   } catch(e) {
     console.error('Campaign AI analyse error: ' + e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Diagnostic endpoints (temporary — for Round N+5 fixes) ────────────────
+// These help us see real data structures without guessing. Remove after use.
+
+// Sample one refunded order — return its full structure so we can see the actual
+// fields Shopify returns for refunds (we may be reading the wrong field).
+app.get('/api/google/debug/refund-sample', async function(req, res) {
+  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  const store = process.env.SHOPIFY_STORE;
+  if (!token || !store) return res.status(500).json({ error: 'No Shopify credentials' });
+  try {
+    // Search recent orders for one with refunds
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const orderRes = await axios.get('https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&financial_status=refunded,partially_refunded&created_at_min=' + since, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const orders = orderRes.data.orders || [];
+    const refundedOrder = orders.find(function(o){ return (o.refunds || []).length > 0; });
+    if (!refundedOrder) return res.json({ message: 'No refunded orders found in last 30 days' });
+
+    // Return just the relevant fields plus the raw refunds array so we can see structure
+    res.json({
+      orderName: refundedOrder.name,
+      orderId: refundedOrder.id,
+      createdAt: refundedOrder.created_at,
+      financialStatus: refundedOrder.financial_status,
+      currentTotalPrice: refundedOrder.current_total_price,
+      currentSubtotalPrice: refundedOrder.current_subtotal_price,
+      totalPrice: refundedOrder.total_price,
+      subtotalPrice: refundedOrder.subtotal_price,
+      totalDiscounts: refundedOrder.total_discounts,
+      totalRefunded: refundedOrder.total_refunded || refundedOrder.refund_amount || null,
+      totalShippingPriceSet: refundedOrder.total_shipping_price_set,
+      lineItems: (refundedOrder.line_items || []).map(function(li){
+        return {
+          productId: li.product_id,
+          title: li.title,
+          quantity: li.quantity,
+          price: li.price,
+          discountAllocations: li.discount_allocations
+        };
+      }),
+      refundsRaw: refundedOrder.refunds, // FULL refund objects so we can see all fields
+      refundsSummary: (refundedOrder.refunds || []).map(function(ref){
+        return {
+          createdAt: ref.created_at,
+          processedAt: ref.processed_at,
+          note: ref.note,
+          orderAdjustments: ref.order_adjustments,
+          transactions: (ref.transactions || []).map(function(t){
+            return { kind: t.kind, status: t.status, amount: t.amount };
+          }),
+          refundLineItems: (ref.refund_line_items || []).map(function(rli){
+            return {
+              quantity: rli.quantity,
+              subtotal: rli.subtotal,
+              subtotalSet: rli.subtotal_set,
+              totalTax: rli.total_tax,
+              productId: rli.line_item ? rli.line_item.product_id : null,
+              lineItemPrice: rli.line_item ? rli.line_item.price : null
+            };
+          })
+        };
+      })
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Sample of GA4 itemNames vs Shopify titles so we can see why matching fails
+app.get('/api/google/debug/ga4-sample', async function(req, res) {
+  if (!ga4State.refreshToken) return res.status(500).json({ error: 'GA4 not connected' });
+  if (!process.env.GA4_OAUTH_CLIENT_ID || !process.env.GA4_OAUTH_CLIENT_SECRET) return res.status(500).json({ error: 'No OAuth creds' });
+  try {
+    // Refresh the token to make a live call
+    const tokenRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      client_id: process.env.GA4_OAUTH_CLIENT_ID,
+      client_secret: process.env.GA4_OAUTH_CLIENT_SECRET,
+      refresh_token: ga4State.refreshToken,
+      grant_type: 'refresh_token'
+    }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const accessToken = tokenRes.data.access_token;
+    const url = 'https://analyticsdata.googleapis.com/v1beta/properties/' + process.env.GA4_PROPERTY_ID + ':runReport';
+
+    // Fetch raw itemName + eventName + count for begin_checkout, purchase, add_to_cart
+    const r = await axios.post(url, {
+      dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      dimensions: [{ name: 'itemName' }, { name: 'eventName' }],
+      metrics: [{ name: 'eventCount' }],
+      dimensionFilter: {
+        filter: { fieldName: 'eventName', inListFilter: { values: ['begin_checkout', 'purchase', 'add_to_cart'] } }
+      },
+      limit: 200
+    }, { headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' } });
+
+    const itemRows = (r.data.rows || []).map(function(row){
+      return {
+        itemName: row.dimensionValues[0].value,
+        event: row.dimensionValues[1].value,
+        count: parseInt(row.metricValues[0].value) || 0
+      };
+    });
+
+    // Build the same titleToPath map we use during sync
+    const titleToPath = {};
+    (shopifyState.products || []).forEach(function(p){
+      if (p.title && p.handle) titleToPath[p.title.toLowerCase().trim()] = '/products/' + p.handle;
+    });
+
+    // Compare
+    const matched = [];
+    const unmatched = [];
+    const seenItems = {};
+    itemRows.forEach(function(r){
+      const key = r.itemName.toLowerCase().trim();
+      if (seenItems[key]) return;
+      seenItems[key] = true;
+      if (titleToPath[key]) matched.push({ itemName: r.itemName, path: titleToPath[key] });
+      else unmatched.push({ itemName: r.itemName });
+    });
+
+    // For the unmatched, find the closest Shopify title (substring match) to help diagnose
+    const closestMatches = unmatched.slice(0, 30).map(function(u){
+      const lo = u.itemName.toLowerCase();
+      const closest = (shopifyState.products || []).find(function(p){
+        const t = (p.title || '').toLowerCase();
+        return lo.indexOf(t.slice(0, 20)) >= 0 || t.indexOf(lo.slice(0, 20)) >= 0;
+      });
+      return {
+        ga4ItemName: u.itemName,
+        closestShopifyTitle: closest ? closest.title : '(no obvious match)'
+      };
+    });
+
+    res.json({
+      totalGa4Rows: itemRows.length,
+      uniqueItemNamesInGa4: Object.keys(seenItems).length,
+      shopifyProductCount: (shopifyState.products || []).length,
+      matchedCount: matched.length,
+      unmatchedCount: unmatched.length,
+      sampleMatched: matched.slice(0, 10),
+      sampleUnmatched: closestMatches,
+      eventCounts: itemRows.reduce(function(acc, r){
+        acc[r.event] = (acc[r.event] || 0) + r.count;
+        return acc;
+      }, {}),
+      shopifySampleTitles: (shopifyState.products || []).slice(0, 10).map(function(p){ return p.title; })
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
   }
 });
