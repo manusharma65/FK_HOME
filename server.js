@@ -10,7 +10,41 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────
-const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ai-analyse', '/google/pagespeed', '/google/daily-sales', '/google/debug/', '/shopify/products'];
+const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ga4-refresh', '/google/ai-analyse', '/google/pagespeed', '/google/daily-sales', '/google/debug/', '/shopify/products'];
+
+// ─── Time helpers — Shopify Analytics groups by SHOP timezone (Europe/London).
+// Railway containers run UTC, so we compute London-midnight + London-date-keys
+// explicitly to avoid orders near midnight being bucketed into the wrong day.
+
+function londonDateKey(date) {
+  // Returns 'YYYY-MM-DD' in London time. Uses Intl.DateTimeFormat parts
+  // because toLocaleDateString format strings vary across Node versions.
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date);
+  const obj = {};
+  parts.forEach(function(p){ obj[p.type] = p.value; });
+  return obj.year + '-' + obj.month + '-' + obj.day;
+}
+
+function londonMidnightToday() {
+  // Returns the unix-ms timestamp of midnight TODAY in London time.
+  // We construct this by formatting "now" in London, extracting Y/M/D, and parsing
+  // back with the right BST/GMT offset.
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  }).formatToParts(now);
+  const o = {};
+  parts.forEach(function(p){ o[p.type] = p.value; });
+  // Build "YYYY-MM-DDT00:00:00" as if local-London. We need to find the UTC equivalent.
+  // Trick: take "now" and subtract the seconds-into-day in London. London-now-seconds-in-day:
+  let h = parseInt(o.hour, 10); if (h === 24) h = 0;  // some nodes return '24' at midnight
+  const secondsIntoDay = h * 3600 + parseInt(o.minute, 10) * 60 + parseInt(o.second, 10);
+  return now.getTime() - secondsIntoDay * 1000 - now.getMilliseconds();
+}
 
 async function requireAuth(req, res, next) {
   if (PUBLIC_PATHS.some(function(p){ return req.path.startsWith(p); })) return next();
@@ -1595,14 +1629,13 @@ async function syncShopifyProducts() {
     // so a single page of 250 captures less than 2 days). Walk Link headers until done.
     const now = Date.now();
     const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
-    // 7-day window = last 7 COMPLETE days, EXCLUDING today.
-    // Today's sales are tracked separately because Google's revenue attribution
-    // lags 24-48 hours so today's data is unreliable.
-    // Window: [startOfToday - 7 days, startOfToday)
-    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
-    const cutoff7Start = startOfToday.getTime() - 7 * 24 * 60 * 60 * 1000;  // 7 days ago at 00:00
-    const cutoff7End   = startOfToday.getTime();                              // today at 00:00
-    const todayStart   = startOfToday.getTime();
+    // Window: [startOfToday - 7 days, startOfToday) where "today" means London time.
+    // Container runs UTC so we have to compute London-midnight explicitly otherwise
+    // orders placed between 00:00 and 01:00 London time get misbucketed.
+    const startOfToday = londonMidnightToday();
+    const cutoff7Start = startOfToday - 7 * 24 * 60 * 60 * 1000;  // 7 days ago at London 00:00
+    const cutoff7End   = startOfToday;                              // today at London 00:00
+    const todayStart   = startOfToday;
     const todayEnd     = todayStart + 24 * 60 * 60 * 1000;
 
     // Per-product totals over 7 and 30 day windows (7d EXCLUDES today)
@@ -1631,8 +1664,10 @@ async function syncShopifyProducts() {
 
     let totalOrders = 0;
     try {
-      // Paginated fetch — Shopify uses Link header with page_info cursor
-      let url = 'https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&created_at_min=' + since30;
+      // Paginated fetch. We use updated_at_min (NOT created_at_min) so orders that
+      // were created earlier but had a refund issued in the last 30 days come back too.
+      // Without this we silently miss refunds on orders older than 30 days.
+      let url = 'https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&updated_at_min=' + since30;
       let pageCount = 0;
       const maxPages = 20; // safety cap (5,000 orders should be enough for 30 days even at peak)
       while (url && pageCount < maxPages) {
@@ -1644,64 +1679,81 @@ async function syncShopifyProducts() {
         totalOrders += orders.length;
 
         orders.forEach(function(order) {
-          const dayKey = order.created_at.slice(0, 10); // 'YYYY-MM-DD'
+          // Skip cancelled orders entirely — Shopify Analytics excludes them from
+          // gross sales, discounts, and shipping. Refunds on cancelled orders are
+          // also irrelevant because the order never contributed to gross in the
+          // first place. Match Shopify exactly.
+          if (order.cancelled_at) return;
+
           const orderTime = new Date(order.created_at).getTime();
+          const dayKey = londonDateKey(new Date(orderTime));
           const isWithin7 = orderTime >= cutoff7Start && orderTime < cutoff7End;
           const isToday = orderTime >= todayStart && orderTime < todayEnd;
+          // The order may have been CREATED outside our 30-day window but is in our
+          // result set because of a recent refund. We track this so we know to
+          // process refunds (which are dated by their issue) but skip gross/discount
+          // for orders whose creation falls outside any window of interest.
+          const orderInLast30 = orderTime >= new Date(since30).getTime();
 
-          // Shipping at the order level (not per line). Apply to the store-wide day total only,
-          // because shipping isn't attributable to any one product. Add to NET so it flows through.
-          const shippingTotal = (order.shipping_lines || []).reduce(function(s, sl){
-            return s + parseFloat(sl.price || 0);
-          }, 0);
-          if (shippingTotal > 0) {
-            const ad = getDayAll(dayKey);
-            ad.shipping += shippingTotal;
-            ad.net += shippingTotal;
-          }
-
-          (order.line_items || []).forEach(function(item) {
-            const pid = String(item.product_id);
-            const gross = parseFloat(item.price || 0) * (item.quantity || 0);
-            const discountAllocated = (item.discount_allocations || []).reduce(function(s, da){
-              return s + parseFloat(da.amount || 0);
+          // Gross/discount/shipping for this order are only tallied if the order
+          // was actually CREATED in our 30-day window. Refunds further down are
+          // processed regardless of order age (they're dated by refund issue date).
+          if (orderInLast30) {
+            // Shipping at the order level (not per line). Apply to the store-wide
+            // day total only, because shipping isn't attributable to any one product.
+            const shippingTotal = (order.shipping_lines || []).reduce(function(s, sl){
+              return s + parseFloat(sl.price || 0);
             }, 0);
-            const lineNet = Math.max(0, gross - discountAllocated);
-
-            // 30-day total (includes today)
-            sales30[pid] = (sales30[pid] || 0) + lineNet;
-            units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
-            // 7-day window (last 7 COMPLETE days, excludes today)
-            if (isWithin7) {
-              sales7[pid] = (sales7[pid] || 0) + lineNet;
-              units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
-            }
-            // Today separately (incomplete, real-time visibility)
-            if (isToday) {
-              salesToday[pid] = (salesToday[pid] || 0) + lineNet;
-              unitsToday[pid] = (unitsToday[pid] || 0) + (item.quantity || 0);
+            if (shippingTotal > 0) {
+              const ad = getDayAll(dayKey);
+              ad.shipping += shippingTotal;
+              ad.net += shippingTotal;
             }
 
-            // Per-product daily (gross & discount & net — refund applied later by refund date)
-            if (!dailyByPid[pid]) dailyByPid[pid] = {};
-            const d = getDay(dailyByPid[pid], dayKey);
-            d.gross += gross;
-            d.discount += discountAllocated;
+            (order.line_items || []).forEach(function(item) {
+              const pid = String(item.product_id);
+              const gross = parseFloat(item.price || 0) * (item.quantity || 0);
+              const discountAllocated = (item.discount_allocations || []).reduce(function(s, da){
+                return s + parseFloat(da.amount || 0);
+              }, 0);
+              const lineNet = Math.max(0, gross - discountAllocated);
+
+              // 30-day total (includes today)
+              sales30[pid] = (sales30[pid] || 0) + lineNet;
+              units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
+              // 7-day window (last 7 COMPLETE days, excludes today)
+              if (isWithin7) {
+                sales7[pid] = (sales7[pid] || 0) + lineNet;
+                units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
+              }
+              // Today separately (incomplete, real-time visibility)
+              if (isToday) {
+                salesToday[pid] = (salesToday[pid] || 0) + lineNet;
+                unitsToday[pid] = (unitsToday[pid] || 0) + (item.quantity || 0);
+              }
+
+              // Per-product daily (gross & discount & net — refund applied later by refund date)
+              if (!dailyByPid[pid]) dailyByPid[pid] = {};
+              const d = getDay(dailyByPid[pid], dayKey);
+              d.gross += gross;
+              d.discount += discountAllocated;
             d.net += lineNet;
 
-            // Store-wide daily — gross/discount/net by ORDER day
-            const ad = getDayAll(dayKey);
-            ad.gross += gross;
-            ad.discount += discountAllocated;
-            ad.net += lineNet;
-            ad.byPid[pid] = (ad.byPid[pid] || 0) + lineNet;
-          });
+              // Store-wide daily — gross/discount/net by ORDER day
+              const ad = getDayAll(dayKey);
+              ad.gross += gross;
+              ad.discount += discountAllocated;
+              ad.net += lineNet;
+              ad.byPid[pid] = (ad.byPid[pid] || 0) + lineNet;
+            });
+          } // end if(orderInLast30) — end gross/discount/shipping section
 
-          // REFUNDS — option B: assign to the day the refund was issued (order.refunds[].created_at).
-          // For each refunded line, calculate refund value (subtotal of refund_line_items) and apply.
+          // REFUNDS — process for ALL orders regardless of order age, because we
+          // switched to updated_at_min and want to catch refunds on old orders.
+          // Option B: assign to the day the refund was issued (ref.created_at).
           (order.refunds || []).forEach(function(ref) {
-            const refundDayKey = (ref.created_at || order.created_at).slice(0, 10);
             const refundTime = new Date(ref.created_at || order.created_at).getTime();
+            const refundDayKey = londonDateKey(new Date(refundTime));
             const refundIsWithin7 = refundTime >= cutoff7Start && refundTime < cutoff7End;
             const refundIsToday = refundTime >= todayStart && refundTime < todayEnd;
             (ref.refund_line_items || []).forEach(function(rli) {
@@ -1742,7 +1794,7 @@ async function syncShopifyProducts() {
       if (pageCount >= maxPages) {
         console.log('Shopify pagination stopped at safety cap of ' + maxPages + ' pages — some old orders may not be included');
       }
-      console.log('Shopify orders fetched: ' + totalOrders + ' across ' + pageCount + ' page(s); Net = gross - discounts - refunds (refund on day issued)');
+      console.log('Shopify orders fetched: ' + totalOrders + ' across ' + pageCount + ' page(s); using updated_at_min (catches refunds on older orders); cancelled orders excluded');
       // Stash store-wide daily for the dashboard
       shopifyState.dailyBreakdown = dailyAll;
     } catch(e) { console.log('Shopify orders skipped: ' + e.message); }
@@ -1754,14 +1806,13 @@ async function syncShopifyProducts() {
       const imageUrl = p.images && p.images[0] ? p.images[0].src : null;
       const tags = (p.tags || '').split(',').map(function(t){ return t.trim(); });
 
-      // Build 7-day sparkline of NET sales — 7 COMPLETE days ENDING YESTERDAY.
-      // (today excluded because Google attribution lags, and we want a comparable view)
+      // Build 7-day sparkline of NET sales — 7 COMPLETE days ENDING YESTERDAY (London time).
       // Order: oldest (7 days ago) → newest (yesterday)
       const daily = dailyByPid[pid] || {};
       const sparkline = [];
       for (let i = 7; i >= 1; i--) {
         const d = new Date(todayStart - i * 24 * 60 * 60 * 1000);
-        const k = d.toISOString().slice(0, 10);
+        const k = londonDateKey(d);
         const dayData = daily[k];
         sparkline.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
       }
@@ -1917,10 +1968,16 @@ let ga4State = {
 async function loadGa4StateFromDb() {
   if (!db) return;
   try {
-    const r = await db.query("SELECT connected_email, last_used FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
+    const r = await db.query("SELECT refresh_token, access_token, access_token_expires_at, connected_email, last_used FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
     if (r.rows.length) {
       ga4State.connected = true;
       ga4State.connectedEmail = r.rows[0].connected_email;
+      ga4State.refreshToken = r.rows[0].refresh_token;       // <-- this was missing; without it GA4 silently breaks on every Railway restart
+      ga4State.accessToken = r.rows[0].access_token;
+      ga4State.accessTokenExpiresAt = r.rows[0].access_token_expires_at;
+      console.log('GA4 OAuth state restored from DB (connected as ' + ga4State.connectedEmail + ')');
+    } else {
+      console.log('No GA4 OAuth token in DB — connect via /api/google/oauth/start');
     }
     const m = await db.query("SELECT * FROM ga4_product_metrics");
     ga4State.productMetrics = {};
@@ -2409,18 +2466,18 @@ app.get('/api/google/daily-sales', async function(req, res) {
   const products = shopifyState.products || [];
   const dailyAll = shopifyState.dailyBreakdown || {}; // 'YYYY-MM-DD' -> { gross, discount, refund, shipping, net, byPid }
 
-  // 7-day labels = today−7 to today−1 (excludes today, oldest first)
+  // 7-day labels = today−7 to today−1 (excludes today, oldest first), London time
   const labels = [];
-  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  const startOfTodayMs = londonMidnightToday();
   for (let i = 7; i >= 1; i--) {
-    const d = new Date(startOfToday.getTime() - i * 24 * 60 * 60 * 1000);
+    const d = new Date(startOfTodayMs - i * 24 * 60 * 60 * 1000);
     labels.push({
-      iso: d.toISOString().slice(0, 10),
-      day: d.toLocaleDateString('en-GB', { weekday: 'short' }),
-      shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+      iso: londonDateKey(d),
+      day: d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' }),
+      shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'Europe/London' })
     });
   }
-  const todayIso = startOfToday.toISOString().slice(0, 10);
+  const todayIso = londonDateKey(new Date(startOfTodayMs));
 
   const productById = {};
   products.forEach(function(p){ productById[String(p.id)] = p; });
@@ -2461,7 +2518,7 @@ app.get('/api/google/daily-sales', async function(req, res) {
     ? buildDay({
         iso: todayIso,
         day: 'Today',
-        shortDate: startOfToday.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+        shortDate: new Date(startOfTodayMs).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'Europe/London' })
       })
     : null;
 
