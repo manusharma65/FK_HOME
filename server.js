@@ -888,20 +888,29 @@ async function googleTaskAlreadyExistsToday(campaignId, problemType, productKey)
 
 async function ensureGoogleTaskColumns() {
   if (!db) return;
-  // product_key + baseline metrics are Google-specific extras. Use IF NOT EXISTS so safe to re-run.
-  try {
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_spend NUMERIC DEFAULT 0");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_sales NUMERIC DEFAULT 0");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_acos NUMERIC DEFAULT 0");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_impressions INTEGER DEFAULT 0");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision TEXT");        // 'carry_on' | 'archive' | 'stop' | null
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision_at TIMESTAMP");
-    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_note TEXT");
-  } catch (e) {
-    console.error('[GTASK] column ensure error: ' + e.message);
+  // Each ALTER is its own try/catch so a single failure doesn't block the rest.
+  // CREATE COLUMN IF NOT EXISTS is idempotent so safe to call repeatedly.
+  const alters = [
+    ["product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
+    ["product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
+    ["baseline_spend", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_spend NUMERIC DEFAULT 0"],
+    ["baseline_sales", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_sales NUMERIC DEFAULT 0"],
+    ["baseline_acos", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_acos NUMERIC DEFAULT 0"],
+    ["baseline_impressions", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_impressions INTEGER DEFAULT 0"],
+    ["day7_decision", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision TEXT"],
+    ["day7_decision_at", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision_at TIMESTAMP"],
+    ["day7_note", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_note TEXT"]
+  ];
+  let okCount = 0;
+  for (const [name, sql] of alters) {
+    try {
+      await db.query(sql);
+      okCount++;
+    } catch (e) {
+      console.error('[GTASK] could not add column ' + name + ': ' + e.message);
+    }
   }
+  console.log('[GTASK] columns ensured: ' + okCount + '/' + alters.length);
 }
 
 function scoreGoogleTask(spend, sales, problemType) {
@@ -1787,6 +1796,9 @@ app.post('/api/tasks/run-now', async function(req, res) {
 app.get('/api/google/tasks', async function(req, res) {
   if (!db) return res.json({ tasks: [], summary: {} });
   try {
+    // Idempotent — if columns already exist, this is a no-op. Safety net to ensure
+    // the schema is present before we query it (some boots may have skipped it).
+    await ensureGoogleTaskColumns();
     // Filters: ?status=open|in_progress|discussion|complete|all  ?agent=Rahul|Anuj|Unassigned|all  ?day7=true
     const statusFilter = req.query.status || 'active';   // 'active' = not complete/archived
     const agentFilter = req.query.agent || 'all';
@@ -1987,6 +1999,7 @@ app.post('/api/google/tasks/:id/day7-decision', async function(req, res) {
 // Manual trigger — POST to force the daily Google task scheduler to run NOW
 app.post('/api/google/tasks/run-now', async function(req, res) {
   try {
+    await ensureGoogleTaskColumns();   // safety net before scheduler tries to insert
     const result = await runGoogleTaskScheduler();
     res.json({ success: true, result: result });
   } catch (e) {
@@ -1999,6 +2012,7 @@ app.post('/api/google/tasks/run-now', async function(req, res) {
 app.get('/api/google/tasks/by-campaign/:campaignId', async function(req, res) {
   if (!db) return res.json({ tasks: [] });
   try {
+    await ensureGoogleTaskColumns();
     const r = await db.query(
       "SELECT id, agent_name, status, problem_type, product_title, created_date, day7_decision " +
       "FROM campaign_tasks WHERE department='google' AND campaign_id=$1 AND status NOT IN ('complete','archived','dismissed') " +

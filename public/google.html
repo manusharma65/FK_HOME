@@ -1290,8 +1290,12 @@ function taskRow(t) {
       + ' <button class="btn btn-ghost" onclick="setTaskStatus(' + t.id + ',\'complete\')" style="font-size:11px;padding:5px 12px;color:var(--green)">✓ Complete</button>';
   }
 
-  const baseline = t.baseline_spend > 0 || t.baseline_sales > 0
-    ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;font-family:var(--mono)">Baseline: spent £' + (t.baseline_spend || 0).toFixed(2) + ' · sold £' + (t.baseline_sales || 0).toFixed(2) + (t.baseline_acos > 0 ? ' · ACOS ' + Math.round(t.baseline_acos) + '%' : '') + '</div>'
+  // Postgres NUMERIC fields arrive as strings from pg — coerce to numbers before doing math
+  const bSpend = Number(t.baseline_spend) || 0;
+  const bSales = Number(t.baseline_sales) || 0;
+  const bAcos = Number(t.baseline_acos) || 0;
+  const baseline = bSpend > 0 || bSales > 0
+    ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;font-family:var(--mono)">Baseline: spent £' + bSpend.toFixed(2) + ' · sold £' + bSales.toFixed(2) + (bAcos > 0 ? ' · ACOS ' + Math.round(bAcos) + '%' : '') + '</div>'
     : '';
 
   const dismissedNote = t.dismissed_reason
