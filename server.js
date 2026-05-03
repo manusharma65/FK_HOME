@@ -3538,9 +3538,12 @@ function buildLandingPageDossier(shopifyProduct) {
   // The PUBLIC storefront URL — what customers actually see when they click an ad.
   // shopifyProduct.shopifyUrl points at the admin page (myshopify.com/admin/...) which
   // requires auth, so we always build the storefront URL from the handle.
+  // Append ?country=GB&currency=GBP so Shopify renders the UK market view regardless
+  // of server IP — without this, the page comes back in USD because Shopify auto-detects
+  // the request origin location.
   const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
   const storefrontUrl = shopifyProduct.handle
-    ? ('https://' + storefrontDomain + '/products/' + shopifyProduct.handle)
+    ? ('https://' + storefrontDomain + '/products/' + shopifyProduct.handle + '?country=GB&currency=GBP')
     : null;
 
   // Google Ads rows for this product (across all campaigns)
@@ -3613,6 +3616,13 @@ function buildCritiquePrompt(dossier, pageSummary) {
   return [
     "You are a senior conversion-rate optimisation analyst for an e-commerce store on Shopify.",
     "Below is a structured dossier for ONE product, including its real performance data and the live HTML content of its landing page.",
+    "",
+    "IMPORTANT CONTEXT — DO NOT misinterpret currency:",
+    "• This is a UK-based store (fksports.co.uk). All prices in the dossier are in GBP (£).",
+    "• The live page is fetched with ?country=GB&currency=GBP query parameters and UK headers, so it should render in GBP.",
+    "• If the page text still contains '$' or 'USD' references, this is likely Shopify's currency selector dropdown listing other markets — NOT the price the UK customer sees.",
+    "• DO NOT flag a 'currency mismatch' or 'USD shown to UK shoppers' unless you have direct evidence in the page TEXT that the actual product price next to Add to Cart is shown in USD.",
+    "• The dossier price is the source of truth for the GBP price.",
     "",
     "Your job: produce a comprehensive, actionable critique that explains WHY this product is or isn't converting, and what to fix this week.",
     "",
@@ -3814,7 +3824,7 @@ app.post('/api/google/landing-page-critique-debug', async function(req, res) {
       if (!sp) return res.status(404).json({ error: 'Product not found in shopifyState' });
       productInfo = { id: sp.id, title: sp.title, handle: sp.handle, shopifyAdminUrl: sp.shopifyUrl };
       const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
-      url = sp.handle ? ('https://' + storefrontDomain + '/products/' + sp.handle) : null;
+      url = sp.handle ? ('https://' + storefrontDomain + '/products/' + sp.handle + '?country=GB&currency=GBP') : null;
       if (!url) return res.status(400).json({ error: 'Product has no handle, cannot build URL' });
     }
     if (!url) return res.status(400).json({ error: 'productId or url required' });
@@ -3838,6 +3848,7 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
   try {
     const productId = String(req.body.productId || '');
     const requestedRefresh = !!req.body.forceRefresh;
+    const cachedOnly = !!req.body.cachedOnly;   // if true, never auto-run AI, return 404 when no cache
     if (!productId) return res.status(400).json({ error: 'productId required' });
 
     const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
@@ -3848,7 +3859,7 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
     const u = req.user || {};
     const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
     let forceRefresh = false;
-    if (requestedRefresh) {
+    if (requestedRefresh && !cachedOnly) {
       if (isManager) {
         forceRefresh = true;
       } else {
@@ -3870,6 +3881,10 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
       if (cached) {
         cached.lockedForAgent = !isManager;
         return res.json(cached);
+      }
+      // No cache. If caller asked for cachedOnly, do NOT auto-run AI — return 404.
+      if (cachedOnly) {
+        return res.status(404).json({ error: 'No cached analysis', cached: false });
       }
     }
     const result = await runCritiqueForProduct(sp, 0);

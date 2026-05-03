@@ -1561,8 +1561,9 @@ async function renderRuleFrictionSection(p) {
 
 // Render the AI section inside an open product modal, using cache if available.
 // ─── Landing page critique (per product) — unified replacement for old Quick/Deep AI ──
-// On product modal open: silently checks for cached critique. If <24h, auto-renders inline.
-// If none/stale, shows "Run analysis" button. "Re-analyse" forces a fresh run.
+// On product modal open: ONE call to the critique endpoint with forceRefresh:false.
+// Server returns cached (24h) if available, else 404. We render whatever comes back,
+// and the run button is ALWAYS visible from the start.
 async function renderProductAiSection(p) {
   const buttonsDiv = document.getElementById('lpc-buttons-product');
   const contentDiv = document.getElementById('lpc-content-product');
@@ -1571,50 +1572,41 @@ async function renderProductAiSection(p) {
 
   const productId = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
   if (!productId) {
-    contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Landing page critique requires a Shopify-matched product. This row isn\'t linked to one yet.</div>';
+    contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">AI deep analysis requires a Shopify-matched product. This row isn\'t linked to one yet.</div>';
     metaDiv.textContent = '';
     buttonsDiv.innerHTML = '';
     return;
   }
 
-  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Checking for existing critique…</div>';
-  buttonsDiv.innerHTML = '';
+  // Render run button immediately so user can always click it
+  const runBtnHtml = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run AI deep analysis</button>';
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading any saved analysis…</div>';
+  buttonsDiv.innerHTML = runBtnHtml;
   metaDiv.textContent = '';
 
-  // Peek at the list endpoint first (cheap, no AI call) to know if a cached critique exists
+  // Try to fetch cached analysis ONLY (cachedOnly:true so we never auto-run AI)
   try {
-    const listResp = await authedFetch('/api/google/landing-page-critique/list');
-    const listJ = await listResp.json();
-    const cached = (listJ.items || []).find(function(it){ return String(it.productId) === String(productId); });
-
-    if (cached && !cached.stale) {
-      // Fresh cached critique — fetch full and render inline
-      const fullResp = await authedFetch('/api/google/landing-page-critique', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productId: String(productId), forceRefresh: false })
-      });
-      const fullJ = await fullResp.json();
-      if (fullResp.ok) {
-        renderCritiqueInlineInProductModal(fullJ, productId);
+    const r = await authedFetch('/api/google/landing-page-critique', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: String(productId), forceRefresh: false, cachedOnly: true })
+    });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.diagnosis) {
+        renderCritiqueInlineInProductModal(j, productId);
         return;
       }
     }
-
-    // No fresh cache — show the run button (and offer to view stale if present)
+    // No cached analysis — show prompt to run
     contentDiv.innerHTML = '<div style="color:var(--text);font-size:13px;line-height:1.6">'
-      + '<strong>This is the most powerful analysis</strong> — fetches your live product page, cross-references your ads, GA4 funnel, and Shopify data, then identifies friction and ranks the fixes by impact.<br><br>'
-      + '<span style="color:var(--text3)">Takes 15–25 seconds. Cached for 24 hours afterwards.</span>'
+      + '<strong>The most powerful analysis</strong> — fetches your live product page (UK locale), cross-references your ads, GA4 funnel, and Shopify data, then identifies friction and ranks fixes by impact.<br><br>'
+      + '<span style="color:var(--text3)">Takes 15–25 seconds. Cached for 24h afterwards. Result will reappear here every time you re-open this product.</span>'
       + '</div>';
-    let btns = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run landing page critique</button>';
-    if (cached && cached.stale) {
-      btns += ' <button class="btn btn-ghost" onclick="loadCachedProductCritique(\'' + productId + '\')">View last result (' + Math.round(cached.ageHours) + 'h old)</button>';
-    }
-    buttonsDiv.innerHTML = btns;
-    metaDiv.textContent = '';
+    buttonsDiv.innerHTML = runBtnHtml;
   } catch(e) {
-    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + escapeHtml(e.message) + '</div>';
-    buttonsDiv.innerHTML = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run landing page critique</button>';
+    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Could not check for saved analysis: ' + escapeHtml(e.message) + '</div>';
+    buttonsDiv.innerHTML = runBtnHtml;
   }
 }
 
@@ -1624,7 +1616,7 @@ async function runProductCritique(productId) {
   const metaDiv = document.getElementById('lpc-meta-product');
   if (!contentDiv) return;
 
-  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Running analysis — fetching live page, cross-referencing ads &amp; funnel, identifying friction… (15–25s)</div>';
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Running analysis — fetching live page (UK locale), cross-referencing ads &amp; funnel, identifying friction… (15–25s)</div>';
   buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
   metaDiv.textContent = '';
 
@@ -1644,6 +1636,7 @@ async function runProductCritique(productId) {
 }
 
 async function loadCachedProductCritique(productId) {
+  // Kept for backward compatibility — calls the same endpoint
   const buttonsDiv = document.getElementById('lpc-buttons-product');
   const contentDiv = document.getElementById('lpc-content-product');
   if (contentDiv) contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading cached critique…</div>';
