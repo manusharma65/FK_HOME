@@ -3173,18 +3173,32 @@ function summariseProductPage(html) {
 }
 
 async function fetchProductPageHtml(url) {
-  if (!url) return null;
+  if (!url) return { html: null, error: 'No URL provided' };
   try {
     const resp = await axios.get(url, {
-      timeout: 15000,
+      timeout: 20000,
       maxRedirects: 5,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CampaignPulse/1.0; +https://app.fksports.co.uk)' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-GB,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br'
+      },
       validateStatus: function(s){ return s >= 200 && s < 400; }
     });
-    return resp.data;
+    if (!resp.data || typeof resp.data !== 'string') {
+      return { html: null, error: 'Response not HTML (got ' + typeof resp.data + ')', url: url, status: resp.status };
+    }
+    return { html: resp.data, error: null, url: url, status: resp.status, bytes: resp.data.length };
   } catch (e) {
-    console.error('Landing page fetch failed for ' + url + ': ' + e.message);
-    return null;
+    const detail = {
+      message: e.message,
+      code: e.code || null,
+      status: e.response ? e.response.status : null,
+      url: url
+    };
+    console.error('Landing page fetch failed: ' + JSON.stringify(detail));
+    return { html: null, error: e.message, code: e.code, status: detail.status, url: url };
   }
 }
 
@@ -3373,9 +3387,11 @@ async function getCachedCritique(productId) {
 async function runCritiqueForProduct(shopifyProduct, score) {
   const dossier = buildLandingPageDossier(shopifyProduct);
   if (!dossier) throw new Error('Could not build dossier');
-  const html = await fetchProductPageHtml(dossier.product.url);
-  if (!html) throw new Error('Could not fetch product page');
-  const pageSummary = summariseProductPage(html);
+  const fetchResult = await fetchProductPageHtml(dossier.product.url);
+  if (!fetchResult.html) {
+    throw new Error('Could not fetch product page (' + dossier.product.url + '): ' + (fetchResult.error || 'unknown') + (fetchResult.code ? ' [' + fetchResult.code + ']' : '') + (fetchResult.status ? ' status=' + fetchResult.status : ''));
+  }
+  const pageSummary = summariseProductPage(fetchResult.html);
   const prompt = buildCritiquePrompt(dossier, pageSummary);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -3449,6 +3465,35 @@ async function runCritiqueForProduct(shopifyProduct, score) {
 }
 
 // ── Endpoints ────────────────────────────────────────────────────────────
+
+// Debug: probe the page-fetch in isolation. Helps diagnose DNS/firewall/Cloudflare issues
+// without burning AI tokens. Usage: POST /api/google/landing-page-critique-debug { productId } or { url }
+app.post('/api/google/landing-page-critique-debug', async function(req, res) {
+  try {
+    let url = req.body.url;
+    let productInfo = null;
+    if (!url && req.body.productId) {
+      const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === String(req.body.productId); });
+      if (!sp) return res.status(404).json({ error: 'Product not found in shopifyState' });
+      productInfo = { id: sp.id, title: sp.title, handle: sp.handle, shopifyUrl: sp.shopifyUrl };
+      url = sp.shopifyUrl || ('https://www.fksports.co.uk/products/' + sp.handle);
+    }
+    if (!url) return res.status(400).json({ error: 'productId or url required' });
+    const fetchResult = await fetchProductPageHtml(url);
+    res.json({
+      productInfo: productInfo,
+      attemptedUrl: url,
+      success: !!fetchResult.html,
+      error: fetchResult.error,
+      errorCode: fetchResult.code,
+      httpStatus: fetchResult.status,
+      bytes: fetchResult.bytes || 0,
+      htmlSnippet: fetchResult.html ? fetchResult.html.substring(0, 500) : null
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.post('/api/google/landing-page-critique', async function(req, res) {
   try {
