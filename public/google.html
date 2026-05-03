@@ -265,6 +265,18 @@ table.activity tr:last-child td { border-bottom: none; }
     <!-- DAILY SALES CARD — visual breakdown of Shopify net sales (7d) -->
     <div id="daily-sales-card" class="section-card" style="margin:-12px 0 24px 0;padding:18px 20px;background:var(--bg);border-radius:12px;border:1px solid var(--border)"></div>
 
+    <!-- CART PAGE FRICTION — store-wide check, free, rule-based, cached 24h -->
+    <div id="cart-friction-card" class="section-card" style="margin:0 0 24px 0;padding:18px 20px;background:var(--bg);border-radius:12px;border:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">
+        <div>
+          <div class="section-title" style="margin-bottom:2px">🛒 Cart-page friction <span id="cart-friction-counts" style="color:var(--text3);font-weight:500;font-size:13px;margin-left:6px"></span></div>
+          <div class="section-sub" id="cart-friction-sub">Checks the storefront /cart page for missing trust, payment and shipping signals — the most common reasons people add to cart but don't check out.</div>
+        </div>
+        <div id="cart-friction-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+      </div>
+      <div id="cart-friction-content"></div>
+    </div>
+
     <div class="section-header">
       <div>
         <div class="section-title">Top urgent products</div>
@@ -572,6 +584,8 @@ function renderDashboard() {
   if (s.urgentCount > 0) { navBadge.style.display = 'inline-block'; navBadge.textContent = s.urgentCount; } else { navBadge.style.display = 'none'; }
 
   renderDailySalesCard();
+  // Load cart-page friction (free, cached 24h)
+  loadCartFriction();
 
   const urgent = (allProductsData.products || []).filter(function(p){ return p.priority === 1; }).slice(0, 5);
   document.getElementById('urgent-sub').textContent = urgent.length + ' products need urgent action';
@@ -900,12 +914,16 @@ function productSubrow(p) {
   const frictionBadge = productIdForFriction
     ? '<span class="rf-badge" data-product-id="' + productIdForFriction + '" style="display:none;margin-left:6px;font-size:11px;font-family:var(--mono)"></span>'
     : '';
+  const frictionTopLine = productIdForFriction
+    ? '<div class="rf-top-line" data-product-id="' + productIdForFriction + '" style="display:none;margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4"></div>'
+    : '';
   return '<div class="product-card" style="padding:10px;margin-top:10px;cursor:pointer" onclick=\'openProductDetailFromCampaignRow(' + payload + ')\'>'
     + img
     + '<div class="product-body">'
     + '<div class="product-title" style="font-size:12px">' + titleAttr + frictionBadge + '</div>'
     + '<div class="product-meta">' + pri + (p.itemType ? '<span>' + p.itemType + '</span>' : '') + '</div>'
     + '<div class="diagnosis-line">' + escapeHtml(p.diagnosis || '') + '</div>'
+    + frictionTopLine
     + '<div class="product-stats">'
     + statRow('Spend', fmtCurrency(p.spend))
     + statRow('Sales', fmtCurrency(p.sales))
@@ -941,8 +959,69 @@ async function populateFrictionBadges() {
       span.innerHTML = parts.join(' · ');
       span.style.display = 'inline';
     });
+    // Also populate the top friction line under each card's diagnosis (one-line summary)
+    document.querySelectorAll('.rf-top-line').forEach(function(div){
+      const pid = div.getAttribute('data-product-id');
+      const it = byId[pid];
+      if (!it || !it.top || !it.top.length) return;
+      const top1 = it.top[0];
+      if (!top1 || !top1.issue) return;
+      const colour = top1.priority === 'P1' ? 'var(--red)' : top1.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
+      div.innerHTML = '<span style="color:' + colour + ';font-weight:700;margin-right:4px">' + escapeHtml(top1.priority || '') + '</span>' + escapeHtml(top1.issue);
+      div.style.display = 'block';
+    });
   } catch(e) {
     // Non-fatal — badges just don't appear
+  }
+}
+
+// ─── Cart-page friction (store-wide, dashboard top section) ─────────────
+async function loadCartFriction() {
+  const card = document.getElementById('cart-friction-card');
+  if (!card) return;
+  const contentDiv = document.getElementById('cart-friction-content');
+  const countsSpan = document.getElementById('cart-friction-counts');
+  const actionsDiv = document.getElementById('cart-friction-actions');
+  if (!contentDiv) return;
+
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:8px 0">Scanning /cart page for friction…</div>';
+  if (countsSpan) countsSpan.textContent = '';
+
+  try {
+    const r = await authedFetch('/api/google/cart-friction');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Cart scan failed');
+
+    const friction = j.friction || [];
+    const counts = j.counts || {};
+    if (countsSpan) {
+      const parts = [];
+      if (counts.p1) parts.push('<span style="color:var(--red);font-weight:700">' + counts.p1 + ' P1</span>');
+      if (counts.p2) parts.push('<span style="color:var(--amber);font-weight:700">' + counts.p2 + ' P2</span>');
+      if (counts.p3) parts.push('<span style="color:var(--text3)">' + counts.p3 + ' P3</span>');
+      countsSpan.innerHTML = parts.length ? '· ' + parts.join(' · ') : '· no obvious issues';
+    }
+    if (actionsDiv) {
+      actionsDiv.innerHTML = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">' + (j.cached ? 'Cached' : 'Fresh') + '</span>';
+    }
+
+    if (!friction.length) {
+      contentDiv.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0">No obvious friction found on cart page. ' + (j.pageError ? '<span style="color:var(--amber)">(Note: page fetch had an error.)</span>' : '') + '</div>';
+      return;
+    }
+
+    contentDiv.innerHTML = friction.map(function(f){
+      const colour = f.priority === 'P1' ? 'var(--red)' : f.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
+      return '<div style="padding:10px 12px;background:var(--bg2);border-left:3px solid ' + colour + ';border-radius:4px;margin-bottom:8px">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">'
+        + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:' + colour + ';margin-right:6px">' + escapeHtml(f.priority || '') + '</span>' + escapeHtml(f.issue || '') + '</div>'
+        + (f.category ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap">' + escapeHtml(f.category) + '</div>' : '')
+        + '</div>'
+        + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(f.evidence || '') + '</div>'
+        + '</div>';
+    }).join('');
+  } catch(e) {
+    contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Cart friction error: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -1427,7 +1506,8 @@ function openProductDetailFromObj(p) {
       '</div>' +
     '</div>' +
 
-    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Sales (Shopify)</div>' +
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 4px">Sales (Shopify, estimate)</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Net of refunds. May differ from Shopify Analytics by ~5% due to refund attribution timing.</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
     stat('Revenue 7d', fmtCurrency(p.revenue7d)) +
     stat('Revenue 30d', fmtCurrency(p.revenue30d)) +
@@ -1481,7 +1561,7 @@ function openProductDetailFromObj(p) {
     // on open. Re-analyse forces a fresh Opus run with live page fetch.
     '<div id="lpc-section-product" style="margin-top:18px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
-        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔍 AI deep analysis <span id="lpc-lock-badge" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔍 Landing page critique <span id="lpc-lock-badge" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>' +
         '<div id="lpc-buttons-product" style="display:flex;gap:8px;flex-wrap:wrap"></div>' +
       '</div>' +
       '<div id="lpc-content-product" style="font-size:14px;line-height:1.6;color:var(--text)"></div>' +
@@ -1540,7 +1620,7 @@ async function renderRuleFrictionSection(p) {
     }
 
     if (!friction.length) {
-      contentDiv.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0">No obvious rule-based issues found on this page. ' + (j.pageError ? '<span style="color:var(--amber)">(Note: page fetch had an error — only funnel & ad rules checked.)</span>' : 'Run AI deep analysis below for nuanced critique.') + '</div>';
+      contentDiv.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0">No obvious rule-based issues found on this page. ' + (j.pageError ? '<span style="color:var(--amber)">(Note: page fetch had an error — only funnel & ad rules checked.)</span>' : 'Run landing page critique below for nuanced critique.') + '</div>';
       return;
     }
 
@@ -1572,14 +1652,14 @@ async function renderProductAiSection(p) {
 
   const productId = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
   if (!productId) {
-    contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">AI deep analysis requires a Shopify-matched product. This row isn\'t linked to one yet.</div>';
+    contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Landing page critique requires a Shopify-matched product. This row isn\'t linked to one yet.</div>';
     metaDiv.textContent = '';
     buttonsDiv.innerHTML = '';
     return;
   }
 
   // Render run button immediately so user can always click it
-  const runBtnHtml = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run AI deep analysis</button>';
+  const runBtnHtml = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run landing page critique</button>';
   contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading any saved analysis…</div>';
   buttonsDiv.innerHTML = runBtnHtml;
   metaDiv.textContent = '';

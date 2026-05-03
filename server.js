@@ -3385,35 +3385,177 @@ app.post('/api/google/rule-friction', async function(req, res) {
 app.get('/api/google/rule-friction/list', async function(req, res) {
   if (!db) return res.json({ items: [] });
   try {
-    // Read every product whose page_summary is cached, plus its rule scan
-    const r = await db.query("SELECT product_id, product_url, fetched_at, page_summary FROM product_page_cache");
+    // Read every product whose page_summary is cached. If the table doesn't exist yet
+    // (first deploy of the new feature), return empty list rather than 500.
+    let r;
+    try {
+      r = await db.query("SELECT product_id, product_url, fetched_at, page_summary FROM product_page_cache");
+    } catch (tableErr) {
+      console.log('product_page_cache not ready yet: ' + tableErr.message);
+      return res.json({ items: [] });
+    }
+
     const items = [];
     const byId = {};
     r.rows.forEach(function(row) { byId[row.product_id] = row; });
 
-    // Iterate Shopify products that have any signal of activity (Google ads spend OR GA4 sessions)
     (shopifyState.products || []).forEach(function(sp) {
-      const id = String(sp.id);
-      const cached = byId[id];
-      if (!cached) return;  // skip products we haven't fetched yet
+      try {
+        const id = String(sp.id);
+        const cached = byId[id];
+        if (!cached || !cached.page_summary) return;
 
-      const dossier = buildLandingPageDossier(sp);
-      if (!dossier) return;
+        const dossier = buildLandingPageDossier(sp);
+        if (!dossier) return;
 
-      const ruleFriction = extractRuleFriction(cached.page_summary, dossier);
-      const funnelFriction = extractFunnelFriction(dossier.funnel);
-      const adFriction = extractAdFriction(dossier);
-      const all = [].concat(ruleFriction, funnelFriction, adFriction);
-      all.sort(function(a, b) {
-        const order = { P1: 1, P2: 2, P3: 3 };
-        return (order[a.priority] || 9) - (order[b.priority] || 9);
-      });
-      const counts = { p1: all.filter(function(f){return f.priority==='P1';}).length, p2: all.filter(function(f){return f.priority==='P2';}).length, p3: all.filter(function(f){return f.priority==='P3';}).length };
-      if (all.length === 0) return;
-      items.push({ productId: id, productTitle: sp.title, counts: counts, top: all.slice(0, 3) });
+        const ruleFriction = extractRuleFriction(cached.page_summary, dossier);
+        const funnelFriction = extractFunnelFriction(dossier.funnel);
+        const adFriction = extractAdFriction(dossier);
+        const all = [].concat(ruleFriction, funnelFriction, adFriction);
+        all.sort(function(a, b) {
+          const order = { P1: 1, P2: 2, P3: 3 };
+          return (order[a.priority] || 9) - (order[b.priority] || 9);
+        });
+        const counts = { p1: all.filter(function(f){return f.priority==='P1';}).length, p2: all.filter(function(f){return f.priority==='P2';}).length, p3: all.filter(function(f){return f.priority==='P3';}).length };
+        if (all.length === 0) return;
+        items.push({ productId: id, productTitle: sp.title, counts: counts, top: all.slice(0, 3) });
+      } catch (perProductErr) {
+        // Skip a single bad product rather than 500 the whole list
+        console.error('rule-friction list per-product error: ' + perProductErr.message);
+      }
     });
 
     res.json({ items: items });
+  } catch(e) {
+    console.error('rule-friction list error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cart-page friction (rule-based). Fetches /cart on the storefront once per 24h
+// and applies rules specific to the cart-step decision: shipping clarity, payment
+// options, urgency/scarcity, free-shipping threshold visibility, abandoned-cart copy.
+// Uses the SAME product_page_cache table with key 'cart' so we don't pollute the schema.
+async function getCartPageFriction() {
+  const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
+  const cartUrl = 'https://' + storefrontDomain + '/cart?country=GB&currency=GBP';
+  const cartCacheKey = '__cart__';
+
+  let pageSummary = null;
+  let cacheUsed = false;
+  let pageError = null;
+
+  if (db) {
+    try {
+      const r = await db.query("SELECT page_summary, fetched_at FROM product_page_cache WHERE product_id=$1", [cartCacheKey]);
+      if (r.rows.length) {
+        const ageHours = (Date.now() - new Date(r.rows[0].fetched_at).getTime()) / 36e5;
+        if (ageHours < 24) {
+          pageSummary = r.rows[0].page_summary;
+          cacheUsed = true;
+        }
+      }
+    } catch(e) { /* fall through */ }
+  }
+
+  if (!pageSummary) {
+    const fetchResult = await fetchProductPageHtml(cartUrl);
+    if (!fetchResult.html) {
+      return { friction: [], error: fetchResult.error || 'Could not fetch cart page', pageError: fetchResult.error };
+    }
+    pageSummary = summariseProductPage(fetchResult.html);
+    if (db) {
+      try {
+        await db.query(
+          "INSERT INTO product_page_cache (product_id, product_url, fetched_at, page_summary) VALUES ($1, $2, NOW(), $3) " +
+          "ON CONFLICT (product_id) DO UPDATE SET product_url=EXCLUDED.product_url, fetched_at=NOW(), page_summary=EXCLUDED.page_summary",
+          [cartCacheKey, cartUrl, JSON.stringify(pageSummary)]
+        );
+      } catch(e) { /* ignore */ }
+    }
+  }
+
+  const friction = extractCartFriction(pageSummary);
+  return { friction: friction, pageError: pageError, cacheUsed: cacheUsed, pageSummary: pageSummary };
+}
+
+function extractCartFriction(pageSummary) {
+  const friction = [];
+  const sig = (pageSummary && pageSummary.signals) || {};
+  const text = (pageSummary && pageSummary.text) || '';
+  const lower = text.toLowerCase();
+
+  // Free-shipping threshold visibility
+  const hasFreeShippingThreshold = /spend (£|gbp |over )\d|free (uk )?(delivery|shipping) over|free (delivery|shipping) (when you )?(spend|over)/i.test(text);
+  if (!hasFreeShippingThreshold && !sig.hasShippingMention) {
+    friction.push({ priority: 'P1', issue: 'Cart has no shipping cost / threshold info', evidence: 'Customers see the cart but not what shipping will cost or how to qualify for free delivery. Adding "Spend £X for free delivery" lifts AOV and reduces checkout abandonment.', category: 'shipping' });
+  } else if (!hasFreeShippingThreshold) {
+    friction.push({ priority: 'P2', issue: 'No free-shipping progress bar', evidence: 'Cart mentions shipping but doesn\'t show a "£X away from free shipping" progress bar. This is a top conversion lever for cart upsells.', category: 'shipping' });
+  }
+
+  // Express checkout / payment options
+  const hasShopPay = /shop pay|shoppay/i.test(text);
+  const hasPayPal = /paypal/i.test(text);
+  const hasApplePay = /apple pay|applepay/i.test(text);
+  const hasGooglePay = /google pay|googlepay|g pay/i.test(text);
+  const expressMethodCount = [hasShopPay, hasPayPal, hasApplePay, hasGooglePay].filter(Boolean).length;
+  if (expressMethodCount === 0) {
+    friction.push({ priority: 'P1', issue: 'No express checkout options visible on cart', evidence: 'No mention of Shop Pay, PayPal, Apple Pay or Google Pay on the cart page. Express checkout typically lifts mobile conversion 20-30%.', category: 'payment' });
+  } else if (expressMethodCount === 1) {
+    friction.push({ priority: 'P2', issue: 'Only one express checkout option', evidence: 'Cart shows only one express payment method. Adding more (e.g. Shop Pay + PayPal + Apple Pay) covers more device types and lifts mobile conversion.', category: 'payment' });
+  }
+
+  // Trust signals at cart
+  if (!sig.hasReturnsMention) {
+    friction.push({ priority: 'P2', issue: 'No returns / money-back guarantee on cart page', evidence: 'UK shoppers expect to see returns terms before paying. Add "Free 30-day returns" near the checkout button.', category: 'trust' });
+  }
+
+  // Discount / promo code field handling
+  const hasDiscountField = /discount code|promo code|coupon/i.test(text);
+  if (hasDiscountField && !/apply (a |your )?discount|got a code/i.test(text)) {
+    friction.push({ priority: 'P3', issue: 'Discount code field visible by default', evidence: 'A visible "Discount code" field can prompt buyers to leave the cart and search for codes online, often abandoning. Hide it behind "Got a code?" link.', category: 'cart' });
+  }
+
+  // Empty cart fallback
+  if (lower.indexOf('your cart is empty') >= 0 && !/(continue shopping|browse|popular)/i.test(text)) {
+    friction.push({ priority: 'P3', issue: 'Empty-cart page has no recovery CTAs', evidence: '"Your cart is empty" but no "Continue shopping" or popular-products list. Add product recommendations to recover bounces.', category: 'cart' });
+  }
+
+  // Mobile viewport (re-check, since cart page is its own URL)
+  if (!sig.hasViewportMeta) {
+    friction.push({ priority: 'P2', issue: 'Cart page missing viewport meta tag', evidence: 'Mobile viewport tag missing — cart will render badly on phones. Ensure theme has proper meta viewport.', category: 'mobile' });
+  }
+
+  // No urgency / scarcity copy
+  if (!sig.hasUrgencyBadges && !/(only \d+ left|limited stock|hurry|today only|ends in)/i.test(text)) {
+    friction.push({ priority: 'P3', issue: 'No urgency or scarcity copy on cart', evidence: 'Cart has no "Only X left" / time-limited badges. Genuine urgency lifts checkout-completion modestly.', category: 'urgency' });
+  }
+
+  // Sort by priority
+  friction.sort(function(a, b) {
+    const order = { P1: 1, P2: 2, P3: 3 };
+    return (order[a.priority] || 9) - (order[b.priority] || 9);
+  });
+  return friction;
+}
+
+// Endpoint: returns cart-page friction (rule-based, free, cached 24h).
+// Same shape as /rule-friction so the front-end can render with the same component.
+app.get('/api/google/cart-friction', async function(req, res) {
+  try {
+    const result = await getCartPageFriction();
+    const counts = {
+      total: result.friction.length,
+      p1: result.friction.filter(function(f){ return f.priority === 'P1'; }).length,
+      p2: result.friction.filter(function(f){ return f.priority === 'P2'; }).length,
+      p3: result.friction.filter(function(f){ return f.priority === 'P3'; }).length
+    };
+    res.json({
+      friction: result.friction,
+      counts: counts,
+      cached: result.cacheUsed,
+      pageError: result.pageError
+    });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -3706,10 +3848,14 @@ async function getCachedCritique(productId) {
   if (!db) return null;
   try {
     const r = await db.query("SELECT * FROM landing_page_critiques WHERE product_id=$1", [String(productId)]);
+    console.log('[LPC] cache lookup productId=' + productId + ' → ' + (r.rows.length ? 'HIT, generated_at=' + r.rows[0].generated_at : 'MISS'));
     if (!r.rows.length) return null;
     const row = r.rows[0];
     const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
-    if (ageHours > LPC_CACHE_HOURS) return null;
+    if (ageHours > LPC_CACHE_HOURS) {
+      console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h)');
+      return null;
+    }
     return {
       productId: row.product_id,
       productTitle: row.product_title,
@@ -3726,7 +3872,7 @@ async function getCachedCritique(productId) {
       ageHours: Math.round(ageHours * 10) / 10
     };
   } catch (e) {
-    console.error('LPC cache read error: ' + e.message);
+    console.error('[LPC] cache read error productId=' + productId + ': ' + e.message);
     return null;
   }
 }
@@ -3804,9 +3950,12 @@ async function runCritiqueForProduct(shopifyProduct, score) {
           JSON.stringify(result.funnelSummary), JSON.stringify(result.adSummary), JSON.stringify(result.pageSummary),
           rawText, result.score]
       );
+      console.log('[LPC] persisted productId=' + result.productId + ' title="' + (result.productTitle || '').slice(0, 40) + '"');
     } catch (e) {
-      console.error('LPC persist error: ' + e.message);
+      console.error('[LPC] persist error productId=' + result.productId + ': ' + e.message);
     }
+  } else {
+    console.warn('[LPC] no db — analysis not persisted, will be lost when you close the modal');
   }
   return result;
 }
@@ -3918,6 +4067,40 @@ app.get('/api/google/landing-page-critique/list', async function(req, res) {
     res.json({ items: items });
   } catch (e) {
     console.error('LPC list error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DEBUG: lists every row in the critique table — used to verify saves actually happen.
+// Hit this in browser to see what's in the DB. Returns minimal info so it's safe to call.
+app.get('/api/google/landing-page-critique-debug-list', async function(req, res) {
+  if (!db) return res.json({ rows: [], note: 'no db connection' });
+  try {
+    const r = await db.query(
+      "SELECT product_id, product_title, generated_at, " +
+      "LENGTH(diagnosis) AS diag_len, " +
+      "(friction_json IS NOT NULL) AS has_friction, " +
+      "(actions_json IS NOT NULL) AS has_actions " +
+      "FROM landing_page_critiques ORDER BY generated_at DESC LIMIT 100"
+    );
+    res.json({
+      count: r.rows.length,
+      cacheHours: LPC_CACHE_HOURS,
+      rows: r.rows.map(function(row) {
+        const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
+        return {
+          productId: row.product_id,
+          productTitle: (row.product_title || '').slice(0, 60),
+          generatedAt: row.generated_at,
+          ageHours: Math.round(ageHours * 10) / 10,
+          stale: ageHours > LPC_CACHE_HOURS,
+          diagLen: row.diag_len || 0,
+          hasFriction: row.has_friction,
+          hasActions: row.has_actions
+        };
+      })
+    });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
