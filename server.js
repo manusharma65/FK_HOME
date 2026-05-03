@@ -1611,11 +1611,11 @@ async function syncShopifyProducts() {
     const dailyAll = {};       // 'YYYY-MM-DD' -> { gross, discount, refund, net, byPid: { pid: net } }
 
     function getDay(map, key) {
-      if (!map[key]) map[key] = { gross: 0, discount: 0, refund: 0, net: 0 };
+      if (!map[key]) map[key] = { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0 };
       return map[key];
     }
     function getDayAll(key) {
-      if (!dailyAll[key]) dailyAll[key] = { gross: 0, discount: 0, refund: 0, net: 0, byPid: {} };
+      if (!dailyAll[key]) dailyAll[key] = { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0, byPid: {} };
       return dailyAll[key];
     }
 
@@ -1637,6 +1637,17 @@ async function syncShopifyProducts() {
           const dayKey = order.created_at.slice(0, 10); // 'YYYY-MM-DD'
           const orderTime = new Date(order.created_at).getTime();
           const isWithin7 = orderTime >= cutoff7;
+
+          // Shipping at the order level (not per line). Apply to the store-wide day total only,
+          // because shipping isn't attributable to any one product. Add to NET so it flows through.
+          const shippingTotal = (order.shipping_lines || []).reduce(function(s, sl){
+            return s + parseFloat(sl.price || 0);
+          }, 0);
+          if (shippingTotal > 0) {
+            const ad = getDayAll(dayKey);
+            ad.shipping += shippingTotal;
+            ad.net += shippingTotal;
+          }
 
           (order.line_items || []).forEach(function(item) {
             const pid = String(item.product_id);
@@ -2409,6 +2420,7 @@ app.get('/api/google/daily-sales', async function(req, res) {
       gross: Math.round((dayData.gross || 0) * 100) / 100,
       discount: Math.round((dayData.discount || 0) * 100) / 100,
       refund: Math.round((dayData.refund || 0) * 100) / 100,
+      shipping: Math.round((dayData.shipping || 0) * 100) / 100,
       net: Math.round((dayData.net || 0) * 100) / 100,
       total: Math.round((dayData.net || 0) * 100) / 100, // for backward compat with frontend
       top: top
@@ -2419,6 +2431,7 @@ app.get('/api/google/daily-sales', async function(req, res) {
   const totalGross = result.reduce(function(s, d){ return s + d.gross; }, 0);
   const totalDiscount = result.reduce(function(s, d){ return s + d.discount; }, 0);
   const totalRefund = result.reduce(function(s, d){ return s + d.refund; }, 0);
+  const totalShipping = result.reduce(function(s, d){ return s + d.shipping; }, 0);
   const totalNet = result.reduce(function(s, d){ return s + d.net; }, 0);
 
   res.json({
@@ -2426,6 +2439,7 @@ app.get('/api/google/daily-sales', async function(req, res) {
     totalGross7d: Math.round(totalGross * 100) / 100,
     totalDiscount7d: Math.round(totalDiscount * 100) / 100,
     totalRefund7d: Math.round(totalRefund * 100) / 100,
+    totalShipping7d: Math.round(totalShipping * 100) / 100,
     totalNet7d: Math.round(totalNet * 100) / 100,
     totalRevenue7d: Math.round(totalNet * 100) / 100, // backward compat
     lastShopifySync: shopifyState.lastSync
@@ -2976,44 +2990,68 @@ app.post('/api/google/ai-analyse', async function(req, res) {
       }
     }
 
-    const prompt = `You are a Google Ads and e-commerce expert advising FK Sports UK.
+    // Build daily Shopify sales line for this product so AI can see the trend rather than just totals
+    const dailySales7d = product.dailySales7d || [];
+    const dailyLine = dailySales7d.length
+      ? dailySales7d.map(function(v, i){
+          const d = new Date(Date.now() - (6 - i) * 24 * 60 * 60 * 1000);
+          const day = d.toLocaleDateString('en-GB', { weekday: 'short' });
+          return day + ' £' + Math.round(v || 0);
+        }).join(', ')
+      : '(no daily breakdown available)';
 
-BUSINESS CONTEXT:
-- FK Sports UK sells home fitness equipment AND baby products on a single Shopify store (fksports.co.uk).
-- Roughly 150+ orders per day across all categories.
-- Currently a single Google Ads account covers both fitness and baby. Plan is to split baby into its own ads account in future.
-- Shopify is the source of truth for actual sales. Google's "Revenue" lags hours-to-days — if Google shows conversions but £0 revenue, that's typically attribution lag, not broken tracking.
-- Critical Shopify data caveat: there's currently a known GA4 checkout-event tracking gap, so the Funnel section may show "0 checkouts" even when Shopify clearly has orders. Don't over-index on the funnel checkout count vs Shopify sales — the discrepancy is almost certainly tracking, not behaviour.
+    // Derived signals — let AI see the relationship rather than infer it
+    const adSpendVsShopifySales = (gSpend > 0 && rev7d != null) ? (rev7d / gSpend).toFixed(1) : null;
+    const sellingWithoutAds = (rev7d != null && rev7d > 50 && gSpend < 5);
+    const spendingWithoutSales = (gSpend > 5 && rev7d != null && rev7d < 20);
+
+    const signalsLine = [
+      sellingWithoutAds ? 'SIGNAL: This product is selling on Shopify (' + fmt(rev7d) + ') with little/no Google ad spend (' + fmt(gSpend) + '). It either does not need ads, or there is an opportunity to scale through ads.' : '',
+      spendingWithoutSales ? 'SIGNAL: Google ad spend (' + fmt(gSpend) + ') is high vs Shopify sales (' + fmt(rev7d) + ') in the same window. Either ads are not converting (creative/landing/competitive issue) or attribution is delayed.' : '',
+      adSpendVsShopifySales ? 'Shopify-sales-to-ad-spend ratio: ' + adSpendVsShopifySales + 'x' : ''
+    ].filter(function(x){ return x; }).join('\n');
+
+    function fmt(n){ return n == null ? '—' : '£' + Math.round(n * 100) / 100; }
+
+    const prompt = `You are advising FK Sports UK on a single product.
+
+CONTEXT YOU NEED TO KNOW:
+- FK Sports UK is a Shopify store (fksports.co.uk) selling home fitness equipment AND baby products. ~150+ orders/day.
+- One Google Ads account covers everything today (fitness + baby will split into separate accounts later).
+- Shopify is the source of truth for actual sales. Google "Revenue" lags 24-48 hours and may show £0 even when Google has driven real sales.
+- Known data caveat: GA4 begin_checkout/purchase events are not always attributing back to product names cleanly. If the funnel section below shows "0 checkouts" for a product that clearly has Shopify orders, treat the funnel as untrustworthy on those two metrics — but cart_additions on the funnel is reliable.
 
 PRODUCT: ${name}${product.campaignName ? '\nCAMPAIGN: ' + product.campaignName : ''}${product.campaignType ? ' (' + product.campaignType + ')' : ''}
 
-GOOGLE ADS PERFORMANCE (LAST 7 DAYS):
-- Impressions: ${gImp}
-- Clicks: ${gClk}
-- CTR: ${gCtr}%
-- Conversions: ${gConv}
-- Ad Spend: £${gSpend}
-- Revenue (Google-attributed, lagged): £${gSales}
-- ACoS: ${gAcos}%
-
-SHOPIFY DATA:
-${(price != null) ? `- Price: £${price}` : ''}
+SHOPIFY (TRUTH):
+${(price != null) ? `- Price: ${fmt(price)}` : ''}
 ${(inventory != null) ? `- Inventory: ${inventory === 0 ? 'OUT OF STOCK' : inventory + ' units'}` : ''}
 ${status ? '- Status: ' + status.toUpperCase() : ''}
-${rev7d != null ? `- Last 7 days: £${rev7d} / ${units7d || 0} units (Shopify Net sales — gross minus discounts minus refunds)` : ''}
-${rev30d != null ? `- Last 30 days: £${rev30d} / ${units30d || 0} units (Shopify Net sales)` : ''}
-${funnelSnippet}${speedSnippet}${pageSnippet}
+${rev7d != null ? `- Net sales last 7 days: ${fmt(rev7d)} / ${units7d || 0} units` : ''}
+${rev30d != null ? `- Net sales last 30 days: ${fmt(rev30d)} / ${units30d || 0} units` : ''}
+- Daily net sales (Mon → today): ${dailyLine}
 
-CURRENT DIAGNOSIS: ${product.diagnosis || 'None'}
-SUGGESTED ACTION: ${product.action || 'None'}
+GOOGLE ADS (LAST 7 DAYS):
+- Impressions: ${gImp}
+- Clicks: ${gClk} (CTR ${gCtr}%)
+- Conversions recorded: ${gConv}
+- Ad spend: ${fmt(gSpend)}
+- Google-attributed revenue (lagged): ${fmt(gSales)}
+- ACOS: ${gAcos}% (only meaningful when Google revenue > 0; otherwise reads N/A)
 
-Provide a concise analysis (4-6 sentences max):
-1. What's the real root cause? Compare Google ad spend vs Shopify Net sales. Is this an ads activation problem (selling well organically but no/low ads), an ads-not-working problem (ads running but not converting), a listing problem, an attribution lag, or something else?
-2. One specific action to take this week.
-3. Expected impact if the action is taken.
-${includePageContent && productUrl ? '4. Listing-quality issues you can see (title length, image, description, etc.)' : ''}
+${signalsLine ? 'DERIVED SIGNALS:\n' + signalsLine + '\n' : ''}
+${funnelSnippet ? funnelSnippet + '\n' : ''}${speedSnippet}${pageSnippet}
 
-Be direct, specific, actionable. Reference actual numbers. No generic advice.`;
+THE QUESTION:
+Why isn't this product performing better, and what should the team do?
+
+Specifically address:
+1. Diagnose what is actually wrong (look at Shopify trend vs ad performance — don't conflate Google-side issues with Shopify-side issues).
+2. The single highest-leverage action this week.
+3. The realistic expected impact if action is taken.
+${includePageContent && productUrl ? '4. Listing-quality observations from the live page (image quality, title length, description, etc.).' : ''}
+
+Be direct. Be specific. Reference the actual numbers above. If the data tells a story, tell it. If it's ambiguous, say so. No generic platitudes.`;
 
     // Sonnet for routine analysis (faster, cheaper); Opus for deep dives where
     // we've also fetched the page + PageSpeed (the harder reasoning task)
@@ -3106,13 +3144,27 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
     const sorted = allProducts.slice().sort(function(a, b){ return (b.spend || 0) - (a.spend || 0); });
     const top = sorted.slice(0, 15); // limit to 15 to keep prompt manageable
 
+    // Per-product Shopify net sales (7d) lookup so AI can compare each product's ad performance vs its Shopify performance
+    const shopifyByPid = {};
+    (shopifyState.products || []).forEach(function(sp){ shopifyByPid[String(sp.id)] = sp; });
+    function getShopifyNet7d(googleRow) {
+      if (!googleRow.shopifyItemId) return null;
+      const parts = String(googleRow.shopifyItemId).split('_');
+      if (parts.length < 4) return null;
+      const sp = shopifyByPid[parts[2]];
+      return sp ? (sp.revenue7d || 0) : null;
+    }
+
     const productLines = top.map(function(p, i){
       const name = p.name || p.productName || p.adGroupName || '(unknown)';
       const spend = (p.spend || 0).toFixed(2);
       const sales = (p.sales || 0).toFixed(2);
-      const acos = p.acos != null ? p.acos.toFixed(1) + '%' : 'N/A';
+      const acos = (p.acos != null && p.acos > 0) ? p.acos.toFixed(1) + '%' : 'N/A';
+      const shopifyNet = getShopifyNet7d(p);
+      const shopifyPart = shopifyNet != null ? ', Shopify net 7d £' + shopifyNet.toFixed(0) : '';
       return (i+1) + '. ' + name.slice(0, 60)
-        + ' — Spend £' + spend + ', Sales £' + sales
+        + ' — Spend £' + spend + ', Google revenue £' + sales
+        + shopifyPart
         + ', ' + (p.impressions || 0) + ' impr, ' + (p.clicks || 0) + ' clk, '
         + (p.conversions || 0) + ' conv, ACOS ' + acos;
     }).join('\n');
@@ -3122,13 +3174,13 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       ? '\n... and ' + remaining + ' more product rows in this campaign.'
       : '';
 
-    const prompt = 'You are a Google Ads expert advising FK Sports UK.\n\n'
-      + 'BUSINESS CONTEXT:\n'
-      + '- FK Sports UK sells home fitness equipment AND baby products on a single Shopify store (fksports.co.uk).\n'
-      + '- Shop volume is roughly 150+ orders per day across all categories.\n'
-      + '- Currently a single Google Ads account covers both fitness and baby. Plan is to split baby out into its own ads account in future, but right now treat them as one.\n'
-      + '- Shopify is the source of truth for actual sales. Google\'s "conversion value" lags hours to days — if Google reports 344 conversions but £0 revenue, that\'s an attribution lag, not necessarily broken tracking.\n'
-      + '- ACOS = ad spend / Google-attributed revenue. If Google revenue is £0 the ACOS field will read N/A even when the campaign is genuinely converting on Shopify.\n\n'
+    const prompt = 'You are advising FK Sports UK on one Google Ads campaign.\n\n'
+      + 'CONTEXT YOU NEED TO KNOW:\n'
+      + '- FK Sports UK is a Shopify store (fksports.co.uk) selling home fitness equipment AND baby products. ~150+ orders/day.\n'
+      + '- One Google Ads account covers everything today (fitness + baby split into separate accounts is planned).\n'
+      + '- Shopify is the source of truth for actual sales. Google "Revenue" lags 24-48 hours — when Google shows conversions but £0 revenue, that is normally attribution lag, not broken tracking.\n'
+      + '- ACOS = ad spend / Google-attributed revenue. Reads N/A when Google revenue is £0.\n'
+      + '- For each product below we show both the Google revenue (lagged) AND its Shopify net sales for the same 7-day window. Use Shopify net as the truth for whether the product is selling.\n\n'
       + 'CAMPAIGN: ' + campaignName + '\n'
       + 'TYPE: ' + campaignType + '\n'
       + 'PERIOD: Last 7 days\n\n'
@@ -3136,20 +3188,21 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       + '- Spend: £' + totalSpend.toFixed(2) + '\n'
       + '- Google-attributed sales (lagged): £' + totalSales.toFixed(2) + '\n'
       + '- Impressions: ' + totalImpressions + '\n'
-      + '- Clicks: ' + totalClicks + '\n'
-      + '- Conversions recorded: ' + totalConv + '\n'
-      + '- CTR: ' + overallCtr + '%\n'
-      + '- ACOS (only meaningful when Google revenue > 0): ' + overallAcos + '\n'
+      + '- Clicks: ' + totalClicks + ' (CTR ' + overallCtr + '%)\n'
+      + '- Conversions: ' + totalConv + '\n'
+      + '- ACOS: ' + overallAcos + '\n'
       + '- Product rows in campaign: ' + allProducts.length + '\n\n'
-      + 'TOP PRODUCTS BY SPEND:\n' + productLines + remainingNote + '\n\n'
-      + 'Provide a CAMPAIGN-LEVEL analysis covering:\n'
-      + '1. Overall health verdict in one line (scaling / healthy / leaking money / tracking issue / broken). If conversions > 0 but Google revenue = £0, lean toward "tracking lag" or "tracking gap" rather than "broken" — it usually self-corrects in 24-48 hours.\n'
-      + '2. Which products are dragging this campaign down — name 1-3, with spend and ACOS\n'
-      + '3. Which products are working — name 1-3 that could absorb more budget\n'
-      + '4. ONE specific structural change to make this week (e.g. "split Walking Pad into its own campaign", "lower bid on Hex Dumbbell Tree by 30%", "exclude product type X")\n'
-      + '5. If campaign mixes fitness and baby products, flag it — they convert differently and benefit from separate campaigns\n'
-      + '6. If this is Performance Max or Shopping, comment on whether the right products are in scope\n\n'
-      + 'Be direct, specific, named. Reference actual product names and numbers. No generic advice.';
+      + 'TOP PRODUCTS BY SPEND (with Shopify-side truth):\n' + productLines + remainingNote + '\n\n'
+      + 'THE QUESTION:\n'
+      + 'What is going right and wrong in this campaign, and what is the one structural change to make this week?\n\n'
+      + 'Specifically:\n'
+      + '1. Health verdict in one line.\n'
+      + '2. Which products are dragging this down — name 1-3 with their numbers (compare ad spend to Shopify net sales — if a product has high ad spend but low Shopify net sales it is genuinely failing; if it has low Shopify net AND low ad spend, it is just inactive).\n'
+      + '3. Which products are working and could absorb more budget — name 1-3.\n'
+      + '4. ONE specific structural change for this week (e.g. exclude product type X, split product Y into its own campaign, lower bid on Z by 30%, etc.).\n'
+      + '5. If the campaign mixes fitness and baby products, flag it — they convert differently and benefit from separate campaigns.\n'
+      + '6. If this is Performance Max or Shopping, comment on whether the right products are in scope.\n\n'
+      + 'Be direct, specific, named. Reference actual numbers. No generic advice.';
 
     // Use Opus for campaign-level reasoning — it's the harder task
     const response = await axios.post('https://api.anthropic.com/v1/messages', {

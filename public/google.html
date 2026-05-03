@@ -46,7 +46,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 .logo { padding: 20px 22px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
 .logo-product { font-family: var(--display); font-size: 18px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; display: flex; align-items: center; gap: 6px; }
-.logo-sub { font-size: 11px; color: rgba(255,255,255,0.35); margin-top: 2px; font-family: var(--mono); }
+.logo-sub { font-size: 14px; font-weight: 700; color: #ff6a00; margin-top: 4px; font-family: var(--display); letter-spacing: -0.2px; }
 .nav { padding: 14px 12px; flex: 1; }
 .nav-section { font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.25); letter-spacing: 0.12em; text-transform: uppercase; padding: 14px 10px 7px; }
 .nav-item { display: flex; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 8px; cursor: pointer; color: rgba(255,255,255,0.55); font-size: 13.5px; font-weight: 400; transition: all 0.15s; border: none; background: none; width: 100%; text-align: left; }
@@ -312,17 +312,7 @@ table.activity tr:last-child td { border-bottom: none; }
 
 </div></div>
 
-<!-- AI MODAL — z-index 1200, ABOVE the big product card modal (1000) and dismiss modal (1100) -->
-<div class="modal-bg" id="ai-modal" onclick="if(event.target===this)closeAi()" style="z-index:1200">
-  <div class="modal" style="max-width:720px">
-    <div class="modal-title" id="ai-title">AI analysis</div>
-    <div class="modal-sub" id="ai-sub"></div>
-    <div class="ai-output" id="ai-output" style="font-size:14px;line-height:1.6">Analysing…</div>
-    <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="closeAi()">Close</button>
-    </div>
-  </div>
-</div>
+<!-- (Old standalone AI modal removed in v11 — AI now lives inside the big product/campaign modals with session caching.) -->
 
 <!-- BIG MODAL — used for product detail and daily sales drilldown -->
 <div class="modal-bg" id="big-modal" onclick="if(event.target===this)closeBigModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1000;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
@@ -364,6 +354,25 @@ let currentUser = null;
 let currentView = 'shopify';
 let currentFilter = 'all';
 let campaignTab = 'active'; // 'active' | 'dismissed' | 'archived'
+
+// AI result cache — per browser session.
+// Key: 'product:<id>:<depth>' or 'campaign:<id>'
+// Value: { analysis, timestamp, model, visionUsed, pageFetched }
+const aiCache = {};
+function aiCacheKeyForProduct(p, deep) {
+  const id = p.shopifyId || p.productId || p.id || p.title || 'unknown';
+  return 'product:' + id + ':' + (deep ? 'deep' : 'quick');
+}
+function aiCacheKeyForCampaign(campaignId) {
+  return 'campaign:' + campaignId;
+}
+function timeAgo(ts) {
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' hr ago';
+  return Math.floor(sec / 86400) + ' day(s) ago';
+}
 
 // ─── Auth helpers (every API call must include the token) ─────────────────
 function getAuthHeaders(extra) {
@@ -566,19 +575,20 @@ function renderDailySalesCard() {
       + '</div>';
   }).join('');
 
-  // Compact 4-part breakdown for the dashboard card itself
-  const totalNet = dailySalesData.totalNet7d || dailySalesData.totalRevenue7d || 0;
+  const totalNet = dailySalesData.totalNet7d || 0;
   const totalGross = dailySalesData.totalGross7d || 0;
   const totalDiscount = dailySalesData.totalDiscount7d || 0;
   const totalRefund = dailySalesData.totalRefund7d || 0;
+  const totalShipping = dailySalesData.totalShipping7d || 0;
 
   target.innerHTML = '<div class="section-header"><div>'
     + '<div class="section-title" style="font-size:14px">Daily breakdown of Net sales (7d)</div>'
-    + '<div class="section-sub">'
-    + 'Gross ' + fmtCurrency(totalGross)
-    + ' − Discounts ' + fmtCurrency(totalDiscount)
-    + ' − Refunds ' + fmtCurrency(totalRefund)
-    + ' = <strong style="color:var(--text)">Net ' + fmtCurrency(totalNet) + '</strong>'
+    + '<div class="section-sub" style="display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px">'
+    + '<span>Gross ' + fmtCurrency(totalGross) + '</span>'
+    + '<span style="color:var(--amber)">− Discounts ' + fmtCurrency(totalDiscount) + '</span>'
+    + '<span style="color:var(--red)">− Returns ' + fmtCurrency(totalRefund) + '</span>'
+    + '<span style="color:var(--green)">+ Shipping ' + fmtCurrency(totalShipping) + '</span>'
+    + '<span style="color:var(--text);font-weight:700">= Net ' + fmtCurrency(totalNet) + '</span>'
     + '</div>'
     + '</div>'
     + '<button class="btn btn-ghost" onclick="openDailySalesModal()">Open full view →</button>'
@@ -601,36 +611,44 @@ function openDailySalesModal() {
       + '</div>';
   }).join('');
 
-  // Header: 4-part totals
-  const totalNet = dailySalesData.totalNet7d || dailySalesData.totalRevenue7d || 0;
+  // Big breakdown table at top — matches Shopify's "Total sales breakdown" panel
+  const totalNet = dailySalesData.totalNet7d || 0;
   const totalGross = dailySalesData.totalGross7d || 0;
   const totalDiscount = dailySalesData.totalDiscount7d || 0;
   const totalRefund = dailySalesData.totalRefund7d || 0;
-  const breakdownTile = function(label, value, colour){
-    return '<div style="background:var(--bg2);padding:14px 18px;border-radius:10px;border:1px solid var(--border);flex:1;min-width:140px">'
-      + '<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
-      + '<div style="font-size:22px;font-weight:700;font-family:var(--mono);color:' + (colour || 'var(--text)') + '">' + value + '</div>'
+  const totalShipping = dailySalesData.totalShipping7d || 0;
+
+  const breakdownRow = function(label, value, sign){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border)">'
+      + '<div style="font-weight:500;color:var(--text)">' + label + '</div>'
+      + '<div style="font-size:18px;font-weight:700;font-family:var(--mono);color:var(--text)">' + sign + fmtCurrency(value) + '</div>'
       + '</div>';
   };
-  const totalsRow = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">'
-    + breakdownTile('Gross sales', fmtCurrency(totalGross))
-    + breakdownTile('Discounts', '− ' + fmtCurrency(totalDiscount), 'var(--amber)')
-    + breakdownTile('Refunds', '− ' + fmtCurrency(totalRefund), 'var(--red)')
-    + breakdownTile('Net sales', fmtCurrency(totalNet), 'var(--green)')
+
+  const breakdownPanel = '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:18px;overflow:hidden">'
+    + '<div style="padding:12px 18px;background:var(--bg);border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Net sales breakdown — last 7 days</div>'
+    + breakdownRow('Gross sales', totalGross, '')
+    + breakdownRow('Discounts', totalDiscount, '−')
+    + breakdownRow('Returns', totalRefund, '−')
+    + breakdownRow('Shipping charges', totalShipping, '+')
+    + '<div style="display:flex;justify-content:space-between;align-items:center;padding:16px 18px;background:var(--green-light)">'
+    + '<div style="font-weight:700;color:var(--text)">Net sales</div>'
+    + '<div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--green)">' + fmtCurrency(totalNet) + '</div>'
+    + '</div>'
     + '</div>';
 
-  // Per-day breakdown rows
+  // Per-day breakdown
   const dayDetails = days.map(function(d, i){
     const top = (d.top || []).map(function(t){
       return '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span>' + escapeHtml(t.title) + '</span><span style="font-family:var(--mono);font-weight:600">' + fmtCurrency(t.revenue) + '</span></div>';
     }).join('') || '<div style="color:var(--text3);padding:6px 0">No sales</div>';
 
-    // Per-day breakdown line
     const dayLine = '<div style="display:flex;gap:14px;font-size:12px;color:var(--text2);font-family:var(--mono);margin-bottom:10px;flex-wrap:wrap">'
       + '<span>Gross ' + fmtCurrency(d.gross) + '</span>'
       + (d.discount ? '<span style="color:var(--amber)">− Disc ' + fmtCurrency(d.discount) + '</span>' : '')
-      + (d.refund ? '<span style="color:var(--red)">− Ref ' + fmtCurrency(d.refund) + '</span>' : '')
-      + '<span style="color:var(--green);font-weight:700">= Net ' + fmtCurrency(d.net) + '</span>'
+      + (d.refund ? '<span style="color:var(--red)">− Ret ' + fmtCurrency(d.refund) + '</span>' : '')
+      + (d.shipping ? '<span style="color:var(--green)">+ Ship ' + fmtCurrency(d.shipping) + '</span>' : '')
+      + '<span style="color:var(--text);font-weight:700">= Net ' + fmtCurrency(d.net) + '</span>'
       + '</div>';
 
     return '<div id="dsm-day-' + i + '" style="margin-bottom:18px;padding:14px;background:var(--bg2);border-radius:8px">'
@@ -641,10 +659,10 @@ function openDailySalesModal() {
       + '</div>';
   }).join('');
 
-  showBigModal('Daily sales — last 7 days',
-    totalsRow
+  showBigModal('Sales — last 7 days',
+    breakdownPanel
     + '<div style="display:flex;gap:8px;align-items:flex-end;padding:18px 8px;background:var(--bg2);border-radius:10px;margin-bottom:18px">' + bars + '</div>'
-    + '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Per-day detail (refunds applied on the day they were issued):</div>'
+    + '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Per-day detail (refunds applied on the day they were issued, shipping per order):</div>'
     + dayDetails);
 }
 
@@ -833,7 +851,7 @@ function productSubrow(p) {
     + statRow('Conv', fmtNum(p.conversions))
     + statRow('ACOS', fmtPct(p.acos))
     + '</div>'
-    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'aiAnalyse(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\'>🪄 AI</button></div>'
+    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'openProductDetailFromObj(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\'>🪄 Open & analyse</button></div>'
     + '</div>'
     + '</div>';
 }
@@ -919,43 +937,84 @@ async function loadActivity() {
   }
 }
 
-// ─── AI analysis modal ───────────────────────────────────────────────────
-async function aiAnalyse(product, deepDive) {
-  document.getElementById('ai-modal').classList.add('show');
-  document.getElementById('ai-title').textContent = product.title || product.displayName || product.productName || 'Product';
-  document.getElementById('ai-sub').textContent = (product.diagnosis || '') + (deepDive ? ' · Deep dive (Opus + page + speed)' : ' · Quick analysis (Sonnet)');
-  document.getElementById('ai-output').textContent = deepDive ? 'Deep analysis running… 15-25 seconds.' : 'Analysing…';
-  try {
-    const r = await authedFetch('/api/google/ai-analyse', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ product: product, includePageContent: !!deepDive })
-    });
-    const j = await r.json();
-    document.getElementById('ai-output').textContent = j.analysis || j.error || 'No response';
-  } catch(e) {
-    document.getElementById('ai-output').textContent = 'Error: ' + e.message;
+// ─── Campaign AI ─────────────────────────────────────────────────────────
+// Opens a dedicated big modal showing the campaign analysis. Result is cached
+// in memory so closing and reopening the modal shows the cached analysis instantly.
+async function aiAnalyseCampaign(campaignId, campaignName) {
+  const key = aiCacheKeyForCampaign(campaignId);
+  const cached = aiCache[key];
+  const headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:10px;flex-wrap:wrap">'
+    + '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 Campaign analysis</div>'
+    + '<div id="ai-buttons-campaign" style="display:flex;gap:8px;flex-wrap:wrap"></div>'
+    + '</div>';
+
+  const bodyShell = '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:18px 20px">'
+    + headerHtml
+    + '<div id="ai-content-campaign" style="font-size:14px;line-height:1.65;color:var(--text);white-space:pre-wrap"></div>'
+    + '<div id="ai-meta-campaign" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>'
+    + '</div>';
+
+  showBigModal('Campaign analysis · ' + campaignName, bodyShell);
+  renderCampaignAiSection(campaignId, campaignName);
+
+  // If never run, fire it once automatically since the user clicked the AI button
+  if (!cached) runCampaignAi(campaignId, campaignName);
+}
+
+function renderCampaignAiSection(campaignId, campaignName) {
+  const buttonsDiv = document.getElementById('ai-buttons-campaign');
+  const contentDiv = document.getElementById('ai-content-campaign');
+  const metaDiv = document.getElementById('ai-meta-campaign');
+  if (!buttonsDiv || !contentDiv || !metaDiv) return;
+
+  const cached = aiCache[aiCacheKeyForCampaign(campaignId)];
+  if (cached) {
+    contentDiv.textContent = cached.analysis;
+    const tags = ['Opus'];
+    tags.push('analysed ' + timeAgo(cached.timestamp));
+    metaDiv.textContent = tags.join(' · ');
+    buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\')">↻ Re-run</button>';
+  } else {
+    contentDiv.innerHTML = '<div style="color:var(--text3)">Running…</div>';
+    metaDiv.textContent = '';
+    buttonsDiv.innerHTML = '';
   }
 }
-function closeAi() { document.getElementById('ai-modal').classList.remove('show'); }
 
-// Campaign-level AI — looks at the whole campaign's data
-async function aiAnalyseCampaign(campaignId, campaignName) {
-  document.getElementById('ai-modal').classList.add('show');
-  document.getElementById('ai-title').textContent = 'Campaign analysis · ' + campaignName;
-  document.getElementById('ai-sub').textContent = 'Whole-campaign view (Opus) · 15-25 seconds';
-  document.getElementById('ai-output').textContent = 'Analysing campaign…';
+async function runCampaignAi(campaignId, campaignName) {
+  const buttonsDiv = document.getElementById('ai-buttons-campaign');
+  const contentDiv = document.getElementById('ai-content-campaign');
+  const metaDiv = document.getElementById('ai-meta-campaign');
+  if (!contentDiv) return;
+
+  contentDiv.textContent = 'Analysing campaign… 20-30 seconds (Opus reasoning over all products in this campaign).';
+  metaDiv.textContent = '';
+  if (buttonsDiv) buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
+
   try {
     const r = await authedFetch('/api/google/ai-analyse-campaign', {
       method: 'POST',
       body: JSON.stringify({ campaignId: campaignId })
     });
     const j = await r.json();
-    document.getElementById('ai-output').textContent = j.analysis || j.error || 'No response';
+    if (j.error) throw new Error(j.error);
+
+    aiCache[aiCacheKeyForCampaign(campaignId)] = {
+      analysis: j.analysis,
+      timestamp: Date.now(),
+      model: j.modelUsed || 'opus',
+      campaignName: campaignName
+    };
+    renderCampaignAiSection(campaignId, campaignName);
   } catch(e) {
-    document.getElementById('ai-output').textContent = 'Error: ' + e.message;
+    contentDiv.textContent = 'Error: ' + e.message;
+    metaDiv.textContent = '';
+    if (buttonsDiv) buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\')">↻ Retry</button>';
   }
 }
+
+// Legacy stub — closeAi was used by the old standalone AI modal. Kept as no-op for safety.
+function closeAi() { /* no-op: AI is now inline inside the big modal */ }
 
 // ─── Big screen-size modal (product detail / daily sales) ────────────────
 function showBigModal(title, bodyHtml) {
@@ -1072,17 +1131,97 @@ function openProductDetailFromObj(p) {
     stat('Avg time', p.ga4AvgEngagementTime != null ? p.ga4AvgEngagementTime.toFixed(0) + 's' : '—') +
     '</div>' : '<div style="margin-top:20px;padding:12px 16px;background:var(--bg2);border-radius:8px;color:var(--text3);font-size:13px">GA4 funnel data not yet available for this product. Either it has no traffic, or its handle does not match the page path.</div>') +
 
-    '<div style="margin-top:28px;display:flex;gap:8px;flex-wrap:wrap">' +
+    // ─── AI section — lives inside the product card, persists per session ──
+    '<div id="ai-section-product" style="margin-top:28px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 AI analysis</div>' +
+        '<div id="ai-buttons-product" style="display:flex;gap:8px;flex-wrap:wrap"></div>' +
+      '</div>' +
+      '<div id="ai-content-product" style="font-size:14px;line-height:1.65;color:var(--text);white-space:pre-wrap"></div>' +
+      '<div id="ai-meta-product" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>' +
+    '</div>' +
+
+    '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
     (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
-    '<button class="btn btn-ghost" onclick="aiAnalyseByKey(\'' + key.replace(/'/g, "\\'") + '\', false)">🪄 Quick AI</button>' +
-    '<button class="btn btn-primary" onclick="aiAnalyseByKey(\'' + key.replace(/'/g, "\\'") + '\', true)">🔬 Deep dive AI</button>' +
     '</div>';
 
   showBigModal(p.title || 'Product detail', body);
+
+  // Initialise the AI section with either the cached result or the run buttons
+  renderProductAiSection(p);
 }
-function aiAnalyseByKey(key, deep) {
-  const p = productRegistry[key];
-  if (p) aiAnalyse(p, deep);
+
+// Render the AI section inside an open product modal, using cache if available.
+function renderProductAiSection(p) {
+  const buttonsDiv = document.getElementById('ai-buttons-product');
+  const contentDiv = document.getElementById('ai-content-product');
+  const metaDiv = document.getElementById('ai-meta-product');
+  if (!buttonsDiv || !contentDiv || !metaDiv) return;
+
+  const key = registerProduct(p);
+  const quickKey = aiCacheKeyForProduct(p, false);
+  const deepKey = aiCacheKeyForProduct(p, true);
+  const quickCached = aiCache[quickKey];
+  const deepCached = aiCache[deepKey];
+
+  // Prefer deep result if both exist (more thorough)
+  const showCached = deepCached || quickCached;
+
+  if (showCached) {
+    contentDiv.textContent = showCached.analysis;
+    const tags = [];
+    tags.push(showCached.depth === 'deep' ? '🔬 Deep dive' : '🪄 Quick');
+    if (showCached.model) tags.push(showCached.model.indexOf('opus') >= 0 ? 'Opus' : 'Sonnet');
+    if (showCached.visionUsed) tags.push('image analysed');
+    if (showCached.pageFetched) tags.push('page fetched');
+    tags.push('analysed ' + timeAgo(showCached.timestamp));
+    metaDiv.textContent = tags.join(' · ');
+    buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', false)">↻ Re-run quick</button>'
+      + '<button class="btn btn-ghost" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', true)">↻ Re-run deep</button>';
+  } else {
+    contentDiv.innerHTML = '<div style="color:var(--text3)">Click below to analyse this product. Quick uses Sonnet and finishes in 5-10s. Deep dive uses Opus, fetches the live product page and the hero image, and takes 20-30s.</div>';
+    metaDiv.textContent = '';
+    buttonsDiv.innerHTML = '<button class="btn btn-ghost" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', false)">🪄 Quick AI</button>'
+      + '<button class="btn btn-primary" onclick="runProductAi(\'' + key.replace(/'/g, "\\'") + '\', true)">🔬 Deep dive AI</button>';
+  }
+}
+
+async function runProductAi(productKey, deep) {
+  const p = productRegistry[productKey];
+  if (!p) return;
+  const buttonsDiv = document.getElementById('ai-buttons-product');
+  const contentDiv = document.getElementById('ai-content-product');
+  const metaDiv = document.getElementById('ai-meta-product');
+  if (!contentDiv) return;
+
+  contentDiv.textContent = deep
+    ? 'Analysing… Deep dive takes 20-30 seconds (fetching page + image + PageSpeed).'
+    : 'Analysing…';
+  metaDiv.textContent = '';
+  if (buttonsDiv) buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
+
+  try {
+    const r = await authedFetch('/api/google/ai-analyse', {
+      method: 'POST',
+      body: JSON.stringify({ product: p, includePageContent: !!deep })
+    });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+
+    aiCache[aiCacheKeyForProduct(p, deep)] = {
+      analysis: j.analysis,
+      timestamp: Date.now(),
+      model: j.modelUsed || (deep ? 'opus' : 'sonnet'),
+      visionUsed: !!j.visionUsed,
+      pageFetched: !!j.pageFetched,
+      depth: deep ? 'deep' : 'quick'
+    };
+    renderProductAiSection(p);
+  } catch(e) {
+    contentDiv.textContent = 'Error: ' + e.message;
+    metaDiv.textContent = '';
+    renderProductAiSection(p); // restore the buttons so user can retry
+  }
 }
 
 // ─── Dismiss / Archive flow ──────────────────────────────────────────────
