@@ -713,6 +713,23 @@ async function initTasksTable() {
       );
       CREATE INDEX IF NOT EXISTS idx_archive_archived_at ON google_campaign_archive(archived_at DESC);
       CREATE INDEX IF NOT EXISTS idx_archive_state ON google_campaign_archive(state);
+
+      CREATE TABLE IF NOT EXISTS landing_page_critiques (
+        product_id TEXT PRIMARY KEY,
+        product_title TEXT,
+        product_url TEXT,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        diagnosis TEXT,
+        friction_json JSONB,
+        actions_json JSONB,
+        funnel_summary JSONB,
+        ad_summary JSONB,
+        page_summary JSONB,
+        raw_ai_text TEXT,
+        score NUMERIC DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_lpc_score ON landing_page_critiques(score DESC);
     `);
     // Migrate existing rows that don't have state column
     await db.query("ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'");
@@ -3079,6 +3096,450 @@ cron.schedule('0 */2 * * *', function() { syncShopifyProducts().catch(function(e
 cron.schedule('0 7 * * *', function() { fetchGa4ProductMetrics().catch(function(e){ console.error('GA4 cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
 
 const PORT = process.env.PORT || 3000;
+// ─────────────────────────────────────────────────────────────────────────
+// Layer 4: Landing page critique
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Stitches Shopify + Google Ads + GA4 data per product, fetches the live
+// product page, summarises both, and asks Claude to produce a structured
+// critique: where in the funnel are people dropping, what's wrong with the
+// landing page, and what specific actions to take.
+//
+// Endpoints:
+//   POST /api/google/landing-page-critique          { productId, forceRefresh }
+//   GET  /api/google/landing-page-critique/list     → cached top-10
+//   POST /api/google/landing-page-critique-batch    (manager-only) → run top-10 now
+//
+// Cache: 24h, in landing_page_critiques. forceRefresh=true bypasses cache.
+// Daily cron: 03:30 London time, runs the batch automatically.
+
+const LPC_CACHE_HOURS = 24;
+const LPC_MODEL = 'claude-opus-4-7';
+
+// Strip <script>, <style>, comments and tags, collapse whitespace.
+// Returns the visible-text content of the page plus a few structural signals.
+function summariseProductPage(html) {
+  if (!html || typeof html !== 'string') return { text: '', signals: {} };
+  const signals = {
+    hasViewportMeta: /<meta[^>]+name=["']viewport["']/i.test(html),
+    pageBytes: html.length,
+    imageCount: (html.match(/<img\b/gi) || []).length,
+    h1Count: (html.match(/<h1\b/gi) || []).length,
+    hasReviewWidget: /reviews?|rating|stars?/i.test(html) && /<svg|class="[^"]*star/i.test(html),
+    hasShippingMention: /free (uk )?(delivery|shipping)|next.day|24.hour/i.test(html),
+    hasReturnsMention: /returns?|refund|money.back|guarantee/i.test(html),
+    hasUrgencyBadges: /(only \d+ left|selling fast|in stock|low stock|hurry|limited)/i.test(html),
+    hasPrice: /£\d|currency/i.test(html),
+    addToCartCount: (html.match(/add to cart|add to bag|add to basket/gi) || []).length
+  };
+
+  // Try to extract the page title and meta description first
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+  const metaDescMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
+  const ogDescMatch = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+  const productJsonLdMatch = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+  let jsonLd = null;
+  if (productJsonLdMatch) {
+    try { jsonLd = JSON.parse(productJsonLdMatch[1].trim()); } catch(e) {}
+  }
+
+  // Strip noise to get the visible text
+  let body = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Trim to ~6000 chars (~1500 tokens) — enough for AI to assess content quality
+  if (body.length > 6000) body = body.substring(0, 6000) + '... [truncated]';
+
+  return {
+    pageTitle: titleMatch ? titleMatch[1].trim() : null,
+    metaDescription: (metaDescMatch || ogDescMatch) ? (metaDescMatch || ogDescMatch)[1].trim() : null,
+    jsonLdPresent: !!jsonLd,
+    jsonLdType: jsonLd && (jsonLd['@type'] || (Array.isArray(jsonLd) && jsonLd[0] && jsonLd[0]['@type'])) || null,
+    text: body,
+    signals: signals
+  };
+}
+
+async function fetchProductPageHtml(url) {
+  if (!url) return null;
+  try {
+    const resp = await axios.get(url, {
+      timeout: 15000,
+      maxRedirects: 5,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CampaignPulse/1.0; +https://app.fksports.co.uk)' },
+      validateStatus: function(s){ return s >= 200 && s < 400; }
+    });
+    return resp.data;
+  } catch (e) {
+    console.error('Landing page fetch failed for ' + url + ': ' + e.message);
+    return null;
+  }
+}
+
+// Build the dossier we feed to Claude. Pure data — no AI prompt yet.
+function buildLandingPageDossier(shopifyProduct) {
+  if (!shopifyProduct) return null;
+  const productId = String(shopifyProduct.id);
+
+  // Google Ads rows for this product (across all campaigns)
+  const adRows = (googleState.products || []).filter(function(gp) {
+    if (!gp.shopifyItemId) return false;
+    const parts = String(gp.shopifyItemId).split('_');
+    return parts.length >= 4 && parts[2] === productId;
+  });
+  const adAgg = aggregateGoogleMetrics(adRows);
+
+  // Search keywords driving traffic to ad groups whose product groups include this product
+  const adGroupNames = {};
+  adRows.forEach(function(r){ if (r.adGroupName) adGroupNames[r.adGroupName] = true; });
+  const searchKeywords = (googleState.products || [])
+    .filter(function(gp){ return gp.itemType === 'keyword' && (gp.spend > 0 || gp.impressions > 0); })
+    .slice(0, 20)
+    .map(function(gp){ return { keyword: gp.name, spend: gp.spend, sales: gp.sales, clicks: gp.clicks, conversions: gp.conversions }; });
+
+  // GA4 funnel for this product's URL path
+  let funnel = null;
+  if (shopifyProduct.handle) {
+    const path = '/products/' + shopifyProduct.handle;
+    funnel = (ga4State.productMetrics || {})[path] || null;
+  }
+
+  return {
+    product: {
+      id: productId,
+      title: shopifyProduct.title,
+      handle: shopifyProduct.handle,
+      url: shopifyProduct.shopifyUrl || ('https://www.fksports.co.uk/products/' + shopifyProduct.handle),
+      price: shopifyProduct.price,
+      status: shopifyProduct.status,
+      inventory: shopifyProduct.inventory,
+      revenue7d: shopifyProduct.revenue7d || 0,
+      revenue30d: shopifyProduct.revenue30d || 0,
+      unitsSold7d: shopifyProduct.unitsSold7d || 0,
+      unitsSold30d: shopifyProduct.unitsSold30d || 0
+    },
+    ads: {
+      spend: adAgg.spend,
+      sales: adAgg.sales,
+      impressions: adAgg.impressions,
+      clicks: adAgg.clicks,
+      conversions: adAgg.conversions,
+      ctr: adAgg.ctr,
+      acos: adAgg.acos,
+      costPerConv: adAgg.costPerConv,
+      campaignsCount: adAgg.campaignsAdvertisedIn.length,
+      campaignNames: adAgg.campaignsAdvertisedIn.map(function(c){ return c.campaignName; })
+    },
+    searchKeywords: searchKeywords,
+    funnel: funnel ? {
+      sessions: funnel.sessions,
+      cartAdditions: funnel.cartAdditions,
+      checkouts: funnel.checkouts,
+      purchases: funnel.purchases,
+      cartRate: funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : 0,
+      checkoutFromCart: funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : 0,
+      purchaseFromCheckout: funnel.checkouts > 0 ? Math.round((funnel.purchases / funnel.checkouts) * 1000) / 10 : 0,
+      bounceRate: funnel.bounceRate,
+      engagementRate: funnel.engagementRate,
+      avgEngagementTime: funnel.avgEngagementTime
+    } : null
+  };
+}
+
+function buildCritiquePrompt(dossier, pageSummary) {
+  return [
+    "You are a senior conversion-rate optimisation analyst for an e-commerce store on Shopify.",
+    "Below is a structured dossier for ONE product, including its real performance data and the live HTML content of its landing page.",
+    "",
+    "Your job: produce a comprehensive, actionable critique that explains WHY this product is or isn't converting, and what to fix this week.",
+    "",
+    "PRODUCT DOSSIER:",
+    "```json",
+    JSON.stringify(dossier, null, 2),
+    "```",
+    "",
+    "LANDING PAGE — STRUCTURAL SIGNALS:",
+    JSON.stringify(pageSummary.signals, null, 2),
+    "",
+    "LANDING PAGE — META:",
+    "Page title: " + (pageSummary.pageTitle || '(none)'),
+    "Meta description: " + (pageSummary.metaDescription || '(none)'),
+    "JSON-LD product schema present: " + pageSummary.jsonLdPresent,
+    "",
+    "LANDING PAGE — VISIBLE TEXT (truncated to 6000 chars):",
+    pageSummary.text,
+    "",
+    "Return STRICT JSON in this exact shape (no markdown fences, no commentary):",
+    "{",
+    '  "diagnosis": "ONE sentence identifying the most likely root cause of underperformance",',
+    '  "funnelDiagnosis": "Where in the funnel people are dropping (sessions → cart → checkout → purchase). Quote real numbers.",',
+    '  "frictionPoints": [',
+    '    { "priority": "P1|P2|P3", "issue": "Short title", "evidence": "Why this is a problem, citing the data or page content", "category": "trust|price|cta|copy|imagery|mobile|stock|ad-coherence|other" }',
+    '  ],',
+    '  "actions": [',
+    '    { "rank": 1, "action": "Specific thing to do this week", "expectedImpact": "What you might see if this is fixed", "effort": "low|medium|high" }',
+    '  ],',
+    '  "adVsPageCoherence": "Does the landing page deliver on what the ads/keywords promise? Specific gap if any.",',
+    '  "trustSignals": "Reviews, badges, shipping, returns — what\'s present and what\'s missing.",',
+    '  "summary": "2-3 sentences summarising the situation for a non-technical agent."',
+    "}",
+    "",
+    "Rules:",
+    "- Be specific. Quote numbers. Reference exact text from the page where useful.",
+    "- Rank friction points P1 (highest impact, fix first) to P3 (low priority).",
+    "- Provide 3 to 6 actions, ranked by expected revenue impact.",
+    "- Don't invent data. If the page text is missing something, say so explicitly.",
+    "- If the funnel data is null, say funnel data unavailable in funnelDiagnosis.",
+    "- Keep your response under 1500 words total."
+  ].join('\n');
+}
+
+// Pick the top 10 products to analyse, by combined "wasted spend" score.
+// Includes both burning-money (high spend, no sales) and inefficient (high ACOS) cases.
+function pickTopUnderperformers(limit) {
+  limit = limit || 10;
+  const candidates = [];
+  (shopifyState.products || []).forEach(function(sp) {
+    const id = String(sp.id);
+    const adRows = (googleState.products || []).filter(function(gp) {
+      if (!gp.shopifyItemId) return false;
+      const parts = String(gp.shopifyItemId).split('_');
+      return parts.length >= 4 && parts[2] === id;
+    });
+    if (!adRows.length) return;
+    const agg = aggregateGoogleMetrics(adRows);
+    if (agg.spend < 20) return;     // ignore tiny spend
+    const sales = agg.sales || 0;
+    const acos = sales > 0 ? (agg.spend / sales) * 100 : Infinity;
+    // Score: weighted combination
+    //  - if sales=0: full spend counts as wasted (high score)
+    //  - if acos > 30: count the over-spend as wasted, weighted by spend
+    let score = 0;
+    if (sales === 0) {
+      score = agg.spend * 2;        // burning money — double weight
+    } else if (acos > 30) {
+      const targetSpend = sales * 0.30;
+      score = agg.spend - targetSpend;
+    } else {
+      return;                        // healthy product, skip
+    }
+    candidates.push({ shopifyProduct: sp, agg: agg, score: score });
+  });
+  candidates.sort(function(a,b){ return b.score - a.score; });
+  return candidates.slice(0, limit);
+}
+
+async function getCachedCritique(productId) {
+  if (!db) return null;
+  try {
+    const r = await db.query("SELECT * FROM landing_page_critiques WHERE product_id=$1", [String(productId)]);
+    if (!r.rows.length) return null;
+    const row = r.rows[0];
+    const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
+    if (ageHours > LPC_CACHE_HOURS) return null;
+    return {
+      productId: row.product_id,
+      productTitle: row.product_title,
+      productUrl: row.product_url,
+      generatedAt: row.generated_at,
+      diagnosis: row.diagnosis,
+      friction: row.friction_json,
+      actions: row.actions_json,
+      funnelSummary: row.funnel_summary,
+      adSummary: row.ad_summary,
+      pageSummary: row.page_summary,
+      score: parseFloat(row.score) || 0,
+      cached: true,
+      ageHours: Math.round(ageHours * 10) / 10
+    };
+  } catch (e) {
+    console.error('LPC cache read error: ' + e.message);
+    return null;
+  }
+}
+
+async function runCritiqueForProduct(shopifyProduct, score) {
+  const dossier = buildLandingPageDossier(shopifyProduct);
+  if (!dossier) throw new Error('Could not build dossier');
+  const html = await fetchProductPageHtml(dossier.product.url);
+  if (!html) throw new Error('Could not fetch product page');
+  const pageSummary = summariseProductPage(html);
+  const prompt = buildCritiquePrompt(dossier, pageSummary);
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+
+  const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: LPC_MODEL,
+    max_tokens: 3000,
+    messages: [{ role: 'user', content: prompt }]
+  }, {
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    timeout: 90000
+  });
+
+  const rawText = aiResp.data.content[0].text;
+  // Strip any accidental markdown fences
+  const cleaned = rawText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    // If parse fails, store the raw text so the agent can still see it
+    parsed = {
+      diagnosis: '(AI returned non-JSON — see raw text)',
+      funnelDiagnosis: '',
+      frictionPoints: [],
+      actions: [],
+      adVsPageCoherence: '',
+      trustSignals: '',
+      summary: cleaned.substring(0, 1500)
+    };
+  }
+
+  const result = {
+    productId: String(shopifyProduct.id),
+    productTitle: shopifyProduct.title,
+    productUrl: dossier.product.url,
+    generatedAt: new Date(),
+    diagnosis: parsed.diagnosis || '',
+    friction: parsed.frictionPoints || [],
+    actions: parsed.actions || [],
+    funnelSummary: { funnel: dossier.funnel, funnelDiagnosis: parsed.funnelDiagnosis || '' },
+    adSummary: { ads: dossier.ads, searchKeywords: dossier.searchKeywords, adVsPageCoherence: parsed.adVsPageCoherence || '' },
+    pageSummary: { signals: pageSummary.signals, pageTitle: pageSummary.pageTitle, metaDescription: pageSummary.metaDescription, trustSignals: parsed.trustSignals || '', summary: parsed.summary || '' },
+    score: score || 0,
+    cached: false
+  };
+
+  // Persist
+  if (db) {
+    try {
+      await db.query(
+        "INSERT INTO landing_page_critiques (product_id, product_title, product_url, generated_at, diagnosis, friction_json, actions_json, funnel_summary, ad_summary, page_summary, raw_ai_text, score) " +
+        "VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7,$8,$9,$10,$11) " +
+        "ON CONFLICT (product_id) DO UPDATE SET " +
+        "  product_title=EXCLUDED.product_title, product_url=EXCLUDED.product_url, generated_at=NOW(), " +
+        "  diagnosis=EXCLUDED.diagnosis, friction_json=EXCLUDED.friction_json, actions_json=EXCLUDED.actions_json, " +
+        "  funnel_summary=EXCLUDED.funnel_summary, ad_summary=EXCLUDED.ad_summary, page_summary=EXCLUDED.page_summary, " +
+        "  raw_ai_text=EXCLUDED.raw_ai_text, score=EXCLUDED.score",
+        [result.productId, result.productTitle, result.productUrl, result.diagnosis,
+          JSON.stringify(result.friction), JSON.stringify(result.actions),
+          JSON.stringify(result.funnelSummary), JSON.stringify(result.adSummary), JSON.stringify(result.pageSummary),
+          rawText, result.score]
+      );
+    } catch (e) {
+      console.error('LPC persist error: ' + e.message);
+    }
+  }
+  return result;
+}
+
+// ── Endpoints ────────────────────────────────────────────────────────────
+
+app.post('/api/google/landing-page-critique', async function(req, res) {
+  try {
+    const productId = String(req.body.productId || '');
+    const forceRefresh = !!req.body.forceRefresh;
+    if (!productId) return res.status(400).json({ error: 'productId required' });
+
+    const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
+    if (!sp) return res.status(404).json({ error: 'Product not found in Shopify state' });
+
+    if (!forceRefresh) {
+      const cached = await getCachedCritique(productId);
+      if (cached) return res.json(cached);
+    }
+    const result = await runCritiqueForProduct(sp, 0);
+    res.json(result);
+  } catch (e) {
+    console.error('LPC single error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/google/landing-page-critique/list', async function(req, res) {
+  if (!db) return res.json({ items: [] });
+  try {
+    const r = await db.query("SELECT product_id, product_title, product_url, generated_at, diagnosis, friction_json, actions_json, score FROM landing_page_critiques ORDER BY score DESC, generated_at DESC LIMIT 20");
+    const items = r.rows.map(function(row) {
+      const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
+      return {
+        productId: row.product_id,
+        productTitle: row.product_title,
+        productUrl: row.product_url,
+        generatedAt: row.generated_at,
+        diagnosis: row.diagnosis,
+        topFriction: (row.friction_json || []).slice(0, 3),
+        topActions: (row.actions_json || []).slice(0, 3),
+        score: parseFloat(row.score) || 0,
+        ageHours: Math.round(ageHours * 10) / 10,
+        stale: ageHours > LPC_CACHE_HOURS
+      };
+    });
+    res.json({ items: items });
+  } catch (e) {
+    console.error('LPC list error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/google/landing-page-critique-batch', async function(req, res) {
+  // Manager-only
+  const u = req.user || {};
+  const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name);
+  if (!isManager) return res.status(403).json({ error: 'Manager access required' });
+
+  try {
+    const top = pickTopUnderperformers(10);
+    const results = [];
+    const errors = [];
+    // Sequential to avoid hammering Anthropic. ~5-10s per product → up to ~2 min for 10 products.
+    for (const c of top) {
+      try {
+        const r = await runCritiqueForProduct(c.shopifyProduct, c.score);
+        results.push({ productId: r.productId, productTitle: r.productTitle, score: c.score });
+      } catch (e) {
+        errors.push({ productId: String(c.shopifyProduct.id), title: c.shopifyProduct.title, error: e.message });
+      }
+    }
+    res.json({ analysed: results.length, errors: errors.length, results: results, errorDetail: errors });
+  } catch (e) {
+    console.error('LPC batch error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Daily cron: 03:30 London time
+cron.schedule('30 3 * * *', async function() {
+  console.log('LPC nightly batch starting');
+  try {
+    const top = pickTopUnderperformers(10);
+    let ok = 0, err = 0;
+    for (const c of top) {
+      try { await runCritiqueForProduct(c.shopifyProduct, c.score); ok++; }
+      catch (e) { err++; console.error('LPC cron item error: ' + e.message); }
+    }
+    console.log('LPC nightly batch done — ' + ok + ' analysed, ' + err + ' errors');
+  } catch(e) {
+    console.error('LPC nightly batch top-level error: ' + e.message);
+  }
+}, { timezone: 'Europe/London' });
+
+
 app.listen(PORT, '0.0.0.0', async function() {
   console.log('App running on port ' + PORT);
   await initDB();

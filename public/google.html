@@ -204,6 +204,10 @@ table.activity tr:last-child td { border-bottom: none; }
       <span>Advertised</span>
     </button>
     <div class="nav-section">Reports</div>
+    <button class="nav-item" onclick="showPage('landing',this)">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5"/><path d="M11 11l4 4"/></svg>
+      <span>Landing Page AI</span>
+    </button>
     <button class="nav-item" onclick="showPage('activity',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>
       <span>Activity log</span>
@@ -300,6 +304,21 @@ table.activity tr:last-child td { border-bottom: none; }
     <div id="campaigns-list"></div>
   </div>
 
+  <!-- LANDING PAGE AI -->
+  <div class="page" id="page-landing">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Top 10 underperformers — analysed daily</div>
+        <div class="section-sub" id="landing-sub">Click any product to see the full critique. Re-run any time.</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" id="landing-rerun" onclick="rerunLandingBatch()" style="display:none">🔄 Re-run all</button>
+        <button class="btn btn-ghost" onclick="loadLandingList()">↻ Refresh</button>
+      </div>
+    </div>
+    <div id="landing-content" style="margin-top:12px"></div>
+  </div>
+
   <!-- ACTIVITY LOG -->
   <div class="page" id="page-activity">
     <div class="section-header">
@@ -316,13 +335,13 @@ table.activity tr:last-child td { border-bottom: none; }
 <!-- (Old standalone AI modal removed in v11 — AI now lives inside the big product/campaign modals with session caching.) -->
 
 <!-- BIG MODAL — used for product detail and daily sales drilldown -->
-<div class="modal-bg" id="big-modal" onclick="if(event.target===this)closeBigModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1000;align-items:flex-start;justify-content:center;padding:0;overflow-y:auto">
-  <div style="background:var(--bg);width:100%;max-width:100%;min-height:100vh;border-radius:0;border:0;box-shadow:none;margin:0">
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:1">
+<div class="modal-bg" id="big-modal" onclick="if(event.target===this)closeBigModal()" style="display:none;position:fixed;inset:0;background:rgba(13,18,30,0.65);z-index:1000;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+  <div style="background:var(--bg);width:100%;max-width:1100px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);border-radius:14px 14px 0 0;z-index:1">
       <div style="font-size:18px;font-weight:600;color:var(--text)" id="big-modal-title">Detail</div>
       <button class="btn btn-ghost" onclick="closeBigModal()" style="font-size:18px;padding:4px 12px">×</button>
     </div>
-    <div id="big-modal-body" style="padding:24px;max-width:1400px;margin:0 auto"></div>
+    <div id="big-modal-body" style="padding:24px"></div>
   </div>
 </div>
 
@@ -432,10 +451,11 @@ function showPage(id, btn) {
   document.getElementById('page-' + id).classList.add('active');
   document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
   if (btn) btn.classList.add('active');
-  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log' };
+  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log', landing: 'Landing Page AI — Daily Critique' };
   document.getElementById('page-title').textContent = titles[id] || id;
   if (id === 'campaigns') renderCampaignsPage();
   if (id === 'activity') loadActivity();
+  if (id === 'landing') renderLandingPage();
 }
 
 // ─── Format helpers ──────────────────────────────────────────────────────
@@ -1014,6 +1034,149 @@ async function loadActivity() {
   }
 }
 
+// ─── Landing Page AI ─────────────────────────────────────────────────────
+async function renderLandingPage() {
+  // Show re-run button only for managers
+  const btn = document.getElementById('landing-rerun');
+  if (btn) btn.style.display = isManager() ? 'inline-flex' : 'none';
+  await loadLandingList();
+}
+
+async function loadLandingList() {
+  const el = document.getElementById('landing-content');
+  el.innerHTML = '<div class="empty-state">Loading...</div>';
+  try {
+    const r = await authedFetch('/api/google/landing-page-critique/list');
+    const j = await r.json();
+    const items = j.items || [];
+    if (!items.length) {
+      el.innerHTML = '<div class="empty-state" style="padding:30px;text-align:left">'
+        + '<div style="font-size:15px;font-weight:600;margin-bottom:8px;color:var(--text)">No critiques yet.</div>'
+        + '<div style="color:var(--text2);font-size:13px;line-height:1.6;max-width:600px">'
+        + 'The daily batch runs automatically at 03:30 UK time and analyses the top 10 worst-performing products by spend ÷ revenue. '
+        + (isManager() ? 'You can also run it manually now using the "Re-run all" button above. Each run takes ~2 minutes.' : 'A manager can also trigger it manually.')
+        + '</div></div>';
+      return;
+    }
+    document.getElementById('landing-sub').textContent = items.length + ' product' + (items.length === 1 ? '' : 's') + ' analysed. Most stale: ' + Math.max.apply(null, items.map(function(i){return i.ageHours;})).toFixed(0) + 'h ago.';
+    el.innerHTML = items.map(function(it) {
+      const top1 = (it.topFriction[0] || {});
+      const top1Action = (it.topActions[0] || {});
+      const stale = it.stale ? '<span style="color:var(--amber);font-size:11px;font-weight:600;margin-left:8px">STALE</span>' : '';
+      return '<div class="product-card" style="cursor:pointer;padding:14px 16px;margin-bottom:10px" onclick="openLandingCritique(\'' + it.productId + '\')">'
+        + '<div class="product-body" style="margin-left:0">'
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px">'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">' + escapeHtml(it.productTitle || '(unnamed)') + stale + '</div>'
+        + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(it.diagnosis || '') + '</div>'
+        + '</div>'
+        + '<div style="font-size:11px;font-family:var(--mono);color:var(--text3);white-space:nowrap">' + (it.ageHours < 1 ? '<1h ago' : Math.round(it.ageHours) + 'h ago') + '</div>'
+        + '</div>'
+        + (top1.issue ? '<div style="margin-top:6px;padding:8px 10px;background:var(--bg2);border-left:3px solid ' + (top1.priority === 'P1' ? 'var(--red)' : top1.priority === 'P2' ? 'var(--amber)' : 'var(--text3)') + ';border-radius:4px;font-size:12px"><strong>' + (top1.priority || 'P?') + ':</strong> ' + escapeHtml(top1.issue) + '</div>' : '')
+        + (top1Action.action ? '<div style="margin-top:6px;font-size:12px;color:var(--text2)"><strong style="color:var(--text)">Top action:</strong> ' + escapeHtml(top1Action.action) + '</div>' : '')
+        + '</div>'
+        + '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="empty-state">Error loading critiques: ' + e.message + '</div>';
+  }
+}
+
+async function rerunLandingBatch() {
+  if (!confirm('This will analyse the top 10 underperforming products. Takes ~2-3 minutes. Continue?')) return;
+  const btn = document.getElementById('landing-rerun');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
+  document.getElementById('landing-content').innerHTML = '<div class="empty-state" style="padding:30px"><div style="font-size:14px;color:var(--text)">Running batch — please wait. This typically takes 2-3 minutes for 10 products.</div></div>';
+  try {
+    const r = await authedFetch('/api/google/landing-page-critique-batch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Batch failed');
+    btn.disabled = false;
+    btn.textContent = '🔄 Re-run all';
+    alert('Batch complete: ' + j.analysed + ' analysed' + (j.errors ? ', ' + j.errors + ' errors' : '.'));
+    await loadLandingList();
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🔄 Re-run all';
+    alert('Batch error: ' + e.message);
+  }
+}
+
+async function openLandingCritique(productId, forceRefresh) {
+  const headerHtml = '<div style="font-size:14px;color:var(--text2)">Loading critique...</div>';
+  showBigModal('Landing page critique', headerHtml);
+  try {
+    const r = await authedFetch('/api/google/landing-page-critique', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: String(productId), forceRefresh: !!forceRefresh })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Critique failed');
+    renderLandingCritiqueInModal(j);
+  } catch(e) {
+    document.getElementById('big-modal-body').innerHTML = '<div class="empty-state" style="padding:20px;color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderLandingCritiqueInModal(j) {
+  document.getElementById('big-modal-title').textContent = 'Landing page critique — ' + (j.productTitle || j.productId);
+
+  const friction = (j.friction || []).map(function(f) {
+    const colour = f.priority === 'P1' ? 'var(--red)' : f.priority === 'P2' ? 'var(--amber)' : 'var(--text3)';
+    return '<div style="padding:10px 14px;background:var(--bg2);border-left:3px solid ' + colour + ';border-radius:4px;margin-bottom:8px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
+      + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:' + colour + ';margin-right:6px">' + escapeHtml(f.priority || '') + '</span>' + escapeHtml(f.issue || '') + '</div>'
+      + (f.category ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">' + escapeHtml(f.category) + '</div>' : '')
+      + '</div>'
+      + '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escapeHtml(f.evidence || '') + '</div>'
+      + '</div>';
+  }).join('');
+
+  const actions = (j.actions || []).map(function(a) {
+    return '<div style="padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin-bottom:8px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px">'
+      + '<div style="font-size:13px;font-weight:700;color:var(--text)"><span style="color:var(--accent);margin-right:6px">#' + (a.rank || '?') + '</span>' + escapeHtml(a.action || '') + '</div>'
+      + (a.effort ? '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap">Effort: ' + escapeHtml(a.effort) + '</div>' : '')
+      + '</div>'
+      + (a.expectedImpact ? '<div style="font-size:12px;color:var(--text2);line-height:1.5"><strong>Expected impact:</strong> ' + escapeHtml(a.expectedImpact) + '</div>' : '')
+      + '</div>';
+  }).join('');
+
+  const funnelDiag = j.funnelSummary && j.funnelSummary.funnelDiagnosis ? j.funnelSummary.funnelDiagnosis : '';
+  const adCoherence = j.adSummary && j.adSummary.adVsPageCoherence ? j.adSummary.adVsPageCoherence : '';
+  const trustSignals = j.pageSummary && j.pageSummary.trustSignals ? j.pageSummary.trustSignals : '';
+  const summary = j.pageSummary && j.pageSummary.summary ? j.pageSummary.summary : '';
+  const ageNote = j.cached ? ('Cached (' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' old)') : 'Fresh';
+
+  const body =
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px;flex-wrap:wrap">'
+      + '<div style="flex:1;min-width:300px">'
+      + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">' + ageNote + (j.productUrl ? ' · <a href="' + j.productUrl + '" target="_blank" style="color:var(--accent)">View live page ↗</a>' : '') + '</div>'
+      + '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:12px 14px;border-radius:4px"><strong>Diagnosis:</strong> ' + escapeHtml(j.diagnosis || '(none)') + '</div>'
+      + '</div>'
+      + '<button class="btn btn-ghost" onclick="openLandingCritique(\'' + j.productId + '\', true)" style="font-size:12px">🔄 Re-analyse</button>'
+    + '</div>'
+
+    + (summary ? '<div style="padding:14px 16px;background:var(--bg2);border-radius:8px;margin-bottom:18px;font-size:13px;line-height:1.6;color:var(--text2)">' + escapeHtml(summary) + '</div>' : '')
+
+    + (funnelDiag ? '<div style="font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 8px">Funnel diagnosis</div>'
+      + '<div style="font-size:13px;color:var(--text);line-height:1.6;margin-bottom:14px">' + escapeHtml(funnelDiag) + '</div>' : '')
+
+    + (friction ? '<div style="font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 8px">Friction points</div>' + friction : '')
+
+    + (actions ? '<div style="font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:22px 0 8px">Specific actions for this week</div>' + actions : '')
+
+    + (adCoherence ? '<div style="font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:22px 0 8px">Ad-vs-page coherence</div>'
+      + '<div style="font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escapeHtml(adCoherence) + '</div>' : '')
+
+    + (trustSignals ? '<div style="font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 8px">Trust signals</div>'
+      + '<div style="font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escapeHtml(trustSignals) + '</div>' : '');
+
+  document.getElementById('big-modal-body').innerHTML = body;
+}
+
 // ─── Campaign AI ─────────────────────────────────────────────────────────
 // Opens a dedicated big modal showing the campaign analysis. Result is cached
 // in memory so closing and reopening the modal shows the cached analysis instantly.
@@ -1253,6 +1416,7 @@ function openProductDetailFromObj(p) {
     '</div>' +
 
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
+    (p.shopifyId ? '<button class="btn btn-primary" onclick="openLandingCritique(\'' + p.shopifyId + '\')">🔍 Critique landing page</button>' : '') +
     (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
     '</div>';
 
