@@ -3207,6 +3207,14 @@ function buildLandingPageDossier(shopifyProduct) {
   if (!shopifyProduct) return null;
   const productId = String(shopifyProduct.id);
 
+  // The PUBLIC storefront URL — what customers actually see when they click an ad.
+  // shopifyProduct.shopifyUrl points at the admin page (myshopify.com/admin/...) which
+  // requires auth, so we always build the storefront URL from the handle.
+  const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
+  const storefrontUrl = shopifyProduct.handle
+    ? ('https://' + storefrontDomain + '/products/' + shopifyProduct.handle)
+    : null;
+
   // Google Ads rows for this product (across all campaigns)
   const adRows = (googleState.products || []).filter(function(gp) {
     if (!gp.shopifyItemId) return false;
@@ -3235,7 +3243,8 @@ function buildLandingPageDossier(shopifyProduct) {
       id: productId,
       title: shopifyProduct.title,
       handle: shopifyProduct.handle,
-      url: shopifyProduct.shopifyUrl || ('https://www.fksports.co.uk/products/' + shopifyProduct.handle),
+      url: storefrontUrl,
+      adminUrl: shopifyProduct.shopifyUrl || null,
       price: shopifyProduct.price,
       status: shopifyProduct.status,
       inventory: shopifyProduct.inventory,
@@ -3475,8 +3484,10 @@ app.post('/api/google/landing-page-critique-debug', async function(req, res) {
     if (!url && req.body.productId) {
       const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === String(req.body.productId); });
       if (!sp) return res.status(404).json({ error: 'Product not found in shopifyState' });
-      productInfo = { id: sp.id, title: sp.title, handle: sp.handle, shopifyUrl: sp.shopifyUrl };
-      url = sp.shopifyUrl || ('https://www.fksports.co.uk/products/' + sp.handle);
+      productInfo = { id: sp.id, title: sp.title, handle: sp.handle, shopifyAdminUrl: sp.shopifyUrl };
+      const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
+      url = sp.handle ? ('https://' + storefrontDomain + '/products/' + sp.handle) : null;
+      if (!url) return res.status(400).json({ error: 'Product has no handle, cannot build URL' });
     }
     if (!url) return res.status(400).json({ error: 'productId or url required' });
     const fetchResult = await fetchProductPageHtml(url);
