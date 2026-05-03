@@ -713,48 +713,70 @@ async function initTasksTable() {
       );
       CREATE INDEX IF NOT EXISTS idx_archive_archived_at ON google_campaign_archive(archived_at DESC);
       CREATE INDEX IF NOT EXISTS idx_archive_state ON google_campaign_archive(state);
-
-      CREATE TABLE IF NOT EXISTS landing_page_critiques (
-        product_id TEXT PRIMARY KEY,
-        product_title TEXT,
-        product_url TEXT,
-        generated_at TIMESTAMP DEFAULT NOW(),
-        diagnosis TEXT,
-        friction_json JSONB,
-        actions_json JSONB,
-        funnel_summary JSONB,
-        ad_summary JSONB,
-        page_summary JSONB,
-        raw_ai_text TEXT,
-        score NUMERIC DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_lpc_score ON landing_page_critiques(score DESC);
-
-      CREATE TABLE IF NOT EXISTS campaign_ai_cache (
-        campaign_id TEXT PRIMARY KEY,
-        campaign_name TEXT,
-        generated_at TIMESTAMP DEFAULT NOW(),
-        analysis TEXT,
-        model_used TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_cac_generated_at ON campaign_ai_cache(generated_at DESC);
-
-      -- Page summary cache (rule-based friction extraction). Page content rarely changes,
-      -- so we cache the parsed summary for 12h to avoid re-fetching on every modal open.
-      CREATE TABLE IF NOT EXISTS product_page_cache (
-        product_id TEXT PRIMARY KEY,
-        product_url TEXT,
-        fetched_at TIMESTAMP DEFAULT NOW(),
-        page_summary JSONB,
-        rule_friction JSONB,
-        funnel_friction JSONB,
-        ad_friction JSONB
-      );
-      CREATE INDEX IF NOT EXISTS idx_ppc_fetched_at ON product_page_cache(fetched_at DESC);
     `);
     // Migrate existing rows that don't have state column
     await db.query("ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'");
+
+    // ─── New AI/cache tables — isolated init so earlier failures can't block them ───
+    // These were added later. Run them in their own try block so if migrations or
+    // other init queries fail, these still get created.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS landing_page_critiques (
+          product_id TEXT PRIMARY KEY,
+          product_title TEXT,
+          product_url TEXT,
+          generated_at TIMESTAMP DEFAULT NOW(),
+          diagnosis TEXT,
+          friction_json JSONB,
+          actions_json JSONB,
+          funnel_summary JSONB,
+          ad_summary JSONB,
+          page_summary JSONB,
+          raw_ai_text TEXT,
+          score NUMERIC DEFAULT 0
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_score ON landing_page_critiques(score DESC)");
+      console.log('[INIT] landing_page_critiques table ready');
+    } catch (e) {
+      console.error('[INIT] landing_page_critiques error: ' + e.message);
+    }
+
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS campaign_ai_cache (
+          campaign_id TEXT PRIMARY KEY,
+          campaign_name TEXT,
+          generated_at TIMESTAMP DEFAULT NOW(),
+          analysis TEXT,
+          model_used TEXT
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_cac_generated_at ON campaign_ai_cache(generated_at DESC)");
+      console.log('[INIT] campaign_ai_cache table ready');
+    } catch (e) {
+      console.error('[INIT] campaign_ai_cache error: ' + e.message);
+    }
+
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS product_page_cache (
+          product_id TEXT PRIMARY KEY,
+          product_url TEXT,
+          fetched_at TIMESTAMP DEFAULT NOW(),
+          page_summary JSONB,
+          rule_friction JSONB,
+          funnel_friction JSONB,
+          ad_friction JSONB
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_ppc_fetched_at ON product_page_cache(fetched_at DESC)");
+      console.log('[INIT] product_page_cache table ready');
+    } catch (e) {
+      console.error('[INIT] product_page_cache error: ' + e.message);
+    }
 
     try {
       const tasks = await db.query('SELECT id, campaign_name FROM campaign_tasks WHERE campaign_name IS NOT NULL');
@@ -4133,6 +4155,70 @@ app.get('/api/google/landing-page-critique/list', async function(req, res) {
     console.error('LPC list error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// MANUAL INIT: force-creates the new AI/cache tables. Use this if the boot-time
+// init didn't run (e.g. earlier migration failed). Safe to call multiple times —
+// CREATE TABLE IF NOT EXISTS is idempotent.
+app.post('/api/google/init-tables', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'no db connection' });
+  const results = {};
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS landing_page_critiques (
+        product_id TEXT PRIMARY KEY,
+        product_title TEXT,
+        product_url TEXT,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        diagnosis TEXT,
+        friction_json JSONB,
+        actions_json JSONB,
+        funnel_summary JSONB,
+        ad_summary JSONB,
+        page_summary JSONB,
+        raw_ai_text TEXT,
+        score NUMERIC DEFAULT 0
+      )
+    `);
+    await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC)");
+    results.landing_page_critiques = 'ready';
+  } catch(e) { results.landing_page_critiques = 'error: ' + e.message; }
+
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS campaign_ai_cache (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        analysis TEXT,
+        model_used TEXT
+      )
+    `);
+    results.campaign_ai_cache = 'ready';
+  } catch(e) { results.campaign_ai_cache = 'error: ' + e.message; }
+
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS product_page_cache (
+        product_id TEXT PRIMARY KEY,
+        product_url TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        page_summary JSONB,
+        rule_friction JSONB,
+        funnel_friction JSONB,
+        ad_friction JSONB
+      )
+    `);
+    results.product_page_cache = 'ready';
+  } catch(e) { results.product_page_cache = 'error: ' + e.message; }
+
+  // Verify tables exist now
+  try {
+    const r = await db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('landing_page_critiques','campaign_ai_cache','product_page_cache')");
+    results.verifiedTables = r.rows.map(function(row){ return row.table_name; });
+  } catch(e) { results.verifyError = e.message; }
+
+  res.json({ ok: true, results: results });
 });
 
 // DEBUG: lists every row in the critique table — used to verify saves actually happen.
