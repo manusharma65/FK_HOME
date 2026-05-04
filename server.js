@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r6 (shell.html launcher + owner role + delete users + audit log + password eye + FK Sports Google)
+// CampaignPulse — deploy marker 2026-05-04 r7a (fix daily breakdown filter + add Conversions column)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1954,15 +1954,30 @@ app.get('/api/campaigns/:id/spend-breakdown', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   try {
     const campaignId = req.params.id;
-    const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 14");
+    // Pull last 14 days of snapshots (newest first from DB, sorted ascending in result)
+    const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date ASC LIMIT 14");
     const breakdown = [];
     snapshots.rows.forEach(function(snap) {
       const c = (snap.campaigns||[]).find(function(x){ return String(x.campaignId) === String(campaignId); });
-      if (c && (parseFloat(c.spend||0) > 0 || parseFloat(c.sales||0) > 0)) {
+      // r7a fix: include EVERY day the campaign existed in the snapshot, not just days with activity.
+      // Previous filter `c.spend > 0 || c.sales > 0` hid days where the campaign was paused/zero-impression,
+      // making older tasks look like they had only 1 row of data when in fact 5+ days had passed.
+      if (c) {
         const d = typeof snap.snapshot_date === 'string' ? snap.snapshot_date : new Date(snap.snapshot_date).toLocaleDateString('en-GB', {timeZone:'Europe/London', year:'numeric', month:'2-digit', day:'2-digit'}).split('/').reverse().join('-');
-        breakdown.push({ date: d, spend: parseFloat(c.spend||0).toFixed(2), sales: parseFloat(c.sales||0).toFixed(2), acos: c.acos||0, impressions: c.impressions||0, clicks: c.clicks||0 });
+        breakdown.push({
+          date: d,
+          spend: parseFloat(c.spend||0).toFixed(2),
+          sales: parseFloat(c.sales||0).toFixed(2),
+          acos: c.acos||0,
+          impressions: c.impressions||0,
+          clicks: c.clicks||0,
+          // r7a addition: conversions / orders count for the day
+          conversions: parseInt(c.orders||c.purchases||c.conversions||0)
+        });
       }
     });
+    // Show newest first in the UI table (matches the original look)
+    breakdown.reverse();
     res.json({ breakdown });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

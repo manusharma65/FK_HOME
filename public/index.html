@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r6 (shell launcher + owner role + delete users + audit log + password eye + FK Sports Google) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r7a (fix Day 2/3 daily history + add Impressions/Conversions columns) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2673,16 +2673,21 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
         '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Spend</th>' +
         '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Revenue</th>' +
         '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">ACOS</th>' +
+        '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Impressions</th>' +
         '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Clicks</th>' +
+        '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Conv.</th>' +
       '</tr></thead><tbody>' +
       rows.map(function(r) {
         const hasRevenue = parseFloat(r.sales) > 0;
+        const conv = parseInt(r.conversions || 0);
         return '<tr style="border-bottom:1px solid var(--border)">' +
           '<td style="padding:7px 10px">' + r.date + '</td>' +
           '<td style="padding:7px 10px;text-align:right;color:var(--red);font-weight:600">£' + r.spend + '</td>' +
           '<td style="padding:7px 10px;text-align:right;color:' + (hasRevenue ? 'var(--green)' : '#aaa') + ';font-weight:600">' + (hasRevenue ? '£' + r.sales : '£0.00') + '</td>' +
           '<td style="padding:7px 10px;text-align:right">' + (parseFloat(r.acos) > 0 ? r.acos + '%' : '—') + '</td>' +
+          '<td style="padding:7px 10px;text-align:right">' + (parseInt(r.impressions||0).toLocaleString('en-GB')) + '</td>' +
           '<td style="padding:7px 10px;text-align:right">' + r.clicks + '</td>' +
+          '<td style="padding:7px 10px;text-align:right;color:' + (conv > 0 ? 'var(--green)' : '#aaa') + ';font-weight:' + (conv > 0 ? '600' : '400') + '">' + conv + '</td>' +
         '</tr>';
       }).join('') +
       '</tbody></table>';
