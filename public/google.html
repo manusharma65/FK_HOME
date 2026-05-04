@@ -1926,18 +1926,49 @@ function assignToCampaign(campaignId, campaignName, campaignType) {
   showAssignModal({ campaignId: campaignId, campaignName: campaignName, campaignType: campaignType });
 }
 
-// Helper: show assign modal scoped to a specific product within a campaign
+// Helper: show assign modal scoped to a specific product within a campaign.
+// Caller may pass:
+//   • A campaign-row product (has p.campaignId, p.campaignName, p.shopifyTitle, p.spend etc.)
+//   • A merged modal object (has p.title, p.googleSpend, p.campaignsAdvertisedIn[] etc.)
+//   • A Shopify product card (has p.shopifyId but no campaign — needs prompting)
 function assignToProduct(p) {
   if (!p) return;
-  // p might be a campaign-row product, or a Shopify product. Different fields.
-  const campaignId = p.campaignId || (p.googleSpend ? null : null);
-  const productKey = p.shopifyItemId || p.productId || null;
+
+  // Resolve campaign — try every shape we know about
+  let campaignId = p.campaignId || null;
+  let campaignName = p.campaignName || p.googleCampaignName || '';
+  let campaignType = p.campaignType || '';
+  if (!campaignId && Array.isArray(p.campaignsAdvertisedIn) && p.campaignsAdvertisedIn.length) {
+    campaignId = p.campaignsAdvertisedIn[0].campaignId || null;
+    campaignName = campaignName || p.campaignsAdvertisedIn[0].campaignName || '';
+    campaignType = campaignType || p.campaignsAdvertisedIn[0].campaignType || '';
+  }
+
+  // If product is in multiple campaigns, ask which one
+  if (!campaignId && Array.isArray(p.campaignsAdvertisedIn) && p.campaignsAdvertisedIn.length > 1) {
+    const choice = prompt('This product is in multiple campaigns:\n\n' + p.campaignsAdvertisedIn.map(function(c, i){ return (i+1) + '. ' + c.campaignName; }).join('\n') + '\n\nWhich campaign? Enter number:');
+    const idx = parseInt(choice) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= p.campaignsAdvertisedIn.length) { alert('Cancelled.'); return; }
+    campaignId = p.campaignsAdvertisedIn[idx].campaignId;
+    campaignName = p.campaignsAdvertisedIn[idx].campaignName;
+    campaignType = p.campaignsAdvertisedIn[idx].campaignType;
+  }
+
+  // If product is not in any campaign at all (Shopify-only), tell the user
+  if (!campaignId) {
+    alert('This product has no Google Ads campaign yet. Go to the Advertised Campaigns view, find the product inside a campaign, then click Assign there.');
+    return;
+  }
+
+  const productKey = p.shopifyItemId || p.productId || (p.shopifyId ? String(campaignId) + '__' + p.shopifyId : null);
+  const productTitle = p.title || p.shopifyTitle || p.displayName || p.productName || p.name || '(unknown product)';
+
   showAssignModal({
-    campaignId: campaignId || (p.shopifyId ? '' : ''),
-    campaignName: p.campaignName || p.googleCampaignName || '',
-    campaignType: p.campaignType || '',
+    campaignId: String(campaignId),
+    campaignName: campaignName,
+    campaignType: campaignType,
     productKey: productKey,
-    productTitle: p.title || p.shopifyTitle || p.displayName || p.productName || ''
+    productTitle: productTitle
   });
 }
 
