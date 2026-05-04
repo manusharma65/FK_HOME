@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r3 (unified shell — auth dept guard + Rahul/Anuj seed)
+// CampaignPulse — deploy marker 2026-05-04 r5 (production base + Switch to Google + dept routing)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
