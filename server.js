@@ -618,6 +618,11 @@ async function initTasksTable() {
 
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'");
     await db.query("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'");
+    // actor_name = the LOGGED-IN USER who took the action (vs agent_name which is the task owner).
+    // Critical for audit: when Bobby reassigns Rahul's task to Anuj, log shows Bobby did it.
+    await db.query("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor_name TEXT");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_at TIMESTAMP");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_from TEXT");
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS notes_ignored BOOLEAN DEFAULT FALSE");
 
     try {
@@ -2007,6 +2012,7 @@ app.post('/api/google/tasks/:id/take', async function(req, res) {
   try {
     const u = req.user || {};
     const me = req.body.agent || u.name || u.username || '';
+    const actor = u.name || u.username || me;     // who clicked (logged-in user)
     if (!me) return res.status(400).json({ error: 'Could not determine agent name' });
     if (!GOOGLE_TASK_AGENTS.includes(me)) return res.status(400).json({ error: 'Only Rahul or Anuj can take tasks' });
     await db.query(
@@ -2015,11 +2021,52 @@ app.post('/api/google/tasks/:id/take', async function(req, res) {
     );
     try {
       await db.query(
-        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,'take',$4,'google')",
-        ['', '', me, 'Took task #' + req.params.id]
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) VALUES ($1,$2,$3,$4,'take',$5,$6,'google')",
+        ['', '', me, actor, 'Took task', parseInt(req.params.id)]
       );
-    } catch(_) { /* best effort */ }
+    } catch(e) { console.error('[GTASK] take log error: ' + e.message); }
     res.json({ success: true, agent: me });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reassign — manager moves a task to a different agent (or unassigns it).
+// Required: target agent name, note explaining why.
+// Logs as 'reassigned' with from→to in notes, and actor_name = manager who clicked.
+app.post('/api/google/tasks/:id/reassign', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const u = req.user || {};
+  const actor = u.name || u.username || '';
+  const role = u.role || '';
+  const isManager = ['manager','admin'].includes(role) || ['Bobby','Satyam','bobby','satyam'].includes(actor);
+  if (!isManager) return res.status(403).json({ error: 'Only managers can reassign tasks' });
+
+  const targetAgent = (req.body.agent || '').trim();
+  const note = (req.body.note || '').trim();
+  if (!targetAgent) return res.status(400).json({ error: 'Target agent required (Rahul, Anuj, or Unassigned)' });
+  if (!['Rahul', 'Anuj', 'Unassigned'].includes(targetAgent)) return res.status(400).json({ error: 'agent must be Rahul, Anuj, or Unassigned' });
+  if (!note) return res.status(400).json({ error: 'A note explaining the reassignment is required' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [req.params.id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    const fromAgent = task.agent_name || 'Unassigned';
+    if (fromAgent === targetAgent) return res.status(400).json({ error: 'Task is already assigned to ' + targetAgent });
+
+    await db.query(
+      "UPDATE campaign_tasks SET agent_name=$1, reassigned_at=NOW(), reassigned_from=$2, updated_at=NOW() WHERE id=$3",
+      [targetAgent, fromAgent, req.params.id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'reassigned',$5,$6,$7,$8,'google')",
+        [task.campaign_id || '', task.campaign_name || '', targetAgent, actor, note, fromAgent, targetAgent, parseInt(req.params.id)]
+      );
+    } catch (e) { console.error('[GTASK] reassign log error: ' + e.message); }
+
+    res.json({ success: true, from: fromAgent, to: targetAgent });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -2085,12 +2132,14 @@ app.post('/api/google/tasks/:id/status', async function(req, res) {
     }
     await db.query(q, p);
 
-    // Always write activity log with the action verb (status), the note, before/after state.
-    // This is the foundation for Phase 2 (agent scoring) and Phase 3 (AI learning from history).
+    // Always write activity log with: agent_name (task owner), actor_name (who clicked), action, notes.
+    // This is critical for audit — when a manager acts on an agent's task, we record both.
+    const u = req.user || {};
+    const actor = u.name || u.username || task.agent_name || 'system';
     try {
       await db.query(
-        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google')",
-        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', status, notes || dismissedReason, before, finalStatus, parseInt(id)]
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'google')",
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', actor, status, notes || dismissedReason, before, finalStatus, parseInt(id)]
       );
     } catch (e) { console.error('[GTASK] activity_log error: ' + e.message); }
 
@@ -2106,7 +2155,7 @@ app.get('/api/google/tasks/:id/history', async function(req, res) {
   if (!db) return res.json({ history: [] });
   try {
     const r = await db.query(
-      "SELECT id, action, notes, status_before, status_after, agent_name, created_at " +
+      "SELECT id, action, notes, status_before, status_after, agent_name, actor_name, created_at " +
       "FROM activity_log WHERE department='google' AND task_id=$1 ORDER BY created_at ASC",
       [parseInt(req.params.id)]
     );
@@ -2201,12 +2250,14 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
     );
     const newId = r.rows[0] && r.rows[0].id;
     // Log it
+    const u = req.user || {};
+    const actor = u.name || u.username || 'manager';
     try {
       await db.query(
-        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,'manual_create',$4,'',$5,$6,'google')",
-        [String(campaignId), resolvedCampaignName || '', agentName, brief.trim(), 'open', newId]
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'manual_create',$5,'',$6,$7,'google')",
+        [String(campaignId), resolvedCampaignName || '', agentName, actor, brief.trim(), 'open', newId]
       );
-    } catch(_) { /* best effort */ }
+    } catch(e) { console.error('[GTASK] manual-create log error: ' + e.message); }
     res.json({ success: true, id: newId });
   } catch (e) {
     console.error('[GTASK] manual-create error: ' + e.message);
@@ -2244,12 +2295,14 @@ app.post('/api/google/tasks/:id/day7-decision', async function(req, res) {
       [decision, note, newStatus, id]
     );
 
+    const u2 = req.user || {};
+    const actor2 = u2.name || u2.username || task.agent_name || 'system';
     try {
       await db.query(
-        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
-        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', 'day7_' + decision, note]
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,'google')",
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', actor2, 'day7_' + decision, note, parseInt(id)]
       );
-    } catch(_) { /* best effort */ }
+    } catch(e) { console.error('[GTASK] day7 log error: ' + e.message); }
 
     res.json({ success: true, decision: decision, newStatus: newStatus });
   } catch (e) {

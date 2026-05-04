@@ -1230,81 +1230,141 @@ function taskRow(t) {
   const isScale = t.task_type === 'scale' || t.problem_type === 'scale_opportunity';
   const status = t.status || 'open';
   const isClosed = status === 'complete' || status === 'archived' || status === 'dismissed' || status === 'paused';
+  const priority = Number(t.priority) || 2;
+  const isP1 = priority === 1 && !isScale && !isClosed;
+  const isP2 = priority === 2 && !isScale && !isClosed;
 
-  // Image: Shopify thumbnail for product tasks, otherwise icon
+  // ─── Theme palette (FK Sports — bold, energetic, red accent for urgency) ───
+  // Stripe + accent colour: drives the visual category of the card at-a-glance
+  let stripeColour, accentBg, headerBg;
+  if (isClosed) {
+    stripeColour = '#9ca3af'; accentBg = '#f9fafb'; headerBg = '#f9fafb';
+  } else if (isScale) {
+    stripeColour = '#16a34a'; accentBg = '#dcfce7'; headerBg = '#f0fdf4';
+  } else if (t.atDay7) {
+    stripeColour = '#dc2626'; accentBg = '#fee2e2'; headerBg = '#fef2f2';
+  } else if (isP1) {
+    stripeColour = '#dc2626'; accentBg = '#fee2e2'; headerBg = '#fef2f2';
+  } else if (status === 'discussion') {
+    stripeColour = '#ea580c'; accentBg = '#fed7aa'; headerBg = '#fff7ed';
+  } else if (status === 'paused') {
+    stripeColour = '#a855f7'; accentBg = '#f3e8ff'; headerBg = '#faf5ff';
+  } else if (status === 'in_progress') {
+    stripeColour = '#2563eb'; accentBg = '#dbeafe'; headerBg = '#eff6ff';
+  } else if (isP2) {
+    stripeColour = '#ea580c'; accentBg = '#fed7aa'; headerBg = '#fff7ed';
+  } else {
+    stripeColour = '#6b7280'; accentBg = '#f3f4f6'; headerBg = '#f9fafb';
+  }
+
+  // Image
   const img = (isProductTask && t.product_image_url)
-    ? '<img class="product-img" src="' + escapeHtml(t.product_image_url) + '" alt="" onerror="this.outerHTML=\'<div class=&quot;product-img-placeholder&quot;>📦</div>\'">'
-    : '<div class="product-img-placeholder" style="background:' + (isScale ? '#dcfce7' : '#f3f4f6') + ';font-size:24px">' + (isScale ? '🚀' : (isProductTask ? '📦' : '📋')) + '</div>';
+    ? '<img class="product-img" src="' + escapeHtml(t.product_image_url) + '" alt="" style="border:2px solid ' + stripeColour + '20" onerror="this.outerHTML=\'<div class=&quot;product-img-placeholder&quot;>📦</div>\'">'
+    : '<div class="product-img-placeholder" style="background:' + accentBg + ';font-size:28px;border:2px solid ' + stripeColour + '40">' + (isScale ? '🚀' : (isProductTask ? '📦' : '📋')) + '</div>';
 
-  // Day counter pill
-  const dayColour = t.atDay7 ? '#dc2626' : (days >= 4 ? '#ea580c' : '#6b7280');
-  const dayPill = '<span style="font-size:11px;color:' + dayColour + ';font-weight:700;font-family:var(--mono);background:' + dayColour + '15;padding:2px 8px;border-radius:4px">DAY ' + days + ' / 7</span>';
+  // Day-counter visual progress bar (better than just text)
+  const dayProgress = Math.min(7, days);
+  const dayBars = Array.from({length: 7}, function(_, i) {
+    const filled = i < dayProgress;
+    const segColour = t.atDay7 ? '#dc2626' : (i < dayProgress ? stripeColour : '#e5e7eb');
+    return '<div style="flex:1;height:6px;background:' + (filled ? segColour : '#e5e7eb') + ';border-radius:2px"></div>';
+  }).join('');
+  const dayProgressBar = '<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
+    + '<div style="display:flex;gap:2px;flex:1;max-width:140px">' + dayBars + '</div>'
+    + '<span style="font-size:11px;color:' + (t.atDay7 ? '#dc2626' : '#6b7280') + ';font-weight:700;font-family:var(--mono);white-space:nowrap">DAY ' + days + '/7' + (t.atDay7 ? ' ⚠' : '') + '</span>'
+    + '</div>';
 
-  // Status pill
+  // Status pill — strong colours, white text on coloured background
   const statusColours = {
-    open: '#6b7280', in_progress: '#2563eb', discussion: '#ea580c',
-    complete: '#16a34a', archived: '#6b7280', dismissed: '#9ca3af', paused: '#a855f7'
+    open: ['#6b7280', 'white'],
+    in_progress: ['#2563eb', 'white'],
+    discussion: ['#ea580c', 'white'],
+    complete: ['#16a34a', 'white'],
+    archived: ['#9ca3af', 'white'],
+    dismissed: ['#9ca3af', 'white'],
+    paused: ['#a855f7', 'white']
   };
-  const sColour = statusColours[status] || '#6b7280';
-  const statusPill = '<span style="background:' + sColour + '15;color:' + sColour + ';padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase">' + escapeHtml(status.replace('_',' ')) + '</span>';
+  const [sBg, sFg] = statusColours[status] || ['#6b7280', 'white'];
+  const statusPill = '<span style="background:' + sBg + ';color:' + sFg + ';padding:3px 10px;border-radius:4px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.05em">' + escapeHtml(status.replace('_',' ')) + '</span>';
 
-  // Type badge (PRODUCT vs CAMPAIGN vs SCALE)
+  // Type badge
   const typeBadge = isScale
-    ? '<span style="font-size:10px;background:#dcfce7;color:#15803d;padding:2px 6px;border-radius:3px;font-weight:700">SCALE</span>'
+    ? '<span style="background:#16a34a;color:white;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.05em">🚀 SCALE</span>'
     : (isProductTask
-      ? '<span style="font-size:10px;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:3px;font-weight:700">PRODUCT</span>'
-      : '<span style="font-size:10px;background:#f3f4f6;color:#4b5563;padding:2px 6px;border-radius:3px;font-weight:700">CAMPAIGN</span>');
+      ? '<span style="background:#1d4ed8;color:white;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.05em">PRODUCT</span>'
+      : '<span style="background:#0f172a;color:white;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.05em">CAMPAIGN</span>');
 
-  // Problem-type label
+  // Priority chip — the FK Sports red urgency accent for P1
+  const priorityChip = isP1
+    ? '<span style="background:#dc2626;color:white;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.05em">⚠ URGENT</span>'
+    : (isP2 && !isClosed
+      ? '<span style="background:#ea580c;color:white;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.05em">HIGH</span>'
+      : '');
+
   const problemLabelText = taskTypeLabel(t.problem_type);
 
-  // Title — campaign name + product subline if product-level
   const title = isProductTask && t.product_title
     ? escapeHtml(t.product_title)
     : escapeHtml(t.campaign_name || '(unnamed)');
   const subline = isProductTask && t.product_title
-    ? '<div style="font-size:11px;color:var(--text3);margin-top:2px">in ' + escapeHtml(t.campaign_name || '') + '</div>'
+    ? '<div style="font-size:11px;color:#6b7280;margin-top:2px">in ' + escapeHtml(t.campaign_name || '') + '</div>'
     : '';
 
-  // Diagnosis = problem detail (closed tasks: strikethrough so it's clearly resolved)
-  const diagnosisStyle = isClosed ? 'text-decoration:line-through;color:var(--text3)' : '';
-  const diagnosisHtml = '<div class="diagnosis-line" style="' + diagnosisStyle + '"><strong>' + escapeHtml(t.problem_detail || '') + '</strong></div>';
+  // Diagnosis with strikethrough on closed tasks
+  const diagnosisStyle = isClosed ? 'text-decoration:line-through;color:#9ca3af' : 'color:#374151';
+  const diagnosisHtml = '<div style="font-size:13px;line-height:1.55;margin-top:8px;' + diagnosisStyle + '">' + escapeHtml(t.problem_detail || '') + '</div>';
 
-  // Stats grid (matches productCard style)
-  const stats = '<div class="product-stats">'
-    + statRow('Spend', '£' + bSpend.toFixed(2))
-    + statRow('Sales', '£' + bSales.toFixed(2))
-    + statRow('ACOS', bAcos > 0 ? bAcos.toFixed(0) + '%' : '—')
-    + statRow('Impr', bImpr.toLocaleString('en-GB'))
+  // Stats grid — coloured headers per status
+  const stats = '<div class="product-stats" style="margin-top:10px">'
+    + '<div class="stat-item"><div class="stat-label" style="color:' + stripeColour + ';font-weight:700">Spend</div><div class="stat-value">£' + bSpend.toFixed(2) + '</div></div>'
+    + '<div class="stat-item"><div class="stat-label" style="color:' + stripeColour + ';font-weight:700">Sales</div><div class="stat-value">£' + bSales.toFixed(2) + '</div></div>'
+    + '<div class="stat-item"><div class="stat-label" style="color:' + stripeColour + ';font-weight:700">ACOS</div><div class="stat-value" style="color:' + (bAcos > 25 ? '#dc2626' : (bAcos > 12 ? '#ea580c' : '#16a34a')) + ';font-weight:700">' + (bAcos > 0 ? bAcos.toFixed(0) + '%' : '—') + '</div></div>'
+    + '<div class="stat-item"><div class="stat-label" style="color:' + stripeColour + ';font-weight:700">Impr</div><div class="stat-value">' + bImpr.toLocaleString('en-GB') + '</div></div>'
     + '</div>';
 
-  // Notes / dismiss / day7 (compact, with strikethrough on closed tasks)
-  const noteStyle = isClosed ? 'text-decoration:line-through;color:var(--text3)' : '';
+  // Notes / closed callouts
+  const noteStyle = isClosed ? 'text-decoration:line-through;color:#9ca3af' : '';
   const callouts = []
-    .concat(t.agent_notes ? ['<div style="font-size:12px;margin-top:8px;padding:6px 10px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;' + noteStyle + '"><strong>Note:</strong> ' + escapeHtml(t.agent_notes) + '</div>'] : [])
-    .concat(t.paused_reason ? ['<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:#f3e8ff;border-left:3px solid #a855f7;border-radius:4px"><strong>Paused:</strong> ' + escapeHtml(t.paused_reason) + '</div>'] : [])
-    .concat(t.dismissed_reason ? ['<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong>Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'] : [])
-    .concat(t.day7_note ? ['<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:#fed7aa;border-left:3px solid #ea580c;border-radius:4px"><strong>Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'] : [])
+    .concat(t.agent_notes ? ['<div style="font-size:12px;margin-top:8px;padding:8px 12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;' + noteStyle + '"><strong style="color:#92400e">Note:</strong> ' + escapeHtml(t.agent_notes) + '</div>'] : [])
+    .concat(t.paused_reason ? ['<div style="font-size:12px;margin-top:6px;padding:8px 12px;background:#f3e8ff;border-left:3px solid #a855f7;border-radius:4px"><strong style="color:#6b21a8">⏸ Paused:</strong> ' + escapeHtml(t.paused_reason) + '</div>'] : [])
+    .concat(t.dismissed_reason ? ['<div style="font-size:12px;margin-top:6px;padding:8px 12px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong style="color:#991b1b">✕ Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'] : [])
+    .concat(t.day7_note ? ['<div style="font-size:12px;margin-top:6px;padding:8px 12px;background:#fed7aa;border-left:3px solid #ea580c;border-radius:4px"><strong style="color:#9a3412">📋 Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'] : [])
     .join('');
 
-  // Right panel — agent + footer
+  // Assignee chip — coloured by agent
+  const agentColours = { Rahul: '#7c3aed', Anuj: '#0891b2', Unassigned: '#9ca3af' };
+  const aColour = agentColours[t.agent_name] || '#374151';
   const agentDisplay = t.agent_name === 'Unassigned'
-    ? '<span style="color:var(--text3);font-style:italic">Unassigned</span>'
-    : '<span style="font-weight:600;color:var(--text)">' + escapeHtml(t.agent_name || '') + '</span>';
+    ? '<span style="background:#f3f4f6;color:#6b7280;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;font-style:italic">Unassigned</span>'
+    : '<span style="background:' + aColour + ';color:white;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700">' + escapeHtml(t.agent_name || '') + '</span>';
 
-  return '<div class="product-card" style="cursor:pointer" onclick="openTaskDetail(' + t.id + ')">'
-    + img
-    + '<div class="product-body">'
-      + '<div class="product-title" style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
-        + '<span style="flex:1;min-width:0">' + title + '</span>'
-        + '<span style="font-size:11px;color:var(--text3);font-weight:500;white-space:nowrap">' + agentDisplay + '</span>'
+  // Task card with FK Sports-style left-edge accent stripe
+  return '<div class="product-card" style="cursor:pointer;position:relative;overflow:hidden;border-color:' + stripeColour + '30" onclick="openTaskDetail(' + t.id + ')">'
+    // Left stripe
+    + '<div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:' + stripeColour + '"></div>'
+    + '<div style="padding-left:10px;display:flex;gap:14px;width:100%">'
+      + img
+      + '<div class="product-body" style="flex:1;min-width:0;padding-left:0">'
+        // Top row — title + assignee
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
+          + '<div style="flex:1;min-width:0">'
+            + '<div style="font-size:15px;font-weight:700;color:#111;line-height:1.3">' + title + '</div>'
+            + subline
+          + '</div>'
+          + '<div style="flex-shrink:0">' + agentDisplay + '</div>'
+        + '</div>'
+        // Pills row
+        + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px">'
+          + statusPill + typeBadge + priorityChip
+          + '<span style="font-size:11px;color:#6b7280;font-weight:600">' + escapeHtml(problemLabelText) + '</span>'
+        + '</div>'
+        // Day progress bar
+        + dayProgressBar
+        + diagnosisHtml
+        + stats
+        + callouts
+        + '<div style="margin-top:12px;text-align:right;font-size:12px;color:' + stripeColour + ';font-weight:600">Click for details →</div>'
       + '</div>'
-      + subline
-      + '<div class="product-meta">' + statusPill + dayPill + typeBadge + '<span style="font-size:11px;color:var(--text2)">' + escapeHtml(problemLabelText) + '</span></div>'
-      + diagnosisHtml
-      + stats
-      + callouts
-      + '<div style="margin-top:10px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click to open →</div>'
     + '</div>'
     + '</div>';
 }
@@ -1577,29 +1637,42 @@ async function openTaskDetail(taskId) {
     }
   }
 
-  // History items
+  // History items — display ACTOR (who clicked) and TASK OWNER separately for clear audit
   const historyHtml = history.length
     ? history.map(function(h) {
-        const t = new Date(h.created_at);
-        const when = t.toLocaleDateString('en-GB') + ' ' + t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        const ts = new Date(h.created_at);
+        const when = ts.toLocaleDateString('en-GB') + ' ' + ts.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
         const actionLabels = {
-          take: 'took task',
-          in_progress: '⚒ working',
+          take: 'took the task',
+          in_progress: '⚒ logged work',
           discussion: '💬 sent to discussion',
           complete: '✓ completed',
           dismissed: '✕ dismissed',
           paused: '⏸ paused',
           reopened: '↻ reopened',
+          reassigned: '↪ reassigned',
           scale_promoted: '🚀 promoted to scale',
-          manual_create: '✨ created manually',
+          manual_create: '✨ created task',
           day7_carry_on: '📋 Day 7: carry on',
           day7_archive: '📋 Day 7: archive',
           day7_stop: '📋 Day 7: stop'
         };
         const label = actionLabels[h.action] || h.action;
-        return '<div style="padding:10px 12px;border-left:2px solid #e5e7eb;margin-bottom:8px">'
-          + '<div style="font-size:11px;color:#6b7280;font-family:ui-monospace,monospace">' + when + ' · ' + escapeHtml(h.agent_name || 'system') + ' · <strong>' + escapeHtml(label) + '</strong></div>'
-          + (h.notes ? '<div style="font-size:13px;color:#374151;line-height:1.5;margin-top:4px">' + escapeHtml(h.notes) + '</div>' : '')
+        // Actor (who clicked) — fall back to agent_name for old logs that don't have actor_name yet
+        const actor = h.actor_name || h.agent_name || 'system';
+        const owner = h.agent_name || '';
+        // If actor differs from owner, show "Bobby on Rahul's task" — clear audit trail
+        const actorOwnerLine = (h.actor_name && owner && h.actor_name !== owner)
+          ? '<strong style="color:#dc2626">' + escapeHtml(actor) + '</strong> <span style="color:#6b7280">on ' + escapeHtml(owner) + "'s task</span>"
+          : '<strong style="color:#111">' + escapeHtml(actor) + '</strong>';
+        // Reassign-specific: show from→to
+        const reassignDetails = (h.action === 'reassigned' && h.status_before && h.status_after)
+          ? ' <span style="color:#6b7280">(' + escapeHtml(h.status_before) + ' → ' + escapeHtml(h.status_after) + ')</span>'
+          : '';
+        return '<div style="padding:10px 12px;border-left:3px solid #e5e7eb;margin-bottom:8px;background:#fafafa;border-radius:0 6px 6px 0">'
+          + '<div style="font-size:11px;color:#6b7280;font-family:ui-monospace,monospace;margin-bottom:4px">' + when + '</div>'
+          + '<div style="font-size:13px;color:#374151">' + actorOwnerLine + ' · ' + escapeHtml(label) + reassignDetails + '</div>'
+          + (h.notes ? '<div style="font-size:13px;color:#1f2937;line-height:1.5;margin-top:6px;padding:6px 10px;background:white;border-radius:4px">' + escapeHtml(h.notes) + '</div>' : '')
         + '</div>';
       }).join('')
     : '<div style="font-size:13px;color:#6b7280;padding:8px 0">No actions logged yet.</div>';
@@ -1634,7 +1707,9 @@ async function openTaskDetail(taskId) {
             + (subText ? '<div style="font-size:12px;color:#6b7280;margin-top:2px">' + escapeHtml(subText) + '</div>' : '')
             + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">'
               + '<span style="background:' + sColour + '15;color:' + sColour + ';padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase">' + escapeHtml(status.replace('_',' ')) + '</span>'
-              + '<span style="font-size:11px;color:#6b7280">Assigned: <strong>' + escapeHtml(task.agent_name || 'Unassigned') + '</strong></span>'
+              + (isManager()
+                ? '<button onclick="event.stopPropagation();showReassignModal(' + taskId + ')" style="background:#fef3c7;border:1px solid #f59e0b;color:#92400e;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer" title="Click to reassign">Assigned: ' + escapeHtml(task.agent_name || 'Unassigned') + ' ↪</button>'
+                : '<span style="font-size:11px;color:#6b7280">Assigned: <strong>' + escapeHtml(task.agent_name || 'Unassigned') + '</strong></span>')
               + (task.task_source === 'manual' ? '<span style="font-size:10px;background:#e0e7ff;color:#3730a3;padding:2px 6px;border-radius:3px;font-weight:700">MANUAL</span>' : '')
             + '</div>'
           + '</div>'
@@ -1678,6 +1753,77 @@ function closeTaskDetail() {
   document.removeEventListener('keydown', taskDetailEscHandler);
   document.body.style.overflow = '';
   CURRENT_OPEN_TASK_ID = null;
+}
+
+// ─── Reassign modal — manager moves a task between agents ─────────────────
+function showReassignModal(taskId) {
+  const task = (LAST_TASKS_RESPONSE && LAST_TASKS_RESPONSE.tasks || []).find(function(t){ return t.id === taskId; });
+  if (!task) { alert('Task not loaded — refresh first.'); return; }
+
+  const existing = document.getElementById('reassign-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'reassign-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10002;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:white;width:100%;max-width:520px;border-radius:12px;padding:24px 28px;box-shadow:0 25px 50px rgba(0,0,0,0.3)" onclick="event.stopPropagation()">'
+      + '<div style="font-size:18px;font-weight:700;color:#111;margin-bottom:6px">↪ Reassign task</div>'
+      + '<div style="font-size:13px;color:#6b7280;margin-bottom:14px">Currently assigned to: <strong>' + escapeHtml(task.agent_name || 'Unassigned') + '</strong></div>'
+
+      + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">Move to</div>'
+      + '<div id="reassign-targets" style="display:flex;gap:8px;margin-bottom:14px">'
+        + '<button class="reassign-target-btn" data-agent="Rahul" style="flex:1;padding:10px;border:2px solid ' + (task.agent_name === 'Rahul' ? '#9ca3af' : '#d1d5db') + ';border-radius:8px;background:' + (task.agent_name === 'Rahul' ? '#f3f4f6' : 'white') + ';cursor:' + (task.agent_name === 'Rahul' ? 'not-allowed' : 'pointer') + ';font-weight:700;font-size:14px;color:' + (task.agent_name === 'Rahul' ? '#9ca3af' : '#111') + '" ' + (task.agent_name === 'Rahul' ? 'disabled' : '') + '>Rahul</button>'
+        + '<button class="reassign-target-btn" data-agent="Anuj" style="flex:1;padding:10px;border:2px solid ' + (task.agent_name === 'Anuj' ? '#9ca3af' : '#d1d5db') + ';border-radius:8px;background:' + (task.agent_name === 'Anuj' ? '#f3f4f6' : 'white') + ';cursor:' + (task.agent_name === 'Anuj' ? 'not-allowed' : 'pointer') + ';font-weight:700;font-size:14px;color:' + (task.agent_name === 'Anuj' ? '#9ca3af' : '#111') + '" ' + (task.agent_name === 'Anuj' ? 'disabled' : '') + '>Anuj</button>'
+        + '<button class="reassign-target-btn" data-agent="Unassigned" style="flex:1;padding:10px;border:2px solid ' + (task.agent_name === 'Unassigned' ? '#9ca3af' : '#d1d5db') + ';border-radius:8px;background:' + (task.agent_name === 'Unassigned' ? '#f3f4f6' : 'white') + ';cursor:' + (task.agent_name === 'Unassigned' ? 'not-allowed' : 'pointer') + ';font-weight:700;font-size:14px;color:' + (task.agent_name === 'Unassigned' ? '#9ca3af' : '#6b7280') + '" ' + (task.agent_name === 'Unassigned' ? 'disabled' : '') + '>Open queue</button>'
+      + '</div>'
+
+      + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">Why are you moving this?</div>'
+      + '<textarea id="reassign-note" placeholder="e.g. Anuj has more bandwidth this week / Rahul has better expertise on Shopping campaigns" style="width:100%;min-height:80px;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:14px;line-height:1.5;resize:vertical;box-sizing:border-box"></textarea>'
+
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
+        + '<button id="reassign-cancel" class="btn btn-ghost" style="font-size:13px;padding:7px 14px">Cancel</button>'
+        + '<button id="reassign-submit" class="btn btn-primary" style="font-size:13px;padding:7px 14px" disabled>Reassign</button>'
+      + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  let chosenAgent = null;
+  const submitBtn = document.getElementById('reassign-submit');
+  document.querySelectorAll('.reassign-target-btn').forEach(function(b){
+    if (b.disabled) return;
+    b.onclick = function() {
+      chosenAgent = b.getAttribute('data-agent');
+      document.querySelectorAll('.reassign-target-btn').forEach(function(x){
+        if (x.disabled) return;
+        x.style.borderColor = '#d1d5db'; x.style.background = 'white';
+      });
+      b.style.borderColor = '#2563eb';
+      b.style.background = '#eff6ff';
+      submitBtn.disabled = false;
+    };
+  });
+
+  const close = function(){ overlay.remove(); };
+  document.getElementById('reassign-cancel').onclick = close;
+  submitBtn.onclick = async function() {
+    if (!chosenAgent) return;
+    const note = document.getElementById('reassign-note').value.trim();
+    if (!note) { alert('A note is required.'); return; }
+    try {
+      const r = await authedFetch('/api/google/tasks/' + taskId + '/reassign', {
+        method: 'POST',
+        body: JSON.stringify({ agent: chosenAgent, note: note })
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Failed');
+      close();
+      refreshTaskViews(taskId);
+    } catch (e) {
+      alert('Could not reassign: ' + e.message);
+    }
+  };
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
 }
 
 // ─── Manual Assign modal ───────────────────────────────────────────────────
