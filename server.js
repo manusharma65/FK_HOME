@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r2 (revert aggressive wasted styling — minimal red bold only)
+// CampaignPulse — deploy marker 2026-05-04 r3 (unified shell — auth dept guard + Rahul/Anuj seed)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -11,7 +11,26 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────
-const PUBLIC_PATHS = ['/auth/login', '/auth/logout', '/admin/create-manager', '/google/ingest', '/google/products-diagnostic', '/google/all-products', '/google/dashboard', '/google/oauth', '/google/ga4-status', '/google/ga4-refresh', '/google/ai-analyse', '/google/pagespeed', '/google/daily-sales', '/google/debug/', '/shopify/products'];
+// Truly public endpoints — these CANNOT require auth because they're either
+// pre-login (login itself), or hit by external services that use a shared secret
+// (Google Ads script for ingest, OAuth callback handlers).
+const PUBLIC_PATHS = [
+  '/auth/login', '/auth/logout', '/admin/create-manager',
+  '/google/ingest',                  // Google Ads script ingest (uses x-google-secret)
+  '/google/oauth',                   // GA4 OAuth callback
+  '/google/ga4-status',              // Pre-OAuth status check
+  '/google/ga4-refresh',             // GA4 token refresh
+  '/google/debug/'                   // Diagnostics
+];
+
+// Endpoints that require authentication AND check that the user's department matches.
+// Maps URL prefix → required department(s). Manager passes everything.
+const DEPARTMENT_GUARD = [
+  // Google-only endpoints — block Amazon agents from hitting them
+  { prefix: '/api/google/', allowed: ['google', 'manager'] },
+  // Amazon-only endpoints — block Google agents
+  { prefix: '/api/amazon/', allowed: ['amazon', 'manager', 'agent'] }   // 'agent' = legacy Amazon agents
+];
 
 // ─── Time helpers — Shopify Analytics groups by SHOP timezone (Europe/London).
 // Railway containers run UTC, so we compute London-midnight + London-date-keys
@@ -72,6 +91,23 @@ async function requireAuth(req, res, next) {
       [token]
     );
     req.user = result.rows[0];
+
+    // Department guard: agents can only hit endpoints that match their department.
+    // Manager (role='manager' OR department='manager') bypasses all checks.
+    const userDept = (req.user.department || '').toLowerCase();
+    const userRole = (req.user.role || '').toLowerCase();
+    const isManager = userRole === 'manager' || userDept === 'manager';
+    if (!isManager) {
+      for (const guard of DEPARTMENT_GUARD) {
+        if (req.path.startsWith(guard.prefix)) {
+          if (!guard.allowed.includes(userDept) && !guard.allowed.includes(userRole)) {
+            return res.status(403).json({ error: 'You do not have access to this department' });
+          }
+          break;
+        }
+      }
+    }
+
     next();
   } catch(e) {
     console.error('Auth middleware error: ' + e.message);
@@ -637,6 +673,23 @@ async function initTasksTable() {
           ['Bobby', 'bobby@fksports.co.uk', hash, 'manager', 'manager']
         );
         console.log('Default manager account created: bobby@fksports.co.uk / FKSports2024!');
+      }
+      // Idempotent seed for Google agents — only adds if missing.
+      // Initial password is FKSports2024! (they should change on first login).
+      const googleAgents = [
+        { name: 'Rahul', email: 'rahul@fksports.co.uk' },
+        { name: 'Anuj',  email: 'anuj@fksports.co.uk' }
+      ];
+      for (const ag of googleAgents) {
+        const exists = await db.query('SELECT id FROM users WHERE email=$1', [ag.email]);
+        if (!exists.rows.length) {
+          const hash = await bcrypt.hash('FKSports2024!', 10);
+          await db.query(
+            'INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5)',
+            [ag.name, ag.email, hash, 'google', 'agent']
+          );
+          console.log('Google agent seeded: ' + ag.email + ' / FKSports2024! (please change on first login)');
+        }
       }
     } catch(e) { console.error('User init error: ' + e.message); }
     console.log('Auth tables ready');

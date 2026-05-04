@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r2 (minimal wasted styling — no card disruption) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r3 (unified shell — dept guard + logout) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -239,6 +239,7 @@ table.activity tr:last-child td { border-bottom: none; }
       <button id="diagnostics-btn" class="btn btn-ghost" onclick="openDiagnostics()" style="display:none;font-size:12px" title="Manager: refund + GA4 sample">🔧 Diag</button>
       <div class="sync-info"><div class="sync-dot"></div><span id="sync-time">Loading...</span></div>
       <button class="btn btn-primary" onclick="refreshAll()">↻ Refresh</button>
+      <button class="btn btn-ghost" onclick="googleLogout()" style="font-size:12px;padding:6px 10px" title="Sign out">Logout</button>
     </div>
   </div>
 
@@ -467,6 +468,16 @@ async function loadMe() {
     }
     const me = await r.json();
     currentUser = me;
+
+    // Department guard: Amazon-only agents shouldn't be on the Google dashboard
+    const dept = (me.department || '').toLowerCase();
+    const role = (me.role || '').toLowerCase();
+    const isMgr = role === 'manager' || dept === 'manager';
+    if ((dept === 'amazon' || dept === 'agent') && !isMgr) {
+      window.location.replace('/index.html');
+      return;
+    }
+
     document.getElementById('user-name').textContent = me.name || me.username || 'User';
     document.getElementById('user-role').textContent = me.role || 'Agent';
     document.getElementById('user-avatar').textContent = (me.name || me.username || 'U').charAt(0).toUpperCase();
@@ -485,11 +496,19 @@ async function loadMe() {
     document.getElementById('user-role').textContent = 'No session';
   }
 }
+
+async function googleLogout() {
+  try { await authedFetch('/api/auth/logout', { method: 'POST' }); } catch(_) {}
+  localStorage.removeItem('cp_token');
+  window.location.replace('/login.html');
+}
+
 function isManager() {
   if (!currentUser) return false;
   const role = currentUser.role;
+  const dept = (currentUser.department || '').toLowerCase();
   const name = (currentUser.name || currentUser.username || '').toLowerCase();
-  return role === 'manager' || role === 'admin' || ['bobby', 'satyam'].includes(name);
+  return role === 'manager' || role === 'admin' || dept === 'manager' || ['bobby', 'satyam'].includes(name);
 }
 
 // ─── Page navigation ─────────────────────────────────────────────────────

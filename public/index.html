@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r3 (unified shell — auth + dept routing) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -46,13 +47,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
 /* Sidebar */
-.logo { padding: 20px 22px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-.logo-img-wrap { display: flex; align-items: center; justify-content: flex-start; margin-bottom: 10px; }
-.logo-img { height: 44px; width: auto; max-width: 180px; object-fit: contain; filter: brightness(0) invert(1); display: block; }
-.logo-img.loaded { filter: none; }
-.logo-divider { width: 100%; height: 1px; background: rgba(255,255,255,0.1); margin: 10px 0 8px; }
-.logo-product { font-family: var(--display); font-size: 18px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; display: flex; align-items: center; gap: 6px; }
-.logo-product-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; background: var(--accent); color: white; padding: 2px 6px; border-radius: 4px; vertical-align: middle; }
+.logo { padding: 22px 22px 18px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.logo-brand { font-family: var(--display); font-size: 11px; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase; color: var(--accent); margin-bottom: 3px; }
+.logo-product { font-family: var(--display); font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
 .logo-sub { font-size: 11px; color: rgba(255,255,255,0.35); margin-top: 2px; font-family: var(--mono); }
 .nav { padding: 14px 12px; flex: 1; }
 .nav-section { font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.25); letter-spacing: 0.12em; text-transform: uppercase; padding: 14px 10px 7px; }
@@ -118,8 +115,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
 table { width: 100%; border-collapse: collapse; }
 thead th { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.07em; padding: 11px 14px; text-align: left; background: var(--surface2); border-bottom: 1px solid var(--border); white-space: nowrap; }
-thead th[onclick] { cursor: pointer; user-select: none; }
-thead th[onclick]:hover { color: var(--text); background: var(--surface3); }
 tbody td { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text); vertical-align: middle; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: var(--surface2); }
@@ -194,56 +189,6 @@ tbody tr:hover { background: var(--surface2); }
 .acos-high { color: var(--red); font-weight: 600; }
 .acos-warn { color: var(--amber); font-weight: 500; }
 .acos-ok { color: var(--green); font-weight: 500; }
-
-/* ── Mobile responsive ─────────────────────────────────────────────── */
-@media (max-width: 768px) {
-  .shell { flex-direction: column; }
-  .sidebar {
-    width: 100%; height: auto; position: relative; flex-direction: column;
-    overflow-y: visible; overflow-x: hidden;
-  }
-  .logo { padding: 14px 16px 12px; }
-  .nav { padding: 8px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-  .nav-section { display: none; }
-  .nav-item { padding: 7px 10px; font-size: 12px; gap: 6px; flex: 0 0 auto; border-radius: 6px; border-left: none !important; }
-  .nav-item.active { border-left: none !important; border-bottom: 2px solid var(--accent); }
-  .sidebar-footer { display: none; }
-  .main { min-width: 0; width: 100%; }
-  .topbar { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
-  .topbar-right { flex-wrap: wrap; gap: 6px; }
-  .page-title { font-size: 14px; }
-  .content { padding: 14px; }
-  .metrics-grid { grid-template-columns: 1fr 1fr !important; gap: 10px; }
-  .metric-value { font-size: 22px; }
-  .section-header { flex-direction: column; align-items: flex-start; gap: 10px; }
-  .section-header > div:last-child { flex-wrap: wrap; gap: 6px; }
-  .tabs { flex-wrap: wrap; gap: 4px; }
-  .tab-btn { font-size: 12px; padding: 6px 12px; }
-  .table-card { border-radius: 8px; }
-  .table-card .table-header { flex-direction: column; align-items: flex-start; gap: 8px; }
-  table { font-size: 12px; }
-  thead th { padding: 9px 10px; font-size: 10px; }
-  td { padding: 9px 10px; }
-  .camp-name { font-size: 12px; max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .btn { font-size: 12px; padding: 7px 12px; }
-  select, input { font-size: 13px; }
-  .filters { flex-direction: column; gap: 8px; }
-  .filters > * { width: 100%; }
-  /* ensure all tables scroll horizontally on mobile */
-  .table-card > div { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  /* metric grid for 3-col sections */
-  div[style*="grid-template-columns:repeat(3"] { grid-template-columns: 1fr 1fr !important; }
-  div[style*="grid-template-columns:repeat(4"] { grid-template-columns: 1fr 1fr !important; }
-  /* dashboard alert cards */
-  .alert-row { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .alert-actions { margin-left: 0 !important; }
-}
-@media (max-width: 420px) {
-  .metrics-grid { grid-template-columns: 1fr !important; }
-  .metric-card { padding: 14px; }
-  .nav-item span:not(.nav-badge) { display: none; }
-  .nav-item svg { width: 18px; height: 18px; }
-}
 </style>
 </head>
 <body>
@@ -252,25 +197,15 @@ tbody tr:hover { background: var(--surface2); }
 <!-- SIDEBAR -->
 <nav class="sidebar">
   <div class="logo">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-      <img src="https://cdn.shopify.com/s/files/1/0622/7886/9490/files/FK_Sports_logo.png" 
-           onerror="this.style.display='none';document.getElementById('fk-text-logo').style.display='flex'" 
-           style="height:36px;width:auto;max-width:150px;object-fit:contain;filter:brightness(0) invert(1)" 
-           alt="FK Sports">
-      <div id="fk-text-logo" style="display:none;flex-direction:column">
-        <span style="font-size:16px;font-weight:800;color:#fff;letter-spacing:0.05em;text-transform:uppercase">FK SPORTS</span>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px">
-      <span style="font-size:17px;font-weight:700;color:#fff">CampaignPulse</span>
-    </div>
-    <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:2px;font-family:var(--mono)">amazon.co.uk</div>
+    <div class="logo-brand">FK Sports</div>
+    <div class="logo-product">CampaignPulse</div>
+    <div class="logo-sub">amazon.co.uk</div>
   </div>
   <div class="nav">
     <div class="nav-section">Monitor</div>
     <button class="nav-item active" onclick="showPage('dashboard',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
-      Live Dashboard
+      Dashboard
       <span class="nav-badge" id="nb-action" style="display:none">0</span>
     </button>
     <button class="nav-item" onclick="showPage('campaigns',this)">
@@ -280,17 +215,12 @@ tbody tr:hover { background: var(--surface2); }
     <button class="nav-item" onclick="showPage('ai',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M6 8l1.5 1.5L10 6"/></svg>
       AI analysis
+      <span class="nav-badge amber">Live</span>
     </button>
     <button class="nav-item" onclick="showPage('keywords',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="6" r="4"/><path d="M10 10l4 4"/></svg>
       Keyword intelligence
       <span class="nav-badge green">AI</span>
-    </button>
-    <div class="nav-section">Tasks</div>
-    <button class="nav-item" onclick="showPage('tasks',this)">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 8l2 2 4-4"/></svg>
-      Campaign tasks
-      <span class="nav-badge" id="tasks-badge" style="display:none;background:var(--red)">0</span>
     </button>
     <div class="nav-section">Reports</div>
     <button class="nav-item" onclick="showPage('history',this)">
@@ -311,14 +241,6 @@ tbody tr:hover { background: var(--surface2); }
       Activity log
     </button>
     <div class="nav-section">Admin</div>
-    <button class="nav-item" onclick="showPage('my-settings',this)">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5" r="2.5"/><path d="M3 13c0-2.761 2.239-5 5-5s5 2.239 5 5"/></svg>
-      My Profile
-    </button>
-    <button class="nav-item" id="nav-users" onclick="showPage('users',this)" style="display:none">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 12c0-2.21-1.343-4-3-4S5 9.79 5 12"/><circle cx="8" cy="5" r="2.5"/><path d="M13.5 12c0-1.657-1.007-3-2.25-3M2.5 12c0-1.657 1.007-3 2.25-3"/><circle cx="12" cy="4.5" r="1.75"/><circle cx="4" cy="4.5" r="1.75"/></svg>
-      User Management
-    </button>
     <button class="nav-item" onclick="showPage('settings',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
       Settings
@@ -337,14 +259,12 @@ tbody tr:hover { background: var(--surface2); }
   <div class="topbar">
     <div class="page-title" id="page-title">Dashboard</div>
     <div class="topbar-right">
-      <div id="dept-switcher" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:3px;display:none;align-items:center;gap:2px">
-        <button id="dept-btn-amazon" onclick="switchDept('amazon')" style="padding:5px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;background:var(--accent);color:white">Amazon</button>
-        <button id="dept-btn-google" onclick="switchDept('google')" style="padding:5px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;background:transparent;color:var(--text2)">Google</button>
-      </div>
-      <div id="user-info" style="display:flex;align-items:center"></div>
       <div class="sync-info"><div class="sync-dot" id="sync-dot"></div><span id="sync-time">Loading...</span></div>
+      <button id="switch-to-google-btn" class="btn btn-ghost" onclick="location.href='/google.html'" style="display:none;background:#fef3c7;border-color:#f59e0b;color:#92400e" title="Switch to the Google Ads dashboard">→ Google Ads</button>
       <button class="btn btn-ghost" onclick="exportCSV()">Export CSV</button>
       <button class="btn btn-primary" onclick="refreshData()">↻ Refresh</button>
+      <span id="user-pill" style="display:none;font-size:12px;color:var(--text2);background:var(--surface2);border:1px solid var(--border);padding:6px 10px;border-radius:6px;margin-left:4px"></span>
+      <button class="btn btn-ghost" onclick="logout()" style="font-size:12px;padding:6px 10px" title="Sign out">Logout</button>
     </div>
   </div>
 
@@ -409,7 +329,7 @@ tbody tr:hover { background: var(--surface2); }
     <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">
       <input type="text" id="camp-search" placeholder="Search campaigns..." oninput="renderAllCampaigns()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;width:260px;font-family:inherit">
       <select id="camp-portfolio-filter" onchange="renderAllCampaigns()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer">
-        <option value="">All agents</option>
+        <option value="">All portfolios</option>
       </select>
       <select id="camp-type-filter" onchange="renderAllCampaigns()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer">
         <option value="">All types</option>
@@ -472,12 +392,9 @@ tbody tr:hover { background: var(--surface2); }
 
   <!-- DAILY HISTORY PAGE -->
   <div class="page" id="page-history">
-    <div style="display:flex;gap:10px;margin-bottom:20px;align-items:center;flex-wrap:wrap">
+    <div style="display:flex;gap:10px;margin-bottom:20px;align-items:center">
       <select id="history-date-select" onchange="loadHistoryDate()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer;min-width:200px">
         <option value="">Select a date...</option>
-      </select>
-      <select id="history-agent-filter" onchange="filterHistoryByAgent()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer;min-width:160px">
-        <option value="">All agents</option>
       </select>
       <span id="history-loading" style="font-size:12px;color:var(--text3)"></span>
     </div>
@@ -497,8 +414,7 @@ tbody tr:hover { background: var(--surface2); }
 
       <div class="tabs" style="margin-bottom:16px">
         <button class="tab-btn active" onclick="showHistoryTab('campaigns',this)">All campaigns</button>
-        <button class="tab-btn" onclick="showHistoryTab('spend_no_revenue',this)">Spend, no revenue <span id="h-snr-badge" style="background:rgba(192,57,43,0.15);color:var(--red);padding:1px 6px;border-radius:10px;font-size:10px;margin-left:4px">0</span></button>
-        <button class="tab-btn" onclick="showHistoryTab('no_activity',this)">No activity <span id="h-na-badge" style="background:rgba(0,0,0,0.07);color:var(--text3);padding:1px 6px;border-radius:10px;font-size:10px;margin-left:4px">0</span></button>
+        <button class="tab-btn" onclick="showHistoryTab('spend_no_revenue',this)">Spend, no revenue</button>
         <button class="tab-btn" onclick="showHistoryTab('exhaustion',this)">Budget exhaustion log</button>
       </div>
 
@@ -525,10 +441,6 @@ tbody tr:hover { background: var(--surface2); }
       </div>
 
       <div id="history-no-activity-tab" style="display:none">
-        <div class="insight-box" style="margin-bottom:16px">
-          <div class="insight-title">✦ No activity on this day</div>
-          <div class="insight-text" id="history-na-insight">Campaigns with zero impressions and zero spend on this day. Share with your team to review targeting, bids, or whether to pause.</div>
-        </div>
         <div class="table-card">
           <div style="overflow-x:auto"><table>
             <thead><tr><th>Campaign</th><th>Portfolio</th><th>Type</th><th>Budget</th><th>Impressions</th><th>Clicks</th><th>Spend</th><th>Status</th></tr></thead>
@@ -540,7 +452,7 @@ tbody tr:hover { background: var(--surface2); }
       <div id="history-exhaustion-tab" style="display:none">
         <div class="table-card">
           <div style="overflow-x:auto"><table>
-            <thead><tr><th>Time</th><th>Campaign</th><th>Budget</th><th>ACOS</th><th>Est. missed</th><th>Gap</th><th>Resolved at</th><th>Action</th></tr></thead>
+            <thead><tr><th>Time</th><th>Campaign</th><th>Portfolio</th><th>Agent</th><th>Budget</th><th>ACOS</th><th>Est. missed</th><th>Resolved at</th><th>Gap</th><th>Action</th></tr></thead>
             <tbody id="history-exhaustion-table"></tbody>
           </table></div>
         </div>
@@ -611,44 +523,6 @@ tbody tr:hover { background: var(--surface2); }
     </div>
   </div>
 
-  <!-- TASKS PAGE -->
-  <div class="page" id="page-tasks">
-    <div style="margin-bottom:20px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
-      <div>
-        <div class="section-title">Campaign Tasks</div>
-        <div class="section-sub">Daily tasks at 8am · Auto-archived after 3 working days · 7-day scaling window available from Escalation</div>
-      </div>
-      <button class="btn btn-ghost" onclick="showPage('agent-performance')" style="font-size:13px">📊 Agent Performance</button>
-    </div>
-
-    <div class="metrics-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:20px">
-      <div class="metric-card alert"><div class="metric-label">Due</div><div class="metric-value" id="task-open">—</div><div class="metric-delta delta-down">Awaiting action</div></div>
-      <div class="metric-card"><div class="metric-label">In Progress</div><div class="metric-value" id="task-inprogress">—</div><div class="metric-delta">Being worked on</div></div>
-      <div class="metric-card alert"><div class="metric-label">Escalated</div><div class="metric-value" id="task-escalated">—</div><div class="metric-delta delta-down">Day 3+ urgent</div></div>
-      <div class="metric-card"><div class="metric-label">Scaling</div><div class="metric-value" id="task-scaling">—</div><div class="metric-delta">7-day window</div></div>
-      <div class="metric-card success"><div class="metric-label">Completed today</div><div class="metric-value" id="task-complete">—</div><div class="metric-delta delta-up">Resolved</div></div>
-    </div>
-
-    <!-- Agent tabs - click agent THEN tab to filter -->
-    <div id="agent-tabs" style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap"></div>
-
-    <!-- Task status tabs -->
-    <div class="tabs" style="margin-bottom:16px">
-      <button class="tab-btn" id="ttab-all" onclick="showTaskTab('all',this)">All Tasks <span id="tab-all-count" style="background:#6b7280;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn active" id="ttab-due" onclick="showTaskTab('due',this)">Due <span id="tab-due-count" style="background:#e53e3e;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn" id="ttab-inprogress" onclick="showTaskTab('inprogress',this)">In Progress <span id="tab-inprogress-count" style="background:#d97706;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn" id="ttab-escalated" onclick="showTaskTab('escalated',this)">🚨 Escalated <span id="tab-escalated-count" style="background:#e53e3e;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn" id="ttab-scaling" onclick="showTaskTab('scaling',this)">⏱ Scaling <span id="tab-scaling-count" style="background:#7c3aed;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn" id="ttab-repeat" onclick="showTaskTab('repeat',this)">🔁 Repeat Offenders <span id="tab-repeat-count" style="background:#dc2626;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn" id="ttab-complete" onclick="showTaskTab('complete',this)">Completed <span id="tab-complete-count" style="background:#059669;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
-      <button class="tab-btn" id="ttab-archived" onclick="showTaskTab('archived',this)">Archived</button>
-    </div>
-
-    <div id="tasks-container">
-      <div class="loading"><div class="spinner"></div> Loading tasks...</div>
-    </div>
-  </div>
-
   <!-- BUDGET REPORT -->
   <div class="page" id="page-report">
     <div class="report-filters">
@@ -676,34 +550,9 @@ tbody tr:hover { background: var(--surface2); }
     </div>
     <div class="table-card">
       <div style="overflow-x:auto"><table>
-        <thead><tr>
-          <th onclick="sortReport('date')" style="cursor:pointer">Date <span id="rs-date"></span></th>
-          <th onclick="sortReport('campaign')" style="cursor:pointer">Campaign <span id="rs-campaign"></span></th>
-          <th>Portfolio</th><th>Agent</th>
-          <th onclick="sortReport('budget')" style="cursor:pointer">Budget <span id="rs-budget"></span></th>
-          <th onclick="sortReport('time')" style="cursor:pointer">Ran out at <span id="rs-time"></span></th>
-          <th onclick="sortReport('acos')" style="cursor:pointer">ACOS <span id="rs-acos"></span></th>
-          <th onclick="sortReport('missed')" style="cursor:pointer">Est. missed <span id="rs-missed"></span></th>
-          <th>Resolved at</th>
-          <th onclick="sortReport('gap')" style="cursor:pointer">Gap <span id="rs-gap"></span></th>
-          <th>Added</th><th>Action</th>
-        </tr></thead>
+        <thead><tr><th>Date</th><th>Campaign</th><th>Portfolio</th><th>Agent</th><th>Budget</th><th>Ran out at</th><th>ACOS</th><th>Est. missed</th><th>Resolved at</th><th>Gap</th><th>Added</th><th>Action</th></tr></thead>
         <tbody id="report-table"><tr><td colspan="12"><div class="empty">No events yet. Events appear when campaigns run out of budget.</div></td></tr></tbody>
       </table></div>
-    </div>
-  </div>
-
-  <!-- AGENT PERFORMANCE -->
-  <div class="page" id="page-agent-performance">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-      <div>
-        <div style="font-size:20px;font-weight:700;color:var(--text)">Agent Performance</div>
-        <div style="font-size:13px;color:var(--text3);margin-top:4px">AI analysis of the last 30 days — tasks completed, abandoned, patterns, repeat offenders</div>
-      </div>
-      <button class="btn btn-primary" onclick="loadAgentPerformance(true)" style="font-size:13px">🔄 Refresh Analysis</button>
-    </div>
-    <div id="agent-perf-container">
-      <div class="loading"><div class="spinner"></div> Loading agent performance...</div>
     </div>
   </div>
 
@@ -714,14 +563,10 @@ tbody tr:hover { background: var(--surface2); }
         <option value="">All campaigns</option>
       </select>
       <select class="filter-select" id="activity-type" onchange="renderActivity()">
-        <option value="">All action types</option>
-        <option value="task_created">Task created</option>
-        <option value="in_progress">Working on it</option>
-        <option value="complete">Marked complete</option>
-        <option value="dismissed">Dismissed</option>
-        <option value="paused">Paused campaign</option>
-        <option value="scaling">Moved to scaling</option>
-        <option value="budget_added">Budget added</option>
+        <option value="">All event types</option>
+        <option value="out_of_budget">Out of budget</option>
+        <option value="acos_high">High ACOS</option>
+        <option value="budget_low">Budget low</option>
       </select>
     </div>
     <div class="table-card" style="padding:0 20px">
@@ -730,86 +575,6 @@ tbody tr:hover { background: var(--surface2); }
   </div>
 
   <!-- SETTINGS -->
-  <!-- GOOGLE PLACEHOLDER -->
-  <div id="google-placeholder" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:100;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px">
-    <div style="font-size:56px;margin-bottom:20px">🔵</div>
-    <div style="font-size:26px;font-weight:800;color:var(--text);margin-bottom:10px">Google Advertising</div>
-    <div style="font-size:15px;color:var(--text3);margin-bottom:8px;max-width:420px;line-height:1.6">Google Ads integration is being set up. Once API credentials are connected, you'll see full campaign data, alerts, and tasks here.</div>
-    <div style="margin-top:24px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:20px 28px;display:inline-block;text-align:left">
-      <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">Google Advertising Team</div>
-      <div style="font-size:13px;color:var(--text2);margin-bottom:6px">👤 Rahul — Google Ads Agent</div>
-      <div style="font-size:13px;color:var(--text2)">👤 Anuj — Google Ads Agent</div>
-    </div>
-    <button onclick="switchDept('amazon')" class="btn btn-primary" style="margin-top:28px;font-size:14px">← Back to Amazon</button>
-  </div>
-
-  <!-- MY PROFILE PAGE -->
-  <div class="page" id="page-my-settings">
-    <div class="settings-grid">
-      <div class="settings-card" style="max-width:500px">
-        <div class="settings-title">👤 My Profile</div>
-        <div id="my-profile-info" style="margin-bottom:20px;padding:16px;background:var(--surface2);border-radius:10px;font-size:14px">Loading...</div>
-        <div style="border-top:1px solid var(--border);padding-top:20px">
-          <div style="font-size:15px;font-weight:600;margin-bottom:14px">Change Password</div>
-          <div style="margin-bottom:12px">
-            <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Current Password</label>
-            <input id="current-password" type="password" placeholder="Enter current password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
-          </div>
-          <div style="margin-bottom:12px">
-            <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">New Password</label>
-            <input id="new-pw" type="password" placeholder="Enter new password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
-          </div>
-          <div style="margin-bottom:16px">
-            <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Confirm New Password</label>
-            <input id="confirm-pw" type="password" placeholder="Confirm new password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
-          </div>
-          <div id="pw-error" style="color:#e53e3e;font-size:13px;margin-bottom:10px;display:none"></div>
-          <div id="pw-success" style="color:var(--green);font-size:13px;margin-bottom:10px;display:none">✓ Password updated successfully</div>
-          <button class="btn btn-primary" style="font-size:14px" onclick="changeMyPassword()">Update Password</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- USER MANAGEMENT PAGE -->
-  <div class="page" id="page-users">
-    <div class="settings-grid">
-      <div class="settings-card" style="max-width:800px">
-        <div class="settings-title">👥 Team Members</div>
-        <div id="users-list" style="margin-bottom:20px"></div>
-        <div style="border-top:1px solid var(--border);padding-top:20px">
-          <div style="font-size:15px;font-weight:600;margin-bottom:14px">Add New User</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-            <div>
-              <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Full Name</label>
-              <input id="new-name" class="input-sm" placeholder="e.g. Aryan Singh" style="width:100%;padding:9px 12px;font-size:14px">
-            </div>
-            <div>
-              <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Email Address</label>
-              <input id="new-email" class="input-sm" placeholder="e.g. aryan@fksports.co.uk" type="email" style="width:100%;padding:9px 12px;font-size:14px">
-            </div>
-            <div>
-              <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Password</label>
-              <input id="new-password" class="input-sm" placeholder="Set a password" type="password" style="width:100%;padding:9px 12px;font-size:14px">
-            </div>
-            <div>
-              <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Department</label>
-              <select id="new-department" class="filter-select" style="width:100%;font-size:14px;padding:9px 12px">
-                <option value="amazon">Amazon Advertising</option>
-                <option value="google">Google Advertising</option>
-                <option value="supply_chain">Supply Chain & Procurement</option>
-                <option value="logistics">Logistics & Fulfilment</option>
-                <option value="manager">Manager</option>
-              </select>
-            </div>
-          </div>
-          <div id="new-user-error" style="color:#e53e3e;font-size:13px;margin-bottom:10px;display:none"></div>
-          <button class="btn btn-primary" style="font-size:14px;padding:10px 24px" onclick="createUser()">Add User</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <div class="page" id="page-settings">
     <div class="settings-grid">
       <div class="settings-card">
@@ -839,248 +604,91 @@ tbody tr:hover { background: var(--surface2); }
         <div class="settings-row"><div><div class="settings-label">Negative keyword suggestions</div><div class="settings-sub">Zero-conversion terms</div></div><button class="toggle on" onclick="this.classList.toggle('on')"></button></div>
       </div>
     </div>
-    <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
-      <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
-      <button class="btn btn-ghost" onclick="resetSettings()">Reset to defaults</button>
-      <span id="settings-status" style="font-size:12px;color:var(--green);display:none">✓ Settings saved</span>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="btn btn-primary">Save settings</button>
+      <button class="btn btn-ghost">Reset to defaults</button>
     </div>
   </div>
-
-
 
 </div>
 </div>
 
 <script>
-
-// ── Department State ─────────────────────────────────────────────────────
-let activeDept = 'amazon'; // Default department
-
-const AMAZON_AGENTS = ['Aryan','Satyam','Kunal'];
-const GOOGLE_AGENTS = ['Rahul','Anuj'];
-
-function extractAgentName(campaignName) {
-  if (!campaignName) return '';
-  const parts = campaignName.split(/[|@]/);
-  const name = parts[0].trim().substring(0, 30);
-  return name;
-}
-
-function getDeptCampaigns() {
-  if (!activeDept || activeDept === 'all') return allCampaigns;
-  return allCampaigns.filter(function(c) {
-    const agent = extractAgentName(c.name||'');
-    if (activeDept === 'amazon') return AMAZON_AGENTS.includes(agent) || (!GOOGLE_AGENTS.includes(agent));
-    if (activeDept === 'google') return GOOGLE_AGENTS.includes(agent);
-    return true;
-  });
-}
-
-function canSeeBothDepts() {
-  return currentUser && (currentUser.email === 'bobby@fksports.co.uk' || currentUser.name === 'Satyam' || currentUser.role === 'manager');
-}
-
-function switchDept(dept) {
-  activeDept = dept;
-  // Update switcher buttons
-  const btnAmazon = document.getElementById('dept-btn-amazon');
-  const btnGoogle = document.getElementById('dept-btn-google');
-  if (btnAmazon && btnGoogle) {
-    if (dept === 'amazon') {
-      btnAmazon.style.background = 'var(--accent)'; btnAmazon.style.color = 'white';
-      btnGoogle.style.background = 'transparent'; btnGoogle.style.color = 'var(--text2)';
-    } else {
-      btnGoogle.style.background = '#4285f4'; btnGoogle.style.color = 'white';
-      btnAmazon.style.background = 'transparent'; btnAmazon.style.color = 'var(--text2)';
-    }
-  }
-  // Show Google placeholder if switching to google
-  const googlePlaceholder = document.getElementById('google-placeholder');
-  if (googlePlaceholder) {
-    googlePlaceholder.style.display = dept === 'google' ? 'flex' : 'none';
-  }
-  // Hide/show main content based on dept
-  const mainContent = document.getElementById('dept-amazon-content');
-  if (mainContent) {
-    mainContent.style.display = dept === 'amazon' ? '' : 'none';
-  }
-  // Re-render current page with dept filter
-  const activePage = document.querySelector('.page.active');
-  if (activePage) {
-    const pageId = activePage.id.replace('page-', '');
-    refreshCurrentPage(pageId);
-  }
-}
-
-let googleData = null;
-
-async function fetchGoogleData() {
-  try {
-    const res = await fetch('/api/google/dashboard');
-    googleData = await res.json();
-  } catch(e) { console.error('Google fetch error:', e); }
-}
-
-function refreshCurrentPage(name) {
-  if (activeDept === 'google') {
-    // Show google placeholder for now if no data
-    const placeholder = document.getElementById('google-placeholder');
-    if (placeholder) placeholder.style.display = 'flex';
-    // Fetch google data
-    fetchGoogleData().then(function() {
-      if (googleData && googleData.campaigns && googleData.campaigns.length > 0) {
-        if (placeholder) placeholder.style.display = 'none';
-        // Render with google data
-        if (name === 'dashboard') renderGoogleDashboard();
-      }
-    });
-    return;
-  }
-  if (name === 'dashboard') renderDashboard();
-  else if (name === 'campaigns') renderCampaigns();
-  else if (name === 'tasks') loadTasks();
-  else if (name === 'activity') renderActivity();
-  else if (name === 'stuck') loadStuckCampaigns();
-  else if (name === 'history') loadHistory();
-}
-
-function renderGoogleDashboard() {
-  if (!googleData) return;
-  const m = googleData.metrics || {};
-  // Update metric cards
-  const revEl = document.getElementById('metric-revenue');
-  const spendEl = document.getElementById('metric-spend');
-  const acosEl = document.getElementById('metric-acos');
-  const actionEl = document.getElementById('metric-action');
-  if (revEl) revEl.textContent = '£' + (m.totalRevenue||'0.00');
-  if (spendEl) spendEl.textContent = '£' + (m.totalSpend||'0.00');
-  if (acosEl) acosEl.textContent = (m.blendedAcos||0) + '%';
-  if (actionEl) actionEl.textContent = m.outOfBudget || 0;
-  // Update alerts
-  if (googleData.alerts) {
-    const savedAlerts = appData.alerts || [];
-    appData.alerts = googleData.alerts;
-    renderAlerts();
-    appData.alerts = savedAlerts;
-  }
-}
-
-// ── Auth ─────────────────────────────────────────────────────────────────
-let currentUser = null;
-
-async function checkAuth() {
-  const token = localStorage.getItem('cp_token');
-  if (!token) { window.location.replace('/login.html'); return false; }
-  try {
-    const res = await fetch('/api/auth/me', { headers: { 'x-auth-token': token } });
-    const data = await res.json();
-    if (!data.name) { localStorage.removeItem('cp_token'); window.location.replace('/login.html'); return false; }
-    currentUser = data;
-    const userEl = document.getElementById('user-info');
-    // Format department label with proper capitalisation
-    const deptDisplayLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Director' };
-    const deptDisplay = deptDisplayLabels[data.department] || data.department.charAt(0).toUpperCase() + data.department.slice(1);
-    const roleDisplay = data.role === 'manager' ? 'Director' : data.department === 'amazon' ? 'Amazon Advertising' : data.department === 'google' ? 'Google Advertising' : data.department === 'supply_chain' ? 'Supply Chain & Procurement' : data.department === 'logistics' ? 'Logistics & Fulfilment' : data.role.charAt(0).toUpperCase() + data.role.slice(1);
-
-    if (userEl) userEl.innerHTML =
-      '<div style="display:flex;flex-direction:column;align-items:flex-end;margin-right:8px">' +
-        '<span style="font-size:15px;font-weight:700;color:var(--text)">' + escHtml(data.name) + '</span>' +
-        '<span style="font-size:12px;font-weight:600;color:var(--accent)">' + escHtml(roleDisplay) + '</span>' +
-      '</div>' +
-      '<button onclick="doLogout()" style="background:var(--surface2);border:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);padding:6px 14px;border-radius:8px;font-family:inherit">Sign Out</button>';
-
-    // Set default department based on user
-    if (data.department === 'google') {
-      activeDept = 'google';
-    } else {
-      activeDept = 'amazon';
-    }
-
-    // Show dept switcher only for Bobby and Satyam
-    const switcher = document.getElementById('dept-switcher');
-    if (switcher) {
-      const showSwitcher = data.role === 'manager' || data.name === 'Satyam';
-      switcher.style.display = showSwitcher ? 'flex' : 'none';
-      if (showSwitcher) switchDept(activeDept);
-    }
-    return true;
-  } catch(e) { window.location.href = '/login.html'; return false; }
-}
-
-function getAuthHeaders() {
-  const token = localStorage.getItem('cp_token');
-  return token ? { 'x-auth-token': token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-}
-
-// Override fetch to automatically add auth token to all /api calls
-const _originalFetch = window.fetch;
-window.fetch = function(url, options) {
-  if (typeof url === 'string' && url.startsWith('/api/')) {
+// ──────────────────────────────────────────────────────────────────────────
+// Auth bootstrap — applies to ALL fetch() calls in this file so every request
+// carries the user's session token. Also self-routes if user is on wrong dashboard.
+// ──────────────────────────────────────────────────────────────────────────
+(function setupAuthFetch() {
+  const _origFetch = window.fetch;
+  window.fetch = function(url, options) {
     const token = localStorage.getItem('cp_token');
-    if (token) {
-      options = options || {};
-      options.headers = Object.assign({}, options.headers || {}, { 'x-auth-token': token });
+    options = options || {};
+    options.headers = Object.assign({}, options.headers || {});
+    if (token && !options.headers['x-auth-token']) {
+      options.headers['x-auth-token'] = token;
     }
-  }
-  return _originalFetch.apply(this, [url, options]);
-};
+    return _origFetch(url, options).then(function(r) {
+      // If session expired, bounce to login
+      if (r.status === 401) {
+        localStorage.removeItem('cp_token');
+        if (!location.pathname.startsWith('/login')) location.replace('/login.html');
+      }
+      return r;
+    });
+  };
+})();
 
-async function doLogout() {
-  const token = localStorage.getItem('cp_token');
-  if (token) {
-    try { await fetch('/api/auth/logout', { method: 'POST', headers: { 'x-auth-token': token } }); } catch(e) {}
+// On page load: verify the logged-in user has access to this dashboard.
+// Google agents are bounced to /google.html. Amazon agents stay. Managers stay
+// and get a "Switch to Google" button shown.
+let CURRENT_USER = null;
+async function bootstrapUserGate() {
+  try {
+    const r = await fetch('/api/auth/me');
+    if (!r.ok) {
+      // 401 already bounces via setupAuthFetch
+      return false;
+    }
+    const me = await r.json();
+    CURRENT_USER = me;
+    const dept = (me.department || '').toLowerCase();
+    const role = (me.role || '').toLowerCase();
+    const isManager = role === 'manager' || dept === 'manager';
+
+    // If this is a Google-only agent landing on the Amazon dashboard, send them to Google
+    if (dept === 'google' && !isManager) {
+      location.replace('/google.html');
+      return false;
+    }
+
+    // Show manager UI: Switch to Google button + user pill
+    if (isManager) {
+      const switchBtn = document.getElementById('switch-to-google-btn');
+      if (switchBtn) switchBtn.style.display = 'inline-flex';
+    }
+    const userPill = document.getElementById('user-pill');
+    if (userPill) {
+      userPill.textContent = me.name || me.email;
+      userPill.style.display = 'inline-flex';
+    }
+    return true;
+  } catch(e) {
+    console.error('User gate error: ' + e.message);
+    return true;  // fail open — let the page render rather than locking out
   }
+}
+
+async function logout() {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch(_) {}
   localStorage.removeItem('cp_token');
-  localStorage.removeItem('cp_user');
-  window.location.href = '/login.html';
+  location.replace('/login.html');
 }
 
 let appData = { metrics:{}, campaigns:[], alerts:[], exhaustionLog:[], lastSync:null };
-// Persist suppressed alert IDs across page refresh using localStorage
-// Auto-clear suppressions older than 24 hours so alerts come back next day
-(function cleanOldSuppressions() {
-  try {
-    const stored = JSON.parse(localStorage.getItem('suppressedAlertsV2') || '{}');
-    const now = Date.now();
-    const cleaned = {};
-    Object.keys(stored).forEach(function(id) {
-      if (now - stored[id] < 24 * 60 * 60 * 1000) cleaned[id] = stored[id];
-    });
-    localStorage.setItem('suppressedAlertsV2', JSON.stringify(cleaned));
-  } catch(e) {}
-})();
-let suppressedAlertIds = new Set(Object.keys(JSON.parse(localStorage.getItem('suppressedAlertsV2') || '{}')));
-function addSuppressedAlert(campaignId) {
-  suppressedAlertIds.add(String(campaignId));
-  try {
-    const stored = JSON.parse(localStorage.getItem('suppressedAlertsV2') || '{}');
-    stored[String(campaignId)] = Date.now();
-    localStorage.setItem('suppressedAlertsV2', JSON.stringify(stored));
-  } catch(e) {}
-}
-
-// Global agent name extractor - works on both campaign names and stored agent names
-function getTaskAgent(t) {
-  const src = t.campaign_name || t.agent_name || '';
-  const parts = src.split(/[|@]/);
-  const name = parts[0].trim();
-  return (name.length > 0 && name.length < 30) ? name : (t.agent_name || 'Unassigned');
-}
-function getTaskAgentName(t) { return getTaskAgent(t); }
 let allCampaigns = [];
 let currentFilter = 'action';
 let sortState = { col: null, dir: 1 };
-let reportSortState = { col: 'date', dir: -1 };
-
-function sortReport(col) {
-  if (reportSortState.col === col) { reportSortState.dir *= -1; }
-  else { reportSortState.col = col; reportSortState.dir = -1; }
-  document.querySelectorAll('[id^="rs-"]').forEach(function(el){ el.textContent = ''; });
-  const ind = document.getElementById('rs-' + col);
-  if (ind) ind.textContent = reportSortState.dir === -1 ? ' ↓' : ' ↑';
-  renderReport();
-}
-const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Campaign Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
+const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings' };
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showPage(name, btn) {
@@ -1093,40 +701,9 @@ function showPage(name, btn) {
   if (name === 'report') renderReport();
   if (name === 'history') loadHistoryDates();
   if (name === 'stuck') loadStuckCampaigns();
-  if (name === 'tasks') loadTasks();
-  if (name === 'settings') loadSettings();
-  if (name === 'users') loadUsers();
-  if (name === 'my-settings') loadMyProfile();
   if (name === 'activity') renderActivity();
-  if (name === 'ai') {
-    // Don't auto-run AI — show button only to save API credits
-    const container = document.getElementById('ai-container');
-    if (container && !aiCache.result) {
-      container.innerHTML = '<div style="text-align:center;padding:60px 20px">' +
-        '<div style="font-size:40px;margin-bottom:16px">🤖</div>' +
-        '<div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:8px">AI Campaign Analysis</div>' +
-        '<div style="font-size:13px;color:var(--text3);margin-bottom:24px">Click below to run a fresh analysis of all campaigns.<br>Uses Claude AI — run on demand to save credits.</div>' +
-        '<button class="btn btn-primary" onclick="runAI()">Run AI Analysis</button>' +
-      '</div>';
-    } else if (aiCache.result) {
-      renderAIResult(container, aiCache.result);
-    }
-  }
-  if (name === 'keywords') {
-    // Always load status/existing data but don't auto-trigger new analysis
-    loadKeywords(false);
-  }
-  if (name === 'agent-performance') {
-    const container = document.getElementById('agent-perf-container');
-    if (container && !container.getAttribute('data-loaded')) {
-      container.innerHTML = '<div style="text-align:center;padding:60px 20px">' +
-        '<div style="font-size:40px;margin-bottom:16px">📊</div>' +
-        '<div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:8px">Agent Performance Analysis</div>' +
-        '<div style="font-size:13px;color:var(--text3);margin-bottom:24px">Click below to run a fresh performance analysis.<br>Uses Claude AI — run on demand to save credits.</div>' +
-        '<button class="btn btn-primary" onclick="loadAgentPerformance(true)">Analyse Agent Performance</button>' +
-      '</div>';
-    }
-  }
+  if (name === 'ai') runAI();
+  if (name === 'keywords') loadKeywords();
 }
 
 // ── Fetch data ─────────────────────────────────────────────────────────────
@@ -1138,10 +715,6 @@ async function fetchData() {
     clearTimeout(timeout);
     if (!res.ok) throw new Error('API error ' + res.status);
     appData = await res.json();
-    // Keep locally dismissed/budgeted alerts suppressed until next full sync cycle
-    if (suppressedAlertIds.size > 0) {
-      appData.alerts = (appData.alerts || []).filter(function(a){ return !suppressedAlertIds.has(String(a.campaignId)); });
-    }
     allCampaigns = appData.campaigns || [];
     renderDashboard();
     updateSyncTime();
@@ -1185,10 +758,9 @@ function setDashTab(tab, btn) {
 }
 
 function renderDashboardTable() {
-  const camps = getDeptCampaigns();
+  const camps = allCampaigns;
   const spendNoRev = camps.filter(c => c.spend > 0 && (c.sales === 0 || c.sales === null));
-  // Only count as no-activity if stats have actually loaded (spend !== null means stats returned)
-  const noActivity = camps.filter(c => c.spend !== null && c.impressions !== null && (c.spend === 0) && (c.impressions === 0));
+  const noActivity = camps.filter(c => (c.spend === 0 || c.spend === null) && (c.impressions === 0));
   document.getElementById('cnt-spend-no-rev').textContent = spendNoRev.length;
   document.getElementById('cnt-no-activity').textContent = noActivity.length;
 
@@ -1229,9 +801,8 @@ function renderDashboard() {
   document.getElementById('m-spend').textContent = '£' + parseFloat(m.totalSpend || 0).toFixed(2);
   document.getElementById('m-acos').textContent = (m.blendedAcos || 0) + '%';
   document.getElementById('m-action').textContent = m.needsAction || 0;
-  const acosTarget = 12;
-  document.getElementById('m-acos-d').textContent = m.blendedAcos > acosTarget ? '▲ Above ' + acosTarget + '% target' : '▼ Within ' + acosTarget + '% target';
-  document.getElementById('m-acos-d').className = 'metric-delta ' + (m.blendedAcos > acosTarget ? 'delta-down' : 'delta-up');
+  document.getElementById('m-acos-d').textContent = m.blendedAcos > 35 ? '▲ Above 35% target' : '▼ Within target';
+  document.getElementById('m-acos-d').className = 'metric-delta ' + (m.blendedAcos > 35 ? 'delta-down' : 'delta-up');
   document.getElementById('m-action-d').textContent = (m.needsAction || 0) + ' campaigns need attention';
   const nb = document.getElementById('nb-action');
   if (m.needsAction > 0) { nb.textContent = m.needsAction; nb.style.display = ''; }
@@ -1245,91 +816,16 @@ function renderDashboard() {
 
 function renderAlerts() {
   const container = document.getElementById('alert-container');
-  const alerts = (appData.alerts || []).filter(function(a) {
-    if (['out_of_budget','budget_low','acos_high'].indexOf(a.type) < 0) return false;
-    if (suppressedAlertIds.has(String(a.campaignId))) return false;
-    // Filter by active department
-    const agent = extractAgentName(a.name||'');
-    if (activeDept === 'amazon') return AMAZON_AGENTS.includes(agent) || !GOOGLE_AGENTS.includes(agent);
-    if (activeDept === 'google') return GOOGLE_AGENTS.includes(agent);
-    return true;
-  });
-  // Sort: out_of_budget first, then budget_low, then acos_high
-  alerts.sort(function(a,b) {
-    const order = { out_of_budget: 0, budget_low: 1, acos_high: 2 };
-    return (order[a.type]||9) - (order[b.type]||9);
-  });
+  const alerts = (appData.alerts || []).filter(a => a.type === 'out_of_budget').slice(-3);
   if (!alerts.length) { container.innerHTML = ''; return; }
-  container.innerHTML = alerts.map(function(a) {
-    const isOOB = a.type === 'out_of_budget';
-    const isLow = a.type === 'budget_low';
-    const isAcos = a.type === 'acos_high';
-    const icon = isOOB ? '⚠️' : isLow ? '⚡' : '📈';
-    const msg = isOOB
-      ? '<strong>' + escHtml(a.name) + '</strong> ran out of budget at ' + a.time + '. ACOS: ' + a.acos + '%.'
-      : isLow
-      ? '<strong>' + escHtml(a.name) + '</strong> budget running low at ' + a.time + '. ACOS: ' + a.acos + '%.'
-      : '<strong>' + escHtml(a.name) + '</strong> high ACOS: ' + a.acos + '% at ' + a.time + '.';
-    const addBudgetBtn = (isOOB || isLow)
-      ? '<button class="btn btn-green" style="font-size:12px" data-cid="' + a.campaignId + '" onclick="approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">Add budget</button>'
-      : '';
-    return '<div class="alert-banner" id="alert-' + a.campaignId + '">' +
-      '<span style="font-size:16px">' + icon + '</span>' +
-      '<div class="alert-banner-text">' + msg + '</div>' +
-      addBudgetBtn +
-      '<button class="btn btn-ghost" style="font-size:12px" data-cid="' + a.campaignId + '" onclick="dismissAlert(this.getAttribute(&quot;data-cid&quot;))">Dismiss</button>' +
-    '</div>';
-  }).join('');
-}
-
-// ── Dismiss alert with reason ─────────────────────────────────────────────
-function dismissAlert(campaignId) {
-  const reasons = ['High ACOS', 'No CVR', 'Test Low Budget', 'Other'];
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:9998;display:flex;align-items:center;justify-content:center';
-  const popup = document.createElement('div');
-  popup.style.cssText = 'background:white;padding:24px;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.2);min-width:320px;max-width:400px;width:90%';
-  const optHtml = reasons.map(function(r){ return '<option>' + r + '</option>'; }).join('');
-  popup.innerHTML = '<div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px">Dismiss reason</div>' +
-    '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">Why are you not adding budget?</div>' +
-    '<select id="da-reason" style="width:100%;padding:9px;border:1px solid var(--border2);border-radius:7px;margin-bottom:10px;font-size:13px;font-family:inherit">' + optHtml + '</select>' +
-    '<textarea id="da-other" placeholder="Describe reason..." style="width:100%;padding:9px;border:1px solid var(--border2);border-radius:7px;font-size:13px;height:64px;display:none;margin-bottom:10px;resize:none;font-family:inherit"></textarea>' +
-    '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-    '<button id="da-cancel" class="btn btn-ghost" style="font-size:13px">Cancel</button>' +
-    '<button id="da-confirm" class="btn btn-primary" style="font-size:13px">Confirm dismiss</button></div>';
-  popup.querySelector('#da-reason').onchange = function() {
-    popup.querySelector('#da-other').style.display = this.value === 'Other' ? '' : 'none';
-  };
-  popup.querySelector('#da-cancel').onclick = function() { overlay.remove(); };
-  popup.querySelector('#da-confirm').onclick = async function() {
-    const reason = popup.querySelector('#da-reason').value === 'Other'
-      ? (popup.querySelector('#da-other').value || 'Other')
-      : popup.querySelector('#da-reason').value;
-    overlay.remove();
-    // Remove from server state immediately so it doesn't come back on next fetch
-    try { await fetch('/api/alerts/' + campaignId + '/dismiss', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ reason: reason }) }); } catch(e) {}
-    // Remove from local memory immediately so banner disappears at once
-    addSuppressedAlert(campaignId);
-    if (appData.alerts) appData.alerts = appData.alerts.filter(function(a){ return String(a.campaignId) !== String(campaignId); });
-    renderAlerts();
-    // Find and dismiss the alert task in DB
-    try {
-      const tasksRes = await fetch('/api/tasks');
-      const tasksData = await tasksRes.json();
-      const alertTask = (tasksData.tasks||[]).find(function(t){ return String(t.campaign_id)===String(campaignId) && t.task_source==='alert' && (t.status==='open'||t.status==='in_progress'); });
-      if (alertTask) {
-        await fetch('/api/tasks/' + alertTask.id + '/status', {
-          method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ status: 'dismissed', dismissedReason: reason, notes: reason })
-        });
-      }
-    } catch(e) {}
-    // Reload dashboard in background to sync fresh data
-    fetchData();
-  };
-  overlay.appendChild(popup);
-  overlay.onclick = function(e){ if(e.target===overlay) overlay.remove(); };
-  document.body.appendChild(overlay);
+  container.innerHTML = alerts.map(a => `
+    <div class="alert-banner">
+      <span style="font-size:16px">⚠</span>
+      <div class="alert-banner-text"><strong>${escHtml(a.name)}</strong> ran out of budget at ${a.time}. Portfolio: ${escHtml(a.portfolio||'N/A')}. Agent: ${escHtml(a.agent||'N/A')}. ACOS: ${a.acos}%.</div>
+      <button class="btn btn-green" onclick="approveBudget('${a.campaignId}','')">Add budget</button>
+      <button class="btn btn-ghost" onclick="this.closest('.alert-banner').remove()">Dismiss</button>
+    </div>
+  `).join('');
 }
 
 // ── Campaign table ─────────────────────────────────────────────────────────
@@ -1351,9 +847,9 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     else if (budgetLow) statusBadge = '<span class="badge badge-amber"><span class="dot" style="background:var(--amber)"></span>Budget low</span>';
     let action = '<button class="btn btn-ghost" style="font-size:12px">View</button>';
     if (showAction) {
-      if (outOfBudget) action = '<div class="ag"><button class="btn btn-green" data-cid="' + c.campaignId + '" onclick="approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">Add budget</button></div>';
+      if (outOfBudget) action = '<div class="ag"><button class="btn btn-green" onclick="approveBudget(\''+c.campaignId+'\',\'\')">Add budget</button><button class="btn btn-ghost" style="font-size:12px">Skip</button></div>';
       else if (acosHigh) action = '<div class="ag"><button class="btn btn-amber" style="font-size:12px">Fix bids</button></div>';
-      else if (budgetLow) action = '<div class="ag"><button class="btn btn-green" data-cid="' + c.campaignId + '" onclick="approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">Add budget</button></div>';
+      else if (budgetLow) action = '<div class="ag"><button class="btn btn-green" onclick="approveBudget(\''+c.campaignId+'\',\'\')">Add budget</button></div>';
       else action = '<button class="btn btn-ghost" style="font-size:12px">Scale ↗</button>';
     }
     const typeBadge = isAuto ? '<span class="badge badge-blue" style="font-size:10px">Auto</span>' : '<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>';
@@ -1383,13 +879,7 @@ function renderAllCampaigns() {
   const typeFilter = document.getElementById('camp-type-filter')?.value || '';
   let filtered = getFilteredCampaigns(currentFilter);
   if (search) filtered = filtered.filter(c => c.name.toLowerCase().includes(search) || (c.portfolio||'').toLowerCase().includes(search));
-  if (portfolioFilter) {
-    filtered = filtered.filter(function(c){
-      const parts = (c.name||'').split(/[|@]/);
-      const agentName = parts[0].trim();
-      return agentName === portfolioFilter;
-    });
-  }
+  if (portfolioFilter) filtered = filtered.filter(c => (c.portfolio||'') === portfolioFilter);
   if (typeFilter) filtered = filtered.filter(c => (c.targetingType||'') === typeFilter);
   // Sort
   if (sortState.col) {
@@ -1416,12 +906,8 @@ function renderAllCampaigns() {
   // Populate portfolio filter
   const sel = document.getElementById('camp-portfolio-filter');
   if (sel && sel.options.length <= 1) {
-    const agents = [...new Set(allCampaigns.map(function(c){
-      const parts = (c.name||'').split(/[|@]/);
-      const name = parts[0].trim();
-      return name.length > 0 && name.length < 30 ? name : '';
-    }).filter(Boolean))].sort();
-    agents.forEach(function(a) { const o = document.createElement('option'); o.value=a; o.textContent=a; sel.appendChild(o); });
+    const portfolios = [...new Set(allCampaigns.map(c=>c.portfolio||'').filter(Boolean))].sort();
+    portfolios.forEach(p => { const o = document.createElement('option'); o.value=p; o.textContent=p; sel.appendChild(o); });
   }
 }
 
@@ -1449,74 +935,22 @@ function sortCamps(col) {
 }
 
 // ── Budget approval ────────────────────────────────────────────────────────
-function approveBudget(campaignId, suggested) {
-  const camp = allCampaigns.find(function(c){ return String(c.campaignId) === String(campaignId); });
+async function approveBudget(campaignId, suggested) {
+  const camp = allCampaigns.find(c => String(c.campaignId) === String(campaignId));
   const name = camp ? camp.name : campaignId;
   const current = camp ? camp.dailyBudget : 0;
-
-  // Remove any existing modal
-  const existing = document.getElementById('budget-modal');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = 'budget-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:400px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:4px">💰 Add Budget</div>' +
-      '<div style="font-size:13px;color:#555;margin-bottom:4px">' + escHtml(name) + '</div>' +
-      '<div style="font-size:13px;color:#888;margin-bottom:16px">Current daily budget: <strong>£' + current + '</strong></div>' +
-      '<input id="budget-amount" type="number" min="0.01" step="0.01" placeholder="Amount to add (£)" style="width:100%;padding:10px;border:1.5px solid #ddd;border-radius:8px;font-size:15px;box-sizing:border-box;margin-bottom:6px" value="' + (suggested||'') + '">' +
-      '<div id="budget-error" style="color:#e53e3e;font-size:12px;margin-bottom:10px;display:none">Please enter a valid amount.</div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">' +
-        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;budget-modal&quot;).remove()">Cancel</button>' +
-        '<button class="btn btn-green" style="font-size:13px" id="budget-confirm-btn" data-cid="' + String(campaignId) + '" onclick="submitBudget(this.getAttribute(&quot;data-cid&quot;))">Add Budget</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  setTimeout(function(){ const inp = document.getElementById('budget-amount'); if(inp){ inp.focus(); inp.select(); } }, 50);
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
-  // Allow Enter key to submit
-  setTimeout(function(){
-    const inp = document.getElementById('budget-amount');
-    if (inp) inp.addEventListener('keydown', function(e){ if(e.key==='Enter') { const btn = document.getElementById('budget-confirm-btn'); if(btn) submitBudget(btn.getAttribute('data-cid')); } });
-  }, 60);
-}
-
-async function submitBudget(campaignId) {
-  const inp = document.getElementById('budget-amount');
-  const errEl = document.getElementById('budget-error');
-  const btn = document.getElementById('budget-confirm-btn');
-  if (!inp) return;
-  const amount = parseFloat(inp.value);
-  if (isNaN(amount) || amount <= 0) {
-    errEl.style.display = '';
-    inp.style.border = '1.5px solid #e53e3e';
-    return;
-  }
-  // Disable button to prevent double submit
-  btn.disabled = true;
-  btn.textContent = 'Adding...';
+  const input = prompt('Campaign: ' + name + '\nCurrent daily budget: £' + current + '\n\nHow much would you like to add? (£)', suggested || '');
+  if (input === null) return;
+  const amount = parseFloat(input);
+  if (isNaN(amount) || amount <= 0) { alert('Please enter a valid amount'); return; }
   try {
     const res = await fetch('/api/campaigns/' + campaignId + '/budget', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount })
     });
     const data = await res.json();
-    document.getElementById('budget-modal').remove();
-    if (data.success) {
-      try { await fetch('/api/alerts/' + campaignId + '/dismiss', { method: 'POST' }); } catch(e) {}
-      addSuppressedAlert(campaignId);
-      if (appData.alerts) appData.alerts = appData.alerts.filter(function(a){ return String(a.campaignId) !== String(campaignId); });
-      renderAlerts();
-      fetchData();
-    } else {
-      alert('Error: ' + (data.error || 'Unknown'));
-    }
-  } catch(e) {
-    const modal = document.getElementById('budget-modal');
-    if (modal) modal.remove();
-    alert('Error: ' + e.message);
-  }
+    if (data.success) { alert('Done! +£' + amount + ' added. New budget: £' + data.newBudget.toFixed(2)); setTimeout(fetchData, 2000); }
+    else alert('Error: ' + (data.error || 'Unknown'));
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 // ── Report ─────────────────────────────────────────────────────────────────
@@ -1527,21 +961,6 @@ function renderReport() {
   let filtered = log;
   if (campFilter) filtered = filtered.filter(e => e.campaign === campFilter);
   if (typeFilter !== 'all') filtered = filtered.filter(e => e.type === typeFilter);
-  // Sort
-  filtered.sort(function(a,b) {
-    const col = reportSortState.col;
-    let va = col === 'missed' ? parseFloat((a.missed||'0').replace(/[^0-9.]/g,'')) :
-             col === 'budget' ? parseFloat((a.budget||'0').replace(/[^0-9.]/g,'')) :
-             col === 'gap' ? parseInt(a.gap||0) :
-             col === 'acos' ? parseFloat(a.acos||0) :
-             (a[col]||'');
-    let vb = col === 'missed' ? parseFloat((b.missed||'0').replace(/[^0-9.]/g,'')) :
-             col === 'budget' ? parseFloat((b.budget||'0').replace(/[^0-9.]/g,'')) :
-             col === 'gap' ? parseInt(b.gap||0) :
-             col === 'acos' ? parseFloat(b.acos||0) :
-             (b[col]||'');
-    return va < vb ? reportSortState.dir : va > vb ? -reportSortState.dir : 0;
-  });
   document.getElementById('rpt-events').textContent = filtered.length;
   document.getElementById('rpt-events-d').textContent = filtered.length + ' events recorded';
   const missed = filtered.reduce((s,e) => s + parseFloat((e.missed||'0').replace(/[^0-9.]/g,'')), 0);
@@ -1578,68 +997,28 @@ function renderReport() {
 }
 
 // ── Activity log ───────────────────────────────────────────────────────────
-async function renderActivity() {
+function renderActivity() {
+  const campFilter = document.getElementById('activity-filter')?.value || '';
+  const typeFilter = document.getElementById('activity-type')?.value || '';
+  let alerts = [...(appData.alerts||[])].reverse();
+  if (campFilter) alerts = alerts.filter(a => a.name === campFilter);
+  if (typeFilter) alerts = alerts.filter(a => a.type === typeFilter);
   const container = document.getElementById('activity-log');
-  container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading activity...</div>';
-  try {
-    const res = await fetch('/api/activity?limit=200');
-    const data = await res.json();
-    const logs = data.logs || [];
-
-    // Update campaign filter dropdown
-    const campFilter = document.getElementById('activity-filter');
-    const typeFilter = document.getElementById('activity-type');
-    const campVal = campFilter?.value || '';
-    const typeVal = typeFilter?.value || '';
-
-    // Populate campaign filter
-    if (campFilter) {
-      const camps = [...new Set(logs.map(function(l){ return l.campaign_name; }).filter(Boolean))].sort();
-      const currentVal = campFilter.value;
-      campFilter.innerHTML = '<option value="">All campaigns</option>' +
-        camps.map(function(c){ return '<option value="' + escHtml(c) + '"' + (currentVal===c?' selected':'') + '>' + escHtml(c) + '</option>'; }).join('');
-    }
-
-    // Filter logs
-    let filtered = logs;
-    if (campVal) filtered = filtered.filter(function(l){ return l.campaign_name === campVal; });
-    if (typeVal) filtered = filtered.filter(function(l){ return l.action === typeVal; });
-
-    if (!filtered.length) {
-      container.innerHTML = '<div class="empty" style="padding:40px">No activity recorded yet. Actions taken on campaign tasks will appear here.</div>';
-      return;
-    }
-
-    const actionIcons = {
-      task_created: '📋', in_progress: '🔧', complete: '✅',
-      dismissed: '🚫', paused: '⏸', scaling: '⏱',
-      budget_added: '💰', escalated: '🚨'
-    };
-    const actionLabels = {
-      task_created: 'Task created', in_progress: 'Working on it', complete: 'Marked complete',
-      dismissed: 'Dismissed', paused: 'Paused campaign', scaling: 'Moved to scaling',
-      budget_added: 'Budget added', escalated: 'Escalated'
-    };
-
-    container.innerHTML = filtered.map(function(l) {
-      const icon = actionIcons[l.action] || '•';
-      const label = actionLabels[l.action] || l.action;
-      const time = l.logged_at ? new Date(l.logged_at).toLocaleString('en-GB', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '—';
-      const notesHtml = l.notes ? '<div style="font-size:13px;color:var(--blue);margin-top:4px;background:var(--blue-light);padding:6px 10px;border-radius:6px"><strong>Notes:</strong> ' + escHtml(l.notes) + '</div>' : '';
-      return '<div style="display:flex;gap:14px;padding:16px 0;border-bottom:1px solid var(--border)">' +
-        '<div style="font-size:12px;color:var(--text3);width:90px;flex-shrink:0;padding-top:2px">' + time + '</div>' +
-        '<div style="width:30px;height:30px;border-radius:8px;background:var(--surface3);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">' + icon + '</div>' +
-        '<div style="flex:1">' +
-          '<div style="font-size:14px;font-weight:600;color:var(--text)">' + label + ' — ' + escHtml(l.campaign_name||'') + '</div>' +
-          '<div style="font-size:13px;color:var(--text3);margin-top:3px">Agent: <strong>' + escHtml(l.agent_name||'—') + '</strong>' +
-            (l.status_before && l.status_after ? ' · ' + escHtml(l.status_before) + ' → ' + escHtml(l.status_after) : '') + '</div>' +
-          notesHtml +
-        '</div>' +
-      '</div>';
-    }).join('');
-  } catch(e) {
-    container.innerHTML = '<div class="empty">Error loading activity: ' + e.message + '</div>';
-  }
+  if (!alerts.length) { container.innerHTML = '<div class="empty" style="padding:40px">No activity recorded yet.</div>'; return; }
+  const typeLabels = { out_of_budget: 'Out of budget', acos_high: 'High ACOS', budget_low: 'Budget low' };
+  const typeIcons = { out_of_budget: '⚠', acos_high: '📈', budget_low: '⚡' };
+  const typeColors = { out_of_budget: 'var(--red-bg)', acos_high: 'var(--amber-bg)', budget_low: 'var(--amber-bg)' };
+  container.innerHTML = alerts.slice(0,50).map(a => `
+    <div style="display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--border)">
+      <div style="font-family:var(--mono);font-size:11px;color:var(--text3);width:55px;flex-shrink:0;padding-top:4px">${a.time||'—'}</div>
+      <div style="width:28px;height:28px;border-radius:8px;background:${typeColors[a.type]||'var(--surface3)'};display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">${typeIcons[a.type]||'•'}</div>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${typeLabels[a.type]||a.type} — ${escHtml(a.name)}</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:3px">Portfolio: ${escHtml(a.portfolio||'N/A')} · Agent: ${escHtml(a.agent||'N/A')} · ACOS: ${a.acos}% · Budget: £${a.budget}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:3px">${a.date}</div>
+      </div>
+      <div>${a.type==='out_of_budget'?'<button class="btn btn-green" style="font-size:12px" onclick="approveBudget(\''+a.campaignId+'\',\'\')">Add budget</button>':''}</div>
+    </div>`).join('');
 }
 
 // ── AI Analysis ────────────────────────────────────────────────────────────
@@ -1669,7 +1048,7 @@ async function runAI() {
 
 function renderAIResult(container, result) {
   const lastRun = aiCache.lastRun ? new Date(aiCache.lastRun).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'}) : '';
-  const daysLabel = result.daysOfData > 0 ? 'Based on ' + result.daysOfData + ' days of historical data' : "Based on today data";
+  const daysLabel = result.daysOfData > 0 ? 'Based on ' + result.daysOfData + ' days of historical data' : 'Based on today's data';
 
   // Update metrics
   document.getElementById('ai-opps').textContent = result.scaleList?.length || 0;
@@ -1696,9 +1075,9 @@ function renderAIResult(container, result) {
 
   container.innerHTML = refreshBtn + strategicBox +
     '<div class="tabs" id="ai-tabs" style="margin-bottom:16px">' +
-      '<button class="tab-btn active" onclick="showAITab(\"scale\",this)">📈 Scale (' + (result.scaleList?.length||0) + ')</button>' +
-      '<button class="tab-btn" onclick="showAITab(\"pause\",this)">⏸ Pause (' + (result.pauseList?.length||0) + ')</button>' +
-      '<button class="tab-btn" onclick="showAITab(\"reduce\",this)">✂️ Reduce budget (' + (result.reduceList?.length||0) + ')</button>' +
+      '<button class="tab-btn active" onclick="showAITab('scale',this)">📈 Scale (' + (result.scaleList?.length||0) + ')</button>' +
+      '<button class="tab-btn" onclick="showAITab('pause',this)">⏸ Pause (' + (result.pauseList?.length||0) + ')</button>' +
+      '<button class="tab-btn" onclick="showAITab('reduce',this)">✂️ Reduce budget (' + (result.reduceList?.length||0) + ')</button>' +
     '</div>' +
     '<div id="ai-tab-scale">' + renderTable(result.scaleList, ['Campaign','Portfolio','ACOS','7d Spend','Why scale','Recommended action'], 'No scale opportunities identified') + '</div>' +
     '<div id="ai-tab-pause" style="display:none">' + renderTable(result.pauseList, ['Campaign','Portfolio','ACOS','Spend','Why pause','Recommended action'], 'No campaigns recommended for pausing') + '</div>' +
@@ -1732,17 +1111,9 @@ function renderFallbackAI(container, lowAcos, highAcos, outOfBudget) {
 }
 
 // ── Keyword Intelligence ────────────────────────────────────────────────────
-let kwDismissals = [];
-
 async function loadKeywords() {
   const container = document.getElementById('kw-container');
   try {
-    // Load dismissals first so we can filter wasters
-    try {
-      const dRes = await fetch('/api/keywords/dismissals');
-      const dData = await dRes.json();
-      kwDismissals = dData.dismissals || [];
-    } catch(e) { kwDismissals = []; }
     const statusRes = await fetch('/api/keywords/status');
     const status = await statusRes.json();
     if (status.reportId) {
@@ -1787,7 +1158,7 @@ async function loadKeywords() {
         <div class="table-card">
           <div style="overflow-x:auto"><table>
             <thead><tr><th>Search term</th><th>Campaign</th><th>Spend wasted</th><th>Reason</th><th>Action</th></tr></thead>
-            <tbody>${(a.wasteReduction?.topWasters||[]).filter(w=>!kwDismissals.some(d=>d.search_term===w.searchTerm&&d.campaign===w.campaign)).map((w,wi)=>{const wid='kw-'+wi; return `<tr><td class="mono" style="font-weight:600">${escHtml(w.searchTerm)}</td><td style="font-size:12px;color:var(--text2)">${escHtml(w.campaign)}</td><td class="mono" style="color:var(--red);font-weight:600">${escHtml(w.spend)}</td><td style="font-size:12px;color:var(--text3)">${escHtml(w.reason)}</td><td style="display:flex;gap:6px"><button class="btn btn-red" style="font-size:12px" data-term="${escHtml(w.searchTerm)}" data-camp="${escHtml(w.campaign)}" onclick="kwAction(this,'negative')">Add negative</button><button class="btn btn-ghost" style="font-size:12px" data-term="${escHtml(w.searchTerm)}" data-camp="${escHtml(w.campaign)}" onclick="kwAction(this,'dismiss')">Dismiss</button></td></tr>`; }).join('')||'<tr><td colspan="5"><div class="empty">No wasting terms found</div></td></tr>'}</tbody>
+            <tbody>${(a.wasteReduction?.topWasters||[]).map(w=>`<tr><td class="mono" style="font-weight:600">${escHtml(w.searchTerm)}</td><td style="font-size:12px;color:var(--text2)">${escHtml(w.campaign)}</td><td class="mono" style="color:var(--red);font-weight:600">${escHtml(w.spend)}</td><td style="font-size:12px;color:var(--text3)">${escHtml(w.reason)}</td><td><button class="btn btn-red" style="font-size:12px">Add negative</button></td></tr>`).join('')||'<tr><td colspan="5"><div class="empty">No wasting terms found</div></td></tr>'}</tbody>
           </table></div>
         </div>
       </div>
@@ -1799,7 +1170,7 @@ async function loadKeywords() {
         <div class="table-card">
           <div style="overflow-x:auto"><table>
             <thead><tr><th>Search term</th><th>Campaign</th><th>Type</th><th>Purchases</th><th>Sales</th><th>Recommendation</th><th>Action</th></tr></thead>
-            <tbody>${(a.newKeywords?.topOpportunities||[]).filter(k=>!kwDismissals.some(d=>d.search_term===k.searchTerm&&d.campaign===k.campaign)).map(k=>`<tr><td class="mono" style="font-weight:600">${escHtml(k.searchTerm)}</td><td style="font-size:12px;color:var(--text2)">${escHtml(k.campaign)}</td><td>${k.isAuto?'<span class="badge badge-blue" style="font-size:10px">Auto → Manual</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>'}</td><td class="mono" style="color:var(--green);font-weight:600">${escHtml(String(k.purchases))}</td><td class="mono" style="color:var(--green)">${escHtml(k.sales)}</td><td style="font-size:12px">${escHtml(k.recommendation)}</td><td style="display:flex;gap:6px"><button class="btn btn-green" style="font-size:12px" data-term="${escHtml(k.searchTerm)}" data-camp="${escHtml(k.campaign)}" onclick="kwAction(this,'add_keyword')">Add keyword</button><button class="btn btn-ghost" style="font-size:12px" data-term="${escHtml(k.searchTerm)}" data-camp="${escHtml(k.campaign)}" onclick="kwAction(this,'dismiss')">Dismiss</button></td></tr>`).join('')||'<tr><td colspan="7"><div class="empty">No opportunities found</div></td></tr>'}</tbody>
+            <tbody>${(a.newKeywords?.topOpportunities||[]).map(k=>`<tr><td class="mono" style="font-weight:600">${escHtml(k.searchTerm)}</td><td style="font-size:12px;color:var(--text2)">${escHtml(k.campaign)}</td><td>${k.isAuto?'<span class="badge badge-blue" style="font-size:10px">Auto → Manual</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>'}</td><td class="mono" style="color:var(--green);font-weight:600">${escHtml(String(k.purchases))}</td><td class="mono" style="color:var(--green)">${escHtml(k.sales)}</td><td style="font-size:12px">${escHtml(k.recommendation)}</td><td><button class="btn btn-green" style="font-size:12px">Add keyword</button></td></tr>`).join('')||'<tr><td colspan="7"><div class="empty">No opportunities found</div></td></tr>'}</tbody>
           </table></div>
         </div>
       </div>
@@ -1808,7 +1179,7 @@ async function loadKeywords() {
         <div class="table-card">
           <div style="overflow-x:auto"><table>
             <thead><tr><th>Keyword</th><th>Campaign</th><th>Issue</th><th>Recommendation</th><th>Expected outcome</th><th>Action</th></tr></thead>
-            <tbody>${(a.bidChanges||[]).filter(b=>!kwDismissals.some(d=>d.search_term===b.keyword&&d.campaign===b.campaign)).map(b=>`<tr><td class="mono">${escHtml(b.keyword)}</td><td style="font-size:12px">${escHtml(b.campaign)}</td><td style="font-size:12px;color:var(--red)">${escHtml(b.currentIssue)}</td><td style="font-size:12px">${escHtml(b.recommendation)}</td><td style="font-size:12px;color:var(--green)">${escHtml(b.expectedOutcome)}</td><td style="display:flex;gap:6px"><button class="btn btn-amber" style="font-size:12px" data-term="${escHtml(b.keyword)}" data-camp="${escHtml(b.campaign)}" onclick="kwAction(this,'apply_bid')">Apply</button><button class="btn btn-ghost" style="font-size:12px" data-term="${escHtml(b.keyword)}" data-camp="${escHtml(b.campaign)}" onclick="kwAction(this,'dismiss')">Dismiss</button></td></tr>`).join('')||'<tr><td colspan="6"><div class="empty">No bid changes recommended</div></td></tr>'}</tbody>
+            <tbody>${(a.bidChanges||[]).map(b=>`<tr><td class="mono">${escHtml(b.keyword)}</td><td style="font-size:12px">${escHtml(b.campaign)}</td><td style="font-size:12px;color:var(--red)">${escHtml(b.currentIssue)}</td><td style="font-size:12px">${escHtml(b.recommendation)}</td><td style="font-size:12px;color:var(--green)">${escHtml(b.expectedOutcome)}</td><td><button class="btn btn-amber" style="font-size:12px">Apply</button></td></tr>`).join('')||'<tr><td colspan="6"><div class="empty">No bid changes recommended</div></td></tr>'}</tbody>
           </table></div>
         </div>
       </div>
@@ -1830,190 +1201,6 @@ function showKwTab(tab, btn) {
   if (btn) btn.classList.add('active');
 }
 
-// ── Keyword Button Handler (reads data attributes to avoid quote issues) ──
-function kwAction(btn, action) {
-  if (action === 'breakdown') {
-    const campaignId = btn.getAttribute('data-cid');
-    const containerId = btn.getAttribute('data-bid');
-    loadSpendBreakdown(campaignId, containerId, btn);
-    return;
-  }
-  const term = btn.getAttribute('data-term');
-  const camp = btn.getAttribute('data-camp');
-  if (!term || !camp) return;
-  if (action === 'dismiss') {
-    showKwDismissModal(term, camp);
-  } else {
-    actionKeyword(term, camp, action);
-  }
-}
-
-// ── No-Revenue Campaign AI Analysis ──────────────────────────────────────
-async function loadCampaignAnalysis(campaignId, containerId, btn) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  if (container.style.display !== 'none') {
-    container.style.display = 'none';
-    if (btn) btn.textContent = '🤖 AI Analysis';
-    return;
-  }
-  container.style.display = 'block';
-  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div> Claude is analyzing this campaign...</div>';
-  if (btn) btn.textContent = '🤖 Hide analysis';
-  try {
-    const res = await fetch('/api/campaign-analysis/' + encodeURIComponent(campaignId));
-    const data = await res.json();
-    if (data.analysis) {
-      container.innerHTML = '<div style="font-weight:600;margin-bottom:6px;font-size:13px">🤖 Claude Analysis</div>' +
-        '<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">' + escHtml(data.analysis) + '</div>';
-    } else {
-      container.innerHTML = '<div style="color:#e53e3e">Analysis failed: ' + escHtml(data.error||'Unknown error') + '</div>';
-    }
-  } catch(e) {
-    container.innerHTML = '<div style="color:#e53e3e">Error: ' + e.message + '</div>';
-  }
-}
-
-// ── Action Keyword (Add Negative / Add Keyword / Apply Bid) ──────────────
-async function actionKeyword(searchTerm, campaign, action) {
-  const reasons = {
-    negative: 'Added as negative keyword — agent actioned',
-    add_keyword: 'Added as exact match keyword — agent actioned',
-    apply_bid: 'Bid change applied — agent actioned'
-  };
-  try {
-    await fetch('/api/keywords/dismiss', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        searchTerm: searchTerm,
-        campaign: campaign,
-        reason: reasons[action] || 'Agent actioned',
-        dismissedBy: 'agent'
-      })
-    });
-    await loadKeywords();
-  } catch(e) { alert('Error: ' + e.message); }
-}
-
-function showKwDismissModal(searchTerm, campaign) {
-  const existing = document.getElementById('kw-dismiss-modal');
-  if (existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'kw-dismiss-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:420px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:4px">🚫 Dismiss keyword suggestion</div>' +
-      '<div style="font-size:12px;color:#888;margin-bottom:4px"><strong>' + escHtml(searchTerm) + '</strong> in ' + escHtml(campaign) + '</div>' +
-      '<div style="font-size:12px;color:#888;margin-bottom:16px">Why should this not be a negative keyword? Your reason helps the AI learn.</div>' +
-      '<textarea id="kw-dismiss-reason" placeholder="e.g. This is our main keyword, intentional spend, testing this term..." style="width:100%;padding:10px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;height:80px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>' +
-      '<div id="kw-dismiss-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none">Please add a reason before dismissing.</div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
-        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;kw-dismiss-modal&quot;).remove()">Cancel</button>' +
-        '<button class="btn btn-primary" style="font-size:13px" onclick="submitKwDismiss(' + JSON.stringify(searchTerm) + ',' + JSON.stringify(campaign) + ')">Dismiss</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  setTimeout(function(){ const ta = document.getElementById('kw-dismiss-reason'); if(ta) ta.focus(); }, 50);
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
-}
-
-async function submitKwDismiss(searchTerm, campaign) {
-  const reason = (document.getElementById('kw-dismiss-reason').value || '').trim();
-  if (!reason) {
-    document.getElementById('kw-dismiss-error').style.display = '';
-    document.getElementById('kw-dismiss-reason').style.border = '1.5px solid #e53e3e';
-    return;
-  }
-  document.getElementById('kw-dismiss-modal').remove();
-  try {
-    await fetch('/api/keywords/dismiss', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ searchTerm, campaign, reason, dismissedBy: 'agent' })
-    });
-    await loadKeywords();
-  } catch(e) { alert('Error dismissing: ' + e.message); }
-}
-
-// ── Agent Performance ────────────────────────────────────────────────────
-async function loadAgentPerformance(forceRefresh) {
-  const container = document.getElementById('agent-perf-container');
-  if (!container) return;
-  container.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing agent performance with AI... (this may take 20-30 seconds)</div>';
-  try {
-    const url = forceRefresh ? '/api/agent-performance?refresh=1' : '/api/agent-performance';
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.error) {
-      container.innerHTML = '<div class="empty">Error loading performance data: ' + escHtml(data.error) + '</div>';
-      return;
-    }
-    const analysis = data.analysis || 'No analysis available yet. Tasks need to be created and actioned first.';
-    const cached = data.cached
-      ? '<div style="font-size:12px;color:#aaa;margin-bottom:20px">📦 Cached · <button class="btn btn-ghost" style="font-size:11px" onclick="loadAgentPerformance(true)">Force refresh</button></div>'
-      : '<div style="font-size:12px;color:#aaa;margin-bottom:20px">✨ Fresh analysis · ' + new Date().toLocaleString('en-GB', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) + '</div>';
-
-    // Parse agent sections from Claude response — split by agent name headings
-    const allAgents = { amazon: ['Aryan','Satyam','Kunal'], google: ['Rahul','Anuj'] };
-  const agents = activeDept === 'google' ? allAgents.google : allAgents.amazon;
-    const sections = [];
-    let remaining = analysis;
-
-    agents.forEach(function(agent) {
-      const idx = remaining.indexOf(agent);
-      if (idx >= 0) {
-        sections.push({ agent: agent, content: remaining.substring(idx) });
-        remaining = remaining.substring(0, idx);
-      }
-    });
-    sections.reverse();
-
-    // If we found agent sections, render as cards
-    let html = cached;
-    if (sections.length > 0) {
-      sections.forEach(function(s) {
-        // Extract rating if present
-        const ratingMatch = s.content.match(/(Strong|Average|Needs Improvement)/i);
-        const rating = ratingMatch ? ratingMatch[1] : null;
-        const ratingColor = rating === 'Strong' ? 'var(--green)' : rating === 'Average' ? 'var(--amber)' : rating === 'Needs Improvement' ? 'var(--red)' : '#888';
-
-        // Format content — split into paragraphs
-        const nextAgentIdx = Math.min(...agents.filter(a => a !== s.agent).map(a => { const i = s.content.indexOf(a, s.agent.length + 1); return i > 0 ? i : Infinity; }));
-        const agentContent = isFinite(nextAgentIdx) ? s.content.substring(0, nextAgentIdx) : s.content;
-
-        const formatted = escHtml(agentContent)
-          .replace(/[*][*]([^*]+)[*][*]/g, '<strong>$1</strong>')
-          .replace(/\n\n/g, '</p><p style="margin-bottom:10px">')
-          .replace(/\n/g, '<br>');
-
-        html += '<div class="ai-card" style="margin-bottom:16px;border-left:4px solid ' + ratingColor + '">' +
-          '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">' +
-            '<div style="width:44px;height:44px;border-radius:50%;background:var(--accent);color:white;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700">' + s.agent[0] + '</div>' +
-            '<div>' +
-              '<div style="font-size:17px;font-weight:700">' + s.agent + '</div>' +
-              (rating ? '<div style="font-size:12px;font-weight:600;color:' + ratingColor + '">' + rating + '</div>' : '') +
-            '</div>' +
-          '</div>' +
-          '<div style="font-size:14px;line-height:1.7;color:var(--text2)"><p style="margin-bottom:10px">' + formatted + '</p></div>' +
-        '</div>';
-      });
-    } else {
-      // Fallback — plain formatted text
-      const formatted = escHtml(analysis)
-        .replace(/[*][*]([^*]+)[*][*]/g, '<strong>$1</strong>')
-        .replace(/\n\n/g, '</p><p style="margin-bottom:14px">')
-        .replace(/\n/g, '<br>');
-      html += '<div class="ai-card" style="padding:20px"><p style="margin-bottom:14px">' + formatted + '</p></div>';
-    }
-    container.innerHTML = html;
-    container.setAttribute('data-loaded', '1');
-  } catch(e) {
-    container.innerHTML = '<div class="empty">Failed to load: ' + escHtml(e.message) + '</div>';
-  }
-}
-
 async function refreshKeywords() {
   document.getElementById('kw-status').textContent = 'Requesting fresh report...';
   document.getElementById('kw-container').innerHTML = '<div class="loading"><div class="spinner"></div> Requesting search term report from Amazon...</div>';
@@ -2026,8 +1213,7 @@ function exportCSV() {
   if (!allCampaigns.length) { alert('No data to export'); return; }
   const headers = ['Campaign','Portfolio','Agent','Type','State','Daily Budget','Spend','Revenue','ACOS','Impressions','Clicks','CTR','Conversions','Budget Remaining','Budget %'];
   const rows = allCampaigns.map(c => [c.name,c.portfolio||'',c.agent||'',c.targetingType||'',c.state,c.dailyBudget,c.spend||0,c.sales||0,c.acos+'%',c.impressions||0,c.clicks||0,(c.ctr||'0')+'%',c.conversions||0,c.budgetRemaining,c.budgetPct+'%']);
-  const exportDate = document.getElementById('history-date-select')?.value || new Date().toISOString().split('T')[0];
-  downloadCSV(headers, rows, 'fksports-campaigns-' + exportDate + '.csv');
+  downloadCSV(headers, rows, 'fksports-campaigns-' + new Date().toISOString().split('T')[0] + '.csv');
 }
 
 function exportReportCSV() {
@@ -2106,32 +1292,22 @@ async function loadStuckCampaigns() {
         '<td class="mono">£' + c.totalSpend + '</td>' +
         '<td class="mono">£' + c.lastBudget + '</td>' +
         '<td style="font-size:12px;color:var(--text3)">Zero impressions — bid too low or targeting broken</td>' +
-        '<td><div class="ag">' +
-          '<button class="btn btn-red" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;pause&quot;)">Pause</button>' +
-          '<button class="btn btn-ghost" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;review&quot;)">Work on it (1 week)</button>' +
-          '</div></td>' +
+        '<td><div class="ag"><button class="btn btn-red" style="font-size:11px">Pause</button><button class="btn btn-ghost" style="font-size:11px">Review</button></div></td>' +
         '</tr>';
     }).join('') : '<tr><td colspan="8"><div class="empty">No campaigns with 3+ days zero activity</div></td></tr>';
 
     // No revenue table
     const nrTbody = document.getElementById('stuck-nr-table');
     nrTbody.innerHTML = noRevenue.length ? noRevenue.map(function(c) {
-      const aiId = 'nr-ai-' + c.campaignId;
       return '<tr>' +
-        '<td><div class="camp-name">' + escHtml(c.name) + '</div>' +
-          '<button class="btn btn-ghost" style="font-size:11px;margin-top:4px" onclick="loadCampaignAnalysis(' + JSON.stringify(c.campaignId) + ',&quot;' + aiId + '&quot;,this)">🤖 AI Analysis</button>' +
-          '<div id="' + aiId + '" style="display:none;margin-top:8px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px;font-size:13px;line-height:1.6;color:#0369a1;max-width:400px"></div>' +
-        '</td>' +
+        '<td><div class="camp-name">' + escHtml(c.name) + '</div></td>' +
         '<td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td>' +
         '<td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td>' +
         '<td class="mono" style="color:var(--red);font-weight:600">' + c.daysNoRevenue + ' days</td>' +
         '<td class="mono" style="color:var(--red);font-weight:600">£' + c.totalWastedSpend + '</td>' +
         '<td class="mono ' + (parseFloat(c.avgAcos)>35?'acos-high':parseFloat(c.avgAcos)>12?'acos-warn':'') + '">' + c.avgAcos + '%</td>' +
         '<td style="font-size:12px;color:var(--text3)">Spend with zero attributed revenue</td>' +
-        '<td><div class="ag">' +
-          '<button class="btn btn-red" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;pause&quot;)">Pause</button>' +
-          '<button class="btn btn-ghost" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;review&quot;)">Work on it (1 week)</button>' +
-          '</div></td>' +
+        '<td><div class="ag"><button class="btn btn-red" style="font-size:11px">Pause</button><button class="btn btn-ghost" style="font-size:11px">Review</button></div></td>' +
         '</tr>';
     }).join('') : '<tr><td colspan="8"><div class="empty">No campaigns with 7+ days spend and no revenue</div></td></tr>';
 
@@ -2155,13 +1331,11 @@ async function loadHistoryDates() {
     const sel = document.getElementById('history-date-select');
     sel.innerHTML = '<option value="">Select a date...</option>';
     data.dates.forEach(function(d) {
-      // Fix timezone issue - add T00:00:00 to force local date parsing
-      const dateStr = typeof d.date === 'string' ? d.date.split('T')[0] : String(d.date).split('T')[0];
-      const date = new Date(dateStr + 'T12:00:00');
+      const date = new Date(d.date);
       const label = date.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short', year:'numeric' });
       const m = d.metrics || {};
       const opt = document.createElement('option');
-      opt.value = dateStr;
+      opt.value = d.date;
       opt.textContent = label + ' — £' + (m.totalRevenue||'0') + ' rev · £' + (m.totalSpend||'0') + ' spend · ' + (m.blendedAcos||'0') + '% ACOS';
       sel.appendChild(opt);
     });
@@ -2173,85 +1347,6 @@ async function loadHistoryDates() {
   }
 }
 
-let historyData = null;
-let historySortState = { col: 'spend', dir: -1 };
-
-function sortHistoryCol(col) {
-  if (historySortState.col === col) historySortState.dir *= -1;
-  else { historySortState.col = col; historySortState.dir = -1; }
-  document.querySelectorAll('[id^="hs-"]').forEach(function(el){ el.textContent=''; });
-  const ind = document.getElementById('hs-' + col);
-  if (ind) ind.textContent = historySortState.dir === -1 ? ' ↓' : ' ↑';
-  if (historyData) filterHistoryByAgent();
-}
-
-function filterHistoryByAgent() {
-  if (!historyData) return;
-  const agentFilter = document.getElementById('history-agent-filter')?.value || '';
-  let camps = historyData.campaigns || [];
-
-  // Populate agent filter options if empty
-  const sel = document.getElementById('history-agent-filter');
-  if (sel && sel.options.length <= 1) {
-    const agents = [...new Set(camps.map(function(c){
-      const parts = (c.name||'').split(/[|@]/);
-      const name = parts[0].trim();
-      return name.length > 0 && name.length < 30 ? name : '';
-    }).filter(Boolean))].sort();
-    agents.forEach(function(a) {
-      const o = document.createElement('option');
-      o.value = a; o.textContent = a;
-      sel.appendChild(o);
-    });
-  }
-
-  if (agentFilter) {
-    camps = camps.filter(function(c){
-      const parts = (c.name||'').split(/[|@]/);
-      return parts[0].trim() === agentFilter;
-    });
-  }
-
-  // Re-render tables with filtered camps
-  renderHistoryCampaignsTable(camps);
-  renderHistorySNRTable(camps);
-  renderHistoryNoActivityTable(camps);
-}
-
-function renderHistoryCampaignsTable(camps) {
-  const tbody = document.getElementById('history-table');
-  const col = historySortState.col;
-  const dir = historySortState.dir;
-  const sorted = camps.slice().sort(function(a,b){
-    const va = col==='name'?(a.name||''):col==='spend'?(a.spend||0):col==='sales'?(a.sales||0):col==='acos'?(a.acos||0):col==='impressions'?(a.impressions||0):col==='clicks'?(a.clicks||0):(a.conversions||0);
-    const vb = col==='name'?(b.name||''):col==='spend'?(b.spend||0):col==='sales'?(b.sales||0):col==='acos'?(b.acos||0):col==='impressions'?(b.impressions||0):col==='clicks'?(b.clicks||0):(b.conversions||0);
-    return va < vb ? dir : va > vb ? -dir : 0;
-  });
-  tbody.innerHTML = sorted.map(function(c) {
-    const acosClass = c.acos > 35 ? 'acos-high' : c.acos > 25 ? 'acos-warn' : c.acos > 0 ? 'acos-ok' : '';
-    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td class="mono" style="color:var(--green)">£' + (c.sales||0) + '</td><td class="mono">£' + (c.spend||0) + '</td><td class="mono ' + acosClass + '">' + (c.acos>0?c.acos+'%':'—') + '</td><td>' + (c.budgetRemaining<=0.01&&c.dailyBudget>0?'<span class="badge badge-red">Out of budget</span>':c.acos>35&&c.spend>5?'<span class="badge badge-red">ACOS high</span>':'<span class="badge badge-green">Healthy</span>') + '</td></tr>';
-  }).join('') || '<tr><td colspan="12"><div class="empty">No campaign data</div></td></tr>';
-}
-
-function renderHistorySNRTable(camps) {
-  const snr = camps.filter(function(c){ return c.spend > 0 && (c.sales === 0 || c.sales === null); });
-  const snrB = document.getElementById('h-snr-badge'); if(snrB) snrB.textContent = snr.length;
-  document.getElementById('history-snr-insight').textContent = snr.length + ' campaigns spent £' + snr.reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2) + ' with zero attributed revenue on this day.';
-  const snrTbody = document.getElementById('history-snr-table');
-  snrTbody.innerHTML = snr.sort(function(a,b){ return (b.spend||0)-(a.spend||0); }).map(function(c) {
-    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono" style="color:var(--red);font-weight:600">£' + (c.spend||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td><span class="badge badge-red">Wasted spend</span></td></tr>';
-  }).join('') || '<tr><td colspan="9"><div class="empty">No wasted spend on this day</div></td></tr>';
-}
-
-function renderHistoryNoActivityTable(camps) {
-  const noAct = camps.filter(function(c){ return c.impressions === 0 && (c.spend === 0 || c.spend === null); });
-  const naB = document.getElementById('h-na-badge'); if(naB) naB.textContent = noAct.length;
-  const noActTbody = document.getElementById('history-no-activity-table');
-  noActTbody.innerHTML = noAct.length ? noAct.map(function(c) {
-    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono" style="color:var(--text3)">0</td><td class="mono" style="color:var(--text3)">0</td><td class="mono">£' + (c.spend||0) + '</td><td><span class="badge badge-amber">No activity</span></td></tr>';
-  }).join('') : '<tr><td colspan="8"><div class="empty">No inactive campaigns on this day</div></td></tr>';
-}
-
 async function loadHistoryDate() {
   const date = document.getElementById('history-date-select').value;
   if (!date) return;
@@ -2260,15 +1355,13 @@ async function loadHistoryDate() {
   document.getElementById('history-empty').style.display = 'none';
   document.getElementById('history-placeholder').style.display = 'none';
   try {
-    const dateClean = String(date).split('T')[0].split(' ')[0];
-    const res = await fetch('/api/snapshots/' + dateClean);
+    const res = await fetch('/api/snapshots/' + date);
     if (!res.ok) {
       document.getElementById('history-empty').style.display = '';
       document.getElementById('history-loading').textContent = '';
       return;
     }
     const data = await res.json();
-    historyData = data;
     const m = data.metrics || {};
     document.getElementById('h-revenue').textContent = '£' + (m.totalRevenue||'0');
     document.getElementById('h-spend').textContent = '£' + (m.totalSpend||'0');
@@ -2278,44 +1371,33 @@ async function loadHistoryDate() {
     document.getElementById('h-active').textContent = m.activeCampaigns||'0';
     document.getElementById('h-oob').textContent = (data.exhaustionLog||[]).length;
     document.getElementById('h-snr').textContent = m.spendNoRevenue||'0';
-    document.getElementById('history-metrics').style.display = '';
-    document.getElementById('history-placeholder').style.display = 'none';
-    filterHistoryByAgent();
-    const exT = document.getElementById("history-exhaustion-table");
-    if(exT){ const exL=data.exhaustionLog||[]; exT.innerHTML=exL.length?exL.map(function(e){return "<tr><td>"+(e.time||"")+"</td><td>"+(e.campaign||"")+"</td><td>"+(e.budget||"")+"</td><td>"+(e.acos||"")+"</td><td>"+(e.missed||"")+"</td><td>"+(e.gap||"")+"</td><td>"+(e.resolvedAt||"")+"</td><td>"+(e.action||"Pending")+"</td></tr>";}).join(""): "<tr><td colspan=8>No events</td></tr>"; }
     const camps = data.campaigns || [];
     // Campaigns table
     const tbody = document.getElementById('history-table');
-    tbody.innerHTML = sorted.map(function(c) {
+    tbody.innerHTML = camps.sort(function(a,b){ return (b.spend||0)-(a.spend||0); }).map(function(c) {
       const acosClass = c.acos > 35 ? 'acos-high' : c.acos > 25 ? 'acos-warn' : c.acos > 0 ? 'acos-ok' : '';
       return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td class="mono" style="color:var(--green)">£' + (c.sales||0) + '</td><td class="mono">£' + (c.spend||0) + '</td><td class="mono ' + acosClass + '">' + (c.acos>0?c.acos+'%':'—') + '</td><td>' + (c.budgetRemaining<=0.01&&c.dailyBudget>0?'<span class="badge badge-red">Out of budget</span>':c.acos>35&&c.spend>5?'<span class="badge badge-red">ACOS high</span>':'<span class="badge badge-green">Healthy</span>') + '</td></tr>';
     }).join('') || '<tr><td colspan="12"><div class="empty">No campaign data</div></td></tr>';
     // Spend no revenue table
     const snr = camps.filter(function(c){ return c.spend > 0 && (c.sales === 0 || c.sales === null); });
     document.getElementById('history-snr-insight').textContent = snr.length + ' campaigns spent £' + snr.reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2) + ' with zero attributed revenue on this day.';
-    document.getElementById('h-snr-badge').textContent = snr.length;
     const snrTbody = document.getElementById('history-snr-table');
     snrTbody.innerHTML = snr.sort(function(a,b){ return (b.spend||0)-(a.spend||0); }).map(function(c) {
       return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono" style="color:var(--red);font-weight:600">£' + (c.spend||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td><span class="badge badge-red">Wasted spend</span></td></tr>';
     }).join('') || '<tr><td colspan="9"><div class="empty">No wasted spend on this day</div></td></tr>';
     // No activity table
     const noAct = camps.filter(function(c){ return c.impressions === 0 && (c.spend === 0 || c.spend === null); });
-    document.getElementById('history-na-insight').textContent = noAct.length + ' campaign' + (noAct.length !== 1 ? 's' : '') + ' had zero impressions and zero spend on this day. Review bids, targeting, or consider pausing.';
-    document.getElementById('h-na-badge').textContent = noAct.length;
     const noActTbody = document.getElementById('history-no-activity-table');
     noActTbody.innerHTML = noAct.length ? noAct.map(function(c) {
       return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono" style="color:var(--text3)">0</td><td class="mono" style="color:var(--text3)">0</td><td class="mono">£' + (c.spend||0) + '</td><td><span class="badge badge-amber">No activity</span></td></tr>';
     }).join('') : '<tr><td colspan="8"><div class="empty">No inactive campaigns on this day</div></td></tr>';
 
     // Exhaustion log table
-    document.getElementById('history-metrics').style.display = '';
     const exTbody = document.getElementById('history-exhaustion-table');
-    if (exTbody) {
-      const exLog = data.exhaustionLog || [];
-      exTbody.innerHTML = exLog.length ? exLog.map(function(e) {
-        return '<tr><td>' + (e.time||'') + '</td><td>' + (e.campaign||'') + '</td><td>' + (e.budget||'') + '</td><td>' + (e.acos||'') + '</td><td>' + (e.missed||'') + '</td><td>' + (e.gap||'') + '</td><td>' + (e.resolvedAt||'') + '</td><td>' + (e.action||'Pending') + '</td></tr>';
-      }).join('') : '<tr><td colspan="8"><div class="empty">No exhaustion events</div></td></tr>';
-    }
+    exTbody.innerHTML = (data.exhaustionLog||[]).map(function(e) {
+      return '<tr><td class="mono" style="color:var(--red);font-weight:600">' + (e.time||'—') + '</td><td><div class="camp-name">' + escHtml(e.campaign||'—') + '</div></td><td style="font-size:12px">' + escHtml(e.portfolio||'—') + '</td><td style="font-size:12px">' + escHtml(e.agent||'—') + '</td><td class="mono">' + (e.budget||'—') + '</td><td class="mono">' + (e.acos||'—') + '</td><td class="mono" style="color:var(--red)">' + (e.missed||'—') + '</td><td class="mono" style="color:var(--green)">' + (e.resolvedAt||'—') + '</td><td class="mono" style="color:var(--amber);font-weight:600">' + (e.gap||'—') + '</td><td><span class="badge ' + (e.action==='Budget added'?'badge-green':e.action==='Dismissed'?'badge-red':'badge-amber') + '">' + (e.action||'—') + '</span></td></tr>';
+    }).join('') || '<tr><td colspan="10"><div class="empty">No exhaustion events on this day</div></td></tr>';
+    document.getElementById('history-metrics').style.display = '';
     document.getElementById('history-loading').textContent = '';
   } catch(e) {
     document.getElementById('history-empty').style.display = '';
@@ -2332,791 +1414,16 @@ function showHistoryTab(tab, btn) {
   if (btn) btn.classList.add('active');
 }
 
-
-// ── Tasks ──────────────────────────────────────────────────────────────────
-let allTasks = [];
-let taskTab = 'open';
-let selectedAgent = '';
-
-// ── Agent Tabs ───────────────────────────────────────────────────────────
-function renderAgentTabs() {
-  const container = document.getElementById('agent-tabs');
-  if (!container) return;
-  const dailyTasks = allTasks.filter(function(t){ return (t.task_source||'daily') !== 'alert'; });
-  const agents = [...new Set(dailyTasks.map(function(t){ return t.agent_name||''; }).filter(Boolean))].sort();
-
-  const btnStyle = function(selected) {
-    return 'padding:10px 22px;border-radius:10px;border:2px solid ' + (selected?'#e8391d':'#ddd') + ';background:' + (selected?'#e8391d':'white') + ';color:' + (selected?'white':'#333') + ';font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;position:relative;margin:2px;transition:all 0.15s';
-  };
-
-  const allActive = dailyTasks.filter(function(t){ return ['open','in_progress','escalated','scaling'].indexOf(t.status) >= 0; }).length;
-  let html = '<button style="' + btnStyle(selectedAgent==='') + '" onclick="selectAgent(this,&quot;&quot;)">All Agents<br><span style="font-size:11px;font-weight:400;opacity:0.8">' + allActive + ' active</span></button>';
-
-  agents.forEach(function(agent) {
-    const active = dailyTasks.filter(function(t){ return t.agent_name===agent && ['open','in_progress','escalated','scaling'].indexOf(t.status) >= 0; }).length;
-    const repeats = dailyTasks.filter(function(t){ return t.agent_name===agent && t.is_repeat_offender; }).length;
-    const repeatBadge = repeats > 0 ? '<span style="position:absolute;top:-5px;right:-5px;background:#dc2626;color:white;font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px">🔁' + repeats + '</span>' : '';
-    html += '<button style="' + btnStyle(selectedAgent===agent) + '" data-agent="' + escHtml(agent) + '" onclick="selectAgent(this,this.getAttribute(&quot;data-agent&quot;))">' + escHtml(agent) + repeatBadge + '<br><span style="font-size:11px;font-weight:400;opacity:0.8">' + active + ' active</span></button>';
-  });
-
-  container.innerHTML = html;
-}
-
-function selectAgent(btnEl, agent) {
-  selectedAgent = agent;
-  document.querySelectorAll('#agent-tabs button').forEach(function(b){ b.style.background='white'; b.style.color='#333'; b.style.borderColor='#ddd'; });
-  if (btnEl) { btnEl.style.background='#e8391d'; btnEl.style.color='white'; btnEl.style.borderColor='#e8391d'; }
-  updateTaskTabCounts();
-  renderTasks(taskTab);
-}
-
-// ── Load Tasks ────────────────────────────────────────────────────────────
-async function loadTasks() {
-  try {
-    const res = await fetch('/api/tasks');
-    const data = await res.json();
-    allTasks = data.tasks || [];
-    const daily = allTasks.filter(function(t){ return (t.task_source||'daily') !== 'alert'; });
-
-    const counts = {
-      due: daily.filter(function(t){ return t.status === 'open'; }).length,
-      inprogress: daily.filter(function(t){ return t.status === 'in_progress'; }).length,
-      escalated: daily.filter(function(t){ return t.status === 'open' && t.days_persisted >= 3; }).length,
-      scaling: daily.filter(function(t){ return t.status === 'scaling'; }).length,
-      repeat: daily.filter(function(t){ return t.is_repeat_offender; }).length,
-      complete: daily.filter(function(t){ return t.status === 'complete' || t.status === 'dismissed'; }).length,
-      archived: daily.filter(function(t){ return t.status === 'archived'; }).length
-    };
-
-    // Update metric cards
-    if (document.getElementById('task-open')) document.getElementById('task-open').textContent = counts.due;
-    if (document.getElementById('task-inprogress')) document.getElementById('task-inprogress').textContent = counts.inprogress;
-    if (document.getElementById('task-escalated')) document.getElementById('task-escalated').textContent = counts.escalated;
-    if (document.getElementById('task-scaling')) document.getElementById('task-scaling').textContent = counts.scaling;
-    if (document.getElementById('task-complete')) document.getElementById('task-complete').textContent = counts.complete;
-
-    // Update tab counts
-    ['due','inprogress','escalated','scaling','repeat','complete'].forEach(function(k){
-      const el = document.getElementById('tab-' + k + '-count');
-      if (el) el.textContent = counts[k] || 0;
-    });
-
-    // Nav badge
-    const badge = document.getElementById('tasks-badge');
-    const urgent = counts.due + counts.escalated;
-    if (badge) { if (urgent > 0) { badge.textContent = urgent; badge.style.display = ''; } else badge.style.display = 'none'; }
-
-    renderAgentTabs();
-    updateTaskTabCounts();
-    renderTasks(taskTab);
-  } catch(e) {
-    const c = document.getElementById('tasks-container');
-    if (c) c.innerHTML = '<div class="empty">Error loading tasks: ' + e.message + '</div>';
-  }
-}
-
-function updateTaskTabCounts() {
-  const daily = allTasks.filter(function(t){ return (t.task_source||'daily') !== 'alert'; });
-  // Filter by department
-  const deptFiltered = daily.filter(function(t) {
-    const agent = t.agent_name || extractAgentName(t.campaign_name||'');
-    if (activeDept === 'amazon') return AMAZON_AGENTS.includes(agent) || !GOOGLE_AGENTS.includes(agent);
-    if (activeDept === 'google') return GOOGLE_AGENTS.includes(agent);
-    return true;
-  });
-  const agentFiltered = selectedAgent ? deptFiltered.filter(function(t){ return t.agent_name === selectedAgent; }) : deptFiltered;
-  const counts = {
-    all: agentFiltered.filter(function(t){ return !t.archived_at; }).length,
-    due: agentFiltered.filter(function(t){ return t.status === 'open' && (t.days_persisted||1) < 3; }).length,
-    inprogress: agentFiltered.filter(function(t){ return t.status === 'in_progress'; }).length,
-    escalated: agentFiltered.filter(function(t){ return t.status === 'open' && (t.days_persisted||1) >= 3; }).length,
-    scaling: agentFiltered.filter(function(t){ return t.status === 'scaling'; }).length,
-    repeat: agentFiltered.filter(function(t){ return t.is_repeat_offender; }).length,
-    complete: agentFiltered.filter(function(t){ return (t.status==='complete'||t.status==='dismissed'||t.status==='paused') && !t.archived_at; }).length,
-    archived: agentFiltered.filter(function(t){ return t.status==='archived' || t.archived_at; }).length
-  };
-  Object.keys(counts).forEach(function(tab) {
-    const el = document.getElementById('tab-' + tab + '-count');
-    if (el) { el.textContent = counts[tab]; el.style.display = counts[tab] > 0 ? '' : 'none'; }
-  });
-}
-
-function showTaskTab(tab, btn) {
-  taskTab = tab;
-  document.querySelectorAll('#page-tasks .tab-btn').forEach(function(b){ b.classList.remove('active'); });
-  if (btn) btn.classList.add('active');
-  renderTasks(tab);
-}
-
-// ── Render Tasks ──────────────────────────────────────────────────────────
-function renderTasks(tab) {
-  const agentTasks = selectedAgent ? allTasks.filter(function(t){ return t.agent_name === selectedAgent; }) : allTasks;
-  const daily = agentTasks.filter(function(t){ return (t.task_source||'daily') !== 'alert'; });
-
-  let filtered = [];
-  if (tab === 'all') filtered = daily.filter(function(t){ return !t.archived_at; });
-  else if (tab === 'due') filtered = daily.filter(function(t){ return t.status === 'open' && t.days_persisted < 3; });
-  else if (tab === 'inprogress') filtered = daily.filter(function(t){ return t.status === 'in_progress'; });
-  else if (tab === 'escalated') filtered = daily.filter(function(t){ return t.status === 'open' && t.days_persisted >= 3; });
-  else if (tab === 'scaling') filtered = daily.filter(function(t){ return t.status === 'scaling'; });
-  else if (tab === 'repeat') filtered = daily.filter(function(t){ return t.is_repeat_offender; });
-  else if (tab === 'complete') filtered = daily.filter(function(t){ return (t.status === 'complete' || t.status === 'dismissed' || t.status === 'paused') && !t.archived_at; });
-  else if (tab === 'archived') filtered = daily.filter(function(t){ return t.status === 'archived'; });
-  else filtered = daily.filter(function(t){ return t.status === 'open'; });
-
-  // Sort: repeat offenders first, then by days_persisted desc, then score desc
-  filtered.sort(function(a,b){
-    if (b.is_repeat_offender !== a.is_repeat_offender) return b.is_repeat_offender ? 1 : -1;
-    if (b.days_persisted !== a.days_persisted) return (b.days_persisted||1) - (a.days_persisted||1);
-    return (b.score||0) - (a.score||0);
-  });
-
-  const container = document.getElementById('tasks-container');
-  if (!container) return;
-  if (!filtered.length) {
-    const msgs = { due:'No tasks due', inprogress:'No tasks in progress', escalated:'No escalated tasks — great!', scaling:'No campaigns in scaling window', repeat:'No repeat offenders — well done!', complete:'No completed tasks', archived:'No archived tasks' };
-    container.innerHTML = '<div class="empty" style="padding:50px"><div style="font-size:32px;margin-bottom:12px">' + (tab==='escalated'||tab==='repeat'?'✅':'📋') + '</div><div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px">' + (msgs[tab]||'No tasks') + '</div><div style="font-size:13px;color:var(--text3)">Tasks are created daily at 8am based on campaign performance.</div></div>';
-    return;
-  }
-
-  container.innerHTML = filtered.map(function(t) {
-    const isEscalated = t.status === 'open' && t.days_persisted >= 3;
-    const isRepeat = t.is_repeat_offender;
-    const isScaling = t.status === 'scaling';
-
-    // Border colour
-    let borderColor = '';
-    if (isRepeat) borderColor = 'border-left:4px solid #dc2626';
-    else if (isEscalated) borderColor = 'border-left:4px solid var(--red)';
-    else if (isScaling) borderColor = 'border-left:4px solid #7c3aed';
-
-    const statusColors = { open:'badge-red', in_progress:'badge-amber', complete:'badge-green', scaling:'badge-purple', dismissed:'badge-blue', paused:'badge-amber', archived:'badge-blue' };
-    const statusLabels = { open:'Open', in_progress:'In Progress', complete:'Complete', scaling:'Scaling', dismissed:'Dismissed', paused:'Paused', archived:'Archived' };
-    const problemIcon = t.problem_type === 'no_activity' ? '😴' : '💸';
-    const dateStr = (t.created_date||'').toString().split('T')[0];
-
-    // Scaling countdown
-    let scalingCountdown = '';
-    if (isScaling && t.scaling_deadline) {
-      const daysLeft = Math.ceil((new Date(t.scaling_deadline) - new Date()) / (1000*60*60*24));
-      scalingCountdown = '<div style="background:#f3e8ff;border:1px solid #c4b5fd;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:14px;color:#7c3aed"><strong>⏱ Scaling window:</strong> ' + (daysLeft > 0 ? daysLeft + ' days remaining' : '⚠️ EXPIRED — decision required') + ' · Deadline: ' + new Date(t.scaling_deadline).toLocaleDateString('en-GB') + '</div>';
-    }
-
-    // Repeat offender banner
-    let repeatBanner = '';
-    if (isRepeat) {
-      repeatBanner = '<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:15px;color:#dc2626"><strong>🚨 REPEAT OFFENDER</strong> — This campaign has failed ' + (t.failure_count||2) + ' time(s) in the last 14 days. A different approach is needed, not the same quick fix.</div>';
-    }
-
-    // Action buttons based on status and tab
-    let actionButtons = '';
-    if (t.status === 'complete' || t.status === 'dismissed' || t.status === 'archived') {
-      const rt = t.resolved_at ? new Date(t.resolved_at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '';
-      actionButtons = '<div style="font-size:14px;color:var(--green);margin-top:8px">✓ ' + (statusLabels[t.status]||t.status) + (rt ? ' · ' + rt : '') + '</div>';
-      if (!t.archived_at && t.status !== 'archived') {
-        actionButtons += '<div class="ag" style="margin-top:6px">' +
-          '<button class="btn btn-ghost" style="font-size:12px" onclick="archiveTask(' + t.id + ')">Archive now</button>' +
-          '<button class="btn btn-amber" style="font-size:12px" onclick="reopenTask(' + t.id + ')">↩ Reopen to Due</button>' +
-          '</div>';
-      }
-    } else if (t.status === 'paused') {
-      actionButtons = '<div style="font-size:14px;color:var(--amber);margin-top:8px">⏸ Paused' + (t.paused_reason ? ' — ' + escHtml(t.paused_reason) : '') + '</div>';
-      if (!t.archived_at) actionButtons += '<div class="ag" style="margin-top:6px">' +
-        '<button class="btn btn-ghost" style="font-size:12px" onclick="archiveTask(' + t.id + ')">Archive now</button>' +
-        '<button class="btn btn-amber" style="font-size:12px" onclick="reopenTask(' + t.id + ')">↩ Reopen to Due</button>' +
-        '</div>';
-    } else if (isScaling) {
-      const daysLeft = t.scaling_deadline ? Math.ceil((new Date(t.scaling_deadline) - new Date()) / (1000*60*60*24)) : 0;
-      actionButtons = '<div class="ag" style="margin-top:8px">' +
-        '<button class="btn btn-green" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;complete&quot;)">✓ Mark resolved</button>' +
-        '<button class="btn btn-red" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;paused&quot;)">Pause campaign</button>' +
-        (daysLeft <= 0 ? '<span style="font-size:12px;color:#dc2626;font-weight:600">⚠️ Window expired!</span>' : '') +
-        '</div>';
-    } else if (isEscalated) {
-      // Escalated tab gets: Working on it, Request 7-day scaling, Mark complete, Pause + AI Analysis button
-      actionButtons = '<div class="ag" style="margin-top:8px">' +
-        '<button class="btn btn-amber" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;in_progress&quot;)">Working on it</button>' +
-        '<button class="btn btn-purple" style="font-size:12px;background:#f3e8ff;color:#7c3aed;border-color:#c4b5fd" onclick="showScalingModal(' + t.id + ')">⏱ Request 7-day scaling</button>' +
-        '<button class="btn btn-green" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;complete&quot;)">Mark complete</button>' +
-        '<button class="btn btn-red" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;paused&quot;)">Pause</button>' +
-        '</div>' +
-        '<button class="btn btn-ghost" style="font-size:12px;margin-top:8px" onclick="loadEscalationAnalysis(' + t.id + ',this)">🤖 Get AI analysis</button>' +
-        '<div id="ai-analysis-' + t.id + '" style="display:none;margin-top:10px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px;font-size:14px;line-height:1.6;color:#0369a1"></div>';
-    } else {
-      // Due or In Progress — include scaling button
-      actionButtons = '<div class="ag" style="margin-top:8px;flex-wrap:wrap">' +
-        '<button class="btn btn-amber" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;in_progress&quot;)">Working on it</button>' +
-        '<button class="btn btn-green" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;complete&quot;)">Mark complete</button>' +
-        '<button class="btn btn-ghost" style="font-size:12px;background:#f3e8ff;color:#7c3aed;border-color:#c4b5fd" onclick="showScalingModal(' + t.id + ')">⏱ Move to Scaling</button>' +
-        '<button class="btn btn-red" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;paused&quot;)">Pause campaign</button>' +
-        '<button class="btn btn-ghost" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;dismissed&quot;)">Dismiss</button>' +
-        '</div>';
-    }
-
-    const cardId = 'task-card-' + t.id;
-    const detailId = 'task-detail-' + t.id;
-
-    return '<div class="ai-card" id="' + cardId + '" style="' + borderColor + '">' +
-      repeatBanner +
-      scalingCountdown +
-      '<div class="ai-header" style="cursor:pointer" onclick="toggleTaskDetail(' + t.id + ')">' +
-        '<div class="ai-icon">' + problemIcon + '</div>' +
-        '<div style="flex:1">' +
-          '<div class="ai-title" style="font-size:16px">' + escHtml(t.campaign_name) + '</div>' +
-          '<div class="ai-sub" style="font-size:13px">Agent: <strong>' + escHtml(t.agent_name||'Unassigned') + '</strong> · Portfolio: ' + escHtml(t.portfolio||'—') + ' · Created: ' + dateStr + '</div>' +
-        '</div>' +
-        '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">' +
-          (isRepeat ? '<span class="badge" style="background:#dc2626;color:white;font-size:11px">🔁 Repeat #' + (t.failure_count||2) + '</span>' : '') +
-          (isEscalated ? '<span class="badge badge-red" style="font-size:11px">🚨 Day ' + t.days_persisted + ' Escalated</span>' : (t.days_persisted > 1 ? '<span class="badge badge-amber" style="font-size:11px">Day ' + t.days_persisted + '</span>' : '')) +
-          '<span class="badge ' + (statusColors[t.status]||'badge-blue') + '" style="font-size:11px">' + (statusLabels[t.status]||t.status) + '</span>' +
-          '<span style="font-size:12px;color:#aaa;margin-left:4px" id="arrow-' + t.id + '">▼</span>' +
-        '</div>' +
-      '</div>' +
-      '<div id="' + detailId + '" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border2)">' +
-        '<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Problem:</strong> ' + escHtml(t.problem_detail||'—') + '</div>' +
-        '<div style="margin-bottom:12px" id="breakdown-wrap-' + t.id + '">' +
-          '<button class="btn btn-ghost" style="font-size:12px" data-cid="' + escHtml(String(t.campaign_id||'')) + '" data-bid="breakdown-' + t.id + '" onclick="kwAction(this,&quot;breakdown&quot;)">📊 Show daily spend breakdown</button>' +
-          '<div id="breakdown-' + t.id + '" style="display:none;margin-top:8px"></div>' +
-        '</div>' +
-        '<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Score:</strong> ' + (t.score||0) + ' pts · <strong>Days open:</strong> ' + (t.days_persisted||1) + '</div>' +
-        (t.first_action_at ? '<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>First action:</strong> ' + new Date(t.first_action_at).toLocaleString('en-GB') + '</div>' : '') +
-        (t.resolved_at ? '<div style="font-size:15px;color:var(--green);margin-bottom:12px"><strong>Resolved:</strong> ' + new Date(t.resolved_at).toLocaleString('en-GB') + '</div>' : '') +
-        (t.agent_notes ?
-          '<div style="background:var(--blue-light);border:1px solid rgba(26,111,189,0.15);border-radius:8px;padding:14px 18px;font-size:15px;color:var(--blue);margin-bottom:12px">' +
-            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
-              '<strong>Agent Notes:</strong>' +
-              '<button class="btn btn-ghost" style="font-size:11px;padding:2px 8px" onclick="toggleNoteIgnored(' + t.id + ',this)">' + (t.notes_ignored ? '✓ Restore for AI' : '✗ Strike out') + '</button>' +
-            '</div>' +
-            '<span style="white-space:pre-wrap;line-height:1.7;' + (t.notes_ignored ? 'text-decoration:line-through;opacity:0.45;' : '') + '">' + escHtml(t.agent_notes) + '</span>' +
-            (t.notes_ignored ? '<div style="font-size:11px;color:#e53e3e;margin-top:6px">⚠ Struck out — AI will not use this note</div>' : '') +
-          '</div>'
-          : '<div style="font-size:15px;color:#bbb;margin-bottom:12px;font-style:italic">No notes added yet.</div>') +
-        (t.dismissed_reason ? '<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Dismiss reason:</strong> ' + escHtml(t.dismissed_reason) + '</div>' : '') +
-        (t.paused_reason ? '<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Pause reason:</strong> ' + escHtml(t.paused_reason) + '</div>' : '') +
-        (t.escalation_reason ? '<div style="font-size:15px;color:#7c3aed;margin-bottom:12px"><strong>Scaling reason:</strong> ' + escHtml(t.escalation_reason) + '</div>' : '') +
-      '</div>' +
-      actionButtons +
-    '</div>';
-  }).join('');
-}
-
-// ── Scaling Modal ────────────────────────────────────────────────────────
-function showScalingModal(taskId) {
-  const existing = document.getElementById('task-action-modal');
-  if (existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'task-action-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:460px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:4px">⏱ Request 7-Day Scaling Window</div>' +
-      '<div style="font-size:13px;color:#888;margin-bottom:16px">This campaign has been escalated. Explain why you need 7 days to fix it and what your plan is. After 7 days you must mark complete or pause — no extensions.</div>' +
-      '<textarea id="tm-notes" placeholder="What specifically are you going to do over the next 7 days? What is the root cause and your plan to fix it?" style="width:100%;padding:10px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;height:100px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>' +
-      '<div id="tm-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none">Please explain your 7-day plan before requesting the scaling window.</div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
-        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;task-action-modal&quot;).remove()">Cancel</button>' +
-        '<button style="background:#7c3aed;color:white;border:none;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer" onclick="submitTaskModal(' + taskId + ',&quot;scaling&quot;)">Request Scaling Window</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  setTimeout(function(){ const ta = document.getElementById('tm-notes'); if(ta) ta.focus(); }, 50);
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
-}
-
-// ── AI Escalation Analysis ────────────────────────────────────────────────
-async function loadEscalationAnalysis(taskId, btn) {
-  const container = document.getElementById('ai-analysis-' + taskId);
-  if (!container) return;
-  const isVisible = container.style.display !== 'none';
-  if (isVisible) { container.style.display = 'none'; if(btn) btn.textContent = '🤖 Get AI analysis'; return; }
-  container.style.display = 'block';
-  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><div class="spinner" style="width:16px;height:16px;border-width:2px"></div> Claude is analyzing this campaign...</div>';
-  if (btn) btn.textContent = '🤖 Hide analysis';
-  try {
-    const res = await fetch('/api/tasks/' + taskId + '/escalation-analysis', { method: 'POST' });
-    const data = await res.json();
-    if (data.analysis) {
-      container.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:14px">🤖 Claude Analysis</div>' +
-        '<div style="white-space:pre-wrap;font-size:14px;line-height:1.7">' + escHtml(data.analysis) + '</div>';
-    } else {
-      container.innerHTML = '<div style="color:#e53e3e">Analysis failed: ' + escHtml(data.error||'Unknown error') + '</div>';
-    }
-  } catch(e) {
-    container.innerHTML = '<div style="color:#e53e3e">Error: ' + e.message + '</div>';
-  }
-}
-
-// ── Reopen Task ───────────────────────────────────────────────────────────
-async function reopenTask(taskId) {
-  if (!confirm('Reopen this task and move it back to Due? The day count will stay the same.')) return;
-  try {
-    await fetch('/api/tasks/' + taskId + '/reopen', { method: 'POST' });
-    await loadTasks();
-  } catch(e) { alert('Error: ' + e.message); }
-}
-
-// ── Toggle Note Ignored (strike-through for AI) ────────────────────────
-async function toggleNoteIgnored(taskId, btn) {
-  try {
-    const res = await fetch('/api/tasks/' + taskId + '/toggle-note', { method: 'POST' });
-    const data = await res.json();
-    if (data.success) {
-      // Update button text
-      if (btn) btn.textContent = data.notes_ignored ? '✓ Restore for AI' : '✗ Strike out';
-      // Reload tasks to reflect change
-      await loadTasks();
-    }
-  } catch(e) { alert('Error: ' + e.message); }
-}
-
-// ── Underperforming Campaign Modal (Pause / Work on it 1 week) ───────────
-function showStuckModal(btn, action) {
-  const campaignId = btn.getAttribute('data-cid');
-  const campaignName = btn.getAttribute('data-cname');
-  const existing = document.getElementById('stuck-modal');
-  if (existing) existing.remove();
-
-  const isReview = action === 'review';
-  const overlay = document.createElement('div');
-  overlay.id = 'stuck-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:440px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:4px">' + (isReview ? '⏱ Work on it for 1 week' : '⏸ Pause Campaign') + '</div>' +
-      '<div style="font-size:13px;color:#555;margin-bottom:4px">' + escHtml(campaignName) + '</div>' +
-      '<div style="font-size:12px;color:#888;margin-bottom:16px">' +
-        (isReview ? 'This campaign will be flagged for 1 week. If not resolved by then, a campaign task will be created automatically.' : 'Why are you pausing this campaign?') +
-      '</div>' +
-      '<textarea id="stuck-notes" placeholder="' + (isReview ? 'What is your plan to fix this? Be specific...' : 'Reason for pausing...') + '" style="width:100%;padding:10px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;height:90px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>' +
-      '<div id="stuck-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none">Please add a note before continuing.</div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
-        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;stuck-modal&quot;).remove()">Cancel</button>' +
-        '<button class="btn ' + (isReview ? 'btn-amber' : 'btn-red') + '" style="font-size:13px" onclick="submitStuckAction(' + JSON.stringify(campaignId) + ',' + JSON.stringify(campaignName) + ',&quot;' + action + '&quot;)">' + (isReview ? 'Flag for 1 week' : 'Pause Campaign') + '</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  setTimeout(function(){ const ta = document.getElementById('stuck-notes'); if(ta) ta.focus(); }, 50);
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
-}
-
-async function submitStuckAction(campaignId, campaignName, action) {
-  const notes = (document.getElementById('stuck-notes').value || '').trim();
-  if (!notes) {
-    document.getElementById('stuck-error').style.display = '';
-    return;
-  }
-  document.getElementById('stuck-modal').remove();
-  try {
-    await fetch('/api/stuck-campaigns/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ campaignId, campaignName, action, notes })
-    });
-    // Log to activity
-    await fetch('/api/activity/log', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        campaignId, campaignName,
-        action: action === 'review' ? 'stuck_flagged_1week' : 'stuck_paused',
-        notes
-      })
-    });
-    loadStuckCampaigns();
-  } catch(e) { alert('Error: ' + e.message); }
-}
-
-// ── Campaign Daily Spend Breakdown ───────────────────────────────────────
-async function loadSpendBreakdown(campaignId, containerId, btn) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  if (container.style.display !== 'none') {
-    container.style.display = 'none';
-    if (btn) btn.textContent = '📊 Show daily spend breakdown';
-    return;
-  }
-  container.style.display = 'block';
-  container.innerHTML = '<div style="font-size:13px;color:#888">Loading...</div>';
-  if (btn) btn.textContent = '📊 Hide breakdown';
-  try {
-    const res = await fetch('/api/campaigns/' + encodeURIComponent(campaignId) + '/spend-breakdown');
-    const data = await res.json();
-    const rows = data.breakdown || [];
-    if (!rows.length) { container.innerHTML = '<div style="font-size:13px;color:#aaa">No daily data available</div>'; return; }
-    container.innerHTML =
-      '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
-      '<thead><tr style="background:var(--surface2)">' +
-        '<th style="text-align:left;padding:6px 10px;font-size:12px;color:#888">Date</th>' +
-        '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Spend</th>' +
-        '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Revenue</th>' +
-        '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">ACOS</th>' +
-        '<th style="text-align:right;padding:6px 10px;font-size:12px;color:#888">Clicks</th>' +
-      '</tr></thead><tbody>' +
-      rows.map(function(r) {
-        const hasRevenue = parseFloat(r.sales) > 0;
-        return '<tr style="border-bottom:1px solid var(--border)">' +
-          '<td style="padding:7px 10px">' + r.date + '</td>' +
-          '<td style="padding:7px 10px;text-align:right;color:var(--red);font-weight:600">£' + r.spend + '</td>' +
-          '<td style="padding:7px 10px;text-align:right;color:' + (hasRevenue ? 'var(--green)' : '#aaa') + ';font-weight:600">' + (hasRevenue ? '£' + r.sales : '£0.00') + '</td>' +
-          '<td style="padding:7px 10px;text-align:right">' + (parseFloat(r.acos) > 0 ? r.acos + '%' : '—') + '</td>' +
-          '<td style="padding:7px 10px;text-align:right">' + r.clicks + '</td>' +
-        '</tr>';
-      }).join('') +
-      '</tbody></table>';
-  } catch(e) { container.innerHTML = '<div style="font-size:13px;color:#e53e3e">Error: ' + e.message + '</div>'; }
-}
-
-// ── Toggle Task Detail Panel ─────────────────────────────────────────────
-function toggleTaskDetail(taskId) {
-  const detail = document.getElementById('task-detail-' + taskId);
-  if (!detail) return;
-  const isOpen = detail.style.display !== 'none';
-  detail.style.display = isOpen ? 'none' : 'block';
-  // flip arrow
-  const card = document.getElementById('task-card-' + taskId);
-  if (card) {
-    const arrow = card.querySelector('.ai-header span[style*="aaa"]');
-    if (arrow) arrow.textContent = isOpen ? '▼' : '▲';
-  }
-  // Auto-load spend breakdown when detail opens
-  if (!isOpen) {
-    const breakdownBtn = detail.querySelector('[data-bid^="breakdown-"]');
-    if (breakdownBtn && !detail.querySelector('table')) {
-      const campaignId = breakdownBtn.getAttribute('data-cid');
-      const containerId = breakdownBtn.getAttribute('data-bid');
-      if (campaignId) loadSpendBreakdown(campaignId, containerId, breakdownBtn);
-    }
-  }
-}
-
-// ── Unified Task Action Modal ─────────────────────────────────────────────
-function showTaskModal(taskId, action) {
-  // Remove any existing modal
-  const existing = document.getElementById('task-action-modal');
-  if (existing) existing.remove();
-
-  const titles = {
-    in_progress: '🔧 Working On It',
-    complete: '✅ Mark Complete',
-    paused: '⏸️ Pause Campaign',
-    dismissed: '🚫 Dismiss Task'
-  };
-  const placeholders = {
-    in_progress: 'What are you doing to fix this? (e.g. adjusted bids, changed targeting...)',
-    complete: 'What did you do to resolve this? Be specific so the team can learn.',
-    paused: 'Why are you pausing this campaign? (e.g. out of season, restructuring...)',
-    dismissed: 'Why are you dismissing this task? (e.g. main keyword, intentional spend...)'
-  };
-  const btnClass = { in_progress: 'btn-amber', complete: 'btn-green', paused: 'btn-red', dismissed: 'btn-ghost' };
-  const btnLabels = { in_progress: 'Confirm', complete: 'Mark Complete', paused: 'Pause Campaign', dismissed: 'Dismiss' };
-
-  const dismissReasonHtml = '';
-
-  const overlay = document.createElement('div');
-  overlay.id = 'task-action-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:420px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:6px">' + (titles[action]||action) + '</div>' +
-      '<div style="font-size:12px;color:#888;margin-bottom:16px">Note is required — this helps the team learn and AI to improve.</div>' +
-      dismissReasonHtml +
-      '<textarea id="tm-notes" placeholder="' + (placeholders[action]||'Add your notes...') + '" style="width:100%;padding:10px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;height:90px;resize:vertical;font-family:inherit;box-sizing:border-box" required></textarea>' +
-      '<div id="tm-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none">Please add a note before continuing.</div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
-        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;task-action-modal&quot;).remove()">Cancel</button>' +
-        '<button class="btn ' + (btnClass[action]||'btn-primary') + '" style="font-size:13px" onclick="submitTaskModal(' + taskId + ',&quot;' + action + '&quot;)">' + (btnLabels[action]||'Confirm') + '</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  // Focus textarea
-  setTimeout(function(){ const ta = document.getElementById('tm-notes'); if(ta) ta.focus(); }, 50);
-  // Close on overlay click
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
-}
-
-async function submitTaskModal(taskId, action) {
-  const notes = (document.getElementById('tm-notes').value || '').trim();
-  if (!notes) {
-    document.getElementById('tm-error').style.display = '';
-    document.getElementById('tm-notes').style.border = '1.5px solid #e53e3e';
-    return;
-  }
-  const modal = document.getElementById('task-action-modal');
-  if (modal) modal.remove();
-
-  let body = { status: action, notes: notes };
-  if (action === 'dismissed') {
-    body.dismissedReason = notes;
-  }
-  if (action === 'paused') {
-    body.pausedReason = notes;
-  }
-  if (action === 'scaling') {
-    body.escalationReason = notes;
-  }
-
-  try {
-    await fetch('/api/tasks/' + taskId + '/status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    await loadTasks();
-  } catch(e) { alert('Error updating task: ' + e.message); }
-}
-
-async function archiveTask(taskId) {
-  if (!confirm('Archive this task? It will be removed from view but kept in records.')) return;
-  try {
-    await fetch('/api/tasks/' + taskId + '/archive', { method: 'POST' });
-    await loadTasks();
-  } catch(e) { alert('Error: ' + e.message); }
-}
-
-async function updateTask(taskId, status, notes) {
-  try {
-    await fetch('/api/tasks/' + taskId + '/status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, notes })
-    });
-    await loadTasks();
-  } catch(e) { alert('Error updating task: ' + e.message); }
-}
-
-async function runTasksNow() {
-  if (!confirm('Run the task scheduler now? This will check 3 days of history and create tasks. Use for testing only.')) return;
-  try {
-    await fetch('/api/tasks/run-now', { method: 'POST' });
-    setTimeout(loadTasks, 2000);
-    alert('Task scheduler triggered. Tasks will appear in a moment.');
-  } catch(e) { alert('Error: ' + e.message); }
-}
-
-// ── Settings ──────────────────────────────────────────────────────────────
-async function loadSettings() {
-  try {
-    const res = await fetch('/api/settings');
-    const data = await res.json();
-    if (!data.settings) return;
-    const s = data.settings;
-    const fields = document.querySelectorAll('#page-settings input[type="number"]');
-    if (s.acosCritical && fields[0]) fields[0].value = s.acosCritical;
-    if (s.acosWarning && fields[1]) fields[1].value = s.acosWarning;
-    if (s.budgetLowPct && fields[2]) fields[2].value = s.budgetLowPct;
-    if (s.pollInterval && fields[3]) fields[3].value = s.pollInterval;
-    if (s.maxAlertsPerSync && fields[5]) fields[5].value = s.maxAlertsPerSync;
-    if (s.maxAutoAdd && fields[4]) fields[4].value = s.maxAutoAdd;
-  } catch(e) { console.error('Load settings error:', e); }
-}
-
-async function saveSettings() {
-  const fields = document.querySelectorAll('#page-settings input[type="number"]');
-  const settings = {
-    acosCritical: parseFloat(fields[0]?.value || 35),
-    acosWarning: parseFloat(fields[1]?.value || 25),
-    budgetLowPct: parseFloat(fields[2]?.value || 20),
-    pollInterval: parseInt(fields[3]?.value || 15),
-    maxAutoAdd: parseFloat(fields[4]?.value || 50),
-    maxAlertsPerSync: parseInt(fields[5]?.value || 5)
-  };
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings })
-    });
-    const data = await res.json();
-    if (data.success) {
-      const status = document.getElementById('settings-status');
-      status.style.display = '';
-      setTimeout(function(){ status.style.display = 'none'; }, 3000);
-    }
-  } catch(e) { alert('Error saving settings: ' + e.message); }
-}
-
-function resetSettings() {
-  const fields = document.querySelectorAll('#page-settings input[type="number"]');
-  const defaults = [35, 25, 20, 15, 50, 5];
-  fields.forEach(function(f, i) { f.value = defaults[i] || ''; });
-}
-
 // ── Init ──────────────────────────────────────────────────────────────────
-// ── My Profile ───────────────────────────────────────────────────────────
-function loadMyProfile() {
-  const infoEl = document.getElementById('my-profile-info');
-  if (!infoEl || !currentUser) return;
-  const deptLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
-  infoEl.innerHTML =
-    '<div style="font-weight:600;font-size:15px;margin-bottom:6px">' + escHtml(currentUser.name) + '</div>' +
-    '<div style="color:#888;margin-bottom:4px">' + escHtml(currentUser.email) + '</div>' +
-    '<div style="color:#888">' + escHtml(deptLabels[currentUser.department]||currentUser.department) + ' · ' + escHtml(currentUser.role) + '</div>';
-}
-
-async function changeMyPassword() {
-  const current = document.getElementById('current-password').value;
-  const newPw = document.getElementById('new-pw').value;
-  const confirm = document.getElementById('confirm-pw').value;
-  const errEl = document.getElementById('pw-error');
-  const successEl = document.getElementById('pw-success');
-  errEl.style.display = 'none';
-  successEl.style.display = 'none';
-
-  if (!current || !newPw || !confirm) { errEl.textContent = 'Please fill in all fields.'; errEl.style.display = 'block'; return; }
-  if (newPw !== confirm) { errEl.textContent = 'New passwords do not match.'; errEl.style.display = 'block'; return; }
-  if (newPw.length < 6) { errEl.textContent = 'Password must be at least 6 characters.'; errEl.style.display = 'block'; return; }
-
-  try {
-    const res = await fetch('/api/auth/change-password', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ currentPassword: current, newPassword: newPw })
-    });
-    const data = await res.json();
-    if (data.success) {
-      successEl.style.display = 'block';
-      document.getElementById('current-password').value = '';
-      document.getElementById('new-pw').value = '';
-      document.getElementById('confirm-pw').value = '';
-    } else {
-      errEl.textContent = data.error || 'Failed to update password.';
-      errEl.style.display = 'block';
-    }
-  } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = 'block'; }
-}
-
-// ── User Management ──────────────────────────────────────────────────────
-async function loadUsers() {
-  try {
-    const res = await fetch('/api/auth/users', { headers: getAuthHeaders() });
-    const data = await res.json();
-    const container = document.getElementById('users-list');
-    if (!container) return;
-    const deptLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
-    container.innerHTML = (data.users||[]).map(function(u) {
-      return '<div style="padding:14px 0;border-bottom:1px solid var(--border)">' +
-        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
-          '<div style="width:36px;height:36px;border-radius:50%;background:var(--accent);color:white;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0">' + escHtml(u.name[0]||'?') + '</div>' +
-          '<div style="flex:1">' +
-            '<div style="font-size:14px;font-weight:600">' + escHtml(u.name) + ' <span style="font-size:12px;color:#888;font-weight:400">' + escHtml(u.email) + '</span></div>' +
-            '<div style="font-size:12px;color:#888;margin-top:2px">' + escHtml(deptLabels[u.department]||u.department) + ' · ' + (u.is_active ? '<span style="color:var(--green)">Active</span>' : '<span style="color:var(--red)">Inactive</span>') + ' · Last login: ' + (u.last_login ? new Date(u.last_login).toLocaleDateString('en-GB') : 'Never') + '</div>' +
-          '</div>' +
-          '<button class="btn btn-ghost" style="font-size:12px" onclick="showEditUser(' + u.id + ',&quot;' + escHtml(u.name) + '&quot;,&quot;' + escHtml(u.email) + '&quot;,&quot;' + u.department + '&quot;,' + u.is_active + ')">Edit</button>' +
-        '</div>' +
-      '</div>';
-    }).join('') || '<div style="color:#aaa;font-size:13px;padding:16px 0">No users yet — add your first team member below.</div>';
-  } catch(e) { console.error('Load users error:', e); }
-}
-
-function showEditUser(userId, name, email, department, isActive) {
-  const existing = document.getElementById('edit-user-modal');
-  if (existing) existing.remove();
-  const deptOptions = ['amazon','google','supply_chain','logistics','manager'];
-  const deptLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
-  const overlay = document.createElement('div');
-  overlay.id = 'edit-user-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:440px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:20px">✏️ Edit User</div>' +
-      '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Full Name</label>' +
-      '<input id="edit-name" value="' + escHtml(name) + '" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box"></div>' +
-      '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Email</label>' +
-      '<input id="edit-email" value="' + escHtml(email) + '" type="email" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box"></div>' +
-      '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Department</label>' +
-      '<select id="edit-dept" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">' +
-      deptOptions.map(function(d){ return '<option value="' + d + '"' + (d===department?' selected':'') + '>' + deptLabels[d] + '</option>'; }).join('') +
-      '</select></div>' +
-      '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">New Password <span style="font-weight:400;color:#aaa">(leave blank to keep current)</span></label>' +
-      '<input id="edit-password" type="password" placeholder="Enter new password to change it" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box"></div>' +
-      '<div style="margin-bottom:16px;display:flex;align-items:center;gap:8px">' +
-      '<input type="checkbox" id="edit-active"' + (isActive?' checked':'') + ' style="width:16px;height:16px">' +
-      '<label for="edit-active" style="font-size:14px">Account active</label></div>' +
-      '<div id="edit-user-error" style="color:#e53e3e;font-size:12px;margin-bottom:10px;display:none"></div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;edit-user-modal&quot;).remove()">Cancel</button>' +
-        '<button class="btn btn-primary" style="font-size:13px" onclick="saveEditUser(' + userId + ')">Save Changes</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
-}
-
-async function saveEditUser(userId) {
-  const name = document.getElementById('edit-name').value.trim();
-  const email = document.getElementById('edit-email').value.trim();
-  const department = document.getElementById('edit-dept').value;
-  const password = document.getElementById('edit-password').value;
-  const isActive = document.getElementById('edit-active').checked;
-  const errEl = document.getElementById('edit-user-error');
-  errEl.style.display = 'none';
-  if (!name || !email) { errEl.textContent = 'Name and email are required.'; errEl.style.display = 'block'; return; }
-  try {
-    const body = { name, email, department, role: department === 'manager' ? 'manager' : 'agent', is_active: isActive };
-    if (password) body.password = password;
-    const res = await fetch('/api/auth/users/' + userId, {
-      method: 'PUT', headers: getAuthHeaders(), body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (data.success) {
-      document.getElementById('edit-user-modal').remove();
-      await loadUsers();
-    } else {
-      errEl.textContent = data.error || 'Failed to save.';
-      errEl.style.display = 'block';
-    }
-  } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = 'block'; }
-}
-
-async function createUser() {
-  const name = document.getElementById('new-name').value.trim();
-  const email = document.getElementById('new-email').value.trim();
-  const password = document.getElementById('new-password').value;
-  const department = document.getElementById('new-department').value;
-  const errEl = document.getElementById('new-user-error');
-  errEl.style.display = 'none';
-
-  if (!name || !email || !password) {
-    errEl.textContent = 'Please fill in all fields.';
-    errEl.style.display = 'block';
-    return;
-  }
-  try {
-    const res = await fetch('/api/auth/users', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ name, email, password, department, role: department === 'manager' ? 'manager' : 'agent' })
-    });
-    const data = await res.json();
-    if (data.success) {
-      document.getElementById('new-name').value = '';
-      document.getElementById('new-email').value = '';
-      document.getElementById('new-password').value = '';
-      await loadUsers();
-    } else {
-      errEl.textContent = data.error || 'Failed to create user.';
-      errEl.style.display = 'block';
-    }
-  } catch(e) {
-    errEl.textContent = 'Error: ' + e.message;
-    errEl.style.display = 'block';
-  }
-}
-
 async function init() {
-  const authed = await checkAuth();
-  if (!authed) return;
-  // Show User Management nav only for managers
-  if (currentUser && currentUser.role === 'manager') {
-    const navUsers = document.getElementById('nav-users');
-    if (navUsers) navUsers.style.display = 'flex';
-  }
+  // Verify auth + department BEFORE fetching anything. If user is in the wrong dashboard
+  // they'll be redirected and we should stop here.
+  const ok = await bootstrapUserGate();
+  if (!ok) return;
   try { await fetchData(); } catch(e) { console.error('Init error:', e); setTimeout(init, 3000); }
-  loadSettings();
 }
 init();
 setInterval(fetchData, 5 * 60 * 1000);
-
 </script>
 </body>
 </html>
