@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r5 (production base + Switch to Google + dept routing)
+// CampaignPulse — deploy marker 2026-05-04 r6 (shell.html launcher + owner role + delete users + audit log + password eye + FK Sports Google)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -93,10 +93,10 @@ async function requireAuth(req, res, next) {
     req.user = result.rows[0];
 
     // Department guard: agents can only hit endpoints that match their department.
-    // Manager (role='manager' OR department='manager') bypasses all checks.
+    // Manager AND Owner (role='manager'/'owner' OR department='manager') bypass all checks.
     const userDept = (req.user.department || '').toLowerCase();
     const userRole = (req.user.role || '').toLowerCase();
-    const isManager = userRole === 'manager' || userDept === 'manager';
+    const isManager = userRole === 'manager' || userRole === 'owner' || userDept === 'manager';
     if (!isManager) {
       for (const guard of DEPARTMENT_GUARD) {
         if (req.path.startsWith(guard.prefix)) {
@@ -691,6 +691,12 @@ async function initTasksTable() {
           console.log('Google agent seeded: ' + ag.email + ' / FKSports2024! (please change on first login)');
         }
       }
+      // Promote Bobby from 'manager' to 'owner' so only he sees the Delete-user button.
+      // Idempotent — only updates if currently 'manager', leaves anything else alone.
+      try {
+        const r = await db.query("UPDATE users SET role='owner' WHERE email='bobby@fksports.co.uk' AND role='manager'");
+        if (r.rowCount > 0) console.log("Bobby promoted to role='owner'");
+      } catch(e) { console.error('Owner role promotion error: ' + e.message); }
     } catch(e) { console.error('User init error: ' + e.message); }
     console.log('Auth tables ready');
 
@@ -1703,6 +1709,15 @@ app.post('/api/auth/users', async function(req, res) {
   try {
     const hash = await bcrypt.hash(password, 10);
     await db.query('INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5)', [name, email.toLowerCase().trim(), hash, department, role||'agent']);
+    // Audit log — who created what
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      const deptLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain', logistics: 'Logistics', manager: 'Manager' };
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'user_created',$2)",
+        [actor, actor + ' created user ' + name + ' (' + (deptLabels[department]||department) + ' ' + (role||'agent') + ')']
+      );
+    } catch(e) { console.error('Audit log error: ' + e.message); }
     res.json({ success: true });
   } catch(e) { if (e.code === '23505') return res.status(400).json({ error: 'Email already exists' }); res.status(500).json({ error: e.message }); }
 });
@@ -1739,12 +1754,94 @@ app.put('/api/auth/users/:id', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const { name, department, role, is_active, password } = req.body;
   try {
+    // Look up the target user before edit so audit log captures their name
+    const beforeRes = await db.query('SELECT name, is_active FROM users WHERE id=$1', [req.params.id]);
+    const targetName = beforeRes.rows.length ? beforeRes.rows[0].name : ('user #' + req.params.id);
+    const wasActive = beforeRes.rows.length ? beforeRes.rows[0].is_active : true;
+
     if (password) {
       const hash = await bcrypt.hash(password, 10);
       await db.query('UPDATE users SET name=$1, department=$2, role=$3, is_active=$4, password_hash=$5 WHERE id=$6', [name, department, role, is_active, hash, req.params.id]);
     } else {
       await db.query('UPDATE users SET name=$1, department=$2, role=$3, is_active=$4 WHERE id=$5', [name, department, role, is_active, req.params.id]);
     }
+
+    // Audit log — different message if this looks like a deactivation
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      let action = 'user_updated';
+      let note = actor + ' updated user ' + targetName;
+      if (wasActive && !is_active) {
+        action = 'user_deactivated';
+        note = actor + ' deactivated user ' + targetName;
+      } else if (!wasActive && is_active) {
+        action = 'user_reactivated';
+        note = actor + ' reactivated user ' + targetName;
+      }
+      if (password) note += ' (password reset)';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,$2,$3)",
+        [actor, action, note]
+      );
+    } catch(e) { console.error('Audit log error: ' + e.message); }
+
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Soft-delete a user — sets is_active=false. Reversible.
+app.post('/api/auth/users/:id/deactivate', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  // Owner-only
+  if (!req.user || (req.user.role || '').toLowerCase() !== 'owner') {
+    return res.status(403).json({ error: 'Owner permission required' });
+  }
+  try {
+    const beforeRes = await db.query('SELECT name FROM users WHERE id=$1', [req.params.id]);
+    const targetName = beforeRes.rows.length ? beforeRes.rows[0].name : ('user #' + req.params.id);
+    await db.query('UPDATE users SET is_active=FALSE WHERE id=$1', [req.params.id]);
+    // Invalidate any active sessions for that user
+    try { await db.query('DELETE FROM user_sessions WHERE user_id=$1', [req.params.id]); } catch(e) {}
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'user_deactivated',$2)",
+        [actor, actor + ' deactivated user ' + targetName]
+      );
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Hard-delete a user — destroys the row permanently. Owner only, requires confirmation.
+// Frontend must send { confirm: 'DELETE' } in body to proceed.
+app.delete('/api/auth/users/:id', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  // Owner-only
+  if (!req.user || (req.user.role || '').toLowerCase() !== 'owner') {
+    return res.status(403).json({ error: 'Owner permission required' });
+  }
+  if ((req.body && req.body.confirm) !== 'DELETE') {
+    return res.status(400).json({ error: 'Confirmation required: send { confirm: "DELETE" } in body' });
+  }
+  // Don't let owner delete themselves — would lock them out
+  try {
+    const target = await db.query('SELECT name, email FROM users WHERE id=$1', [req.params.id]);
+    if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
+    if (target.rows[0].email === (req.user.email || '').toLowerCase()) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    const targetName = target.rows[0].name;
+    // Clean up sessions first
+    try { await db.query('DELETE FROM user_sessions WHERE user_id=$1', [req.params.id]); } catch(e) {}
+    await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'user_deleted',$2)",
+        [actor, actor + ' permanently deleted user ' + targetName]
+      );
+    } catch(e) {}
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1757,7 +1854,8 @@ app.get('/api/admin/create-manager', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   try {
     const hash = await bcrypt.hash('FKSports2024!', 10);
-    await db.query('INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (email) DO UPDATE SET password_hash=$3, is_active=TRUE', ['Bobby', 'bobby@fksports.co.uk', hash, 'manager', 'manager']);
+    // Don't downgrade an existing owner — only seed/reset password.
+    await db.query("INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (email) DO UPDATE SET password_hash=$3, is_active=TRUE", ['Bobby', 'bobby@fksports.co.uk', hash, 'manager', 'owner']);
     res.json({ success: true, message: 'Manager account created/reset. Email: bobby@fksports.co.uk / Password: FKSports2024!' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

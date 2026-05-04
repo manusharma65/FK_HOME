@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r5 (production base + Switch to Google + dept routing) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r6 (FK Sports Google rebrand + My Profile + password eye + Back to overview) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -175,6 +175,51 @@ table.activity tr:last-child td { border-bottom: none; }
   .topbar { padding: 12px 16px; }
   .nav-item span:not(.nav-badge) { display: none; }
 }
+/* ── Password eye toggle + strength bar (r6) ──────────────────────────── */
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 38px !important; }
+.pw-eye {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.5);
+  border-radius: 5px;
+  transition: background 0.15s, color 0.15s;
+}
+.pw-eye:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); }
+.pw-eye:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pw-eye svg { width: 16px; height: 16px; }
+
+.pw-strength {
+  margin-top: 6px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.pw-strength-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.1);
+  overflow: hidden;
+}
+.pw-strength-fill {
+  height: 100%;
+  background: #ef4444;
+  width: 0%;
+  transition: width 0.2s, background 0.2s;
+}
+.pw-strength-label { font-size: 11px; color: rgba(255,255,255,0.5); min-width: 60px; }
 </style>
 </head>
 <body>
@@ -217,6 +262,10 @@ table.activity tr:last-child td { border-bottom: none; }
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>
       <span>Activity log</span>
     </button>
+    <button class="nav-item" onclick="showPage('my-profile',this)">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/></svg>
+      <span>My profile</span>
+    </button>
   </div>
   <div class="sidebar-footer">
     <div class="profile-row">
@@ -232,8 +281,9 @@ table.activity tr:last-child td { border-bottom: none; }
     <div class="page-title" id="page-title">Overview</div>
     <div class="topbar-right">
       <div class="dept-switcher" id="dept-switcher" style="display:none">
+        <button class="dept-btn" id="back-to-overview" onclick="window.location.href='/shell.html'" style="background:#fff;color:#333">← Overview</button>
         <button class="dept-btn" onclick="window.location.href='/index.html'">Amazon</button>
-        <button class="dept-btn active">Google</button>
+        <button class="dept-btn active">FK Sports Google</button>
       </div>
       <div id="ga4-pill" style="display:none;font-size:11px;padding:4px 10px;border-radius:6px;font-family:var(--mono)"></div>
       <button id="diagnostics-btn" class="btn btn-ghost" onclick="openDiagnostics()" style="display:none;font-size:12px" title="Manager: refund + GA4 sample">🔧 Diag</button>
@@ -378,6 +428,52 @@ table.activity tr:last-child td { border-bottom: none; }
     <div id="activity-content"></div>
   </div>
 
+  <!-- MY PROFILE PAGE (r6) -->
+  <div class="page" id="page-my-profile">
+    <div class="section-header">
+      <div>
+        <div class="section-title">My profile</div>
+        <div class="section-sub">Your account details and password</div>
+      </div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:520px">
+      <div id="my-profile-info" style="margin-bottom:24px;padding:16px;background:var(--bg2);border-radius:10px;font-size:14px;color:var(--text)">Loading...</div>
+
+      <div style="border-top:1px solid var(--border);padding-top:20px">
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:14px">Change password</div>
+
+        <div style="margin-bottom:12px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">Current password</label>
+          <div class="pw-wrap">
+            <input id="g-current-password" type="password" placeholder="Enter current password" style="width:100%;padding:9px 12px;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:8px;font-size:14px;box-sizing:border-box;font-family:inherit">
+            <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('g-current-password', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">New password</label>
+          <div class="pw-wrap">
+            <input id="g-new-pw" type="password" placeholder="Enter new password" oninput="updatePwStrength('g-new-pw','g-new-pw-strength')" style="width:100%;padding:9px 12px;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:8px;font-size:14px;box-sizing:border-box;font-family:inherit">
+            <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('g-new-pw', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+          <div class="pw-strength" id="g-new-pw-strength" style="display:none"><div class="pw-strength-bar"><div class="pw-strength-fill"></div></div><span class="pw-strength-label">Weak</span></div>
+        </div>
+
+        <div style="margin-bottom:16px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">Confirm new password</label>
+          <div class="pw-wrap">
+            <input id="g-confirm-pw" type="password" placeholder="Confirm new password" style="width:100%;padding:9px 12px;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:8px;font-size:14px;box-sizing:border-box;font-family:inherit">
+            <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('g-confirm-pw', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+        </div>
+
+        <div id="g-pw-error" style="color:var(--red);font-size:13px;margin-bottom:10px;display:none"></div>
+        <div id="g-pw-success" style="color:#16a34a;font-size:13px;margin-bottom:10px;display:none">✓ Password updated successfully</div>
+        <button class="btn btn-primary" onclick="googleChangePassword()">Update password</button>
+      </div>
+    </div>
+  </div>
+
 </div></div>
 
 <!-- (Old standalone AI modal removed in v11 — AI now lives inside the big product/campaign modals with session caching.) -->
@@ -505,10 +601,10 @@ async function googleLogout() {
 
 function isManager() {
   if (!currentUser) return false;
-  const role = currentUser.role;
+  const role = (currentUser.role || '').toLowerCase();
   const dept = (currentUser.department || '').toLowerCase();
   const name = (currentUser.name || currentUser.username || '').toLowerCase();
-  return role === 'manager' || role === 'admin' || dept === 'manager' || ['bobby', 'satyam'].includes(name);
+  return role === 'manager' || role === 'admin' || role === 'owner' || dept === 'manager' || ['bobby', 'satyam'].includes(name);
 }
 
 // ─── Page navigation ─────────────────────────────────────────────────────
@@ -517,12 +613,13 @@ function showPage(id, btn) {
   document.getElementById('page-' + id).classList.add('active');
   document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
   if (btn) btn.classList.add('active');
-  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log', landing: 'Landing Page AI — Daily Critique', tasks: 'Tasks' };
+  const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log', landing: 'Landing Page AI — Daily Critique', tasks: 'Tasks', 'my-profile': 'My profile' };
   document.getElementById('page-title').textContent = titles[id] || id;
   if (id === 'campaigns') renderCampaignsPage();
   if (id === 'activity') loadActivity();
   if (id === 'landing') renderLandingPage();
   if (id === 'tasks') loadGoogleTasks();
+  if (id === 'my-profile') loadMyProfile();
   // Refresh data freshness banner whenever we navigate to a page that has one
   if (id === 'products' || id === 'campaigns') updateDataFreshnessBanner();
 }
@@ -3037,6 +3134,102 @@ async function removeCampaignPermanent(campaignId, campaignName) {
     }
     refreshAll();
   } catch(e) { alert('Remove failed: ' + e.message); }
+}
+
+// ─── My Profile + password helpers (r6) ─────────────────────────────────
+function togglePwVisibility(inputId, btn) {
+  var inp = document.getElementById(inputId);
+  if (!inp) return;
+  var isPassword = inp.type === 'password';
+  inp.type = isPassword ? 'text' : 'password';
+  btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+  btn.innerHTML = isPassword
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+}
+
+function updatePwStrength(inputId, indicatorId) {
+  var inp = document.getElementById(inputId);
+  var ind = document.getElementById(indicatorId);
+  if (!inp || !ind) return;
+  var pw = inp.value || '';
+  if (pw.length === 0) { ind.style.display = 'none'; return; }
+  ind.style.display = 'flex';
+  var score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (/[a-z]/.test(pw)) score++;
+  if (/[A-Z]/.test(pw)) score++;
+  if (/[0-9]/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  var pct, color, label;
+  if (score <= 2) { pct = 25; color = '#ef4444'; label = 'Weak'; }
+  else if (score <= 3) { pct = 50; color = '#f59e0b'; label = 'Fair'; }
+  else if (score <= 4) { pct = 75; color = '#22c55e'; label = 'Good'; }
+  else { pct = 100; color = '#16a34a'; label = 'Strong'; }
+  var fill = ind.querySelector('.pw-strength-fill');
+  var lbl = ind.querySelector('.pw-strength-label');
+  if (fill) { fill.style.width = pct + '%'; fill.style.background = color; }
+  if (lbl) { lbl.textContent = label; lbl.style.color = color; }
+}
+
+function loadMyProfile() {
+  var infoEl = document.getElementById('my-profile-info');
+  if (!infoEl || !currentUser) return;
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  var deptLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
+  var role = (currentUser.role || '').toLowerCase();
+  var roleLabel = role === 'owner' ? 'Owner' : role === 'manager' ? 'Director' : (deptLabels[currentUser.department] || (currentUser.role || 'Agent'));
+  infoEl.innerHTML =
+    '<div style="font-weight:600;font-size:15px;margin-bottom:6px">' + esc(currentUser.name) + '</div>' +
+    '<div style="color:var(--text2);margin-bottom:4px">' + esc(currentUser.email || '—') + '</div>' +
+    '<div style="color:var(--text2)">' + esc(deptLabels[currentUser.department] || currentUser.department) + ' · ' + esc(roleLabel) + '</div>';
+}
+
+async function googleChangePassword() {
+  var cur = document.getElementById('g-current-password').value;
+  var pw = document.getElementById('g-new-pw').value;
+  var conf = document.getElementById('g-confirm-pw').value;
+  var errEl = document.getElementById('g-pw-error');
+  var okEl = document.getElementById('g-pw-success');
+  errEl.style.display = 'none';
+  okEl.style.display = 'none';
+  if (!cur || !pw || !conf) {
+    errEl.textContent = 'All three fields are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (pw !== conf) {
+    errEl.textContent = 'New passwords do not match.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (pw.length < 6) {
+    errEl.textContent = 'New password must be at least 6 characters.';
+    errEl.style.display = 'block';
+    return;
+  }
+  try {
+    var res = await authedFetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword: cur, newPassword: pw })
+    });
+    var data = await res.json();
+    if (data.success) {
+      okEl.style.display = 'block';
+      document.getElementById('g-current-password').value = '';
+      document.getElementById('g-new-pw').value = '';
+      document.getElementById('g-confirm-pw').value = '';
+      document.getElementById('g-new-pw-strength').style.display = 'none';
+    } else {
+      errEl.textContent = data.error || 'Password update failed.';
+      errEl.style.display = 'block';
+    }
+  } catch(e) {
+    errEl.textContent = 'Network error: ' + e.message;
+    errEl.style.display = 'block';
+  }
 }
 
 // ─── Boot ────────────────────────────────────────────────────────────────

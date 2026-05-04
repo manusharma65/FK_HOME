@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r5 (production base + Switch to Google + dept routing) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r6 (shell launcher + owner role + delete users + audit log + password eye + FK Sports Google) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -245,6 +245,51 @@ tbody tr:hover { background: var(--surface2); }
   .nav-item span:not(.nav-badge) { display: none; }
   .nav-item svg { width: 18px; height: 18px; }
 }
+/* ── Password eye toggle + strength bar (r6) ──────────────────────────── */
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 38px !important; }
+.pw-eye {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #888;
+  border-radius: 5px;
+  transition: background 0.15s, color 0.15s;
+}
+.pw-eye:hover { background: #f3f3f3; color: #444; }
+.pw-eye:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pw-eye svg { width: 16px; height: 16px; }
+
+.pw-strength {
+  margin-top: 6px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.pw-strength-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+.pw-strength-fill {
+  height: 100%;
+  background: #ef4444;
+  width: 0%;
+  transition: width 0.2s, background 0.2s;
+}
+.pw-strength-label { font-size: 11px; color: #888; min-width: 60px; }
 </style>
 </head>
 <body>
@@ -737,15 +782,25 @@ tbody tr:hover { background: var(--surface2); }
           <div style="font-size:15px;font-weight:600;margin-bottom:14px">Change Password</div>
           <div style="margin-bottom:12px">
             <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Current Password</label>
-            <input id="current-password" type="password" placeholder="Enter current password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
+            <div class="pw-wrap">
+              <input id="current-password" type="password" placeholder="Enter current password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
+              <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('current-password', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            </div>
           </div>
           <div style="margin-bottom:12px">
             <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">New Password</label>
-            <input id="new-pw" type="password" placeholder="Enter new password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
+            <div class="pw-wrap">
+              <input id="new-pw" type="password" placeholder="Enter new password" oninput="updatePwStrength('new-pw','new-pw-strength')" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
+              <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('new-pw', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            </div>
+            <div class="pw-strength" id="new-pw-strength" style="display:none"><div class="pw-strength-bar"><div class="pw-strength-fill"></div></div><span class="pw-strength-label">Weak</span></div>
           </div>
           <div style="margin-bottom:16px">
             <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Confirm New Password</label>
-            <input id="confirm-pw" type="password" placeholder="Confirm new password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
+            <div class="pw-wrap">
+              <input id="confirm-pw" type="password" placeholder="Confirm new password" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">
+              <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('confirm-pw', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            </div>
           </div>
           <div id="pw-error" style="color:#e53e3e;font-size:13px;margin-bottom:10px;display:none"></div>
           <div id="pw-success" style="color:var(--green);font-size:13px;margin-bottom:10px;display:none">✓ Password updated successfully</div>
@@ -774,13 +829,17 @@ tbody tr:hover { background: var(--surface2); }
             </div>
             <div>
               <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Password</label>
-              <input id="new-password" class="input-sm" placeholder="Set a password" type="password" style="width:100%;padding:9px 12px;font-size:14px">
+              <div class="pw-wrap">
+                <input id="new-password" class="input-sm" placeholder="Set a password" type="password" oninput="updatePwStrength('new-password','new-password-strength')" style="width:100%;padding:9px 12px;font-size:14px">
+                <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('new-password', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              </div>
+              <div class="pw-strength" id="new-password-strength" style="display:none"><div class="pw-strength-bar"><div class="pw-strength-fill"></div></div><span class="pw-strength-label">Weak</span></div>
             </div>
             <div>
               <label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">Department</label>
               <select id="new-department" class="filter-select" style="width:100%;font-size:14px;padding:9px 12px">
                 <option value="amazon">Amazon Advertising</option>
-                <option value="google">Google Advertising</option>
+                <option value="google">FK Sports Google</option>
                 <option value="supply_chain">Supply Chain & Procurement</option>
                 <option value="logistics">Logistics & Fulfilment</option>
                 <option value="manager">Manager</option>
@@ -858,21 +917,28 @@ async function checkAuth() {
 
     const userEl = document.getElementById('user-info');
     // Format department label with proper capitalisation
-    const deptDisplayLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Director' };
+    const deptDisplayLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Director' };
     const deptDisplay = deptDisplayLabels[data.department] || data.department.charAt(0).toUpperCase() + data.department.slice(1);
-    const roleDisplay = data.role === 'manager' ? 'Director' : data.department === 'amazon' ? 'Amazon Advertising' : data.department === 'google' ? 'Google Advertising' : data.department === 'supply_chain' ? 'Supply Chain & Procurement' : data.department === 'logistics' ? 'Logistics & Fulfilment' : data.role.charAt(0).toUpperCase() + data.role.slice(1);
+    const role = (data.role || '').toLowerCase();
+    const isManagerLevel = role === 'manager' || role === 'owner' || data.department === 'manager';
+    const roleDisplay = role === 'owner' ? 'Owner' : role === 'manager' ? 'Director' : data.department === 'amazon' ? 'Amazon Advertising' : data.department === 'google' ? 'FK Sports Google' : data.department === 'supply_chain' ? 'Supply Chain & Procurement' : data.department === 'logistics' ? 'Logistics & Fulfilment' : (data.role||'').charAt(0).toUpperCase() + (data.role||'').slice(1);
 
-    // Switch-to-Google button — only managers see this (so they can flip between dashboards)
-    const switchBtn = data.role === 'manager'
-      ? '<button onclick="window.location.href=\'/google.html\'" style="background:#4285F4;border:1px solid #3367D6;cursor:pointer;font-size:13px;font-weight:600;color:#fff;padding:6px 14px;border-radius:8px;font-family:inherit;margin-right:8px">Switch to Google</button>'
-      : '';
+    // Manager-level header buttons:
+    //  • "Back to overview" — go back to the launcher / shell
+    //  • "Switch to Google" — flip to FK Sports Google dashboard
+    let managerBtns = '';
+    if (isManagerLevel) {
+      managerBtns =
+        '<button onclick="window.location.href=\'/shell.html\'" style="background:var(--surface2);border:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);padding:6px 14px;border-radius:8px;font-family:inherit;margin-right:8px">← Overview</button>' +
+        '<button onclick="window.location.href=\'/google.html\'" style="background:#4285F4;border:1px solid #3367D6;cursor:pointer;font-size:13px;font-weight:600;color:#fff;padding:6px 14px;border-radius:8px;font-family:inherit;margin-right:8px">Switch to FK Sports Google</button>';
+    }
 
     if (userEl) userEl.innerHTML =
       '<div style="display:flex;flex-direction:column;align-items:flex-end;margin-right:8px">' +
         '<span style="font-size:15px;font-weight:700;color:var(--text)">' + escHtml(data.name) + '</span>' +
         '<span style="font-size:12px;font-weight:600;color:var(--accent)">' + escHtml(roleDisplay) + '</span>' +
       '</div>' +
-      switchBtn +
+      managerBtns +
       '<button onclick="doLogout()" style="background:var(--surface2);border:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);padding:6px 14px;border-radius:8px;font-family:inherit">Sign Out</button>';
     return true;
   } catch(e) { window.location.href = '/login.html'; return false; }
@@ -2803,7 +2869,7 @@ function resetSettings() {
 function loadMyProfile() {
   const infoEl = document.getElementById('my-profile-info');
   if (!infoEl || !currentUser) return;
-  const deptLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
+  const deptLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
   infoEl.innerHTML =
     '<div style="font-weight:600;font-size:15px;margin-bottom:6px">' + escHtml(currentUser.name) + '</div>' +
     '<div style="color:#888;margin-bottom:4px">' + escHtml(currentUser.email) + '</div>' +
@@ -2849,8 +2915,19 @@ async function loadUsers() {
     const data = await res.json();
     const container = document.getElementById('users-list');
     if (!container) return;
-    const deptLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
+    const deptLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
+    const isOwner = currentUser && (currentUser.role || '').toLowerCase() === 'owner';
     container.innerHTML = (data.users||[]).map(function(u) {
+      // Owner sees: Edit + Delete (or Restore if already deactivated)
+      // Manager sees: Edit only
+      let actionBtns = '<button class="btn btn-ghost" style="font-size:12px" onclick="showEditUser(' + u.id + ',&quot;' + escHtml(u.name) + '&quot;,&quot;' + escHtml(u.email) + '&quot;,&quot;' + u.department + '&quot;,' + u.is_active + ')">Edit</button>';
+      if (isOwner && u.email !== (currentUser.email || '').toLowerCase()) {
+        if (u.is_active) {
+          actionBtns += ' <button class="btn btn-ghost" style="font-size:12px;color:#dc2626;border-color:#fca5a5" onclick="deactivateUser(' + u.id + ',&quot;' + escHtml(u.name) + '&quot;)">Delete</button>';
+        } else {
+          actionBtns += ' <button class="btn btn-ghost" style="font-size:12px;color:#7c2d12;border-color:#fed7aa" onclick="permanentlyDeleteUser(' + u.id + ',&quot;' + escHtml(u.name) + '&quot;)">Permanently delete</button>';
+        }
+      }
       return '<div style="padding:14px 0;border-bottom:1px solid var(--border)">' +
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
           '<div style="width:36px;height:36px;border-radius:50%;background:var(--accent);color:white;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0">' + escHtml(u.name[0]||'?') + '</div>' +
@@ -2858,18 +2935,55 @@ async function loadUsers() {
             '<div style="font-size:14px;font-weight:600">' + escHtml(u.name) + ' <span style="font-size:12px;color:#888;font-weight:400">' + escHtml(u.email) + '</span></div>' +
             '<div style="font-size:12px;color:#888;margin-top:2px">' + escHtml(deptLabels[u.department]||u.department) + ' · ' + (u.is_active ? '<span style="color:var(--green)">Active</span>' : '<span style="color:var(--red)">Inactive</span>') + ' · Last login: ' + (u.last_login ? new Date(u.last_login).toLocaleDateString('en-GB') : 'Never') + '</div>' +
           '</div>' +
-          '<button class="btn btn-ghost" style="font-size:12px" onclick="showEditUser(' + u.id + ',&quot;' + escHtml(u.name) + '&quot;,&quot;' + escHtml(u.email) + '&quot;,&quot;' + u.department + '&quot;,' + u.is_active + ')">Edit</button>' +
+          actionBtns +
         '</div>' +
       '</div>';
     }).join('') || '<div style="color:#aaa;font-size:13px;padding:16px 0">No users yet — add your first team member below.</div>';
   } catch(e) { console.error('Load users error:', e); }
 }
 
+// Soft delete — deactivate user (reversible)
+async function deactivateUser(userId, userName) {
+  if (!confirm('Deactivate user "' + userName + '"?\n\nThey will lose access immediately and any active sessions will be killed. This is reversible — you can re-enable them later by editing their account.')) return;
+  try {
+    const res = await fetch('/api/auth/users/' + userId + '/deactivate', { method: 'POST', headers: getAuthHeaders() });
+    const data = await res.json();
+    if (data.success) {
+      await loadUsers();
+    } else {
+      alert('Could not deactivate user: ' + (data.error || 'Unknown error'));
+    }
+  } catch(e) { alert('Network error: ' + e.message); }
+}
+
+// Hard delete — destroys row permanently. Two-step confirmation.
+async function permanentlyDeleteUser(userId, userName) {
+  if (!confirm('PERMANENTLY DELETE "' + userName + '"?\n\nThis will remove the user from the database forever. Their history will be preserved in the activity log but their account row will be gone.\n\nThis cannot be undone.')) return;
+  const typed = prompt('Type DELETE (in capitals) to confirm permanent deletion of "' + userName + '":');
+  if (typed !== 'DELETE') {
+    alert('Permanent deletion cancelled — confirmation text did not match.');
+    return;
+  }
+  try {
+    const res = await fetch('/api/auth/users/' + userId, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ confirm: 'DELETE' })
+    });
+    const data = await res.json();
+    if (data.success) {
+      await loadUsers();
+    } else {
+      alert('Could not delete user: ' + (data.error || 'Unknown error'));
+    }
+  } catch(e) { alert('Network error: ' + e.message); }
+}
+
 function showEditUser(userId, name, email, department, isActive) {
   const existing = document.getElementById('edit-user-modal');
   if (existing) existing.remove();
   const deptOptions = ['amazon','google','supply_chain','logistics','manager'];
-  const deptLabels = { amazon: 'Amazon Advertising', google: 'Google Advertising', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
+  const deptLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain & Procurement', logistics: 'Logistics & Fulfilment', manager: 'Manager' };
   const overlay = document.createElement('div');
   overlay.id = 'edit-user-modal';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
@@ -2885,7 +2999,11 @@ function showEditUser(userId, name, email, department, isActive) {
       deptOptions.map(function(d){ return '<option value="' + d + '"' + (d===department?' selected':'') + '>' + deptLabels[d] + '</option>'; }).join('') +
       '</select></div>' +
       '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#555;display:block;margin-bottom:4px">New Password <span style="font-weight:400;color:#aaa">(leave blank to keep current)</span></label>' +
-      '<input id="edit-password" type="password" placeholder="Enter new password to change it" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box"></div>' +
+      '<div class="pw-wrap">' +
+        '<input id="edit-password" type="password" placeholder="Enter new password to change it" oninput="updatePwStrength(&quot;edit-password&quot;,&quot;edit-password-strength&quot;)" style="width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;box-sizing:border-box">' +
+        '<button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility(&quot;edit-password&quot;, this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>' +
+      '</div>' +
+      '<div class="pw-strength" id="edit-password-strength" style="display:none"><div class="pw-strength-bar"><div class="pw-strength-fill"></div></div><span class="pw-strength-label">Weak</span></div></div>' +
       '<div style="margin-bottom:16px;display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="edit-active"' + (isActive?' checked':'') + ' style="width:16px;height:16px">' +
       '<label for="edit-active" style="font-size:14px">Account active</label></div>' +
@@ -2971,6 +3089,46 @@ async function init() {
   try { await fetchData(); } catch(e) { console.error('Init error:', e); setTimeout(init, 3000); }
   loadSettings();
 }
+
+// ─── Password eye toggle + strength helpers (r6) ────────────────────────
+function togglePwVisibility(inputId, btn) {
+  var inp = document.getElementById(inputId);
+  if (!inp) return;
+  var isPassword = inp.type === 'password';
+  inp.type = isPassword ? 'text' : 'password';
+  btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+  btn.innerHTML = isPassword
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+}
+
+function updatePwStrength(inputId, indicatorId) {
+  var inp = document.getElementById(inputId);
+  var ind = document.getElementById(indicatorId);
+  if (!inp || !ind) return;
+  var pw = inp.value || '';
+  if (pw.length === 0) { ind.style.display = 'none'; return; }
+  ind.style.display = 'flex';
+  // Score: length, lowercase, uppercase, number, symbol
+  var score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (/[a-z]/.test(pw)) score++;
+  if (/[A-Z]/.test(pw)) score++;
+  if (/[0-9]/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  // Weak / Fair / Good / Strong
+  var pct, color, label;
+  if (score <= 2) { pct = 25; color = '#ef4444'; label = 'Weak'; }
+  else if (score <= 3) { pct = 50; color = '#f59e0b'; label = 'Fair'; }
+  else if (score <= 4) { pct = 75; color = '#22c55e'; label = 'Good'; }
+  else { pct = 100; color = '#16a34a'; label = 'Strong'; }
+  var fill = ind.querySelector('.pw-strength-fill');
+  var lbl = ind.querySelector('.pw-strength-label');
+  if (fill) { fill.style.width = pct + '%'; fill.style.background = color; }
+  if (lbl) { lbl.textContent = label; lbl.style.color = color; }
+}
+
 init();
 setInterval(fetchData, 5 * 60 * 1000);
 

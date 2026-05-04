@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- CampaignPulse login — deploy 2026-05-04 r6 (eye toggle + role-based routing) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -23,102 +24,73 @@
     max-width: 400px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.3);
   }
-  .logo {
-    text-align: center;
-    margin-bottom: 32px;
-  }
+  .logo { text-align: center; margin-bottom: 32px; }
   .logo-icon {
-    width: 60px;
-    height: 60px;
+    width: 60px; height: 60px;
     background: linear-gradient(135deg, #e8391d, #ff6b4a);
     border-radius: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: flex; align-items: center; justify-content: center;
     font-size: 28px;
     margin: 0 auto 12px;
   }
-  .logo-title {
-    font-size: 22px;
-    font-weight: 800;
-    color: #1a1a2e;
-    letter-spacing: -0.5px;
-  }
-  .logo-sub {
-    font-size: 13px;
-    color: #888;
-    margin-top: 4px;
-  }
-  .form-group {
-    margin-bottom: 18px;
-  }
+  .logo-title { font-size: 22px; font-weight: 800; color: #1a1a2e; letter-spacing: -0.5px; }
+  .logo-sub { font-size: 13px; color: #888; margin-top: 4px; }
+  .form-group { margin-bottom: 18px; }
   label {
-    display: block;
-    font-size: 13px;
-    font-weight: 600;
-    color: #444;
-    margin-bottom: 6px;
+    display: block; font-size: 13px; font-weight: 600;
+    color: #444; margin-bottom: 6px;
   }
   input {
-    width: 100%;
-    padding: 14px 16px;
-    border: 1.5px solid #e0e0e0;
-    border-radius: 10px;
-    font-size: 16px;
-    font-family: inherit;
-    transition: border-color 0.2s;
-    outline: none;
+    width: 100%; padding: 14px 16px;
+    border: 1.5px solid #e0e0e0; border-radius: 10px;
+    font-size: 16px; font-family: inherit;
+    transition: border-color 0.2s; outline: none;
     -webkit-appearance: none;
   }
-  input:focus {
-    border-color: #e8391d;
+  input:focus { border-color: #e8391d; }
+  /* Password input wrapper with eye toggle button */
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 44px; }
+  .pw-eye {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #888;
+    border-radius: 6px;
+    transition: background 0.15s, color 0.15s;
   }
+  .pw-eye:hover { background: #f3f3f3; color: #444; }
+  .pw-eye:focus-visible { outline: 2px solid #e8391d; outline-offset: 1px; }
+  .pw-eye svg { width: 18px; height: 18px; }
+
   .error {
-    background: #fff5f5;
-    border: 1px solid #feb2b2;
-    color: #c53030;
-    padding: 12px 14px;
-    border-radius: 8px;
-    font-size: 13px;
-    margin-bottom: 16px;
+    background: #fff5f5; border: 1px solid #feb2b2; color: #c53030;
+    padding: 12px 14px; border-radius: 8px;
+    font-size: 13px; margin-bottom: 16px;
     display: none;
   }
   .btn-login {
-    width: 100%;
-    padding: 15px;
+    width: 100%; padding: 15px;
     background: linear-gradient(135deg, #e8391d, #ff6b4a);
-    color: white;
-    border: none;
-    border-radius: 10px;
-    font-size: 16px;
-    font-weight: 700;
-    cursor: pointer;
-    font-family: inherit;
+    color: white; border: none; border-radius: 10px;
+    font-size: 16px; font-weight: 700;
+    cursor: pointer; font-family: inherit;
     transition: opacity 0.2s, transform 0.1s;
     margin-top: 4px;
   }
-  .btn-login:active {
-    transform: scale(0.98);
-    opacity: 0.9;
-  }
-  .btn-login:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .footer {
-    text-align: center;
-    margin-top: 24px;
-    font-size: 12px;
-    color: #aaa;
-  }
-  .dept-badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-    margin-top: 8px;
-  }
+  .btn-login:active { transform: scale(0.98); opacity: 0.9; }
+  .btn-login:disabled { opacity: 0.6; cursor: not-allowed; }
+  .footer { text-align: center; margin-top: 24px; font-size: 12px; color: #aaa; }
 </style>
 </head>
 <body>
@@ -137,7 +109,15 @@
   </div>
   <div class="form-group">
     <label>Password</label>
-    <input type="password" id="password" placeholder="Enter your password" autocomplete="current-password">
+    <div class="pw-wrap">
+      <input type="password" id="password" placeholder="Enter your password" autocomplete="current-password">
+      <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('password', this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>
+    </div>
   </div>
 
   <button class="btn-login" id="login-btn" onclick="doLogin()">Sign in</button>
@@ -146,17 +126,46 @@
 </div>
 
 <script>
-  // If already logged in, redirect to dashboard
-  const savedToken = localStorage.getItem('cp_token');
-  if (savedToken) {
+  // Eye toggle for password fields. Re-usable for any input by ID.
+  function togglePwVisibility(inputId, btn) {
+    var inp = document.getElementById(inputId);
+    if (!inp) return;
+    var isPassword = inp.type === 'password';
+    inp.type = isPassword ? 'text' : 'password';
+    btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+    // Swap icon: open eye when password visible, slashed eye when hidden
+    btn.innerHTML = isPassword
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>' +
+        '<line x1="1" y1="1" x2="23" y2="23"/>' +
+        '</svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+        '<circle cx="12" cy="12" r="3"/>' +
+        '</svg>';
+  }
+
+  // Decide where to send a logged-in user based on role + department.
+  function destinationFor(user) {
+    if (!user) return '/index.html';
+    var role = (user.role || '').toLowerCase();
+    var dept = (user.department || '').toLowerCase();
+    if (role === 'owner' || role === 'manager' || dept === 'manager') return '/shell.html';
+    if (dept === 'google') return '/google.html';
+    return '/index.html';
+  }
+
+  // If already logged in, route them where they belong
+  (function() {
+    var savedToken = localStorage.getItem('cp_token');
+    if (!savedToken) return;
     fetch('/api/auth/me', { headers: { 'x-auth-token': savedToken } })
       .then(function(r){ return r.json(); })
       .then(function(d){
-        if (d.name) window.location.href = '/';
+        if (d && d.name) window.location.replace(destinationFor(d));
       }).catch(function(){});
-  }
+  })();
 
-  // Allow Enter key to submit
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') doLogin();
   });
@@ -187,7 +196,7 @@
       if (data.success && data.token) {
         localStorage.setItem('cp_token', data.token);
         localStorage.setItem('cp_user', JSON.stringify({ name: data.name, department: data.department, role: data.role, email: data.email }));
-        window.location.href = '/';
+        window.location.replace(destinationFor(data));
       } else {
         errEl.textContent = data.error || 'Login failed. Please try again.';
         errEl.style.display = 'block';
