@@ -289,6 +289,7 @@ table.activity tr:last-child td { border-bottom: none; }
 
   <!-- ALL PRODUCTS (Shopify-led) and ADVERTISED (Google-led) share the products page -->
   <div class="page" id="page-products">
+    <div class="data-freshness-banner" data-banner-page="products" style="display:none"></div>
     <div class="view-toggle">
       <button class="active" onclick="setView('shopify',this)">Shopify view (all 90 products)</button>
       <button onclick="setView('google',this)">Google view (campaigns)</button>
@@ -299,6 +300,7 @@ table.activity tr:last-child td { border-bottom: none; }
 
   <!-- ADVERTISED (campaigns view as standalone page too, for sidebar nav) -->
   <div class="page" id="page-campaigns">
+    <div class="data-freshness-banner" data-banner-page="campaigns" style="display:none"></div>
     <div class="section-header">
       <div>
         <div class="section-title">All Google Ads campaigns</div>
@@ -501,7 +503,45 @@ function showPage(id, btn) {
   if (id === 'activity') loadActivity();
   if (id === 'landing') renderLandingPage();
   if (id === 'tasks') loadGoogleTasks();
+  // Refresh data freshness banner whenever we navigate to a page that has one
+  if (id === 'products' || id === 'campaigns') updateDataFreshnessBanner();
 }
+
+// ─── Data freshness banner ────────────────────────────────────────────────
+// Polls /api/google/data-freshness — if the Google Ads script hasn't pushed data
+// in 30+ hours, show a red banner on Products and Campaigns views.
+async function updateDataFreshnessBanner() {
+  try {
+    const r = await authedFetch('/api/google/data-freshness');
+    const j = await r.json();
+    const banners = document.querySelectorAll('.data-freshness-banner');
+
+    if (!j.stale && !j.neverReceived) {
+      banners.forEach(function(b){ b.style.display = 'none'; b.innerHTML = ''; });
+      return;
+    }
+
+    let html;
+    if (j.neverReceived) {
+      html = '<strong>⚠ No Google Ads data has ever been received.</strong> The script in your Google Ads account hasn\'t pushed data to this dashboard yet. Check that the CampaignPulse script is scheduled to run daily.';
+    } else {
+      const lastDate = new Date(j.lastReceivedAt);
+      const lastDateStr = lastDate.toLocaleDateString('en-GB') + ' at ' + lastDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      const ageH = Math.round(j.ageHours);
+      html = '<strong>⚠ Google Ads data is ' + ageH + ' hours old.</strong> The CampaignPulse script in Google Ads hasn\'t pushed an update since ' + lastDateStr + ' (UK time). Check the script in Google Ads → Tools → Scripts. Numbers below may be stale.';
+    }
+
+    banners.forEach(function(b) {
+      b.innerHTML = html;
+      b.style.cssText = 'display:block;background:#fee2e2;border:1px solid #dc2626;border-left:5px solid #dc2626;color:#991b1b;padding:14px 18px;border-radius:8px;margin-bottom:14px;font-size:13px;line-height:1.5';
+    });
+  } catch(e) {
+    // Non-fatal — if endpoint fails, just don't show banner
+  }
+}
+
+// On initial dashboard load, also check freshness so banner shows if user lands on products/campaigns
+setTimeout(function(){ updateDataFreshnessBanner(); }, 1500);
 
 // ─── Format helpers ──────────────────────────────────────────────────────
 function fmtCurrency(n) { if (n == null) return '—'; n = Number(n); return '£' + n.toLocaleString('en-GB', {minimumFractionDigits: n < 100 ? 2 : 0, maximumFractionDigits: 2}); }

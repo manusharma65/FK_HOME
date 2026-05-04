@@ -97,8 +97,10 @@ let state = {
 // ── Google Ads State ──────────────────────────────────────────────────────
 let googleState = {
   campaigns: [],
+  products: [],
   alerts: [],
-  lastSync: null,
+  lastSync: null,           // human-readable string like "08:23"
+  lastReceivedAt: null,     // ISO timestamp from server clock when last ingest succeeded
   error: null
 };
 
@@ -781,6 +783,29 @@ async function initTasksTable() {
       console.log('[INIT] product_page_cache table ready');
     } catch (e) {
       console.error('[INIT] product_page_cache error: ' + e.message);
+    }
+
+    // google_state_snapshots — persists the result of each Google Ads script ingest.
+    // Why: googleState lives in process memory only, so any redeploy/restart wipes data
+    // until the next 8am cron runs. With this table, the server boots and immediately
+    // hydrates googleState from the most recent snapshot. Also keeps 30 days of history
+    // for trend analysis later.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_state_snapshots (
+          id SERIAL PRIMARY KEY,
+          received_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          campaigns JSONB,
+          products JSONB,
+          campaigns_count INTEGER DEFAULT 0,
+          products_count INTEGER DEFAULT 0,
+          last_sync_label TEXT
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gss_received_at ON google_state_snapshots(received_at DESC)");
+      console.log('[INIT] google_state_snapshots table ready');
+    } catch (e) {
+      console.error('[INIT] google_state_snapshots error: ' + e.message);
     }
 
     try {
@@ -2424,9 +2449,25 @@ app.post('/api/google/ingest', async function(req, res) {
       return Object.assign({}, p, { agentName: null, department: 'google' });
     });
     googleState.lastSync = timeStr;
+    googleState.lastReceivedAt = now.toISOString();
     googleState.error = null;
     googleState.lastSnapshot = { campaigns, products, lastSync: timeStr };
     console.log("Google ingest received: " + campaigns.length + " campaigns, " + products.length + " products");
+
+    // Persist this ingest to DB so a redeploy doesn't lose data.
+    // Also prune snapshots older than 30 days to keep the table small.
+    if (db) {
+      try {
+        await db.query(
+          "INSERT INTO google_state_snapshots (received_at, campaigns, products, campaigns_count, products_count, last_sync_label) " +
+          "VALUES ($1, $2, $3, $4, $5, $6)",
+          [now.toISOString(), JSON.stringify(googleState.campaigns), JSON.stringify(googleState.products), campaigns.length, products.length, timeStr]
+        );
+        await db.query("DELETE FROM google_state_snapshots WHERE received_at < NOW() - INTERVAL '30 days'");
+      } catch(e) {
+        console.error('[INGEST] snapshot save error (non-fatal): ' + e.message);
+      }
+    }
 
     if (!alertsSuppressed) {
       for (const c of googleState.campaigns) {
@@ -2462,6 +2503,26 @@ app.post('/api/google/ingest', async function(req, res) {
     console.error('Google ingest error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Returns freshness/staleness info for the Google Ads ingest. Used by the dashboard
+// to show a red banner if the script hasn't pushed data in > 30 hours.
+app.get('/api/google/data-freshness', function(req, res) {
+  const lastReceivedAt = googleState.lastReceivedAt;
+  if (!lastReceivedAt) {
+    return res.json({ stale: true, neverReceived: true, ageHours: null, lastReceivedAt: null });
+  }
+  const ageMs = Date.now() - new Date(lastReceivedAt).getTime();
+  const ageHours = ageMs / 36e5;
+  const STALE_THRESHOLD_HOURS = 30;
+  res.json({
+    stale: ageHours > STALE_THRESHOLD_HOURS,
+    neverReceived: false,
+    ageHours: Math.round(ageHours * 10) / 10,
+    lastReceivedAt: lastReceivedAt,
+    lastSync: googleState.lastSync,
+    thresholdHours: STALE_THRESHOLD_HOURS
+  });
 });
 
 // ── Google Ads Dashboard Endpoint ─────────────────────────────────────────
@@ -4995,6 +5056,27 @@ app.listen(PORT, '0.0.0.0', async function() {
       if (settings.budgetLowPct) process.env.BUDGET_LOW_PERCENT = String(settings.budgetLowPct);
       if (Object.keys(settings).length) console.log('Settings loaded from DB: ' + JSON.stringify(settings));
     } catch(e) { console.error('Settings load error: ' + e.message); }
+
+    // Hydrate googleState from the most recent snapshot in DB.
+    // Prevents the "dashboard goes blank after every deploy" problem — agents see
+    // last-known data immediately on boot, regardless of whether the script has
+    // run since the redeploy.
+    try {
+      const snap = await db.query("SELECT received_at, campaigns, products, last_sync_label, campaigns_count, products_count FROM google_state_snapshots ORDER BY received_at DESC LIMIT 1");
+      if (snap.rows.length) {
+        const r = snap.rows[0];
+        googleState.campaigns = r.campaigns || [];
+        googleState.products = r.products || [];
+        googleState.lastSync = r.last_sync_label;
+        googleState.lastReceivedAt = r.received_at ? new Date(r.received_at).toISOString() : null;
+        const ageHours = ((Date.now() - new Date(r.received_at).getTime()) / 36e5).toFixed(1);
+        console.log('[GOOGLE-STATE] hydrated from DB: ' + (r.campaigns_count || 0) + ' campaigns, ' + (r.products_count || 0) + ' products, ' + ageHours + 'h old');
+      } else {
+        console.log('[GOOGLE-STATE] no snapshots in DB yet — waiting for first ingest');
+      }
+    } catch(e) {
+      console.error('[GOOGLE-STATE] hydrate error: ' + e.message);
+    }
   }
   setTimeout(function() {
     syncCampaigns().catch(function(err) { console.error('Initial sync failed:', err.message); });
