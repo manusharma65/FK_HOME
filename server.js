@@ -3798,6 +3798,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
         campaignName: r.campaignName,
         campaignType: r.campaignType,
         totalSpend: 0, totalSales: 0, totalImpressions: 0, totalClicks: 0, totalConversions: 0,
+        wastedSpend: 0,           // spend on rows that produced £0 sales (clear money loss)
         urgentCount: 0, productCount: 0,
         products: []
       };
@@ -3808,6 +3809,11 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
     c.totalImpressions += r.impressions || 0;
     c.totalClicks += r.clicks || 0;
     c.totalConversions += r.conversions || 0;
+    // Wasted spend = money spent on a product/keyword that returned £0 sales
+    // (with a real spend > 0 — ignore noise at < 50p)
+    if ((r.spend || 0) > 0.5 && (!r.sales || r.sales === 0)) {
+      c.wastedSpend += r.spend || 0;
+    }
     c.productCount += 1;
     if (r.priority === 1) c.urgentCount += 1;
     c.products.push(r);
@@ -3816,6 +3822,7 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
   Object.values(byCampaign).forEach(function(c) {
     c.totalSpend = Math.round(c.totalSpend * 100) / 100;
     c.totalSales = Math.round(c.totalSales * 100) / 100;
+    c.wastedSpend = Math.round(c.wastedSpend * 100) / 100;
     c.acos = c.totalSales > 0 ? Math.round((c.totalSpend / c.totalSales) * 1000) / 10 : 0;
     c.costPerConv = c.totalConversions > 0 ? Math.round((c.totalSpend / c.totalConversions) * 100) / 100 : 0;
     c.products.sort(function(a, b) {
@@ -4524,8 +4531,17 @@ function buildLandingPageDossier(shopifyProduct) {
 
 function buildCritiquePrompt(dossier, pageSummary) {
   return [
-    "You are a senior conversion-rate optimisation analyst for an e-commerce store on Shopify.",
-    "Below is a structured dossier for ONE product, including its real performance data and the live HTML content of its landing page.",
+    "You are helping a marketing agent at FK Sports UK understand why a product on their Shopify store isn't selling well.",
+    "The agent is NOT a technical expert. They speak plain English and need clear, actionable advice — not industry jargon.",
+    "",
+    "WRITING RULES — these are mandatory:",
+    "• Write like you're talking to a small-business owner, not a marketing director.",
+    "• NO jargon. Avoid: CRO, CTA, funnel, conversion rate optimisation, friction, value proposition, USP, social proof, A/B test, heatmap, bounce rate, attribution.",
+    "• If you must use a term, explain it in brackets the first time. Example: 'CTA (the buy button)'.",
+    "• Every problem you flag must say WHY it's a problem in real-world terms. Don't say 'weak CTA' — say 'the Add to Cart button is small and hard to find on mobile, so people give up before buying'.",
+    "• Every action must be something a person could do this week without specialist help.",
+    "• Use simple sentences. Short is better than long.",
+    "• Use £ for money. Talk about 'shoppers' or 'people' — not 'users' or 'sessions'.",
     "",
     "IMPORTANT CONTEXT — DO NOT misinterpret currency:",
     "• This is a UK-based store (fksports.co.uk). All prices in the dossier are in GBP (£).",
@@ -4534,7 +4550,7 @@ function buildCritiquePrompt(dossier, pageSummary) {
     "• DO NOT flag a 'currency mismatch' or 'USD shown to UK shoppers' unless you have direct evidence in the page TEXT that the actual product price next to Add to Cart is shown in USD.",
     "• The dossier price is the source of truth for the GBP price.",
     "",
-    "Your job: produce a comprehensive, actionable critique that explains WHY this product is or isn't converting, and what to fix this week.",
+    "Your job: explain in plain English why this product is or isn't selling, and what to fix this week.",
     "",
     "PRODUCT DOSSIER:",
     "```json",
@@ -4554,17 +4570,17 @@ function buildCritiquePrompt(dossier, pageSummary) {
     "",
     "Return STRICT JSON in this exact shape (no markdown fences, no commentary):",
     "{",
-    '  "diagnosis": "ONE sentence identifying the most likely root cause of underperformance",',
-    '  "funnelDiagnosis": "Where in the funnel people are dropping (sessions → cart → checkout → purchase). Quote real numbers.",',
+    '  "diagnosis": "ONE plain-English sentence saying what the main problem is. No jargon.",',
+    '  "funnelDiagnosis": "Where shoppers are dropping off, in plain language. E.g. \\"500 people visited but only 3 added to cart — most leave before clicking Buy.\\" Use real numbers.",',
     '  "frictionPoints": [',
-    '    { "priority": "P1|P2|P3", "issue": "Short title", "evidence": "Why this is a problem, citing the data or page content", "category": "trust|price|cta|copy|imagery|mobile|stock|ad-coherence|other" }',
+    '    { "priority": "P1|P2|P3", "issue": "Short plain-English title", "evidence": "Why this is a problem in everyday language. Cite numbers or page text. No jargon.", "category": "trust|price|cta|copy|imagery|mobile|stock|ad-coherence|other" }',
     '  ],',
     '  "actions": [',
-    '    { "rank": 1, "action": "Specific thing to do this week", "expectedImpact": "What you might see if this is fixed", "effort": "low|medium|high" }',
+    '    { "rank": 1, "action": "What to do this week, written as a clear instruction. E.g. \\"Add a bigger Buy Now button on the product page.\\"", "expectedImpact": "What might happen if this is fixed, in plain words. E.g. \\"More people likely to click Buy on phones.\\"", "effort": "low|medium|high" }',
     '  ],',
-    '  "adVsPageCoherence": "Does the landing page deliver on what the ads/keywords promise? Specific gap if any.",',
-    '  "trustSignals": "Reviews, badges, shipping, returns — what\'s present and what\'s missing.",',
-    '  "summary": "2-3 sentences summarising the situation for a non-technical agent."',
+    '  "adVsPageCoherence": "Plain English: does what the ad promised match what the visitor sees? Be specific.",',
+    '  "trustSignals": "What customer trust signs are on the page (reviews, free returns, badges) and what is missing — in everyday words.",',
+    '  "summary": "2-3 sentences any agent can read and immediately understand. The single most important thing they should know."',
     "}",
     "",
     "Rules:",
@@ -5224,15 +5240,22 @@ ${signalsLine ? 'DERIVED SIGNALS:\n' + signalsLine + '\n' : ''}
 ${funnelSnippet ? funnelSnippet + '\n' : ''}${speedSnippet}${pageSnippet}
 
 THE QUESTION:
-Why isn't this product performing better, and what should the team do?
+Why isn't this product selling better, and what should the team do?
+
+WRITE IN PLAIN ENGLISH. The agent reading this is NOT a marketing expert.
+- No jargon. Avoid: CRO, CTA, funnel, conversion rate optimisation, value proposition, USP, social proof, attribution.
+- If you must use a technical term, explain it in brackets the first time. Example: "CTR (the % of people who click the ad)".
+- Talk about "shoppers" or "people", not "users" or "sessions".
+- Use £ for money.
+- Every recommendation should be something a normal person could do this week.
 
 Specifically address:
-1. Diagnose what is actually wrong (look at Shopify trend vs ad performance — don't conflate Google-side issues with Shopify-side issues).
-2. The single highest-leverage action this week.
-3. The realistic expected impact if action is taken.
-${includePageContent && productUrl ? '4. Listing-quality observations from the live page (image quality, title length, description, etc.).' : ''}
+1. What's actually going wrong, in plain words. Look at Shopify trends vs Google Ads numbers — don't blame Google for a Shopify problem or vice versa.
+2. The single biggest thing the team should do this week.
+3. What might happen if they do it (be realistic, not promotional).
+${includePageContent && productUrl ? '4. What you can see about the product page (image quality, title clarity, description, etc.) in everyday language.' : ''}
 
-Be direct. Be specific. Reference the actual numbers above. If the data tells a story, tell it. If it's ambiguous, say so. No generic platitudes.`;
+Be direct. Be specific. Quote the real numbers above. If the data is unclear, say so. No generic advice.`;
 
     // Sonnet for routine analysis (faster, cheaper); Opus for deep dives where
     // we've also fetched the page + PageSpeed (the harder reasoning task)
@@ -5267,7 +5290,7 @@ Be direct. Be specific. Reference the actual numbers above. If the data tells a 
                   data: base64
                 }
               },
-              { type: 'text', text: prompt + '\n\nThe attached image is the product\'s hero image as it appears in the Shopify product page and Google Shopping ads. Comment specifically on its quality: is it bright and clean, is the product clearly visible, is it lifestyle or studio, does it look professional, are there any issues that would hurt CTR or conversion?' }
+              { type: 'text', text: prompt + '\n\nThe attached image is the product\'s main photo as it appears on the Shopify page and in Google ads. In plain English, comment on the image quality: is it bright and clear, is the product easy to see, does it look professional, are there any obvious issues that might put off shoppers? Avoid jargon.' }
             ];
             visionUsed = true;
           }

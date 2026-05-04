@@ -699,6 +699,41 @@ function renderDailySalesCard() {
       + '</span>'
     : '';
 
+  // Compute total wasted spend across all active campaigns this week
+  // and how many campaigns are wasting > £5. Pulls from advertisedData
+  // which is loaded alongside dailySales on every refresh.
+  let totalWasted = 0;
+  let wastingCampaignCount = 0;
+  if (advertisedData && Array.isArray(advertisedData.campaigns)) {
+    advertisedData.campaigns.forEach(function(c) {
+      if (c.dismissed) return;
+      const w = Number(c.wastedSpend) || 0;
+      totalWasted += w;
+      if (w > 5) wastingCampaignCount++;
+    });
+  }
+  // Round to pennies
+  totalWasted = Math.round(totalWasted * 100) / 100;
+
+  // Wasted tile — clickable, takes the user to Advertised view filtered to wasting campaigns.
+  // Quiet (grey) when zero, red when there's actual waste to flag.
+  const wastedTile = totalWasted > 5
+    ? '<div onclick="goToWastingCampaigns()" style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:background 0.15s" onmouseover="this.style.background=\'#fecaca\'" onmouseout="this.style.background=\'#fee2e2\'" title="Click to see which campaigns are wasting money">'
+      + '<div style="flex-shrink:0">'
+        + '<div style="font-size:10px;color:#991b1b;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:2px">⚠ Wasted this week</div>'
+        + '<div style="font-size:18px;font-weight:700;color:#991b1b;font-family:var(--mono);line-height:1.1">' + fmtCurrency(totalWasted) + '</div>'
+        + '<div style="font-size:11px;color:#7f1d1d;margin-top:2px">' + wastingCampaignCount + ' campaign' + (wastingCampaignCount === 1 ? '' : 's') + ' · click to view →</div>'
+      + '</div>'
+    + '</div>'
+    : (totalWasted > 0
+      ? '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:12px">'
+        + '<div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:2px">Wasted this week</div>'
+        + '<div style="font-size:18px;font-weight:600;color:var(--text);font-family:var(--mono);line-height:1.1">' + fmtCurrency(totalWasted) + '</div>'
+        + '<div style="font-size:11px;color:var(--text3);margin-top:2px">below £5/campaign — minor</div>'
+      + '</div></div>'
+      : ''
+    );
+
   target.innerHTML = '<div class="section-header"><div>'
     + '<div class="section-title" style="font-size:14px;display:flex;align-items:center;flex-wrap:wrap">Net sales — last 7 complete days' + todayPill + '</div>'
     + '<div class="section-sub" style="display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px">'
@@ -709,9 +744,25 @@ function renderDailySalesCard() {
     + '<span style="color:var(--text);font-weight:700">= Net ' + fmtCurrency(totalNet) + '</span>'
     + '</div>'
     + '</div>'
+    + '<div style="display:flex;gap:10px;align-items:center">'
+    + wastedTile
     + '<button class="btn btn-ghost" onclick="openDailySalesModal()">Open full view →</button>'
     + '</div>'
+    + '</div>'
     + '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px 8px">' + bars + '</div>';
+}
+
+// Helper: take user to Advertised view filtered to campaigns with > £5 wasted spend
+function goToWastingCampaigns() {
+  // Navigate to campaigns page
+  const campaignsBtn = Array.from(document.querySelectorAll('.nav-item')).find(function(el){
+    return el.getAttribute('onclick') && el.getAttribute('onclick').indexOf("'campaigns'") >= 0;
+  });
+  if (campaignsBtn) campaignsBtn.click();
+  // Set flag so renderCampaignsPage filters
+  window.WASTING_CAMPAIGNS_FILTER = true;
+  // Re-render so filter applies
+  setTimeout(function(){ renderCampaignsPage(); }, 50);
 }
 
 function openDailySalesModal() {
@@ -961,6 +1012,7 @@ function campaignBlock(c) {
     + '<div class="campaign-stats">'
     + '<div><div class="stat-label">Spend</div><div class="stat-value">' + fmtCurrency(c.totalSpend) + '</div></div>'
     + '<div><div class="stat-label">Sales</div><div class="stat-value">' + fmtCurrency(c.totalSales) + '</div></div>'
+    + '<div><div class="stat-label" style="color:' + ((c.wastedSpend || 0) > 5 ? '#dc2626' : 'var(--text3)') + '">Wasted</div><div class="stat-value" style="color:' + ((c.wastedSpend || 0) > 5 ? '#dc2626' : 'var(--text)') + ';font-weight:' + ((c.wastedSpend || 0) > 5 ? '700' : '500') + '" title="Spend on products/keywords that returned £0 sales in the last 7 days">' + fmtCurrency(c.wastedSpend || 0) + '</div></div>'
     + '<div><div class="stat-label">Impr</div><div class="stat-value">' + fmtNum(c.totalImpressions) + '</div></div>'
     + '<div><div class="stat-label">Clicks</div><div class="stat-value">' + fmtNum(c.totalClicks) + '</div></div>'
     + '<div><div class="stat-label">ACOS</div><div class="stat-value">' + fmtPct(c.acos) + '</div></div>'
@@ -1170,8 +1222,20 @@ function renderCampaignsPage() {
     }).join('') || '<div class="empty-state">Nothing dismissed yet.</div>';
     document.getElementById('campaigns-list').innerHTML = tabsHtml + dismissedRows;
   } else {
-    document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
-    document.getElementById('campaigns-list').innerHTML = tabsHtml + (advertisedData.campaigns || []).map(campaignBlock).join('');
+    // If user clicked the wasted-this-week tile from Overview, filter to wasting campaigns
+    let campaignsToShow = (advertisedData.campaigns || []);
+    let filterBanner = '';
+    if (window.WASTING_CAMPAIGNS_FILTER) {
+      campaignsToShow = campaignsToShow.filter(function(c){ return !c.dismissed && (Number(c.wastedSpend) || 0) > 5; });
+      filterBanner = '<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#991b1b">'
+        + '<span><strong>Filtered: campaigns wasting > £5 this week</strong> · ' + campaignsToShow.length + ' of ' + (advertisedData.campaigns || []).length + ' campaigns shown.</span>'
+        + '<button class="btn btn-ghost" style="font-size:12px" onclick="window.WASTING_CAMPAIGNS_FILTER=false;renderCampaignsPage();">✕ Clear filter</button>'
+        + '</div>';
+      document.getElementById('camp-sub').textContent = campaignsToShow.length + ' wasting campaigns (filtered)';
+    } else {
+      document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
+    }
+    document.getElementById('campaigns-list').innerHTML = tabsHtml + filterBanner + campaignsToShow.map(campaignBlock).join('');
     // After render, lazily populate friction badges (one cheap GET, no AI)
     setTimeout(populateFrictionBadges, 50);
   }
