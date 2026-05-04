@@ -1031,8 +1031,14 @@ function toggleCampaign(id) {
   document.getElementById('camp-' + id).classList.toggle('expanded');
 }
 function productSubrow(p) {
+  // A product is "wasting" if it spent real money (>£0.50) but generated zero sales in 7 days
+  const isWasting = (Number(p.spend) || 0) > 0.5 && (!p.sales || Number(p.sales) === 0);
+
   const img = p.shopifyImageUrl ? ('<img class="product-img" style="width:48px;height:48px" src="' + p.shopifyImageUrl + '">') : '<div class="product-img-placeholder" style="width:48px;height:48px;font-size:9px">—</div>';
   const pri = '<span class="priority-pill ' + priorityClass(p.priority) + '">' + priorityLabel(p.priority) + '</span>';
+  const wastedTag = isWasting
+    ? '<span style="background:#dc2626;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.05em;margin-left:6px">⚠ WASTED ' + fmtCurrency(p.spend) + '</span>'
+    : '';
   const titleAttr = escapeHtml(p.displayName || p.productName || '');
   const payload = JSON.stringify(p).replace(/'/g, "&#39;");
   // Placeholder for the rule-friction counts — filled in lazily after card renders
@@ -1043,10 +1049,15 @@ function productSubrow(p) {
   const frictionTopLine = productIdForFriction
     ? '<div class="rf-top-line" data-product-id="' + productIdForFriction + '" style="display:none;margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4"></div>'
     : '';
-  return '<div class="product-card" style="padding:10px;margin-top:10px;cursor:pointer" onclick=\'openProductDetailFromCampaignRow(' + payload + ')\'>'
+  // Visual treatment for wasters: red border (2px) + subtle red background tint so they
+  // stand out at a glance when scanning a long list of products in a campaign.
+  const cardStyle = isWasting
+    ? 'padding:10px;margin-top:10px;cursor:pointer;border:2px solid #dc2626;background:#fef2f2'
+    : 'padding:10px;margin-top:10px;cursor:pointer';
+  return '<div class="product-card" style="' + cardStyle + '" onclick=\'openProductDetailFromCampaignRow(' + payload + ')\'>'
     + img
     + '<div class="product-body">'
-    + '<div class="product-title" style="font-size:12px">' + titleAttr + frictionBadge + '</div>'
+    + '<div class="product-title" style="font-size:12px">' + titleAttr + wastedTag + frictionBadge + '</div>'
     + '<div class="product-meta">' + pri + (p.itemType ? '<span>' + p.itemType + '</span>' : '') + '</div>'
     + '<div class="diagnosis-line">' + escapeHtml(p.diagnosis || '') + '</div>'
     + frictionTopLine
