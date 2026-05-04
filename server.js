@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r7a (fix daily breakdown filter + add Conversions column)
+// CampaignPulse — deploy marker 2026-05-04 r7b (timeline system: working days, auto-advance, day strip, not-started warning, ACOS analysis)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -9,6 +9,55 @@ require('dotenv').config();
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+
+// ── r7b: timeline + ACOS configuration ────────────────────────────────────
+// Account-wide ACOS target. Used to colour-code Discuss/Decide callouts.
+// 20% = green, 20-40% = amber, > 40% = red, 0 revenue = red "no conversions".
+const TARGET_ACOS_PCT = 20;
+
+// Working-day helpers. "Working day" = any day except Sunday.
+// Saturday counts as a normal working day per Bobby's spec.
+// All comparisons happen in Europe/London local time so an agent in the UK
+// sees the same Day-N count as the cron that runs at 00:01 London.
+function toLondonDate(d) {
+  // Normalise to a YYYY-MM-DD string in London tz then back to a Date
+  // so we can do day-arithmetic without DST surprises.
+  const s = new Date(d).toLocaleDateString('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' });
+  // s is dd/mm/yyyy — flip to yyyy-mm-dd
+  const parts = s.split('/');
+  return new Date(parts[2] + '-' + parts[1] + '-' + parts[0] + 'T00:00:00');
+}
+function isSunday(d) { return toLondonDate(d).getDay() === 0; }
+function workingDaysBetween(fromDate, toDate) {
+  // Inclusive count of working days from `fromDate` up to (and NOT including) `toDate`.
+  // workingDaysBetween(creationDay, today) gives 0 on the creation day, 1 the next working day, etc.
+  let from = toLondonDate(fromDate);
+  const to = toLondonDate(toDate);
+  if (from >= to) return 0;
+  let count = 0;
+  const cur = new Date(from);
+  while (cur < to) {
+    cur.setDate(cur.getDate() + 1);
+    if (cur.getDay() !== 0) count++; // skip Sundays
+  }
+  return count;
+}
+// Map working-days-open → task stage. 0-3 working days = open, 4-6 = discuss, 7 = decide, 8+ = overdue.
+function stageForWorkingDay(n) {
+  if (n >= 8) return 'overdue';
+  if (n >= 7) return 'decide';
+  if (n >= 4) return 'discuss';
+  return 'open';
+}
+// What's the next milestone and how many working days until it?
+function milestoneInfo(workingDaysOpen) {
+  if (workingDaysOpen >= 8) return { next: null, daysUntil: 0, label: 'Overdue' };
+  if (workingDaysOpen === 7) return { next: 'overdue', daysUntil: 0, label: 'Decide today' };
+  if (workingDaysOpen >= 4) return { next: 'decide', daysUntil: 7 - workingDaysOpen, label: (7 - workingDaysOpen) + ' working day' + ((7 - workingDaysOpen) === 1 ? '' : 's') + ' until Decide' };
+  if (workingDaysOpen === 3) return { next: 'discuss', daysUntil: 1, label: '1 working day until Discuss' };
+  return { next: 'discuss', daysUntil: 4 - workingDaysOpen, label: (4 - workingDaysOpen) + ' working days until Discuss' };
+}
+
 
 // ── Auth middleware ───────────────────────────────────────────────────────
 // Truly public endpoints — these CANNOT require auth because they're either
@@ -657,6 +706,13 @@ async function initTasksTable() {
 
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'");
     await db.query("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'");
+    // r7b: timeline stage tracking (open / discuss / decide / overdue) and start-warning timestamp.
+    // task_stage is auto-advanced by the daily 00:01 cron based on working days since created_date.
+    // working_days_open is computed (Sundays excluded) — replaces the old days_persisted as the
+    // canonical "how long has this task been open" measure.
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS task_stage TEXT DEFAULT 'open'");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS stage_advanced_at TIMESTAMP");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_tasks_stage ON campaign_tasks(task_stage)");
     // actor_name = the LOGGED-IN USER who took the action (vs agent_name which is the task owner).
     // Critical for audit: when Bobby reassigns Rahul's task to Anuj, log shows Bobby did it.
     await db.query("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor_name TEXT");
@@ -2062,7 +2118,33 @@ app.post('/api/settings', async function(req, res) {
 
 app.get('/api/tasks', async function(req, res) {
   if (!db) return res.json({ tasks: [] });
-  try { const result = await db.query("SELECT * FROM campaign_tasks WHERE agent_name IN ('Aryan','Satyam','Kunal') ORDER BY score DESC, created_date DESC LIMIT 500"); res.json({ tasks: result.rows }); } catch(e) { res.json({ tasks: [], error: e.message }); }
+  try {
+    const result = await db.query("SELECT * FROM campaign_tasks WHERE agent_name IN ('Aryan','Satyam','Kunal') ORDER BY score DESC, created_date DESC LIMIT 500");
+    // r7b: enrich each row with computed timeline fields so the frontend doesn't
+    // have to know about working days. working_days_open is the canonical age count;
+    // task_stage is recomputed live (the cron persists it but live computation is
+    // safer for tasks that haven't been reviewed by the cron yet).
+    const today = new Date();
+    const tasks = result.rows.map(function(t) {
+      const wdo = workingDaysBetween(t.created_date, today);
+      const liveStage = stageForWorkingDay(wdo);
+      const milestone = milestoneInfo(wdo);
+      // Created today AND no first_action AND it's now past 23:59 of creation day → not started warning.
+      // For now we treat any task with same-day created_date and no first_action as "not started"
+      // (display layer decides whether to show grace-period or warning styling).
+      const createdTodayLondon = workingDaysBetween(t.created_date, today) === 0 && toLondonDate(t.created_date).getTime() === toLondonDate(today).getTime();
+      const notStarted = !t.first_action_at && wdo >= 1; // no action on/before yesterday
+      return Object.assign({}, t, {
+        working_days_open: wdo,
+        task_stage: liveStage,
+        next_milestone: milestone.next,
+        next_milestone_label: milestone.label,
+        not_started_warning: notStarted,
+        created_today: createdTodayLondon
+      });
+    });
+    res.json({ tasks });
+  } catch(e) { res.json({ tasks: [], error: e.message }); }
 });
 
 app.post('/api/admin/cleanup-tasks', async function(req, res) {
@@ -2146,15 +2228,27 @@ app.get('/api/google/tasks', async function(req, res) {
       params
     );
 
-    // Compute days-since-creation + Day-7 flag inline
-    const now = Date.now();
+    // r7b: working-day-aware timeline fields. Use the same helpers as Amazon
+    // so both dashboards count days the same way (Sundays excluded).
+    const now = new Date();
     const tasks = r.rows.map(function(row) {
-      const created = row.created_date ? new Date(row.created_date).getTime() : now;
-      const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
+      const wdo = workingDaysBetween(row.created_date, now);
+      const liveStage = stageForWorkingDay(wdo);
+      const milestone = milestoneInfo(wdo);
+      // Legacy daysOpen stays as a CALENDAR-day count (Google UI uses it elsewhere).
+      // working_days_open and task_stage are the new authoritative timeline fields.
+      const created = row.created_date ? new Date(row.created_date).getTime() : now.getTime();
+      const daysOpenCalendar = Math.max(0, Math.floor((now.getTime() - created) / 86400000));
+      const notStarted = !row.first_action_at && wdo >= 1;
       return Object.assign({}, row, {
-        daysOpen: daysOpen,
-        atDay7: daysOpen >= 7 && !row.day7_decision,
-        atDay4: daysOpen >= 4 && daysOpen < 7
+        daysOpen: daysOpenCalendar,
+        atDay7: wdo >= 7 && !row.day7_decision,
+        atDay4: wdo >= 4 && wdo < 7,
+        working_days_open: wdo,
+        task_stage: liveStage,
+        next_milestone: milestone.next,
+        next_milestone_label: milestone.label,
+        not_started_warning: notStarted
       });
     });
 
@@ -4153,6 +4247,50 @@ cron.schedule('0 8 * * *', function() {
 cron.schedule('0 0 * * *', function() {
   autoArchiveTasks().catch(function(e){ console.error('Auto-archive error: ' + e.message); });
 }, { timezone: 'Europe/London' });
+
+// r7b: advance task stages once a day at 00:01 London time.
+// Reads created_date for every non-archived/non-complete task and recomputes
+// task_stage based on working-day count. Writes audit log entries when a stage
+// actually changes (so we don't spam the log with no-op rows).
+cron.schedule('1 0 * * *', function() {
+  advanceTaskStages().catch(function(e){ console.error('Stage-advance cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+async function advanceTaskStages() {
+  if (!db) return;
+  try {
+    // Pick up every task that isn't already finished
+    const result = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, department, created_date, task_stage FROM campaign_tasks WHERE status NOT IN ('complete','archived','dismissed') AND archived_at IS NULL"
+    );
+    const today = new Date();
+    const counters = { open: 0, discuss: 0, decide: 0, overdue: 0 };
+    let advanced = 0;
+    for (const t of result.rows) {
+      const wdo = workingDaysBetween(t.created_date, today);
+      const newStage = stageForWorkingDay(wdo);
+      counters[newStage] = (counters[newStage] || 0) + 1;
+      const oldStage = (t.task_stage || 'open');
+      if (newStage !== oldStage) {
+        try {
+          await db.query(
+            'UPDATE campaign_tasks SET task_stage=$1, stage_advanced_at=NOW() WHERE id=$2',
+            [newStage, t.id]
+          );
+          // Write an audit-log entry so managers can see when a task auto-flipped.
+          // Only log on stage upgrades (open→discuss→decide→overdue). Backfills on the same
+          // day produce a single entry per task, not per cron tick.
+          await db.query(
+            "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, department) VALUES ($1,$2,$3,'system','task_stage_advanced',$4,$5,$6,$7)",
+            [String(t.campaign_id || ''), t.campaign_name || '', t.agent_name || '', 'Auto-advanced after ' + wdo + ' working day(s)', oldStage, newStage, t.department || 'amazon']
+          );
+          advanced++;
+        } catch(e) { console.error('Stage-advance error on task ' + t.id + ': ' + e.message); }
+      }
+    }
+    console.log('[STAGE-ADVANCE] Reviewed ' + result.rows.length + ' tasks, advanced ' + advanced + '. Distribution: ' + JSON.stringify(counters));
+  } catch(e) { console.error('Stage-advance overall error: ' + e.message); }
+}
 
 async function autoArchiveTasks() {
   if (!db) return;

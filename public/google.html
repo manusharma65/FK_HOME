@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r6 (FK Sports Google rebrand + My Profile + password eye + Back to overview) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r7b (timeline system: working days, day strip, not-started warning, milestone countdown) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -663,6 +663,13 @@ setTimeout(function(){ updateDataFreshnessBanner(); }, 1500);
 // ─── Format helpers ──────────────────────────────────────────────────────
 function fmtCurrency(n) { if (n == null) return '—'; n = Number(n); return '£' + n.toLocaleString('en-GB', {minimumFractionDigits: n < 100 ? 2 : 0, maximumFractionDigits: 2}); }
 function fmtNum(n) { if (n == null) return '—'; return Number(n).toLocaleString('en-GB'); }
+
+// r7b: a task is "decided/closed" when its lifecycle has ended — no point showing
+// "Not started" on something that's already been resolved one way or another.
+function isClosedDecided(t) {
+  const s = t && t.status;
+  return s === 'complete' || s === 'archived' || s === 'dismissed' || s === 'paused';
+}
 function fmtPct(n) { if (n == null || n === 0) return '—'; return Number(n).toFixed(1) + '%'; }
 
 function priorityClass(p) { return 'priority-' + (p || 4); }
@@ -1429,7 +1436,14 @@ async function loadGoogleTasks() {
       return;
     }
 
-    listDiv.innerHTML = tasks.map(taskRow).join('');
+    // r7b: count tasks not yet started (no first_action, working day 1+)
+    // and surface them at the top of the list.
+    const notStartedCount = tasks.filter(function(t){ return t.not_started_warning && !isClosedDecided(t); }).length;
+    const notStartedBanner = notStartedCount > 0
+      ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#991b1b;font-weight:600">⚠️ ' + notStartedCount + ' task' + (notStartedCount === 1 ? '' : 's') + ' not started — agent has not logged a first action</div>'
+      : '';
+
+    listDiv.innerHTML = notStartedBanner + tasks.map(taskRow).join('');
   } catch (e) {
     listDiv.innerHTML = '<div class="empty-state" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
   }
@@ -1461,7 +1475,15 @@ function taskRow(t) {
   const bAcos = Number(t.baseline_acos) || 0;
   const bImpr = Number(t.baseline_impressions) || 0;
 
-  const days = t.daysOpen != null ? t.daysOpen : 0;
+  // r7b: prefer working-days-open from server (Sundays excluded). Fall back to
+  // calendar daysOpen for backwards compat with older API responses.
+  const wdo = (t.working_days_open !== undefined) ? t.working_days_open : (t.daysOpen != null ? t.daysOpen : 0);
+  const days = wdo;
+  const stage = t.task_stage || (wdo >= 7 ? 'decide' : (wdo >= 4 ? 'discuss' : 'open'));
+  const milestoneLabel = t.next_milestone_label || '';
+  const notStarted = !!t.not_started_warning && !isClosedDecided(t);
+  // Note: legacy atDay7 / atDay4 still set by server using working-day arithmetic so
+  // the card-stripe logic below keeps working without changes.
   const isProductTask = (t.problem_type && t.problem_type.indexOf('product_') === 0) || !!t.product_key;
   const isScale = t.task_type === 'scale' || t.problem_type === 'scale_opportunity';
   const status = t.status || 'open';
@@ -1508,7 +1530,9 @@ function taskRow(t) {
   const dayProgressBar = '<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
     + '<div style="display:flex;gap:2px;flex:1;max-width:140px">' + dayBars + '</div>'
     + '<span style="font-size:11px;color:' + (t.atDay7 ? '#dc2626' : '#6b7280') + ';font-weight:700;font-family:var(--mono);white-space:nowrap">DAY ' + days + '/7' + (t.atDay7 ? ' ⚠' : '') + '</span>'
-    + '</div>';
+    + (notStarted ? '<span style="font-size:10px;color:#991b1b;background:#fee2e2;border:1px solid #fca5a5;padding:2px 7px;border-radius:99px;font-weight:600;white-space:nowrap">⚠ Not started</span>' : '')
+    + '</div>'
+    + (milestoneLabel ? '<div style="font-size:10.5px;color:' + (stage === 'decide' || stage === 'overdue' ? '#dc2626' : (stage === 'discuss' ? '#92400e' : '#6b7280')) + ';margin-top:4px;font-weight:600">' + (milestoneLabel.indexOf('1 working day') === 0 ? '⏰ ' : '') + milestoneLabel + '</div>' : '');
 
   // Status pill — strong colours, white text on coloured background
   const statusColours = {
