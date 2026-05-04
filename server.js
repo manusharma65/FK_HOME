@@ -1,3 +1,4 @@
+// CampaignPulse — deploy marker 2026-05-04 (wasted column + product wasters)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
