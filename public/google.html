@@ -908,6 +908,9 @@ function campaignBlock(c) {
   // Campaign-level AI button
   const aiBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();aiAnalyseCampaign(\'' + c.campaignId + '\',\'' + nameEsc + '\')" title="AI analysis of the whole campaign">🪄 Campaign AI</button>';
 
+  // Assign button — manager creates a manual task on this campaign
+  const assignBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();assignToCampaign(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Create a task and assign to Rahul or Anuj">📋 Assign</button>';
+
   return '<div class="campaign-row' + (c.dismissed ? ' is-dismissed' : '') + '" id="camp-' + c.campaignId + '">'
     + '<div class="campaign-header">'
     + '<div onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer;flex:1">'
@@ -922,7 +925,7 @@ function campaignBlock(c) {
     + '<div><div class="stat-label">Clicks</div><div class="stat-value">' + fmtNum(c.totalClicks) + '</div></div>'
     + '<div><div class="stat-label">ACOS</div><div class="stat-value">' + fmtPct(c.acos) + '</div></div>'
     + '<div><div class="stat-label">Cost/conv</div><div class="stat-value">' + (c.costPerConv ? fmtCurrency(c.costPerConv) : '—') + '</div></div>'
-    + aiBtn + dismissBtn
+    + aiBtn + assignBtn + dismissBtn
     + '<svg class="expand-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer"><path d="M6 4l4 4-4 4"/></svg>'
     + '</div>'
     + '</div>'
@@ -964,7 +967,8 @@ function productSubrow(p) {
     + statRow('ACOS', fmtPct(p.acos))
     + statRow('Cost/conv', p.costPerConv ? fmtCurrency(p.costPerConv) : '—')
     + '</div>'
-    + '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();openProductDetailFromCampaignRow(' + payload + ')\'>🪄 Open &amp; analyse</button></div>'
+    + '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();openProductDetailFromCampaignRow(' + payload + ')\'>🪄 Open &amp; analyse</button>'
+    + '<button class="btn btn-ghost" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();assignToProduct(' + payload + ')\' title="Create task assigned to agent">📋 Assign</button></div>'
     + '</div>'
     + '</div>';
 }
@@ -1220,151 +1224,93 @@ function taskRow(t) {
   const bSales = Number(t.baseline_sales) || 0;
   const bAcos = Number(t.baseline_acos) || 0;
   const bImpr = Number(t.baseline_impressions) || 0;
-  const bCostPerConv = bSpend > 0 && bSales > 0 ? null : null;  // would need conversions field
 
   const days = t.daysOpen != null ? t.daysOpen : 0;
-  const isProductTask = (t.problem_type && t.problem_type.indexOf('product_') === 0);
+  const isProductTask = (t.problem_type && t.problem_type.indexOf('product_') === 0) || !!t.product_key;
   const isScale = t.task_type === 'scale' || t.problem_type === 'scale_opportunity';
   const status = t.status || 'open';
+  const isClosed = status === 'complete' || status === 'archived' || status === 'dismissed' || status === 'paused';
 
-  // Coloured priority stripe down the left edge
-  let stripeColour;
-  if (isScale) stripeColour = 'var(--green)';
-  else if (t.atDay7) stripeColour = 'var(--red)';
-  else if (status === 'complete' || status === 'archived') stripeColour = 'var(--text3)';
-  else if (status === 'discussion') stripeColour = 'var(--amber)';
-  else if (status === 'in_progress') stripeColour = 'var(--accent)';
-  else if (days >= 4) stripeColour = 'var(--amber)';
-  else stripeColour = 'var(--accent)';
-
-  // Image — Shopify thumbnail for product tasks, channel icon otherwise
+  // Image: Shopify thumbnail for product tasks, otherwise icon
   const img = (isProductTask && t.product_image_url)
-    ? '<img src="' + escapeHtml(t.product_image_url) + '" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0">'
-    : '<div style="width:48px;height:48px;border-radius:6px;background:var(--bg2);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">' + (isScale ? '🚀' : (isProductTask ? '📦' : '📋')) + '</div>';
-
-  // Status pill
-  const statusPillColours = {
-    open: 'var(--text2)', in_progress: 'var(--accent)', discussion: 'var(--amber)',
-    complete: 'var(--green)', archived: 'var(--text3)', dismissed: 'var(--text3)'
-  };
-  const sColour = statusPillColours[status] || 'var(--text2)';
-  const statusPill = '<span style="background:' + sColour + '15;color:' + sColour + ';padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase">' + escapeHtml(status.replace('_',' ')) + '</span>';
+    ? '<img class="product-img" src="' + escapeHtml(t.product_image_url) + '" alt="" onerror="this.outerHTML=\'<div class=&quot;product-img-placeholder&quot;>📦</div>\'">'
+    : '<div class="product-img-placeholder" style="background:' + (isScale ? '#dcfce7' : '#f3f4f6') + ';font-size:24px">' + (isScale ? '🚀' : (isProductTask ? '📦' : '📋')) + '</div>';
 
   // Day counter pill
-  const dayColour = t.atDay7 ? 'var(--red)' : (days >= 4 ? 'var(--amber)' : 'var(--text3)');
-  const dayPill = '<span style="font-size:10px;color:' + dayColour + ';font-weight:700;font-family:var(--mono);background:' + dayColour + '15;padding:2px 8px;border-radius:4px">DAY ' + days + ' / 7</span>';
+  const dayColour = t.atDay7 ? '#dc2626' : (days >= 4 ? '#ea580c' : '#6b7280');
+  const dayPill = '<span style="font-size:11px;color:' + dayColour + ';font-weight:700;font-family:var(--mono);background:' + dayColour + '15;padding:2px 8px;border-radius:4px">DAY ' + days + ' / 7</span>';
 
-  // Type badge
+  // Status pill
+  const statusColours = {
+    open: '#6b7280', in_progress: '#2563eb', discussion: '#ea580c',
+    complete: '#16a34a', archived: '#6b7280', dismissed: '#9ca3af', paused: '#a855f7'
+  };
+  const sColour = statusColours[status] || '#6b7280';
+  const statusPill = '<span style="background:' + sColour + '15;color:' + sColour + ';padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase">' + escapeHtml(status.replace('_',' ')) + '</span>';
+
+  // Type badge (PRODUCT vs CAMPAIGN vs SCALE)
   const typeBadge = isScale
-    ? '<span style="font-size:10px;background:var(--green)15;color:var(--green);padding:2px 6px;border-radius:3px;font-weight:700">SCALE</span>'
+    ? '<span style="font-size:10px;background:#dcfce7;color:#15803d;padding:2px 6px;border-radius:3px;font-weight:700">SCALE</span>'
     : (isProductTask
-      ? '<span style="font-size:10px;background:var(--accent)15;color:var(--accent);padding:2px 6px;border-radius:3px;font-weight:700">PRODUCT</span>'
-      : '<span style="font-size:10px;background:var(--text3)15;color:var(--text3);padding:2px 6px;border-radius:3px;font-weight:700">CAMPAIGN</span>');
+      ? '<span style="font-size:10px;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:3px;font-weight:700">PRODUCT</span>'
+      : '<span style="font-size:10px;background:#f3f4f6;color:#4b5563;padding:2px 6px;border-radius:3px;font-weight:700">CAMPAIGN</span>');
 
-  // Problem type label
-  const problemLabel = '<span style="font-size:11px;color:var(--text2)">' + escapeHtml(taskTypeLabel(t.problem_type)) + '</span>';
+  // Problem-type label
+  const problemLabelText = taskTypeLabel(t.problem_type);
 
-  // Campaign type badge (PMax / Search / Shopping)
-  const campTypeBadge = t.portfolio
-    ? '<span style="font-size:10px;background:var(--bg2);color:var(--text3);padding:2px 6px;border-radius:3px;font-weight:600;text-transform:uppercase">' + escapeHtml(t.portfolio.replace('PERFORMANCE_MAX','PMax').replace('SEARCH','Search').replace('SHOPPING','Shopping').slice(0, 12)) + '</span>'
+  // Title — campaign name + product subline if product-level
+  const title = isProductTask && t.product_title
+    ? escapeHtml(t.product_title)
+    : escapeHtml(t.campaign_name || '(unnamed)');
+  const subline = isProductTask && t.product_title
+    ? '<div style="font-size:11px;color:var(--text3);margin-top:2px">in ' + escapeHtml(t.campaign_name || '') + '</div>'
     : '';
 
-  // Stats grid — same style as product card
-  const statsGrid = (bSpend > 0 || bSales > 0 || bImpr > 0)
-    ? '<div class="product-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-top:10px">'
-      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Spend</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">£' + bSpend.toFixed(2) + '</div></div>'
-      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Sales</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">£' + bSales.toFixed(2) + '</div></div>'
-      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">ACOS</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">' + (bAcos > 0 ? bAcos.toFixed(0) + '%' : '—') + '</div></div>'
-      + '<div><div class="stat-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Impr</div><div class="stat-value" style="font-size:14px;font-weight:600;color:var(--text)">' + bImpr.toLocaleString('en-GB') + '</div></div>'
-    + '</div>'
-    : '';
+  // Diagnosis = problem detail (closed tasks: strikethrough so it's clearly resolved)
+  const diagnosisStyle = isClosed ? 'text-decoration:line-through;color:var(--text3)' : '';
+  const diagnosisHtml = '<div class="diagnosis-line" style="' + diagnosisStyle + '"><strong>' + escapeHtml(t.problem_detail || '') + '</strong></div>';
 
-  // Notes / dismissal / day7 sections (coloured callouts)
-  const dismissedNote = t.dismissed_reason
-    ? '<div style="font-size:12px;color:var(--text2);margin-top:8px;padding:8px 10px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong>Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'
-    : '';
-  const day7Note = t.day7_note
-    ? '<div style="font-size:12px;color:var(--text);margin-top:8px;padding:8px 10px;background:#fed7aa;border-left:3px solid #ea580c;border-radius:4px"><strong>Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'
-    : '';
-  const agentNote = t.agent_notes
-    ? '<div style="font-size:12px;color:var(--text);margin-top:8px;padding:8px 10px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px"><strong>Notes:</strong> ' + escapeHtml(t.agent_notes) + '</div>'
-    : '';
+  // Stats grid (matches productCard style)
+  const stats = '<div class="product-stats">'
+    + statRow('Spend', '£' + bSpend.toFixed(2))
+    + statRow('Sales', '£' + bSales.toFixed(2))
+    + statRow('ACOS', bAcos > 0 ? bAcos.toFixed(0) + '%' : '—')
+    + statRow('Impr', bImpr.toLocaleString('en-GB'))
+    + '</div>';
 
-  // Action buttons — context-sensitive, on the right
-  let actionsHtml = '';
-  if (t.atDay7 && status !== 'archived' && status !== 'complete') {
-    actionsHtml = '<button class="btn btn-primary" onclick="event.stopPropagation();openDay7Decision(' + t.id + ')" style="font-size:11px;padding:6px 12px">📋 Day 7 decision</button>';
-  } else if (t.agent_name === 'Unassigned') {
-    actionsHtml = '<button class="btn btn-primary" onclick="event.stopPropagation();takeTask(' + t.id + ')" style="font-size:11px;padding:6px 12px">✋ Take it</button>';
-  } else if (status === 'open' || status === 'in_progress') {
-    actionsHtml = '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 10px">⚒ Working</button>'
-      + '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'discussion\')" style="font-size:11px;padding:5px 10px">💬 Discuss</button>'
-      + '<button class="btn btn-ghost" onclick="event.stopPropagation();dismissTask(' + t.id + ')" style="font-size:11px;padding:5px 10px;color:var(--red)">✕ Dismiss</button>';
-  } else if (status === 'discussion') {
-    actionsHtml = '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'in_progress\')" style="font-size:11px;padding:5px 10px">⚒ Resume</button>'
-      + '<button class="btn btn-ghost" onclick="event.stopPropagation();setTaskStatus(' + t.id + ',\'complete\')" style="font-size:11px;padding:5px 10px;color:var(--green)">✓ Complete</button>';
-  }
+  // Notes / dismiss / day7 (compact, with strikethrough on closed tasks)
+  const noteStyle = isClosed ? 'text-decoration:line-through;color:var(--text3)' : '';
+  const callouts = []
+    .concat(t.agent_notes ? ['<div style="font-size:12px;margin-top:8px;padding:6px 10px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;' + noteStyle + '"><strong>Note:</strong> ' + escapeHtml(t.agent_notes) + '</div>'] : [])
+    .concat(t.paused_reason ? ['<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:#f3e8ff;border-left:3px solid #a855f7;border-radius:4px"><strong>Paused:</strong> ' + escapeHtml(t.paused_reason) + '</div>'] : [])
+    .concat(t.dismissed_reason ? ['<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong>Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'] : [])
+    .concat(t.day7_note ? ['<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:#fed7aa;border-left:3px solid #ea580c;border-radius:4px"><strong>Day 7 (' + escapeHtml(t.day7_decision || '') + '):</strong> ' + escapeHtml(t.day7_note) + '</div>'] : [])
+    .join('');
 
-  // Agent display
+  // Right panel — agent + footer
   const agentDisplay = t.agent_name === 'Unassigned'
     ? '<span style="color:var(--text3);font-style:italic">Unassigned</span>'
     : '<span style="font-weight:600;color:var(--text)">' + escapeHtml(t.agent_name || '') + '</span>';
 
-  // Build a payload the modal can read — works whether product-level or campaign-level
-  // For product-level tasks: extract shopifyId from product_key (format: xxx_xxx_<id>_xxx)
-  let openHandler = '';
-  if (isProductTask && t.product_key) {
-    const parts = String(t.product_key).split('_');
-    const shopifyId = parts.length >= 3 ? parts[2] : null;
-    if (shopifyId) {
-      // Open product modal by shopify id — productCard helper handles this
-      openHandler = 'onclick="openProductDetailFromShopifyId(\'' + shopifyId + '\')"';
-    }
-  }
-
-  return '<div class="task-card" ' + openHandler + ' style="position:relative;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:14px 16px 14px 20px;margin-bottom:10px;' + (openHandler ? 'cursor:pointer;' : '') + 'transition:border-color 0.15s">'
-    + '<div style="position:absolute;top:0;bottom:0;left:0;width:4px;background:' + stripeColour + ';border-radius:12px 0 0 12px"></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">'
-      + '<div style="flex:1;min-width:0;display:flex;gap:12px">'
-        + img
-        + '<div style="flex:1;min-width:0">'
-          + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'
-            + statusPill + dayPill + typeBadge + campTypeBadge + problemLabel
-          + '</div>'
-          + '<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.3">' + escapeHtml(t.campaign_name || '(unnamed campaign)') + '</div>'
-          + (t.product_title ? '<div style="font-size:12px;color:var(--text2);margin-bottom:4px">↳ ' + escapeHtml(t.product_title) + '</div>' : '')
-          + '<div style="font-size:13px;color:var(--text2);line-height:1.55;margin-top:4px">' + escapeHtml(t.problem_detail || '') + '</div>'
-          + statsGrid
-          + agentNote
-          + dismissedNote
-          + day7Note
-        + '</div>'
+  return '<div class="product-card" style="cursor:pointer" onclick="openTaskDetail(' + t.id + ')">'
+    + img
+    + '<div class="product-body">'
+      + '<div class="product-title" style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
+        + '<span style="flex:1;min-width:0">' + title + '</span>'
+        + '<span style="font-size:11px;color:var(--text3);font-weight:500;white-space:nowrap">' + agentDisplay + '</span>'
       + '</div>'
-      + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:140px">'
-        + '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Assigned to</div>'
-        + '<div style="font-size:13px">' + agentDisplay + '</div>'
-        + '<div style="display:flex;flex-direction:column;gap:5px;align-items:stretch;margin-top:6px;width:100%">' + actionsHtml + '</div>'
-      + '</div>'
+      + subline
+      + '<div class="product-meta">' + statusPill + dayPill + typeBadge + '<span style="font-size:11px;color:var(--text2)">' + escapeHtml(problemLabelText) + '</span></div>'
+      + diagnosisHtml
+      + stats
+      + callouts
+      + '<div style="margin-top:10px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click to open →</div>'
     + '</div>'
     + '</div>';
 }
 
-// Open product modal from a Shopify product ID (used by task-card click handler)
-function openProductDetailFromShopifyId(shopifyId) {
-  if (!shopifyId) return;
-  const allProds = (window.allProductsData && window.allProductsData.products) || [];
-  const sp = allProds.find(function(p){ return String(p.shopifyId) === String(shopifyId); });
-  if (!sp) {
-    // Try finding via shopifyItemId in case allProductsData isn't loaded
-    alert('Product not found in current view. Switch to "All Products" tab and try again.');
-    return;
-  }
-  openProductDetailFromObj(sp);
-}
-
 async function takeTask(id) {
-  // Determine the current user (Rahul or Anuj). Easiest: check global window.currentUser if set,
-  // otherwise prompt.
+  // Just claims ownership — no text needed (everything else does)
   let agent = (window.currentUser && window.currentUser.name) || '';
   if (agent !== 'Rahul' && agent !== 'Anuj') {
     agent = prompt('Type your name to claim this task (Rahul or Anuj):', '');
@@ -1378,67 +1324,53 @@ async function takeTask(id) {
     const r = await authedFetch('/api/google/tasks/' + id + '/take', { method: 'POST', body: JSON.stringify({ agent: agent }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Failed');
-    loadGoogleTasks();
-  } catch (e) {
-    alert('Could not take task: ' + e.message);
-  }
+    refreshTaskViews(id);
+  } catch (e) { alert('Could not take task: ' + e.message); }
 }
+
+// Map status → human prompt text
+const TASK_ACTION_PROMPTS = {
+  in_progress: { title: 'Start working', label: 'What are you doing? (e.g. "Lowering bid on dumbbell keyword by 30% and adding cheap-trampolines as negatives")' },
+  discussion: { title: 'Send to discussion', label: 'What should we discuss? (e.g. "Tried 3 things, none working — should we pause this campaign?")' },
+  complete: { title: 'Mark complete', label: 'What did you do that worked? (e.g. "Pause sponsored brands variant — sales recovered to baseline within 4 days")' },
+  paused: { title: 'Pause task', label: 'Why pausing? (e.g. "Waiting for new product images before re-running ads")' },
+  dismissed: { title: 'Dismiss task', label: 'Reason for dismissing (e.g. "Seasonal product — expected behaviour")' },
+  reopened: { title: 'Reopen task', label: 'Why reopening? (e.g. "Same problem returned, need to look again")' },
+  scale_promoted: { title: 'Promote to Scale', label: 'Why move to Scale? (e.g. "Fix worked, ACOS now 8% — push more budget")' }
+};
 
 async function setTaskStatus(id, status) {
-  let notes = '';
-  if (status === 'discussion') {
-    notes = prompt('Optional note for discussion (what should we discuss?):', '') || '';
-  } else if (status === 'complete') {
-    notes = prompt('Note about completion (what was fixed?):', '') || '';
-  }
-  try {
-    const r = await authedFetch('/api/google/tasks/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: status, notes: notes }) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Failed');
-    loadGoogleTasks();
-  } catch (e) {
-    alert('Could not update task: ' + e.message);
-  }
+  const prom = TASK_ACTION_PROMPTS[status];
+  if (!prom) return;
+  showActionPromptModal(prom.title, prom.label, '', async function(text) {
+    if (!text || !text.trim()) {
+      alert('A note is required for this action.');
+      return false;
+    }
+    try {
+      const body = status === 'dismissed'
+        ? JSON.stringify({ status: 'dismissed', dismissedReason: text.trim() })
+        : JSON.stringify({ status: status, notes: text.trim() });
+      const r = await authedFetch('/api/google/tasks/' + id + '/status', { method: 'POST', body: body });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Failed');
+      refreshTaskViews(id);
+      return true;
+    } catch (e) {
+      alert('Could not update task: ' + e.message);
+      return false;
+    }
+  });
 }
 
-async function dismissTask(id) {
-  const reason = prompt('Reason for dismissing this task (required):', '');
-  if (!reason || !reason.trim()) {
-    alert('A reason is required to dismiss.');
-    return;
-  }
-  try {
-    const r = await authedFetch('/api/google/tasks/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: 'dismissed', dismissedReason: reason.trim() }) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Failed');
-    loadGoogleTasks();
-  } catch (e) {
-    alert('Could not dismiss task: ' + e.message);
-  }
-}
+async function dismissTask(id) { return setTaskStatus(id, 'dismissed'); }
+async function pauseTask(id)   { return setTaskStatus(id, 'paused'); }
+async function reopenTask(id)  { return setTaskStatus(id, 'reopened'); }
+async function promoteToScale(id) { return setTaskStatus(id, 'scale_promoted'); }
 
 async function openDay7Decision(id) {
-  // Three-button decision modal. We use a simple confirm flow.
-  const decision = prompt('Day 7 decision — type one of: carry_on / archive / stop', 'carry_on');
-  if (!decision) return;
-  const allowed = ['carry_on', 'archive', 'stop'];
-  if (!allowed.includes(decision.trim())) {
-    alert('Must be: carry_on, archive, or stop');
-    return;
-  }
-  const note = prompt('Note explaining this decision (required):', '');
-  if (!note || !note.trim()) {
-    alert('A note is required.');
-    return;
-  }
-  try {
-    const r = await authedFetch('/api/google/tasks/' + id + '/day7-decision', { method: 'POST', body: JSON.stringify({ decision: decision.trim(), note: note.trim() }) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Failed');
-    loadGoogleTasks();
-  } catch (e) {
-    alert('Could not save decision: ' + e.message);
-  }
+  // Custom modal with three buttons + note textarea
+  showDay7Modal(id);
 }
 
 async function runGoogleTasksNow() {
@@ -1456,6 +1388,423 @@ async function runGoogleTasksNow() {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '⚙ Run scheduler now'; }
   }
+}
+
+// Refresh both the task list AND the open task detail modal (if showing this task)
+function refreshTaskViews(taskId) {
+  loadGoogleTasks();
+  if (document.getElementById('task-detail-overlay') && CURRENT_OPEN_TASK_ID === taskId) {
+    openTaskDetail(taskId);  // re-render detail with fresh data
+  }
+}
+
+// ─── Generic action-prompt modal ──────────────────────────────────────────
+// Shown for every status change requiring a note. Big textarea so agents can
+// write a sentence, not just a few words.
+function showActionPromptModal(title, label, defaultText, onSubmit) {
+  const existing = document.getElementById('action-prompt-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'action-prompt-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:white;width:100%;max-width:540px;border-radius:12px;padding:24px 28px;box-shadow:0 25px 50px rgba(0,0,0,0.3)">'
+      + '<div style="font-size:16px;font-weight:700;color:#111;margin-bottom:6px">' + escapeHtml(title) + '</div>'
+      + '<div style="font-size:12px;color:#6b7280;margin-bottom:14px;line-height:1.5">' + escapeHtml(label) + '</div>'
+      + '<textarea id="action-prompt-text" style="width:100%;min-height:90px;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:14px;line-height:1.5;resize:vertical;box-sizing:border-box">' + escapeHtml(defaultText || '') + '</textarea>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
+        + '<button id="action-prompt-cancel" class="btn btn-ghost" style="font-size:13px;padding:7px 14px">Cancel</button>'
+        + '<button id="action-prompt-submit" class="btn btn-primary" style="font-size:13px;padding:7px 14px">Submit</button>'
+      + '</div>'
+    + '</div>';
+
+  document.body.appendChild(overlay);
+  const textarea = document.getElementById('action-prompt-text');
+  textarea.focus();
+
+  const close = function(){ overlay.remove(); };
+  document.getElementById('action-prompt-cancel').onclick = close;
+  document.getElementById('action-prompt-submit').onclick = async function() {
+    const text = textarea.value;
+    const ok = await onSubmit(text);
+    if (ok !== false) close();
+  };
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+}
+
+// ─── Day 7 decision modal ─────────────────────────────────────────────────
+function showDay7Modal(taskId) {
+  const existing = document.getElementById('day7-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'day7-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:white;width:100%;max-width:600px;border-radius:12px;padding:24px 28px;box-shadow:0 25px 50px rgba(0,0,0,0.3)">'
+      + '<div style="font-size:18px;font-weight:700;color:#111;margin-bottom:6px">📋 Day 7 decision</div>'
+      + '<div style="font-size:13px;color:#6b7280;margin-bottom:18px;line-height:1.5">After 7 days of working on this task, you must choose one of three outcomes. The note explaining your choice is required.</div>'
+      + '<div style="display:flex;gap:10px;margin-bottom:18px">'
+        + '<button class="day7-btn" data-decision="carry_on" style="flex:1;padding:12px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;text-align:left">'
+          + '<div style="font-size:14px;font-weight:700;color:#111;margin-bottom:4px">↻ Carry on</div>'
+          + '<div style="font-size:11px;color:#6b7280;line-height:1.4">Keep monitoring. Stays open another period.</div>'
+        + '</button>'
+        + '<button class="day7-btn" data-decision="archive" style="flex:1;padding:12px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;text-align:left">'
+          + '<div style="font-size:14px;font-weight:700;color:#111;margin-bottom:4px">✓ Archive</div>'
+          + '<div style="font-size:11px;color:#6b7280;line-height:1.4">Mark resolved. Successful or no action needed.</div>'
+        + '</button>'
+        + '<button class="day7-btn" data-decision="stop" style="flex:1;padding:12px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;text-align:left">'
+          + '<div style="font-size:14px;font-weight:700;color:#111;margin-bottom:4px">⏸ Stop</div>'
+          + '<div style="font-size:11px;color:#6b7280;line-height:1.4">Pause campaign manually in Google Ads. Marks task done.</div>'
+        + '</button>'
+      + '</div>'
+      + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">Why this decision?</div>'
+      + '<textarea id="day7-note" style="width:100%;min-height:80px;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:14px;line-height:1.5;resize:vertical;box-sizing:border-box" placeholder="e.g. Bid changes worked — ACOS dropped from 35% to 18% over 7 days. Continuing to monitor."></textarea>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
+        + '<button id="day7-cancel" class="btn btn-ghost" style="font-size:13px;padding:7px 14px">Cancel</button>'
+        + '<button id="day7-submit" class="btn btn-primary" style="font-size:13px;padding:7px 14px" disabled>Submit decision</button>'
+      + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  let chosenDecision = null;
+  const submitBtn = document.getElementById('day7-submit');
+  document.querySelectorAll('.day7-btn').forEach(function(btn){
+    btn.onclick = function() {
+      chosenDecision = btn.getAttribute('data-decision');
+      document.querySelectorAll('.day7-btn').forEach(function(b){ b.style.borderColor = '#d1d5db'; b.style.background = 'white'; });
+      btn.style.borderColor = '#2563eb';
+      btn.style.background = '#eff6ff';
+      submitBtn.disabled = false;
+    };
+  });
+
+  const close = function(){ overlay.remove(); };
+  document.getElementById('day7-cancel').onclick = close;
+  submitBtn.onclick = async function() {
+    if (!chosenDecision) return;
+    const note = document.getElementById('day7-note').value.trim();
+    if (!note) { alert('A note is required.'); return; }
+    try {
+      const r = await authedFetch('/api/google/tasks/' + taskId + '/day7-decision', {
+        method: 'POST',
+        body: JSON.stringify({ decision: chosenDecision, note: note })
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Failed');
+      close();
+      refreshTaskViews(taskId);
+    } catch (e) {
+      alert('Could not save: ' + e.message);
+    }
+  };
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+}
+
+// ─── Task detail modal ────────────────────────────────────────────────────
+// Full popup for a single task: header + baseline metrics + problem + history + actions.
+let CURRENT_OPEN_TASK_ID = null;
+
+async function openTaskDetail(taskId) {
+  CURRENT_OPEN_TASK_ID = taskId;
+  // Find the task in our last list response
+  const task = (LAST_TASKS_RESPONSE && LAST_TASKS_RESPONSE.tasks || []).find(function(t){ return t.id === taskId; });
+  if (!task) {
+    alert('Task not found in current list. Try refreshing.');
+    return;
+  }
+
+  // Fetch action history
+  let history = [];
+  try {
+    const r = await authedFetch('/api/google/tasks/' + taskId + '/history');
+    const j = await r.json();
+    history = j.history || [];
+  } catch(_) {}
+
+  const existing = document.getElementById('task-detail-overlay');
+  if (existing) existing.remove();
+
+  const bSpend = Number(task.baseline_spend) || 0;
+  const bSales = Number(task.baseline_sales) || 0;
+  const bAcos = Number(task.baseline_acos) || 0;
+  const bImpr = Number(task.baseline_impressions) || 0;
+  const days = task.daysOpen != null ? task.daysOpen : 0;
+  const isProductTask = (task.problem_type && task.problem_type.indexOf('product_') === 0) || !!task.product_key;
+  const isScale = task.task_type === 'scale';
+  const status = task.status || 'open';
+  const isClosed = status === 'complete' || status === 'archived' || status === 'dismissed' || status === 'paused';
+
+  // Status pill
+  const statusColours = {
+    open: '#6b7280', in_progress: '#2563eb', discussion: '#ea580c',
+    complete: '#16a34a', archived: '#6b7280', dismissed: '#9ca3af', paused: '#a855f7'
+  };
+  const sColour = statusColours[status] || '#6b7280';
+
+  // Action buttons in detail modal — full set with proper labels
+  let actions = [];
+  if (task.atDay7 && !isClosed) {
+    actions.push('<button class="btn btn-primary" onclick="openDay7Decision(' + taskId + ')" style="font-size:13px;padding:8px 16px">📋 Day 7 decision</button>');
+  } else if (task.agent_name === 'Unassigned') {
+    actions.push('<button class="btn btn-primary" onclick="takeTask(' + taskId + ')" style="font-size:13px;padding:8px 16px">✋ Take it</button>');
+  }
+  if (status === 'open' || status === 'in_progress') {
+    actions.push('<button class="btn btn-ghost" onclick="setTaskStatus(' + taskId + ',\'in_progress\')" style="font-size:13px;padding:8px 14px">⚒ Add note (working)</button>');
+    actions.push('<button class="btn btn-ghost" onclick="setTaskStatus(' + taskId + ',\'discussion\')" style="font-size:13px;padding:8px 14px">💬 Discuss</button>');
+    actions.push('<button class="btn btn-ghost" onclick="pauseTask(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#a855f7">⏸ Pause</button>');
+    actions.push('<button class="btn btn-ghost" onclick="setTaskStatus(' + taskId + ',\'complete\')" style="font-size:13px;padding:8px 14px;color:#16a34a">✓ Complete</button>');
+    actions.push('<button class="btn btn-ghost" onclick="dismissTask(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#dc2626">✕ Dismiss</button>');
+    if (!isScale) {
+      actions.push('<button class="btn btn-ghost" onclick="promoteToScale(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#16a34a">🚀 Promote to Scale</button>');
+    }
+  } else if (status === 'discussion') {
+    actions.push('<button class="btn btn-ghost" onclick="setTaskStatus(' + taskId + ',\'in_progress\')" style="font-size:13px;padding:8px 14px">⚒ Resume working</button>');
+    actions.push('<button class="btn btn-ghost" onclick="setTaskStatus(' + taskId + ',\'complete\')" style="font-size:13px;padding:8px 14px;color:#16a34a">✓ Complete</button>');
+    actions.push('<button class="btn btn-ghost" onclick="pauseTask(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#a855f7">⏸ Pause</button>');
+  }
+  // Reopen button for closed tasks
+  if (isClosed) {
+    actions.push('<button class="btn btn-primary" onclick="reopenTask(' + taskId + ')" style="font-size:13px;padding:8px 16px">↻ Reopen</button>');
+  }
+  // "Open product analysis" for product-level tasks
+  if (isProductTask && task.product_key) {
+    const parts = String(task.product_key).split('_');
+    const sid = parts.length >= 3 ? parts[2] : null;
+    if (sid) {
+      actions.push('<button class="btn btn-ghost" onclick="openProductDetailFromShopifyId(\'' + sid + '\')" style="font-size:13px;padding:8px 14px">🔬 Open product analysis</button>');
+    }
+  }
+
+  // History items
+  const historyHtml = history.length
+    ? history.map(function(h) {
+        const t = new Date(h.created_at);
+        const when = t.toLocaleDateString('en-GB') + ' ' + t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        const actionLabels = {
+          take: 'took task',
+          in_progress: '⚒ working',
+          discussion: '💬 sent to discussion',
+          complete: '✓ completed',
+          dismissed: '✕ dismissed',
+          paused: '⏸ paused',
+          reopened: '↻ reopened',
+          scale_promoted: '🚀 promoted to scale',
+          manual_create: '✨ created manually',
+          day7_carry_on: '📋 Day 7: carry on',
+          day7_archive: '📋 Day 7: archive',
+          day7_stop: '📋 Day 7: stop'
+        };
+        const label = actionLabels[h.action] || h.action;
+        return '<div style="padding:10px 12px;border-left:2px solid #e5e7eb;margin-bottom:8px">'
+          + '<div style="font-size:11px;color:#6b7280;font-family:ui-monospace,monospace">' + when + ' · ' + escapeHtml(h.agent_name || 'system') + ' · <strong>' + escapeHtml(label) + '</strong></div>'
+          + (h.notes ? '<div style="font-size:13px;color:#374151;line-height:1.5;margin-top:4px">' + escapeHtml(h.notes) + '</div>' : '')
+        + '</div>';
+      }).join('')
+    : '<div style="font-size:13px;color:#6b7280;padding:8px 0">No actions logged yet.</div>';
+
+  // Closed-task callouts (with strikethrough on related notes for visual cue)
+  const closedCallouts = []
+    .concat(task.dismissed_reason ? ['<div style="padding:10px 14px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:6px;margin-bottom:10px;font-size:13px"><strong>Dismissed:</strong> ' + escapeHtml(task.dismissed_reason) + '</div>'] : [])
+    .concat(task.paused_reason ? ['<div style="padding:10px 14px;background:#f3e8ff;border-left:3px solid #a855f7;border-radius:6px;margin-bottom:10px;font-size:13px"><strong>Paused:</strong> ' + escapeHtml(task.paused_reason) + '</div>'] : [])
+    .concat(task.day7_note ? ['<div style="padding:10px 14px;background:#fed7aa;border-left:3px solid #ea580c;border-radius:6px;margin-bottom:10px;font-size:13px"><strong>Day 7 (' + escapeHtml(task.day7_decision || '') + '):</strong> ' + escapeHtml(task.day7_note) + '</div>'] : [])
+    .join('');
+
+  // Image
+  const img = (isProductTask && task.product_image_url)
+    ? '<img src="' + escapeHtml(task.product_image_url) + '" style="width:80px;height:80px;border-radius:8px;object-fit:cover">'
+    : '<div style="width:80px;height:80px;border-radius:8px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:36px">' + (isScale ? '🚀' : (isProductTask ? '📦' : '📋')) + '</div>';
+
+  const overlay = document.createElement('div');
+  overlay.id = 'task-detail-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:40px 20px';
+
+  const titleText = (isProductTask && task.product_title) ? task.product_title : (task.campaign_name || '(unnamed)');
+  const subText = (isProductTask && task.product_title) ? ('in ' + (task.campaign_name || '')) : '';
+
+  overlay.innerHTML =
+    '<div style="background:white;width:100%;max-width:900px;border-radius:12px;padding:28px 32px;box-shadow:0 25px 50px rgba(0,0,0,0.3);position:relative" onclick="event.stopPropagation()">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px">'
+        + '<div style="display:flex;gap:14px;flex:1;min-width:0">'
+          + img
+          + '<div style="flex:1;min-width:0">'
+            + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:2px">' + (isScale ? 'Scale opportunity' : (isProductTask ? 'Product task' : 'Campaign task')) + ' · Day ' + days + ' / 7</div>'
+            + '<div style="font-size:20px;font-weight:700;color:#111;line-height:1.3">' + escapeHtml(titleText) + '</div>'
+            + (subText ? '<div style="font-size:12px;color:#6b7280;margin-top:2px">' + escapeHtml(subText) + '</div>' : '')
+            + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">'
+              + '<span style="background:' + sColour + '15;color:' + sColour + ';padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase">' + escapeHtml(status.replace('_',' ')) + '</span>'
+              + '<span style="font-size:11px;color:#6b7280">Assigned: <strong>' + escapeHtml(task.agent_name || 'Unassigned') + '</strong></span>'
+              + (task.task_source === 'manual' ? '<span style="font-size:10px;background:#e0e7ff;color:#3730a3;padding:2px 6px;border-radius:3px;font-weight:700">MANUAL</span>' : '')
+            + '</div>'
+          + '</div>'
+        + '</div>'
+        + '<button onclick="closeTaskDetail()" style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:6px 12px;cursor:pointer;color:#374151;font-size:13px;font-weight:500;flex-shrink:0">✕ Close</button>'
+      + '</div>'
+
+      + '<div style="background:#f9fafb;border-left:3px solid #f59e0b;padding:12px 16px;border-radius:6px;margin-bottom:18px">'
+        + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:4px">Problem</div>'
+        + '<div style="font-size:14px;color:#111;line-height:1.6">' + escapeHtml(task.problem_detail || '') + '</div>'
+      + '</div>'
+
+      + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:8px">Baseline metrics (when task was created)</div>'
+      + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:18px">'
+        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">Spend</div><div style="font-size:18px;font-weight:700;color:#111">£' + bSpend.toFixed(2) + '</div></div>'
+        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">Sales</div><div style="font-size:18px;font-weight:700;color:#111">£' + bSales.toFixed(2) + '</div></div>'
+        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">ACOS</div><div style="font-size:18px;font-weight:700;color:#111">' + (bAcos > 0 ? bAcos.toFixed(0) + '%' : '—') + '</div></div>'
+        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">Impressions</div><div style="font-size:18px;font-weight:700;color:#111">' + bImpr.toLocaleString('en-GB') + '</div></div>'
+      + '</div>'
+
+      + closedCallouts
+
+      + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:10px">Action history</div>'
+      + '<div style="max-height:300px;overflow-y:auto;margin-bottom:20px">' + historyHtml + '</div>'
+
+      + '<div style="display:flex;flex-wrap:wrap;gap:8px;padding-top:18px;border-top:1px solid #e5e7eb">' + actions.join('') + '</div>'
+    + '</div>';
+
+  // Click outside to close
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) closeTaskDetail(); });
+  // Esc to close
+  document.addEventListener('keydown', taskDetailEscHandler);
+  document.body.appendChild(overlay);
+  document.body.style.overflow = 'hidden';
+}
+
+function taskDetailEscHandler(e) { if (e.key === 'Escape') closeTaskDetail(); }
+function closeTaskDetail() {
+  const overlay = document.getElementById('task-detail-overlay');
+  if (overlay) overlay.remove();
+  document.removeEventListener('keydown', taskDetailEscHandler);
+  document.body.style.overflow = '';
+  CURRENT_OPEN_TASK_ID = null;
+}
+
+// ─── Manual Assign modal ───────────────────────────────────────────────────
+// Used by the "Assign" buttons on campaign rows / product cards / product modal
+function showAssignModal(opts) {
+  // opts: { campaignId, campaignName, campaignType, productKey, productTitle }
+  const existing = document.getElementById('assign-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'assign-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:white;width:100%;max-width:560px;border-radius:12px;padding:24px 28px;box-shadow:0 25px 50px rgba(0,0,0,0.3)" onclick="event.stopPropagation()">'
+      + '<div style="font-size:18px;font-weight:700;color:#111;margin-bottom:4px">Create task</div>'
+      + '<div style="font-size:13px;color:#6b7280;margin-bottom:16px">' + escapeHtml(opts.productTitle || opts.campaignName || '') + '</div>'
+
+      + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">Assign to</div>'
+      + '<div id="assign-agents" style="display:flex;gap:8px;margin-bottom:14px">'
+        + '<button class="assign-agent-btn" data-agent="Rahul" style="flex:1;padding:10px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;font-weight:700;font-size:14px">Rahul</button>'
+        + '<button class="assign-agent-btn" data-agent="Anuj" style="flex:1;padding:10px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;font-weight:700;font-size:14px">Anuj</button>'
+        + '<button class="assign-agent-btn" data-agent="Unassigned" style="flex:1;padding:10px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;font-weight:700;font-size:14px;color:#6b7280">Open queue</button>'
+      + '</div>'
+
+      + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">Type</div>'
+      + '<div id="assign-types" style="display:flex;gap:8px;margin-bottom:14px">'
+        + '<button class="assign-type-btn" data-type="problem" style="flex:1;padding:10px;border:2px solid #2563eb;border-radius:8px;background:#eff6ff;cursor:pointer;font-weight:700;font-size:13px">⚠ Fix a problem</button>'
+        + '<button class="assign-type-btn" data-type="scale" style="flex:1;padding:10px;border:2px solid #d1d5db;border-radius:8px;background:white;cursor:pointer;font-weight:700;font-size:13px">🚀 Scale it up</button>'
+      + '</div>'
+
+      + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">What should they do?</div>'
+      + '<textarea id="assign-brief" placeholder="e.g. ACOS getting better, push budget +30% over 7 days and report results" style="width:100%;min-height:90px;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:14px;line-height:1.5;resize:vertical;box-sizing:border-box"></textarea>'
+
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
+        + '<button id="assign-cancel" class="btn btn-ghost" style="font-size:13px;padding:7px 14px">Cancel</button>'
+        + '<button id="assign-submit" class="btn btn-primary" style="font-size:13px;padding:7px 14px" disabled>Create task</button>'
+      + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  let chosenAgent = null;
+  let chosenType = 'problem';  // default
+  const submitBtn = document.getElementById('assign-submit');
+
+  document.querySelectorAll('.assign-agent-btn').forEach(function(b){
+    b.onclick = function() {
+      chosenAgent = b.getAttribute('data-agent');
+      document.querySelectorAll('.assign-agent-btn').forEach(function(x){ x.style.borderColor = '#d1d5db'; x.style.background = 'white'; });
+      b.style.borderColor = '#2563eb';
+      b.style.background = '#eff6ff';
+      submitBtn.disabled = false;
+    };
+  });
+  document.querySelectorAll('.assign-type-btn').forEach(function(b){
+    b.onclick = function() {
+      chosenType = b.getAttribute('data-type');
+      document.querySelectorAll('.assign-type-btn').forEach(function(x){ x.style.borderColor = '#d1d5db'; x.style.background = 'white'; });
+      b.style.borderColor = '#2563eb';
+      b.style.background = '#eff6ff';
+    };
+  });
+
+  const close = function(){ overlay.remove(); };
+  document.getElementById('assign-cancel').onclick = close;
+  submitBtn.onclick = async function() {
+    if (!chosenAgent) return;
+    const brief = document.getElementById('assign-brief').value.trim();
+    if (!brief) { alert('Brief is required.'); return; }
+    try {
+      const r = await authedFetch('/api/google/tasks/manual-create', {
+        method: 'POST',
+        body: JSON.stringify({
+          campaignId: opts.campaignId,
+          campaignName: opts.campaignName,
+          campaignType: opts.campaignType,
+          productKey: opts.productKey || null,
+          productTitle: opts.productTitle || null,
+          agentName: chosenAgent,
+          brief: brief,
+          taskType: chosenType
+        })
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Failed');
+      close();
+      alert('Task created (#' + j.id + '). Visible in Tasks page.');
+      // If we're on tasks page, refresh
+      if (document.getElementById('page-tasks').classList.contains('active')) {
+        loadGoogleTasks();
+      }
+    } catch (e) {
+      alert('Could not create task: ' + e.message);
+    }
+  };
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+}
+
+// Helper: show assign modal scoped to a campaign (no product)
+function assignToCampaign(campaignId, campaignName, campaignType) {
+  showAssignModal({ campaignId: campaignId, campaignName: campaignName, campaignType: campaignType });
+}
+
+// Helper: show assign modal scoped to a specific product within a campaign
+function assignToProduct(p) {
+  if (!p) return;
+  // p might be a campaign-row product, or a Shopify product. Different fields.
+  const campaignId = p.campaignId || (p.googleSpend ? null : null);
+  const productKey = p.shopifyItemId || p.productId || null;
+  showAssignModal({
+    campaignId: campaignId || (p.shopifyId ? '' : ''),
+    campaignName: p.campaignName || p.googleCampaignName || '',
+    campaignType: p.campaignType || '',
+    productKey: productKey,
+    productTitle: p.title || p.shopifyTitle || p.displayName || p.productName || ''
+  });
+}
+
+// Open product modal from a Shopify product ID (used by task-card click handler)
+function openProductDetailFromShopifyId(shopifyId) {
+  if (!shopifyId) return;
+  const allProds = (window.allProductsData && window.allProductsData.products) || [];
+  const sp = allProds.find(function(p){ return String(p.shopifyId) === String(shopifyId); });
+  if (!sp) {
+    alert('Product not found in current view. Switch to "All Products" tab and try again.');
+    return;
+  }
+  openProductDetailFromObj(sp);
 }
 
 
@@ -1907,6 +2256,7 @@ function openProductDetailFromObj(p) {
     '</div>' +
 
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
+    '<button class="btn btn-primary" onclick=\'assignToProduct(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\' style="font-size:13px">📋 Assign as task</button>' +
     (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
     '</div>';
 

@@ -2031,12 +2031,20 @@ app.post('/api/google/tasks/:id/status', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const id = req.params.id;
   const status = req.body.status;
-  const notes = req.body.notes || '';
-  const dismissedReason = req.body.dismissedReason || '';
+  const notes = (req.body.notes || '').trim();
+  const dismissedReason = (req.body.dismissedReason || '').trim();
 
   if (!status) return res.status(400).json({ error: 'status required' });
-  if (status === 'dismissed' && !dismissedReason.trim()) {
-    return res.status(400).json({ error: 'A reason is required to dismiss a task.' });
+
+  // ALL status transitions now require a note explaining what the agent is doing.
+  // The only no-note flow is "take" (separate endpoint, just claims ownership).
+  const noteRequiredStatuses = ['in_progress', 'discussion', 'complete', 'dismissed', 'paused', 'reopened', 'scale_promoted'];
+  if (noteRequiredStatuses.includes(status)) {
+    if (status === 'dismissed') {
+      if (!dismissedReason) return res.status(400).json({ error: 'A reason is required to dismiss a task.' });
+    } else {
+      if (!notes) return res.status(400).json({ error: 'A note is required for this action — describe what you are doing.' });
+    }
   }
 
   try {
@@ -2045,34 +2053,163 @@ app.post('/api/google/tasks/:id/status', async function(req, res) {
     const task = taskRes.rows[0];
     const before = task.status;
 
-    let q, p;
+    let q, p, finalStatus = status;
     if (status === 'dismissed') {
-      q = "UPDATE campaign_tasks SET status='dismissed', agent_notes=$1, dismissed_reason=$2, updated_at=NOW(), resolved_at=NOW() WHERE id=$3";
-      p = [notes, dismissedReason, id];
+      q = "UPDATE campaign_tasks SET status='dismissed', dismissed_reason=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2";
+      p = [dismissedReason, id];
     } else if (status === 'in_progress') {
-      q = "UPDATE campaign_tasks SET status='in_progress', agent_notes=$1, updated_at=NOW(), first_action_at=COALESCE(first_action_at, NOW()) WHERE id=$2";
-      p = [notes, id];
+      q = "UPDATE campaign_tasks SET status='in_progress', updated_at=NOW(), first_action_at=COALESCE(first_action_at, NOW()) WHERE id=$1";
+      p = [id];
     } else if (status === 'discussion') {
-      q = "UPDATE campaign_tasks SET status='discussion', agent_notes=$1, updated_at=NOW() WHERE id=$2";
-      p = [notes, id];
+      q = "UPDATE campaign_tasks SET status='discussion', updated_at=NOW() WHERE id=$1";
+      p = [id];
     } else if (status === 'complete') {
-      q = "UPDATE campaign_tasks SET status='complete', agent_notes=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2";
+      q = "UPDATE campaign_tasks SET status='complete', updated_at=NOW(), resolved_at=NOW() WHERE id=$1";
+      p = [id];
+    } else if (status === 'paused') {
+      q = "UPDATE campaign_tasks SET status='paused', paused_reason=$1, updated_at=NOW() WHERE id=$2";
       p = [notes, id];
+    } else if (status === 'reopened') {
+      // Reopened means: go back to in_progress, but log it as a distinct action so history shows it
+      q = "UPDATE campaign_tasks SET status='in_progress', updated_at=NOW(), resolved_at=NULL WHERE id=$1";
+      p = [id];
+      finalStatus = 'in_progress';
+    } else if (status === 'scale_promoted') {
+      // Promote a problem task to a scale task. Keep it open with task_type='scale' so it shows under Scale filter.
+      q = "UPDATE campaign_tasks SET task_type='scale', status='in_progress', updated_at=NOW() WHERE id=$1";
+      p = [id];
+      finalStatus = 'in_progress';
     } else {
-      q = "UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW() WHERE id=$3";
-      p = [status, notes, id];
+      q = "UPDATE campaign_tasks SET status=$1, updated_at=NOW() WHERE id=$2";
+      p = [status, id];
     }
     await db.query(q, p);
 
+    // Always write activity log with the action verb (status), the note, before/after state.
+    // This is the foundation for Phase 2 (agent scoring) and Phase 3 (AI learning from history).
     try {
       await db.query(
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google')",
-        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', status, notes, before, status, parseInt(id)]
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', status, notes || dismissedReason, before, finalStatus, parseInt(id)]
       );
-    } catch (_) { /* best effort */ }
+    } catch (e) { console.error('[GTASK] activity_log error: ' + e.message); }
 
-    res.json({ success: true });
+    res.json({ success: true, status: finalStatus });
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get full action history for a task — chronological list of every state change with notes.
+// Used by the task popup modal to show what's been done.
+app.get('/api/google/tasks/:id/history', async function(req, res) {
+  if (!db) return res.json({ history: [] });
+  try {
+    const r = await db.query(
+      "SELECT id, action, notes, status_before, status_after, agent_name, created_at " +
+      "FROM activity_log WHERE department='google' AND task_id=$1 ORDER BY created_at ASC",
+      [parseInt(req.params.id)]
+    );
+    res.json({ history: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual task creation — used by the "Assign" buttons on campaign rows / product cards / product modal.
+// The manager picks an agent and writes a brief, server creates a task with task_source='manual'.
+app.post('/api/google/tasks/manual-create', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  await ensureGoogleTaskColumns();
+
+  const { campaignId, campaignName, campaignType, productKey, productTitle, agentName, brief, taskType } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!agentName) return res.status(400).json({ error: 'agentName required (Rahul, Anuj, or Unassigned)' });
+  if (!brief || !brief.trim()) return res.status(400).json({ error: 'A brief is required — describe what the agent should do.' });
+  if (!['Rahul', 'Anuj', 'Unassigned'].includes(agentName)) return res.status(400).json({ error: 'agentName must be Rahul, Anuj, or Unassigned' });
+
+  // Pull baseline metrics from current googleState if available
+  let baselineSpend = 0, baselineSales = 0, baselineAcos = 0, baselineImpressions = 0;
+  let resolvedCampaignName = campaignName || '';
+  let resolvedCampaignType = campaignType || '';
+  let resolvedProductTitle = productTitle || null;
+  let productImageUrl = null;
+
+  if (productKey) {
+    // Product-level task — find the product row
+    const productRow = (googleState.products || []).find(function(p){
+      const pk = p.shopifyItemId || p.productId || (p.adGroupId ? String(p.campaignId) + '_' + p.adGroupId : null);
+      return String(pk) === String(productKey);
+    });
+    if (productRow) {
+      baselineSpend = productRow.spend || 0;
+      baselineSales = productRow.sales || 0;
+      baselineAcos = baselineSales > 0 ? (baselineSpend / baselineSales) * 100 : 0;
+      baselineImpressions = productRow.impressions || 0;
+      resolvedCampaignName = resolvedCampaignName || productRow.campaignName;
+      resolvedCampaignType = resolvedCampaignType || productRow.campaignType;
+      resolvedProductTitle = resolvedProductTitle || productRow.name || productRow.productName;
+    }
+    // Try to get image from shopify
+    const parts = String(productKey).split('_');
+    const shopifyId = parts.length >= 3 ? parts[2] : null;
+    if (shopifyId) {
+      const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === shopifyId; });
+      if (sp && sp.imageUrl) productImageUrl = sp.imageUrl;
+    }
+  } else {
+    // Campaign-level — aggregate
+    const cProducts = (googleState.products || []).filter(function(p){ return String(p.campaignId) === String(campaignId); });
+    cProducts.forEach(function(p){
+      baselineSpend += p.spend || 0;
+      baselineSales += p.sales || 0;
+      baselineImpressions += p.impressions || 0;
+    });
+    baselineAcos = baselineSales > 0 ? (baselineSpend / baselineSales) * 100 : 0;
+    if (cProducts.length && !resolvedCampaignName) resolvedCampaignName = cProducts[0].campaignName;
+    if (cProducts.length && !resolvedCampaignType) resolvedCampaignType = cProducts[0].campaignType;
+  }
+
+  const finalTaskType = taskType === 'scale' ? 'scale' : 'problem';
+  const problemType = productKey ? 'product_manual_assign' : 'manual_assign';
+
+  try {
+    const r = await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      " task_type, priority, product_image_url, status) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,'manual','google',$8,$9,$10,$11,$12,$13,$14,$15,$16,'open') RETURNING id",
+      [
+        String(campaignId),
+        resolvedCampaignName || '(unnamed campaign)',
+        agentName,
+        resolvedCampaignType || '',
+        problemType,
+        brief.trim(),
+        Math.max(1, Math.round(baselineSpend)),
+        productKey || null,
+        resolvedProductTitle,
+        baselineSpend,
+        baselineSales,
+        baselineAcos,
+        baselineImpressions,
+        finalTaskType,
+        2,
+        productImageUrl
+      ]
+    );
+    const newId = r.rows[0] && r.rows[0].id;
+    // Log it
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,'manual_create',$4,'',$5,$6,'google')",
+        [String(campaignId), resolvedCampaignName || '', agentName, brief.trim(), 'open', newId]
+      );
+    } catch(_) { /* best effort */ }
+    res.json({ success: true, id: newId });
+  } catch (e) {
+    console.error('[GTASK] manual-create error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
