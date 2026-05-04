@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 (wasted column + product wasters)
+// CampaignPulse — deploy marker 2026-05-04 r2 (revert aggressive wasted styling — minimal red bold only)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3827,13 +3827,6 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
     c.acos = c.totalSales > 0 ? Math.round((c.totalSpend / c.totalSales) * 1000) / 10 : 0;
     c.costPerConv = c.totalConversions > 0 ? Math.round((c.totalSpend / c.totalConversions) * 100) / 100 : 0;
     c.products.sort(function(a, b) {
-      // Wasters first — products that spent money with zero sales bubble to top
-      // so the moment a manager expands a campaign, money-losers are immediately visible
-      const aWasting = (a.spend || 0) > 0.5 && (!a.sales || a.sales === 0);
-      const bWasting = (b.spend || 0) > 0.5 && (!b.sales || b.sales === 0);
-      if (aWasting !== bWasting) return aWasting ? -1 : 1;
-      // Within wasters: highest waste first. Within non-wasters: by priority then spend.
-      if (aWasting && bWasting) return (b.spend || 0) - (a.spend || 0);
       if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
       return (b.spend || 0) - (a.spend || 0);
     });
