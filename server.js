@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r8a (SP-API: more forgiving getSellerId + raw passthrough endpoint)
+// CampaignPulse — deploy marker 2026-05-04 r8b (SP-API: test-listings probe endpoint to debug 400 errors)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2296,6 +2296,41 @@ app.get('/api/admin/sp-api/raw', async function(req, res) {
     const status = (e.response && e.response.status) || 'no-response';
     const body = (e.response && e.response.data) || null;
     res.json({ ok: false, status: status, error: e.message, body: body });
+  }
+});
+
+// GET /api/admin/sp-api/test-listings — owner-only.
+// Probes the Listings endpoint with the configured seller ID and a tiny pageSize
+// so we can see exactly what Amazon's 400 error says without burning much quota.
+// Tries multiple variants because Amazon documents a few different parameter
+// shapes depending on listing type (FBA vs FBM vs vendor) and SP-API role grants.
+app.get('/api/admin/sp-api/test-listings', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  try {
+    const sellerId = await getSellerId();
+    const variants = [
+      { name: 'minimal', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&pageSize=5' },
+      { name: 'with summaries only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries&pageSize=5' },
+      { name: 'identifiers only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=identifiers&pageSize=5' }
+    ];
+    const results = [];
+    for (const v of variants) {
+      try {
+        const data = await spApiGet(v.path);
+        results.push({ variant: v.name, ok: true, itemCount: (data && data.items && data.items.length) || 0, sample: (data && data.items && data.items[0]) ? Object.keys(data.items[0]) : null });
+      } catch(e) {
+        results.push({
+          variant: v.name,
+          ok: false,
+          status: (e.response && e.response.status) || null,
+          body: (e.response && e.response.data) || null,
+          message: e.message
+        });
+      }
+    }
+    res.json({ sellerIdFromState: sellerId, results: results });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
   }
 });
 
