@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r14 (Active/Dormant tabs, twice-daily orders sync, task date timezone fix, foldable ASIN breakdown, polished SKU pill)
+// CampaignPulse — deploy marker 2026-05-04 r14a (broader timezone fix across snapshots/agents/alerts, campaign chips on product cards + modal table, SKU pill cursor fix)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -657,7 +657,7 @@ async function analyseCampaigns(campaigns) {
     if (!alreadyAlerted && db) {
       try {
         const dbAlert = await db.query(
-          "SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND task_source='alert' AND problem_type=$2 AND created_date=CURRENT_DATE",
+          "SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND task_source='alert' AND problem_type=$2 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)",
           [String(c.campaignId), alertType]
         );
         if (dbAlert.rows.length > 0) alreadyAlerted = true;
@@ -872,7 +872,8 @@ async function initDB() {
 async function saveDailySnapshot() {
   if (!db) return;
   try {
-    const today = new Date().toISOString().split('T')[0];
+    // r14 timezone fix: snapshots keyed by London date, not UTC.
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
     const campaigns = state.campaigns;
     const totalRevenue = campaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
     const totalSpend = campaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
@@ -992,20 +993,18 @@ async function initTasksTable() {
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE`);
     // r14: Fix created_date default to use London time (was UTC, causing tasks created late London evening to show as next day)
     try { await db.query(`ALTER TABLE campaign_tasks ALTER COLUMN created_date SET DEFAULT ((NOW() AT TIME ZONE 'Europe/London')::DATE)`); } catch(e) {}
-    // r14: One-shot fix for tasks where created_date is in the past but updated_at shows the row is actually from today (London time).
-    // Safe scope: only updates tasks where the row hasn't been touched since being created (resolved_at IS NULL AND first_action_at IS NULL),
-    // and where updated_at falls on a different London-date than created_date by exactly 1 day. This catches the timezone-drift bug
-    // without rewriting genuinely-old tasks.
+    // r14: One-shot fix for tasks where created_date is in the past but the row was actually created today (London time).
+    // Scope: all OPEN/IN-PROGRESS tasks (not resolved) where updated_at falls on a different London-date than created_date by 1 day.
+    // This catches the timezone-drift bug for tasks still in due, without touching genuinely-old or already-resolved tasks.
     try {
       const fixRes = await db.query(
         "UPDATE campaign_tasks SET created_date = ((updated_at AT TIME ZONE 'Europe/London')::DATE) " +
-        "WHERE resolved_at IS NULL " +
-        "AND first_action_at IS NULL " +
+        "WHERE status IN ('open','in_progress') " +
         "AND ((updated_at AT TIME ZONE 'Europe/London')::DATE) - created_date = 1 " +
         "AND updated_at >= NOW() - INTERVAL '36 hours' " +
         "RETURNING id"
       );
-      if (fixRes.rowCount > 0) console.log('[r14 timezone-fix] Re-dated ' + fixRes.rowCount + ' recent task(s) to correct London date');
+      if (fixRes.rowCount > 0) console.log('[r14 timezone-fix] Re-dated ' + fixRes.rowCount + ' open/in-progress task(s) to correct London date');
     } catch(e) { console.error('[r14 timezone-fix] ' + e.message); }
     console.log('Tasks table ready');
 
@@ -1114,7 +1113,7 @@ async function initTasksTable() {
     // ── FIX: Reload today alerts using created_date (not created_at) ──────
     try {
       const todayAlerts = await db.query(
-        "SELECT campaign_id, campaign_name, problem_type, problem_detail, created_date FROM campaign_tasks WHERE task_source='alert' AND created_date=CURRENT_DATE"
+        "SELECT campaign_id, campaign_name, problem_type, problem_detail, created_date FROM campaign_tasks WHERE task_source='alert' AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)"
       );
       todayAlerts.rows.forEach(function(row) {
         const existing = state.alerts.find(function(a){ return String(a.campaignId) === String(row.campaign_id) && a.type === row.problem_type; });
@@ -1327,7 +1326,8 @@ function scoreCampaignDays(days) {
 async function createAlertTask(campaignId, campaignName, agentName, portfolio, problemType, problemDetail) {
   if (!db) return;
   try {
-    const today = new Date().toISOString().split('T')[0];
+    // r14 timezone fix: use London date, not UTC. (toISOString returns UTC.)
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
     const existing = await db.query(
       'SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND created_date=$2 AND problem_type=$3 AND task_source=$4',
       [String(campaignId), today, problemType, 'alert']
@@ -1753,7 +1753,8 @@ async function runDailyTaskScheduler() {
       });
     });
 
-    const today = new Date().toISOString().split('T')[0];
+    // r14 timezone fix: London date, not UTC.
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
 
     for (const agentName of Object.keys(agentCampaigns)) {
       const agentCamps = agentCampaigns[agentName];
@@ -2796,7 +2797,7 @@ app.get('/api/amazon/products', async function(req, res) {
         if (overlap > bestOverlap) { bestOverlap = overlap; bestKey = gk; }
       });
       if (!bestKey || bestOverlap < 2) return;
-      if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0 };
+      if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
       const s = groupCampaignStats[bestKey];
       s.spend += parseFloat(c.spend || 0);
       s.sales += parseFloat(c.sales || 0);
@@ -2804,6 +2805,15 @@ app.get('/api/amazon/products', async function(req, res) {
       s.impressions += parseInt(c.impressions || 0);
       s.conversions += parseInt(c.conversions || 0);
       s.count++;
+      // r14: track campaign details for display on cards
+      s.campaigns.push({
+        campaignId: c.campaignId,
+        name: c.name || '',
+        spend: parseFloat(c.spend || 0),
+        sales: parseFloat(c.sales || 0),
+        state: c.state || '',
+        targetingType: c.targetingType || ''
+      });
     });
 
     // 5. Compute per-parent aggregates + diagnosis
@@ -2812,7 +2822,7 @@ app.get('/api/amazon/products', async function(req, res) {
       const totalUnits = parent.children.reduce(function(s, c){ return s + (c.units_7d || 0); }, 0);
       const advertisedChildren = parent.children.filter(function(c){ return c.in_campaign; }).length;
       const adCoveragePct = parent.children.length ? Math.round(100 * advertisedChildren / parent.children.length) : 0;
-      const cs = groupCampaignStats[parent.parent_sku] || { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0 };
+      const cs = groupCampaignStats[parent.parent_sku] || { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
       const acos = cs.sales > 0 ? Math.round((cs.spend / cs.sales) * 1000) / 10 : 0;
       const costPerConv = cs.conversions > 0 ? cs.spend / cs.conversions : null;
       // r13: Activity status — has any child sold in last 60 days?
@@ -2843,6 +2853,7 @@ app.get('/api/amazon/products', async function(req, res) {
         camp_impressions_7d: cs.impressions,
         camp_conversions_7d: cs.conversions,
         camp_count: cs.count,
+        campaigns: cs.campaigns || [],
         acos: acos,
         cost_per_conv: costPerConv != null ? parseFloat(costPerConv.toFixed(2)) : null,
         active_60d: activeRecent,

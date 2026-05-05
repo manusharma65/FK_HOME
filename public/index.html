@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r14 (Active/Dormant/All tabs, foldable ASIN breakdown, polished SKU pill) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r14a (campaign chips on cards + Campaigns table in modal, SKU pill cursor fix) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3581,6 +3581,23 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     '<div class="amz-diagnosis-line"><strong>' + escHtml(p.diagnosis) + '</strong></div>' : '';
   const actionLine = p.action ?
     '<div class="amz-action-line">→ ' + escHtml(p.action) + '</div>' : '';
+  // r14: campaign chips — show up to 3 campaign names this product is targeted in
+  const campsArr = p.campaigns || [];
+  let campaignsRow = '';
+  if (campsArr.length > 0) {
+    const visible = campsArr.slice(0, 3);
+    const more = campsArr.length - visible.length;
+    const chips = visible.map(function(c) {
+      const isPaused = (c.state || '').toLowerCase() === 'paused';
+      const bg = isPaused ? 'var(--surface3)' : 'var(--surface2)';
+      const colour = isPaused ? 'var(--text3)' : 'var(--text2)';
+      return '<span style="display:inline-block;font-size:11px;color:' + colour + ';background:' + bg + ';padding:2px 8px;border-radius:99px;border:1px solid var(--border);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="' + escHtml(c.name) + (isPaused ? ' (paused)' : '') + '">' + escHtml(c.name) + '</span>';
+    }).join(' ');
+    const moreChip = more > 0 ? ' <span style="display:inline-block;font-size:11px;color:var(--text3);padding:2px 6px">+' + more + ' more</span>' : '';
+    campaignsRow = '<div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;flex-shrink:0">In campaigns:</span>' + chips + moreChip + '</div>';
+  } else if (p.total_sales_7d > 0 || p.active_60d) {
+    campaignsRow = '<div style="margin-top:8px;font-size:11px;color:var(--amber)"><span style="font-weight:600">⚠ Not in any campaign</span></div>';
+  }
   return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer" onclick="openAmzProductModal(' + idx + ')">' +
     img +
     '<div class="amz-product-body">' +
@@ -3589,6 +3606,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       diagnosisLine +
       actionLine +
       stats +
+      campaignsRow +
       '<div style="margin-top:8px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>' +
     '</div>' +
   '</div>';
@@ -3717,6 +3735,38 @@ function buildAmzProductModalBody(p) {
       tile('Campaigns', String(p.camp_count || 0)),
     '</div>',
 
+    // r14: Campaigns this product is in
+    (function(){
+      const camps = p.campaigns || [];
+      if (camps.length === 0) return '';
+      const rows = camps.map(function(c) {
+        const isPaused = (c.state || '').toLowerCase() === 'paused';
+        const stateColor = isPaused ? 'var(--text3)' : 'var(--green)';
+        const stateLabel = isPaused ? 'Paused' : 'Enabled';
+        const targeting = (c.targetingType || '').toLowerCase() === 'auto' ? 'Auto' : 'Manual';
+        return '<tr style="border-top:1px solid var(--border)">' +
+          '<td style="padding:10px 12px;font-size:13px;font-weight:500;color:var(--text);max-width:380px">' + escHtml(c.name) + '</td>' +
+          '<td style="padding:10px 12px;font-size:11px;color:' + stateColor + ';font-weight:600">' + stateLabel + '</td>' +
+          '<td style="padding:10px 12px;font-size:11px;color:var(--text3)">' + targeting + '</td>' +
+          '<td style="padding:10px 12px;text-align:right;font-family:var(--mono);font-size:13px">£' + (c.spend || 0).toFixed(2) + '</td>' +
+          '<td style="padding:10px 12px;text-align:right;font-family:var(--mono);font-size:13px">£' + (c.sales || 0).toFixed(2) + '</td>' +
+        '</tr>';
+      }).join('');
+      return '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Campaigns targeting this product (' + camps.length + ')</div>' +
+        '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">' +
+          '<table style="width:100%;border-collapse:collapse">' +
+            '<thead><tr style="background:var(--surface2);color:var(--text3)">' +
+              '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Campaign name</th>' +
+              '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">State</th>' +
+              '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Type</th>' +
+              '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Spend 7d</th>' +
+              '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Sales 7d</th>' +
+            '</tr></thead>' +
+            '<tbody>' + rows + '</tbody>' +
+          '</table>' +
+        '</div>';
+    })(),
+
     // Listing health
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Listing health</div>',
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
@@ -3749,7 +3799,7 @@ function buildAmzProductModalBody(p) {
             const skuList = (c.skus || []).join(', ');
             const skuLabel = c.sku_count > 1 ? c.sku_count + ' SKUs' : '1 SKU';
             // r14: SKU pill — slightly bigger, clearer colour, still subdued
-            const skuPill = '<span style="display:inline-block;font-size:11px;font-weight:500;color:var(--text2);background:var(--surface3);padding:3px 8px;border-radius:99px;cursor:help" title="' + escHtml(skuList) + '">' + skuLabel + '</span>';
+            const skuPill = '<span style="display:inline-block;font-size:11px;font-weight:500;color:var(--text2);background:var(--surface3);padding:3px 8px;border-radius:99px" title="' + escHtml(skuList) + '">' + skuLabel + '</span>';
             return '<tr style="border-top:1px solid var(--border)">' +
               '<td style="padding:10px 12px;font-family:var(--mono);font-weight:600">' + escHtml(c.asin) + '</td>' +
               '<td style="padding:10px 12px">' + skuPill + '</td>' +
