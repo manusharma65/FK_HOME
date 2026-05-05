@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r16 (more permissive matcher, hide/restore for products + campaigns, hidden tab + modal, Bobby Singh Director)
+// CampaignPulse — deploy marker 2026-05-04 r16b (debug endpoint /api/admin/match-debug to trace matcher)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2643,6 +2643,83 @@ function computeAmazonDiagnosis(p) {
   };
 }
 
+// r16b: Debug endpoint — traces the matcher for one specific product
+// Usage: GET /api/admin/match-debug?titleContains=vibration plate
+// Returns: every campaign that should match this product + why each does or doesn't.
+app.get('/api/admin/match-debug', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const titleQuery = String(req.query.titleContains || '').toLowerCase();
+  if (!titleQuery) return res.status(400).json({ error: 'titleContains query required' });
+  try {
+    // Find all matching products
+    const prodRes = await db.query(
+      "SELECT sku, asin, title, parent_sku FROM amazon_products WHERE LOWER(title) LIKE $1 LIMIT 5",
+      ['%' + titleQuery + '%']
+    );
+    if (!prodRes.rows.length) return res.json({ error: 'no products with that title', titleQuery: titleQuery });
+
+    // Pull recent campaigns
+    const snapshotsRes = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
+    );
+    const seenCamp = new Set();
+    const recentCampaigns = [];
+    snapshotsRes.rows.forEach(function(snap) {
+      (snap.campaigns || []).forEach(function(c) {
+        if (c.campaignId && !seenCamp.has(c.campaignId)) { seenCamp.add(c.campaignId); recentCampaigns.push(c); }
+      });
+    });
+
+    // Trace each product
+    const results = prodRes.rows.map(function(p) {
+      const titleKw = extractTitleKeywords(p.title || '');
+      const titleKwArr = Array.from(titleKw);
+      // Find campaigns whose name mentions any keyword
+      const candidateCampaigns = recentCampaigns.filter(function(c) {
+        const lower = (c.name || '').toLowerCase();
+        return titleKwArr.some(function(kw){ return lower.indexOf(kw) !== -1; });
+      });
+      const traced = candidateCampaigns.slice(0, 10).map(function(c) {
+        const parsed = parseCampaignName(c.name || '');
+        const hintKw = extractTitleKeywords(parsed.productHint);
+        const hintKwArr = Array.from(hintKw);
+        const overlap = hintKwArr.filter(function(kw){ return titleKw.has(kw); });
+        const wouldMatch = isCampaignMatch(hintKw, titleKw);
+        return {
+          name: c.name,
+          parsed_agent: parsed.agent,
+          parsed_hint: parsed.productHint,
+          hint_keywords: hintKwArr,
+          title_keywords: titleKwArr.slice(0, 15),
+          overlap: overlap,
+          would_match: wouldMatch,
+          reason: wouldMatch ? 'matches' :
+            !parsed.agent ? 'no agent prefix in campaign name (parser rejected)' :
+            hintKwArr.length === 0 ? 'no usable hint keywords (all stop-words?)' :
+            overlap.length === 0 ? 'no keyword overlap' :
+            overlap.length === 1 && overlap[0].length < 5 ? 'only 1 short keyword overlap (need 2+ or 1 distinctive)' :
+            'unknown'
+        };
+      });
+      return {
+        sku: p.sku,
+        parent_sku: p.parent_sku,
+        title: p.title,
+        title_keywords: titleKwArr,
+        candidate_campaigns_count: candidateCampaigns.length,
+        traced: traced
+      };
+    });
+    res.json({
+      totalRecentCampaigns: recentCampaigns.length,
+      products: results
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/amazon/products
 app.get('/api/amazon/products', async function(req, res) {
   if (!db) return res.json({ products: [] });
   try {
