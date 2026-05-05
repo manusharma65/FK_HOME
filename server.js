@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r8 (SP-API plumbing: catalogue + orders sync, admin diagnostic endpoints, daily cron)
+// CampaignPulse — deploy marker 2026-05-04 r8a (SP-API: more forgiving getSellerId + raw passthrough endpoint)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -322,22 +322,36 @@ async function spApiGet(pathAndQuery, retryCount) {
 }
 
 // Get the seller ID — needed for some endpoints. Fetches once and caches.
+// Tries multiple known shapes of the response, since the field names have
+// changed across SP-API versions.
 async function getSellerId() {
   if (spApiState.sellerId) return spApiState.sellerId;
   try {
     const data = await spApiGet('/sellers/v1/marketplaceParticipations');
-    if (data && data.payload && data.payload.length) {
-      // Find the UK marketplace entry
-      const uk = data.payload.find(function(p) {
-        return p.marketplace && p.marketplace.id === SP_API_MARKETPLACE_ID;
-      }) || data.payload[0];
-      if (uk && uk.participation && uk.participation.sellerId) {
-        spApiState.sellerId = uk.participation.sellerId;
-        console.log('[SP-API] Seller ID fetched: ' + spApiState.sellerId);
-        return spApiState.sellerId;
-      }
+    // Newer responses: data.payload is an array of participation objects
+    // Older responses: same shape, but field names differ slightly
+    const participations = (data && data.payload) || [];
+    if (!participations.length) {
+      throw new Error('No marketplace participations returned (raw shape: ' + JSON.stringify(data || {}).slice(0, 200) + ')');
     }
-    throw new Error('Seller ID not found in marketplaceParticipations response');
+    // Try to find UK first, fall back to first entry
+    let chosen = participations.find(function(p) {
+      const mp = p.marketplace || {};
+      return mp.id === SP_API_MARKETPLACE_ID || mp.countryCode === 'GB' || mp.countryCode === 'UK';
+    }) || participations[0];
+    // The seller ID can live in different places depending on response version
+    const candidates = [
+      chosen && chosen.participation && chosen.participation.sellerId,
+      chosen && chosen.sellerId,
+      chosen && chosen.merchantId,
+      data && data.sellerId
+    ].filter(Boolean);
+    if (!candidates.length) {
+      throw new Error('Seller ID not found in any expected field. First participation keys: ' + Object.keys(chosen || {}).join(','));
+    }
+    spApiState.sellerId = candidates[0];
+    console.log('[SP-API] Seller ID fetched: ' + spApiState.sellerId);
+    return spApiState.sellerId;
   } catch(e) {
     console.error('[SP-API] getSellerId failed: ' + e.message);
     throw e;
@@ -2260,6 +2274,29 @@ app.post('/api/admin/sp-api/sync-orders', async function(req, res) {
   const daysBack = parseInt((req.body && req.body.daysBack) || 7);
   const result = await syncAmazonOrders(daysBack);
   res.json(result);
+});
+
+// GET /api/admin/sp-api/raw?path=/path — diagnostic passthrough.
+// Owner-only. Calls SP-API with the supplied path and returns raw response.
+// Used to inspect endpoint responses when something doesn't parse as expected.
+// Path must start with / and be one of an allow-listed prefix to prevent abuse.
+app.get('/api/admin/sp-api/raw', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const p = String(req.query.path || '');
+  if (!p.startsWith('/')) return res.status(400).json({ error: 'path must start with /' });
+  // Allow-list of safe prefixes — read-only diagnostic only
+  const allowed = ['/sellers/', '/listings/', '/catalog/', '/orders/', '/fba/'];
+  if (!allowed.some(function(prefix){ return p.startsWith(prefix); })) {
+    return res.status(400).json({ error: 'path prefix not in allow-list' });
+  }
+  try {
+    const data = await spApiGet(p);
+    res.json({ ok: true, data: data });
+  } catch(e) {
+    const status = (e.response && e.response.status) || 'no-response';
+    const body = (e.response && e.response.data) || null;
+    res.json({ ok: false, status: status, error: e.message, body: body });
+  }
 });
 
 app.post('/api/admin/fix-agent-names', async function(req, res) {
