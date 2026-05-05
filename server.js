@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r11 (agent product-ownership: auto-derive + manual override, per-agent sales attribution, team transparency view)
+// CampaignPulse — deploy marker 2026-05-04 r12 (Google-style product cards with Amazon-specific diagnosis, smarter owner-derive via campaign-name keyword overlap, owner-role nav fix, compact metric cards)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2461,6 +2461,136 @@ app.get('/api/admin/sp-api/test-listings', async function(req, res) {
 //     they include `targets` arrays per campaign which list the targeted ASINs).
 //   - This is approximate — auto-targeting campaigns may show ads for a product without
 //     ever explicitly listing the ASIN. We flag those as "auto-targeted only" separately.
+// r12: Amazon-specific product diagnosis engine.
+// Returns { priority, diagnosis, action } for a product based on its sales,
+// ad coverage, ACOS, listing status, and campaign performance.
+//
+// Priority levels:
+//   1 = URGENT — losing money, suspended listing, or major coverage gap on a high-revenue product
+//   2 = ATTENTION — needs action (advertising gap, high ACOS, etc.)
+//   3 = SCALE — performing well, opportunity to grow
+//   4 = INFO — stable / no action needed
+//
+// Diagnosis = factual observation. Action = what to do.
+const ACOS_TARGET = 20; // company target — could come from settings later
+function computeAmazonDiagnosis(p) {
+  // p has: parent, totalSales, totalUnits, adCoveragePct, advertisedChildren, totalChildren,
+  //        campaignSpend, campaignSales, acos, campaignCount, autoCampaignsExist
+  // Plus parent.buyable_count, parent.inactive_count
+  const parent = p.parent;
+  const inactiveCount = parent.inactive_count || 0;
+  const buyableCount = parent.buyable_count || 0;
+  const hasSales = p.totalSales > 0;
+  const hasSpend = p.campaignSpend > 0;
+  const hasCampaigns = p.campaignCount > 0;
+
+  // ── URGENT cases (priority 1) ──────────────────────────────────────────────
+  // Listing suspended/inactive
+  if (inactiveCount > 0 && buyableCount === 0) {
+    return {
+      priority: 1,
+      diagnosis: 'All variants INACTIVE/SUSPENDED — listing not buyable on Amazon',
+      action: 'Investigate suspension reason in Seller Central; relist'
+    };
+  }
+  if (inactiveCount >= 2 && p.totalChildren > 2) {
+    return {
+      priority: 1,
+      diagnosis: inactiveCount + ' of ' + p.totalChildren + ' variants suspended/inactive',
+      action: 'Review suspended ASINs in Seller Central and reinstate'
+    };
+  }
+  // Spending hard with zero sales — wasted budget
+  if (hasSpend && p.campaignSpend > 20 && !hasSales) {
+    return {
+      priority: 1,
+      diagnosis: 'Spending £' + p.campaignSpend.toFixed(2) + '/wk in ' + p.campaignCount + ' campaigns — zero sales',
+      action: 'Pause campaigns or check listing for issues (image / price / reviews)'
+    };
+  }
+  // ACOS extremely high (above 2x target)
+  if (hasSales && hasSpend && p.acos > ACOS_TARGET * 2) {
+    return {
+      priority: 1,
+      diagnosis: 'ACOS ' + p.acos + '% — more than double target (' + ACOS_TARGET + '%) at £' + p.campaignSpend.toFixed(2) + ' spend',
+      action: 'Reduce bids or add negative keywords; review search-term report'
+    };
+  }
+
+  // ── ATTENTION cases (priority 2) ───────────────────────────────────────────
+  // Selling but no campaigns at all on this product → losing potential
+  if (hasSales && p.totalSales > 50 && !hasCampaigns) {
+    return {
+      priority: 2,
+      diagnosis: '£' + p.totalSales.toFixed(0) + ' organic sales, but no advertising at all',
+      action: 'Launch a Sponsored Products campaign — already has organic demand'
+    };
+  }
+  // Coverage gap — many variants un-advertised
+  if (p.totalChildren >= 3 && p.adCoveragePct < 40 && hasSales) {
+    return {
+      priority: 2,
+      diagnosis: 'Only ' + p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised (' + p.adCoveragePct + '% coverage)',
+      action: 'Add remaining variants to existing campaigns (same parent ASIN target)'
+    };
+  }
+  // ACOS above target
+  if (hasSales && hasSpend && p.acos > ACOS_TARGET) {
+    return {
+      priority: 2,
+      diagnosis: 'ACOS ' + p.acos + '% — above ' + ACOS_TARGET + '% target on ' + p.campaignCount + ' campaigns',
+      action: 'Tune bids on top-spending keywords; check search-term waste'
+    };
+  }
+  // Owner unassigned — admin issue
+  if (!parent.owner_agent && hasSales) {
+    return {
+      priority: 2,
+      diagnosis: 'No agent assigned — sales not attributed in team breakdown',
+      action: 'Assign an owner agent from the dropdown above'
+    };
+  }
+  // No sales no spend — should we be advertising this?
+  if (!hasSales && !hasSpend && buyableCount > 0) {
+    return {
+      priority: 2,
+      diagnosis: 'BUYABLE listing with no sales and no advertising in 7 days',
+      action: 'Either launch test ads or de-prioritise the listing'
+    };
+  }
+
+  // ── SCALE cases (priority 3) ───────────────────────────────────────────────
+  // Healthy: ACOS at or below target with meaningful spend
+  if (hasSales && hasSpend && p.acos <= ACOS_TARGET && p.campaignSpend > 10) {
+    return {
+      priority: 3,
+      diagnosis: 'ACOS ' + p.acos + '% (under ' + ACOS_TARGET + '% target) — £' + p.totalSales.toFixed(0) + ' sales, £' + p.campaignSpend.toFixed(0) + ' spend',
+      action: 'Increase budget on top-performing campaigns'
+    };
+  }
+  if (hasSales && p.totalSales > 100 && p.adCoveragePct >= 80) {
+    return {
+      priority: 3,
+      diagnosis: '£' + p.totalSales.toFixed(0) + ' weekly sales with ' + p.adCoveragePct + '% ad coverage',
+      action: 'Strong performer — consider Sponsored Brands or Sponsored Display tests'
+    };
+  }
+
+  // ── INFO (priority 4) ──────────────────────────────────────────────────────
+  if (hasSales) {
+    return {
+      priority: 4,
+      diagnosis: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% ad coverage',
+      action: 'No immediate action required'
+    };
+  }
+  return {
+    priority: 4,
+    diagnosis: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ' tracked, no recent activity',
+    action: 'Monitor — no urgent action'
+  };
+}
+
 app.get('/api/amazon/products', async function(req, res) {
   if (!db) return res.json({ products: [] });
   try {
@@ -2513,10 +2643,26 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
+    // 4. Group products into parent buckets — now happens below in section 4 (with diagnosis)
+    // 3b. r12: Aggregate campaign spend/sales/ACOS per parent product group
+    //     Match campaigns to parents via the same name-keyword overlap logic used in deriveProductOwners.
+    //     This gives us "Aryan's Yoga Mat" → all 3 campaigns containing "Yoga" + "Mat" → £X spend, £Y sales.
+    // (parseCampaignName + extractTitleKeywords are defined globally above)
+    const groupCampaignStats = {}; // { groupKey: { spend, sales, clicks, campaigns: [c, c, ...] } }
+    const groupTitleKeywords = {}; // groupKey -> Set of title keywords (built lazily below in section 4)
+    // Collect unique recent campaigns
+    const seenCamp = new Set();
+    const recentCampaigns = [];
+    snapshotsRes.rows.forEach(function(snap) {
+      (snap.campaigns || []).forEach(function(c) {
+        if (c.campaignId && !seenCamp.has(c.campaignId)) { seenCamp.add(c.campaignId); recentCampaigns.push(c); }
+      });
+    });
+
     // 4. Group products into parent buckets
     const parents = {};
     productsRes.rows.forEach(function(p) {
-      const groupKey = p.parent_sku || p.sku; // standalones group under their own SKU
+      const groupKey = p.parent_sku || p.sku;
       if (!parents[groupKey]) {
         parents[groupKey] = {
           parent_sku: groupKey,
@@ -2526,15 +2672,20 @@ app.get('/api/amazon/products', async function(req, res) {
           image_url: null,
           standalone: !p.parent_sku,
           owner_agent: null,
-          owner_manual: false
+          owner_manual: false,
+          buyable_count: 0,
+          inactive_count: 0
         };
       }
       if (!parents[groupKey].title && p.title) parents[groupKey].title = p.title;
       if (!parents[groupKey].image_url && p.image_url) parents[groupKey].image_url = p.image_url;
       if (!parents[groupKey].variation_theme && p.variation_theme) parents[groupKey].variation_theme = p.variation_theme;
-      // Owner is parent-level — take the first non-null value we see (all children should agree)
       if (!parents[groupKey].owner_agent && p.owner_agent) parents[groupKey].owner_agent = p.owner_agent;
       if (p.owner_manual) parents[groupKey].owner_manual = true;
+      // Status counts: child can be BUYABLE, DISCOVERABLE, or INACTIVE/SUSPENDED
+      const status = (p.status || '').toUpperCase();
+      if (status.indexOf('BUYABLE') !== -1) parents[groupKey].buyable_count++;
+      if (status.indexOf('INACTIVE') !== -1 || status.indexOf('SUSPENDED') !== -1) parents[groupKey].inactive_count++;
       const childSales = (p.asin && salesByAsin[p.asin]) || (p.sku && salesBySku[p.sku]) || { revenue: 0, units: 0 };
       parents[groupKey].children.push({
         sku: p.sku,
@@ -2547,23 +2698,83 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
-    // 5. Compute per-parent aggregates
+    // 4b. r12: Match campaigns to parent groups via name-keyword overlap, accumulate spend/sales
+    Object.keys(parents).forEach(function(gk) {
+      groupTitleKeywords[gk] = extractTitleKeywords(parents[gk].title || '');
+    });
+    recentCampaigns.forEach(function(c) {
+      const parsed = parseCampaignName(c.name || '');
+      const hintKw = extractTitleKeywords(parsed.productHint);
+      if (hintKw.size === 0) return;
+      // Find best-matching parent for this campaign (highest overlap, must have ≥2 matches)
+      let bestKey = null;
+      let bestOverlap = 0;
+      Object.keys(parents).forEach(function(gk) {
+        const titleKw = groupTitleKeywords[gk];
+        let overlap = 0;
+        hintKw.forEach(function(kw){ if (titleKw.has(kw)) overlap++; });
+        if (overlap > bestOverlap) { bestOverlap = overlap; bestKey = gk; }
+      });
+      if (!bestKey || bestOverlap < 2) return;
+      // Accumulate
+      if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0 };
+      const s = groupCampaignStats[bestKey];
+      s.spend += parseFloat(c.spend || 0);
+      s.sales += parseFloat(c.sales || 0);
+      s.clicks += parseInt(c.clicks || 0);
+      s.impressions += parseInt(c.impressions || 0);
+      s.conversions += parseInt(c.conversions || 0);
+      s.count++;
+    });
+
+    // 5. Compute per-parent aggregates + diagnosis/action/priority
     const list = Object.values(parents).map(function(parent) {
       const totalSales = parent.children.reduce(function(s, c){ return s + (c.sales_7d || 0); }, 0);
       const totalUnits = parent.children.reduce(function(s, c){ return s + (c.units_7d || 0); }, 0);
       const advertisedChildren = parent.children.filter(function(c){ return c.in_campaign; }).length;
       const adCoveragePct = parent.children.length ? Math.round(100 * advertisedChildren / parent.children.length) : 0;
+      const cs = groupCampaignStats[parent.parent_sku] || { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0 };
+      const acos = cs.sales > 0 ? Math.round((cs.spend / cs.sales) * 1000) / 10 : 0;
+      const costPerConv = cs.conversions > 0 ? cs.spend / cs.conversions : null;
+      // r12: Amazon-specific diagnosis logic
+      const dx = computeAmazonDiagnosis({
+        parent: parent,
+        totalSales: totalSales,
+        totalUnits: totalUnits,
+        adCoveragePct: adCoveragePct,
+        advertisedChildren: advertisedChildren,
+        totalChildren: parent.children.length,
+        campaignSpend: cs.spend,
+        campaignSales: cs.sales,
+        acos: acos,
+        campaignCount: cs.count,
+        autoCampaignsExist: autoCampaignsExist.value
+      });
       return Object.assign({}, parent, {
         total_sales_7d: parseFloat(totalSales.toFixed(2)),
         total_units_7d: totalUnits,
         ad_coverage_pct: adCoveragePct,
         advertised_children: advertisedChildren,
-        total_children: parent.children.length
+        total_children: parent.children.length,
+        // Campaign-side metrics (matched via name)
+        camp_spend_7d: parseFloat(cs.spend.toFixed(2)),
+        camp_sales_7d: parseFloat(cs.sales.toFixed(2)),
+        camp_clicks_7d: cs.clicks,
+        camp_impressions_7d: cs.impressions,
+        camp_conversions_7d: cs.conversions,
+        camp_count: cs.count,
+        acos: acos,
+        cost_per_conv: costPerConv != null ? parseFloat(costPerConv.toFixed(2)) : null,
+        // Diagnosis + action + priority
+        priority: dx.priority,
+        diagnosis: dx.diagnosis,
+        action: dx.action
       });
     });
 
-    // Sort: highest sales first, then by ad coverage gap (uncovered with sales = top priority)
+    // Sort: priority asc (1=urgent first), then sales desc
     list.sort(function(a, b) {
+      if (a.priority !== b.priority) return a.priority - b.priority;
       return b.total_sales_7d - a.total_sales_7d;
     });
 
@@ -2574,7 +2785,10 @@ app.get('/api/amazon/products', async function(req, res) {
         total_skus: productsRes.rows.length,
         auto_campaigns_exist: autoCampaignsExist.value,
         advertised_asins_count: advertisedAsins.size,
-        unassigned_count: list.filter(function(p){ return !p.owner_agent; }).length
+        unassigned_count: list.filter(function(p){ return !p.owner_agent; }).length,
+        urgent_count: list.filter(function(p){ return p.priority === 1; }).length,
+        attention_count: list.filter(function(p){ return p.priority === 2; }).length,
+        scale_count: list.filter(function(p){ return p.priority === 3; }).length
       }
     });
   } catch(e) {
@@ -2651,63 +2865,95 @@ app.get('/api/amazon/top-products', async function(req, res) {
 });
 
 
-// ── r11: Auto-derive product owner agent from campaign data ────────────────
-// For each parent_sku in amazon_products, scan recent daily_snapshots and look
-// at which agent's campaigns target any of its child ASINs. Most-frequent agent wins.
-// Only updates rows where owner_manual=FALSE (so we don't overwrite manual choices).
+// ── r12: Auto-derive product owner agent from campaign data ─────────────────
+// Strategy: campaign names follow the pattern "Agent | Product Name | ..."
+// or "Agent @ Product Name". Examples:
+//   "Satyam | Yoga Mat KT"
+//   "Aryan @ Dumbbell rack | Exact kw"
+//
+// For each campaign:
+//   1. Extract leading agent token (everything before first | or @)
+//   2. Extract the product hint (the next segment, before the second separator)
+//   3. Match the product hint against amazon_products.title via case-insensitive
+//      keyword overlap. A campaign "matches" a product if its hint shares 2+
+//      meaningful keywords with the product title.
+//
+// For each parent product group, tally which agent's campaigns match most often.
+// Most-frequent agent wins, written to amazon_products.owner_agent.
+// Manual overrides (owner_manual=TRUE) are never overwritten.
 async function deriveProductOwners() {
   if (!db) return { ok: false, error: 'no-db' };
   try {
-    // 1. Pull all child SKU + parent + ASIN tuples
+    // 1. Pull all products with parent grouping + titles
     const productsRes = await db.query(
-      "SELECT sku, asin, parent_sku FROM amazon_products WHERE asin IS NOT NULL"
+      "SELECT sku, asin, parent_sku, title FROM amazon_products WHERE title IS NOT NULL"
     );
-    if (!productsRes.rows.length) return { ok: true, parents_updated: 0, message: 'no products' };
+    if (!productsRes.rows.length) return { ok: true, parents_scanned: 0, message: 'no products with titles' };
 
-    // 2. Build ASIN → group_key (parent_sku or own sku for standalones) lookup
-    const asinToGroup = {};
+    // 2. Build group → product info lookup, and a list of (group_key, title_keywords)
+    const groupTitles = {}; // group_key -> { title, keywords:Set }
     productsRes.rows.forEach(function(p) {
-      const key = p.parent_sku || p.sku;
-      asinToGroup[p.asin] = key;
+      const groupKey = p.parent_sku || p.sku;
+      if (!groupTitles[groupKey]) {
+        // Use first title we see for the group
+        const title = p.title || '';
+        groupTitles[groupKey] = { title: title, keywords: extractTitleKeywords(title) };
+      }
     });
 
-    // 3. Scan last 14 days of snapshots for ASIN-targeted campaigns and tally agents
+    // 3. Pull recent campaigns from daily_snapshots (last 14 days)
     const snapshotsRes = await db.query(
-      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days'"
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC"
     );
-    // groupAgentCounts[group_key][agent] = count
-    const groupAgentCounts = {};
+    if (!snapshotsRes.rows.length) {
+      return { ok: true, parents_scanned: 0, rows_updated: 0, message: 'no snapshots in last 14 days' };
+    }
+    // Deduplicate campaigns across days by campaignId — we want each campaign counted once
+    const seenCampaigns = new Set();
+    const campaigns = [];
     snapshotsRes.rows.forEach(function(snap) {
-      const camps = snap.campaigns || [];
-      camps.forEach(function(c) {
-        const agent = c.agent || c.agentName || null;
-        if (!agent) return;
-        // Look at any ASIN this campaign targets — could be in c.targets, c.asins, c.targetedAsins, or the campaign name
-        const asinSet = new Set();
-        ['targets','asins','targetedAsins'].forEach(function(field) {
-          const arr = c[field];
-          if (Array.isArray(arr)) {
-            arr.forEach(function(t) {
-              const asin = (typeof t === 'string') ? t : (t && (t.asin || t.value));
-              if (asin && /^B[0-9A-Z]{9}$/.test(asin)) asinSet.add(asin);
-            });
-          }
-        });
-        // Also extract any ASINs mentioned in the campaign name (some name conventions include them)
-        if (c.name) {
-          const matches = String(c.name).match(/B[0-9A-Z]{9}/g);
-          if (matches) matches.forEach(function(a){ asinSet.add(a); });
+      (snap.campaigns || []).forEach(function(c) {
+        if (c.campaignId && !seenCampaigns.has(c.campaignId)) {
+          seenCampaigns.add(c.campaignId);
+          campaigns.push(c);
         }
-        asinSet.forEach(function(asin) {
-          const groupKey = asinToGroup[asin];
-          if (!groupKey) return;
-          if (!groupAgentCounts[groupKey]) groupAgentCounts[groupKey] = {};
-          groupAgentCounts[groupKey][agent] = (groupAgentCounts[groupKey][agent] || 0) + 1;
-        });
       });
     });
 
-    // 4. For each group, pick the top agent and write to owner_agent (only if owner_manual=FALSE)
+    // 4. For each campaign, extract agent + product hint, then find matching parent products
+    // groupAgentCounts[group_key][agent] = match_count
+    const groupAgentCounts = {};
+    const debugStats = { campaignsWithAgent: 0, campaignsMatched: 0, totalMatches: 0 };
+
+    campaigns.forEach(function(c) {
+      const parsed = parseCampaignName(c.name || '');
+      if (!parsed.agent) return;
+      debugStats.campaignsWithAgent++;
+      // Try to also use the campaign's portfolio-derived agent if present (sometimes more reliable)
+      const agent = parsed.agent;
+      // Product hint keywords from the campaign name
+      const hintKeywords = extractTitleKeywords(parsed.productHint);
+      if (hintKeywords.size === 0) return;
+      // Find matching products
+      let matchedThisCampaign = false;
+      Object.keys(groupTitles).forEach(function(groupKey) {
+        const titleKw = groupTitles[groupKey].keywords;
+        // Count overlap between hint keywords and title keywords
+        let overlap = 0;
+        hintKeywords.forEach(function(kw) { if (titleKw.has(kw)) overlap++; });
+        // Need at least 2 keyword matches OR a single very-distinctive keyword (length>=5)
+        const hasStrongMatch = overlap >= 2 || (overlap === 1 && Array.from(hintKeywords).some(function(kw){ return kw.length >= 5 && titleKw.has(kw); }));
+        if (hasStrongMatch) {
+          if (!groupAgentCounts[groupKey]) groupAgentCounts[groupKey] = {};
+          groupAgentCounts[groupKey][agent] = (groupAgentCounts[groupKey][agent] || 0) + 1;
+          matchedThisCampaign = true;
+          debugStats.totalMatches++;
+        }
+      });
+      if (matchedThisCampaign) debugStats.campaignsMatched++;
+    });
+
+    // 5. For each group, pick top agent and update DB (skip rows with owner_manual=TRUE)
     let updated = 0;
     for (const groupKey of Object.keys(groupAgentCounts)) {
       const counts = groupAgentCounts[groupKey];
@@ -2717,7 +2963,6 @@ async function deriveProductOwners() {
         if (counts[a] > topCount) { topCount = counts[a]; topAgent = a; }
       });
       if (!topAgent) continue;
-      // Update all SKUs whose parent_sku equals groupKey OR (parent_sku IS NULL AND sku == groupKey)
       try {
         const r = await db.query(
           "UPDATE amazon_products SET owner_agent=$1 " +
@@ -2728,12 +2973,57 @@ async function deriveProductOwners() {
         if (r.rowCount > 0) updated += r.rowCount;
       } catch(e) { console.error('[derive-owners] Update error for ' + groupKey + ': ' + e.message); }
     }
-    console.log('[derive-owners] Updated ' + updated + ' rows across ' + Object.keys(groupAgentCounts).length + ' parent groups');
-    return { ok: true, parents_scanned: Object.keys(groupAgentCounts).length, rows_updated: updated };
+
+    console.log('[derive-owners] Stats: ' + debugStats.campaignsWithAgent + ' campaigns parsed, ' + debugStats.campaignsMatched + ' matched, ' + debugStats.totalMatches + ' total matches → ' + updated + ' rows updated across ' + Object.keys(groupAgentCounts).length + ' parent groups');
+    return {
+      ok: true,
+      parents_scanned: Object.keys(groupAgentCounts).length,
+      rows_updated: updated,
+      campaigns_parsed: debugStats.campaignsWithAgent,
+      campaigns_matched: debugStats.campaignsMatched
+    };
   } catch(e) {
     console.error('[derive-owners] FAILED: ' + e.message);
     return { ok: false, error: e.message };
   }
+}
+
+// Parse a campaign name like "Satyam | Yoga Mat KT" → { agent, productHint }
+// Supports both "|" and "@" as the agent separator.
+function parseCampaignName(name) {
+  if (!name) return { agent: null, productHint: '' };
+  // First token before | or @, trimmed. Must look like a name (alpha only, 3-15 chars).
+  const m = String(name).match(/^\s*([A-Za-z]{3,15})\s*[|@]\s*(.*)$/);
+  if (!m) return { agent: null, productHint: '' };
+  const agent = m[1].trim();
+  // Product hint = everything between the agent and the next separator (or end)
+  const rest = m[2] || '';
+  const hint = rest.split(/[|@]/)[0].trim();
+  return { agent: agent, productHint: hint };
+}
+
+// Extract meaningful lowercase keywords from a title or product hint.
+// Filters out common stopwords + noise tokens, returns a Set.
+const TITLE_STOPWORDS = new Set([
+  'the','and','for','with','from','your','our','this','that','are','was','will',
+  'kt','exact','kw','keyword','kws','kws.','sd','sb','sp','auto','manual','match','match.',
+  'amazon','amazo','amaz','prod','product','products','listing','set','pcs','pack','new',
+  'test','testing','old','best','top','main','sub','low','high','any',
+  'fk','sports','fksports'
+]);
+function extractTitleKeywords(text) {
+  if (!text) return new Set();
+  const tokens = String(text).toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')   // strip punctuation
+    .split(/\s+/)
+    .filter(function(t) {
+      if (!t) return false;
+      if (t.length < 3) return false;            // skip tiny tokens
+      if (/^\d+$/.test(t)) return false;         // pure numbers (sizes, etc.)
+      if (TITLE_STOPWORDS.has(t)) return false;  // common noise
+      return true;
+    });
+  return new Set(tokens);
 }
 
 // PUT /api/amazon/products/:groupKey/owner — manually set the owner agent.
