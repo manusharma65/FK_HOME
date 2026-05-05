@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r8c (SP-API: catalogue sync uses summaries-only — fixes 400 error)
+// CampaignPulse — deploy marker 2026-05-04 r8d (SP-API: probe relationships/attributes for parent-ASIN discovery before r9 build)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2314,7 +2314,11 @@ app.get('/api/admin/sp-api/test-listings', async function(req, res) {
     const variants = [
       { name: 'minimal', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&pageSize=5' },
       { name: 'with summaries only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries&pageSize=5' },
-      { name: 'identifiers only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=identifiers&pageSize=5' }
+      { name: 'identifiers only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=identifiers&pageSize=5' },
+      // r9 probes — finding a way to get parent ASIN data
+      { name: 'summaries+relationships', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries,relationships&pageSize=5' },
+      { name: 'relationships only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=relationships&pageSize=5' },
+      { name: 'summaries+attributes', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries,attributes&pageSize=5' }
     ];
     const results = [];
     for (const v of variants) {
