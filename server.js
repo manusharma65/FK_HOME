@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r8b (SP-API: test-listings probe endpoint to debug 400 errors)
+// CampaignPulse — deploy marker 2026-05-04 r8c (SP-API: catalogue sync uses summaries-only — fixes 400 error)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -359,9 +359,11 @@ async function getSellerId() {
 }
 
 // ── Sync the seller's product catalogue from SP-API into amazon_products ─────
-// Uses /listings/2021-08-01/items/{sellerId} to enumerate every SKU. Pulls
-// title, ASIN, status, image, price for each. Idempotent — re-running just
-// updates existing rows.
+// Uses /listings/2021-08-01/items/{sellerId} to enumerate every SKU.
+// IMPORTANT: this endpoint only reliably accepts `includedData=summaries` for
+// most seller account types. Asking for offers/images here causes 400 errors.
+// We pull title/ASIN/status from summaries; images and pricing get fetched
+// separately via the Catalog API in a follow-up step.
 async function syncAmazonCatalogue() {
   if (!db) { console.log('[SP-API catalogue sync] No DB — skipping'); return { ok: false, error: 'no-db' }; }
   if (!spApiConfigured()) { console.log('[SP-API catalogue sync] Not configured — skipping'); return { ok: false, error: 'not-configured' }; }
@@ -373,10 +375,9 @@ async function syncAmazonCatalogue() {
     let pageNum = 0;
     do {
       pageNum++;
-      // includedData controls which fields come back. Keep it lean — we don't need attributes/relationships now.
       const params = new URLSearchParams({
         marketplaceIds: SP_API_MARKETPLACE_ID,
-        includedData: 'summaries,offers,images',
+        includedData: 'summaries',
         pageSize: '20'
       });
       if (pageToken) params.set('pageToken', pageToken);
@@ -387,19 +388,20 @@ async function syncAmazonCatalogue() {
         try {
           const sku = item.sku;
           const summary = (item.summaries && item.summaries[0]) || {};
-          const offer = (item.offers && item.offers[0]) || {};
-          const image = (item.images && item.images[0] && item.images[0].images && item.images[0].images[0]) || {};
           const asin = summary.asin || null;
           const title = summary.itemName || null;
-          const status = summary.status ? (Array.isArray(summary.status) ? summary.status.join(',') : summary.status) : null;
-          const imageUrl = image.link || null;
-          const priceAmount = offer.price && offer.price.amount ? parseFloat(offer.price.amount) : null;
-          const priceCurrency = offer.price && offer.price.currencyCode ? offer.price.currencyCode : null;
+          // Status field can be a string or array; normalise to comma-separated string
+          let status = null;
+          if (summary.status) {
+            status = Array.isArray(summary.status) ? summary.status.join(',') : String(summary.status);
+          }
+          // mainImage lives inside summaries when summaries are returned in this endpoint
+          const imageUrl = (summary.mainImage && summary.mainImage.link) || null;
           await db.query(
-            'INSERT INTO amazon_products (sku, asin, title, status, image_url, price, currency, last_synced_at, raw_summary) ' +
-            'VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8) ' +
-            'ON CONFLICT (sku) DO UPDATE SET asin=$2, title=$3, status=$4, image_url=$5, price=$6, currency=$7, last_synced_at=NOW(), raw_summary=$8',
-            [sku, asin, title, status, imageUrl, priceAmount, priceCurrency, JSON.stringify(summary)]
+            'INSERT INTO amazon_products (sku, asin, title, status, image_url, last_synced_at, raw_summary) ' +
+            'VALUES ($1,$2,$3,$4,$5,NOW(),$6) ' +
+            'ON CONFLICT (sku) DO UPDATE SET asin=$2, title=$3, status=$4, image_url=$5, last_synced_at=NOW(), raw_summary=$6',
+            [sku, asin, title, status, imageUrl, JSON.stringify(summary)]
           );
           upserted++;
         } catch(e) { errors++; console.error('[SP-API catalogue sync] Row error sku=' + (item.sku || '?') + ': ' + e.message); }
@@ -410,7 +412,8 @@ async function syncAmazonCatalogue() {
     } while (pageToken);
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log('[SP-API catalogue sync] Done in ' + seconds + 's: ' + total + ' items pulled, ' + upserted + ' upserted, ' + errors + ' errors');
-    // Mark products that didn't appear in this sync as inactive (they were removed from Amazon)
+    // Mark products that didn't appear in this sync as REMOVED (they were taken down or unlisted on Amazon).
+    // Two-hour window means a partial sync won't accidentally wipe everything.
     try {
       await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '2 hours'");
     } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
