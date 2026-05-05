@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r14b (frontend timezone fix, single-vs-multi campaign card display, Haiku default critique + Opus deep-dive, bulk critique with search-term context)
+// CampaignPulse — deploy marker 2026-05-04 r15 (improved campaign matcher with stemming/compounds, single-campaign card row, layered critique reader modal, Coverage gaps tab, Opus role-gated)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2789,14 +2789,18 @@ app.get('/api/amazon/products', async function(req, res) {
       const hintKw = extractTitleKeywords(parsed.productHint);
       if (hintKw.size === 0) return;
       let bestKey = null;
-      let bestOverlap = 0;
+      let bestScore = 0;
       Object.keys(parents).forEach(function(gk) {
         const titleKw = groupTitleKw[gk];
-        let overlap = 0;
-        hintKw.forEach(function(kw){ if (titleKw.has(kw)) overlap++; });
-        if (overlap > bestOverlap) { bestOverlap = overlap; bestKey = gk; }
+        const score = keywordOverlapScore(hintKw, titleKw);
+        if (score > bestScore) { bestScore = score; bestKey = gk; }
       });
-      if (!bestKey || bestOverlap < 2) return;
+      // r15: lower threshold — accept any match where score >= 1.5 (1 distinctive word OR 2+ regular)
+      if (!bestKey || bestScore < 1.5) {
+        // Try the looser isCampaignMatch as fallback (catches "kettle"/"bell" via compound expansion)
+        const titleKw = groupTitleKw[bestKey] || new Set();
+        if (!bestKey || !isCampaignMatch(hintKw, titleKw)) return;
+      }
       if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
       const s = groupCampaignStats[bestKey];
       s.spend += parseFloat(c.spend || 0);
@@ -2872,10 +2876,18 @@ app.get('/api/amazon/products', async function(req, res) {
       return !(p.buyable_count > 0 && p.active_60d);
     });
 
-    // r14: three-way view selector
+    // r14: three-way view selector + r15: 'gaps' filter
     let returnList;
     if (view === 'dormant') returnList = dormantProducts;
     else if (view === 'all') returnList = allParents;
+    else if (view === 'gaps') {
+      // Coverage gap = active product where ad coverage < 100% OR (has sales but no campaigns at all)
+      returnList = activeProducts.filter(function(p) {
+        if (p.ad_coverage_pct < 100) return true;
+        if ((p.camp_count || 0) === 0 && (p.total_sales_7d || 0) > 0) return true;
+        return false;
+      });
+    }
     else returnList = activeProducts;
     returnList.sort(function(a, b) {
       if (a.priority !== b.priority) return a.priority - b.priority;
@@ -2944,7 +2956,14 @@ app.post('/api/amazon/listing-critique', async function(req, res) {
   const asin = String((req.body && req.body.asin) || '');
   const groupKey = String((req.body && req.body.groupKey) || '');
   // r14b: allow caller to choose model — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
+  // r15: Opus is restricted to owner+manager roles for cost control.
   const requestedModel = String((req.body && req.body.model) || 'haiku').toLowerCase();
+  if (requestedModel === 'opus') {
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+    const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+    if (!isPrivileged) return res.status(403).json({ error: 'Deep Dive (Opus) is restricted to managers and owner. Use Haiku critique instead.' });
+  }
   const modelId = requestedModel === 'opus' ? 'claude-opus-4-5-20251101' : 'claude-haiku-4-5-20251001';
   if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
   try {
@@ -3336,12 +3355,8 @@ async function deriveProductOwners() {
       let matchedThisCampaign = false;
       Object.keys(groupTitles).forEach(function(groupKey) {
         const titleKw = groupTitles[groupKey].keywords;
-        // Count overlap between hint keywords and title keywords
-        let overlap = 0;
-        hintKeywords.forEach(function(kw) { if (titleKw.has(kw)) overlap++; });
-        // Need at least 2 keyword matches OR a single very-distinctive keyword (length>=5)
-        const hasStrongMatch = overlap >= 2 || (overlap === 1 && Array.from(hintKeywords).some(function(kw){ return kw.length >= 5 && titleKw.has(kw); }));
-        if (hasStrongMatch) {
+        // r15: use shared isCampaignMatch helper (with compound expansion + singularization)
+        if (isCampaignMatch(hintKeywords, titleKw)) {
           if (!groupAgentCounts[groupKey]) groupAgentCounts[groupKey] = {};
           groupAgentCounts[groupKey][agent] = (groupAgentCounts[groupKey][agent] || 0) + 1;
           matchedThisCampaign = true;
@@ -3401,27 +3416,91 @@ function parseCampaignName(name) {
 }
 
 // Extract meaningful lowercase keywords from a title or product hint.
-// Filters out common stopwords + noise tokens, returns a Set.
+// r15: improved version — strips plurals/'s', handles compounds (kettlebell ↔ kettle bell),
+// keeps short distinctive words, less aggressive stop-word filter.
 const TITLE_STOPWORDS = new Set([
   'the','and','for','with','from','your','our','this','that','are','was','will',
-  'kt','exact','kw','keyword','kws','kws.','sd','sb','sp','auto','manual','match','match.',
+  'kt','exact','kw','keyword','kws','sd','sb','sp','auto','manual','match',
   'amazon','amazo','amaz','prod','product','products','listing','set','pcs','pack','new',
-  'test','testing','old','best','top','main','sub','low','high','any',
+  'test','testing','old','best','top','main','sub','low','high','any','test','phrase',
   'fk','sports','fksports'
 ]);
+
+// Singular form: strip trailing 's' if word is >3 chars and ends in plural suffix.
+// Examples: kettlebells -> kettlebell, mats -> mat, plates -> plate, dumbbells -> dumbbell
+function singularize(word) {
+  if (!word || word.length <= 3) return word;
+  if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y';     // bunnies -> bunny
+  if (word.endsWith('ses') && word.length > 4) return word.slice(0, -2);            // ?
+  if (word.endsWith('xes') && word.length > 4) return word.slice(0, -2);            // boxes -> box
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) return word.slice(0, -1);
+  return word;
+}
+
+// Split a compound into atoms. "kettlebell" -> ["kettlebell", "kettle", "bell"].
+// We only do this for known fitness compounds so we don't over-split.
+const COMPOUND_PARTS = {
+  'kettlebell': ['kettlebell', 'kettle', 'bell'],
+  'kettlebells': ['kettlebell', 'kettle', 'bell'],
+  'dumbbell': ['dumbbell', 'dumb', 'bell'],
+  'dumbbells': ['dumbbell', 'dumb', 'bell'],
+  'barbell': ['barbell', 'bar', 'bell'],
+  'barbells': ['barbell', 'bar', 'bell'],
+  'trampoline': ['trampoline'],
+  'rebounder': ['rebounder', 'trampoline'],   // synonyms!
+  'spinbike': ['spinbike', 'spin', 'bike'],
+  'treadmill': ['treadmill', 'tread'],
+  'rowing': ['rowing', 'rower'],
+  'rower': ['rower', 'rowing']
+};
+
 function extractTitleKeywords(text) {
   if (!text) return new Set();
-  const tokens = String(text).toLowerCase()
-    .replace(/[^a-z0-9 ]+/g, ' ')   // strip punctuation
+  const out = new Set();
+  String(text).toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
     .split(/\s+/)
-    .filter(function(t) {
-      if (!t) return false;
-      if (t.length < 3) return false;            // skip tiny tokens
-      if (/^\d+$/.test(t)) return false;         // pure numbers (sizes, etc.)
-      if (TITLE_STOPWORDS.has(t)) return false;  // common noise
-      return true;
+    .forEach(function(t) {
+      if (!t) return;
+      if (TITLE_STOPWORDS.has(t)) return;
+      if (/^\d+$/.test(t)) return;
+      // Singularize and add
+      const sing = singularize(t);
+      if (sing.length >= 3) out.add(sing);
+      // If it's a known compound, add its atoms too
+      if (COMPOUND_PARTS[t]) COMPOUND_PARTS[t].forEach(function(p){ out.add(singularize(p)); });
+      if (COMPOUND_PARTS[sing]) COMPOUND_PARTS[sing].forEach(function(p){ out.add(singularize(p)); });
     });
-  return new Set(tokens);
+  return out;
+}
+
+// r15: keyword overlap score — number of shared keywords + bonus for distinctive (long) ones
+function keywordOverlapScore(setA, setB) {
+  let score = 0;
+  setA.forEach(function(kw) {
+    if (setB.has(kw)) {
+      score += 1;
+      if (kw.length >= 6) score += 0.5;  // distinctive word bonus (kettlebell, trampoline)
+    }
+  });
+  return score;
+}
+
+// r15: A campaign matches a product if either:
+//   - 2+ shared keywords (existing rule), OR
+//   - 1 shared keyword that is distinctive (>=5 chars, not a generic word)
+// This fixes the "Kettlebells" problem where campaign hint "Kettle Bells" only shares 1 keyword
+// after stop-word filter, but it's a clearly distinctive match.
+function isCampaignMatch(hintKw, titleKw) {
+  let overlap = 0;
+  let hasDistinctive = false;
+  hintKw.forEach(function(kw) {
+    if (titleKw.has(kw)) {
+      overlap++;
+      if (kw.length >= 5) hasDistinctive = true;
+    }
+  });
+  return overlap >= 2 || (overlap >= 1 && hasDistinctive);
 }
 
 // PUT /api/amazon/products/:groupKey/owner — manually set the owner agent.

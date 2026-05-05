@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r14b (frontend date fix, single-vs-multi campaign placement on cards, Haiku/Opus critique selector, bulk critique button) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r15 (improved campaign matcher, single-campaign row on card, layered critique reader, Coverage gaps tab) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -761,30 +761,19 @@ tbody tr:hover { background: var(--surface2); }
       <div id="amz-sales-content" style="padding:18px"><div class="loading"><div class="spinner"></div> Loading sales...</div></div>
     </div>
 
-    <!-- Untargeted Products card -->
-    <div id="amz-untargeted-card" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:20px;padding:0;overflow:hidden">
-      <div style="padding:14px 18px;background:#fef3c7;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <div style="font-size:13px;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.05em">⚠️ Untargeted product variants</div>
-          <div style="font-size:12px;color:#92400e;margin-top:2px" id="amz-untargeted-sub">Children with no ad coverage</div>
-        </div>
-        <div id="amz-untargeted-count" style="font-size:24px;font-weight:700;color:#92400e">—</div>
-      </div>
-      <div id="amz-untargeted-content" style="padding:18px"><div class="loading"><div class="spinner"></div> Loading...</div></div>
-    </div>
-
     <!-- All products list (parent-grouped) -->
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:0;overflow:hidden">
       <div style="padding:14px 18px;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">All products</div>
         <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
       </div>
-      <!-- r14: Active / Dormant tabs (mutually exclusive) -->
+      <!-- r14: Active / Dormant / All / Coverage gaps tabs (mutually exclusive) — r15 adds gaps tab -->
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
         <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
         <button id="amz-filter-active" class="btn btn-primary" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('active')">Active products</button>
         <button id="amz-filter-dormant" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
         <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
+        <button id="amz-filter-gaps" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('gaps')" title="Active products with ad coverage gaps">⚠ Coverage gaps</button>
         <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
         <!-- r14b: Bulk AI critique trigger + status -->
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
@@ -804,6 +793,23 @@ tbody tr:hover { background: var(--surface2); }
         <button class="btn btn-ghost" onclick="closeAmzProductModal()" style="font-size:18px;padding:4px 12px">×</button>
       </div>
       <div id="amz-product-modal-body" style="padding:24px"></div>
+    </div>
+  </div>
+
+  <!-- r15: Critique reader modal — opens on top of product modal (z-index higher) -->
+  <div id="amz-critique-modal" onclick="if(event.target===this)closeAmzCritiqueModal()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.75);z-index:1200;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--surface);width:100%;max-width:900px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.5);margin-top:30px;margin-bottom:30px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);border-radius:14px 14px 0 0;z-index:1">
+        <div>
+          <div style="font-size:18px;font-weight:600;color:var(--text)" id="amz-critique-modal-title">AI listing critique</div>
+          <div id="amz-critique-modal-meta" style="font-size:11px;color:var(--text3);margin-top:2px"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div id="amz-critique-modal-buttons" style="display:flex;gap:6px"></div>
+          <button class="btn btn-ghost" onclick="closeAmzCritiqueModal()" style="font-size:18px;padding:4px 12px">×</button>
+        </div>
+      </div>
+      <div id="amz-critique-modal-body" style="padding:24px;font-size:14px;line-height:1.6"></div>
     </div>
   </div>
 
@@ -3409,8 +3415,8 @@ let amzProductView = 'active'; // r14: 'active' | 'dormant' | 'all'
 
 function setAmzProductView(view) {
   amzProductView = view;
-  // Update tab styles — three-way exclusive
-  ['active', 'dormant', 'all'].forEach(function(v) {
+  // Update tab styles — four-way exclusive (r15)
+  ['active', 'dormant', 'all', 'gaps'].forEach(function(v) {
     const btn = document.getElementById('amz-filter-' + v);
     if (!btn) return;
     btn.className = (v === view) ? 'btn btn-primary' : 'btn btn-ghost';
@@ -3438,10 +3444,11 @@ async function loadAmazonProducts() {
       let label = '';
       if (amzProductView === 'active') label = 'Showing ' + s.total_parents_active + ' active (of ' + (s.total_parents_active + s.total_parents_dormant) + ' total)';
       else if (amzProductView === 'dormant') label = 'Showing ' + s.total_parents_dormant + ' dormant (no recent sales / no buyable listings)';
+      else if (amzProductView === 'gaps') label = 'Showing ' + (prodData.products || []).length + ' products with ad coverage gaps';
       else label = 'Showing all ' + (s.total_parents_active + s.total_parents_dormant) + ' products';
       counterEl.textContent = label;
     }
-    renderAmazonUntargeted(prodData);
+    // r15: untargeted panel removed — coverage gaps are now a tab in the products list
     renderUnassignedBanner(prodData.summary || {});
     renderAmazonProductsList(prodData);
   } catch(e) {
@@ -3560,15 +3567,11 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     ('<img class="amz-product-img" src="' + escHtml(p.image_url) + '" alt="" onerror="this.outerHTML=&quot;<div class=\\&quot;amz-product-img-placeholder\\&quot;>no image</div>&quot;">') :
     '<div class="amz-product-img-placeholder">no image</div>';
   const pri = '<span class="amz-priority-pill ' + amzPriorityClass(p.priority) + '">' + amzPriorityLabel(p.priority) + '</span>';
-  // Variants summary (now ASIN-level after r13 rollup) — r14b: append single-campaign name inline if only one campaign
+  // Variants summary (now ASIN-level after r13 rollup)
   const variantsBadge = (function() {
-    const camps = p.campaigns || [];
-    const singleCampInline = camps.length === 1 ?
-      ' <span style="font-size:11px;color:var(--text2);font-style:italic" title="' + escHtml(camps[0].name) + '"> · in: ' + escHtml(camps[0].name) + '</span>' :
-      '';
-    if (p.standalone) return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + (p.total_children === 1 ? ' ASIN' : ' ASINs') + singleCampInline + '</span>';
+    if (p.standalone) return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + (p.total_children === 1 ? ' ASIN' : ' ASINs') + '</span>';
     const variantLabel = p.variation_theme ? p.variation_theme.toLowerCase() : 'variant';
-    return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + ' ' + escHtml(variantLabel) + ' variant' + (p.total_children === 1 ? '' : 's') + ' · ' + p.advertised_children + ' advertised' + singleCampInline + '</span>';
+    return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + ' ' + escHtml(variantLabel) + ' variant' + (p.total_children === 1 ? '' : 's') + ' · ' + p.advertised_children + ' advertised</span>';
   })();
   // Listing status pill (BUYABLE / INACTIVE)
   let statusPill = '';
@@ -3613,10 +3616,22 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     '<div class="amz-diagnosis-line"><strong>' + escHtml(p.diagnosis) + '</strong></div>' : '';
   const actionLine = p.action ?
     '<div class="amz-action-line">→ ' + escHtml(p.action) + '</div>' : '';
-  // r14b: campaign chips — only show as chip strip when 2+ campaigns (single-campaign name is inlined into the variant badge above)
+  // r15: campaign display — placed prominently between meta row and diagnosis
+  // 1 campaign: single labeled line
+  // 2+ campaigns: chip strip
+  // 0 campaigns + active product: warning banner
   const campsArr = p.campaigns || [];
   let campaignsRow = '';
-  if (campsArr.length >= 2) {
+  if (campsArr.length === 1) {
+    const c = campsArr[0];
+    const isPaused = (c.state || '').toLowerCase() === 'paused';
+    const colour = isPaused ? 'var(--text3)' : 'var(--text2)';
+    const pausedTag = isPaused ? ' <span style="color:var(--text3);font-size:10px">(paused)</span>' : '';
+    campaignsRow = '<div style="margin-top:6px;font-size:12px;color:' + colour + '">' +
+      '<span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-right:6px">In campaign:</span>' +
+      '<span style="font-weight:500">' + escHtml(c.name) + '</span>' + pausedTag +
+    '</div>';
+  } else if (campsArr.length >= 2) {
     const visible = campsArr.slice(0, 4);
     const more = campsArr.length - visible.length;
     const chips = visible.map(function(c) {
@@ -3626,19 +3641,19 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       return '<span style="display:inline-block;font-size:11px;color:' + colour + ';background:' + bg + ';padding:2px 8px;border-radius:99px;border:1px solid var(--border);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="' + escHtml(c.name) + (isPaused ? ' (paused)' : '') + '">' + escHtml(c.name) + '</span>';
     }).join(' ');
     const moreChip = more > 0 ? ' <span style="display:inline-block;font-size:11px;color:var(--text3);padding:2px 6px">+' + more + ' more</span>' : '';
-    campaignsRow = '<div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;flex-shrink:0">In ' + campsArr.length + ' campaigns:</span>' + chips + moreChip + '</div>';
-  } else if (campsArr.length === 0 && (p.total_sales_7d > 0 || p.active_60d)) {
-    campaignsRow = '<div style="margin-top:8px;font-size:11px;color:var(--amber)"><span style="font-weight:600">⚠ Not in any campaign</span></div>';
+    campaignsRow = '<div style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;flex-shrink:0">In ' + campsArr.length + ' campaigns:</span>' + chips + moreChip + '</div>';
+  } else if (p.total_sales_7d > 0 || p.active_60d) {
+    campaignsRow = '<div style="margin-top:6px;font-size:11px;color:var(--amber)"><span style="font-weight:600">⚠ Not in any campaign</span></div>';
   }
   return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer" onclick="openAmzProductModal(' + idx + ')">' +
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
       '<div class="amz-product-meta">' + pri + statusPill + variantsBadge + ownerControl + '</div>' +
+      campaignsRow +
       diagnosisLine +
       actionLine +
       stats +
-      campaignsRow +
       '<div style="margin-top:8px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>' +
     '</div>' +
   '</div>';
@@ -3948,9 +3963,17 @@ async function renderAmzCritiqueSection(p) {
     return;
   }
   const safeKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
+  // r15: Opus deep-dive only visible to owner + managers
+  const me = window._meCache || {};
+  const myRole = (me.role || '').toLowerCase();
+  const myDept = (me.department || '').toLowerCase();
+  const canDeepDive = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
+  const opusBtnHtml = canDeepDive
+    ? ' <button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>'
+    : '';
   const runBtnHtml =
     '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" title="Fast analysis with Claude Haiku (~£0.01)">🔍 Run critique (Haiku)</button>' +
-    ' <button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>';
+    opusBtnHtml;
   contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading saved analysis…</div>';
   buttonsEl.innerHTML = runBtnHtml;
   // Try cached fetch
@@ -3960,6 +3983,13 @@ async function renderAmzCritiqueSection(p) {
       const j = await r.json();
       if (j && j.critique) {
         renderAmzCritiqueResult(j, asin, p.parent_sku);
+        // r15: stash result so user can open in reader
+        window._amzLastCritique = window._amzLastCritique || {};
+        window._amzLastCritique[asin] = { j: j, groupKey: p.parent_sku };
+        const safeKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
+        if (buttonsEl) {
+          buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="openSavedCritique(\'' + asin + '\')">📖 Open in reader</button> ' + buttonsEl.innerHTML;
+        }
         return;
       }
     }
@@ -3976,14 +4006,16 @@ async function renderAmzCritiqueSection(p) {
 }
 
 // r14b: model parameter — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
+// r15: results now open in a dedicated reader modal (layered on top of product modal)
 async function runAmzCritique(groupKey, asin, model) {
-  const contentEl = document.getElementById('amz-critique-content');
-  const buttonsEl = document.getElementById('amz-critique-buttons');
-  if (!contentEl) return;
+  const inlineContent = document.getElementById('amz-critique-content');
+  const inlineButtons = document.getElementById('amz-critique-buttons');
   const modelLabel = model === 'opus' ? 'Opus (deep dive)' : 'Haiku (fast)';
   const expectedTime = model === 'opus' ? '20-30 seconds' : '8-15 seconds';
-  contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">⏳ Analysing listing with ' + modelLabel + '… ' + expectedTime + '. Do not close this window.</div>';
-  buttonsEl.innerHTML = '';
+  // Show progress in inline area + open reader modal in loading state
+  if (inlineContent) inlineContent.innerHTML = '<div style="color:var(--text3);font-size:13px">⏳ Analysing with ' + modelLabel + '… ' + expectedTime + '. Result will open in reader.</div>';
+  if (inlineButtons) inlineButtons.innerHTML = '';
+  openAmzCritiqueModal(asin, groupKey, null, model);  // null result = loading state
   try {
     const r = await fetch('/api/amazon/listing-critique', {
       method: 'POST',
@@ -3992,17 +4024,99 @@ async function runAmzCritique(groupKey, asin, model) {
     });
     const j = await r.json();
     if (!r.ok || j.error) {
-      contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
+      if (inlineContent) inlineContent.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
       const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
-      buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
+      if (inlineButtons) inlineButtons.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
+      // Show error in critique modal
+      const body = document.getElementById('amz-critique-modal-body');
+      if (body) body.innerHTML = '<div style="color:var(--red);padding:12px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
       return;
     }
+    // Render result in the reader modal AND update the inline section so re-open shows it
+    openAmzCritiqueModal(asin, groupKey, j, model);
     renderAmzCritiqueResult(j, asin, groupKey);
   } catch(e) {
-    contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(e.message) + '</div>';
+    if (inlineContent) inlineContent.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(e.message) + '</div>';
     const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
-    buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
+    if (inlineButtons) inlineButtons.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
+    const body = document.getElementById('amz-critique-modal-body');
+    if (body) body.innerHTML = '<div style="color:var(--red);padding:12px">Critique failed: ' + escHtml(e.message) + '</div>';
   }
+}
+
+// r15: Critique reader modal — layered on top of the product modal
+function openAmzCritiqueModal(asin, groupKey, j, model) {
+  const modal = document.getElementById('amz-critique-modal');
+  const titleEl = document.getElementById('amz-critique-modal-title');
+  const metaEl = document.getElementById('amz-critique-modal-meta');
+  const bodyEl = document.getElementById('amz-critique-modal-body');
+  const btnEl = document.getElementById('amz-critique-modal-buttons');
+  if (!modal || !bodyEl) return;
+  modal.style.display = 'flex';
+  // Find product title for the header
+  const cache = amzProductsCache && amzProductsCache.products;
+  const p = cache ? cache.find(function(x){ return x.parent_sku === groupKey; }) : null;
+  if (titleEl) titleEl.textContent = p ? p.title : 'AI listing critique';
+  if (metaEl) metaEl.textContent = 'ASIN: ' + asin;
+  if (j === null) {
+    // Loading state
+    const modelLabel = model === 'opus' ? 'Opus' : 'Haiku';
+    bodyEl.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text3)"><div style="font-size:40px;margin-bottom:12px">⏳</div><div style="font-size:14px">Analysing with Claude ' + modelLabel + '…</div><div style="font-size:12px;margin-top:6px">' + (model === 'opus' ? '20-30' : '8-15') + ' seconds. Don\'t close this window.</div></div>';
+    if (btnEl) btnEl.innerHTML = '';
+    return;
+  }
+  // Render the result body
+  const c = j.critique || {};
+  const cachedModel = (c._model || '').toLowerCase().indexOf('opus') !== -1 ? 'opus' : 'haiku';
+  let html = '';
+  if (c.summary) {
+    html += '<div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:16px 18px;border-radius:8px;margin-bottom:20px;font-size:14px;line-height:1.6"><strong style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:#92400e;display:block;margin-bottom:6px">Summary</strong>' + escHtml(c.summary) + '</div>';
+  }
+  if (Array.isArray(c.issues) && c.issues.length) {
+    html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin:0 0 12px">Ranked fixes — ' + c.issues.length + ' identified</div>';
+    html += c.issues.map(function(iss, i) {
+      const sev = (iss.severity || 'medium').toLowerCase();
+      const colour = sev === 'high' ? 'var(--red)' : (sev === 'medium' ? 'var(--amber)' : 'var(--text2)');
+      const bg = sev === 'high' ? '#fef2f2' : (sev === 'medium' ? '#fffbeb' : 'var(--surface2)');
+      return '<div style="background:' + bg + ';border-left:3px solid ' + colour + ';padding:14px 16px;border-radius:8px;margin-bottom:12px">' +
+        '<div style="font-weight:600;font-size:15px;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="background:' + colour + ';color:white;font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;text-transform:uppercase;letter-spacing:0.05em">' + sev + '</span>' + (i + 1) + '. ' + escHtml(iss.title || '') + '</div>' +
+        '<div style="font-size:13px;color:var(--text);margin-bottom:8px"><strong>Problem:</strong> ' + escHtml(iss.problem || '') + '</div>' +
+        (iss.fix ? '<div style="font-size:13px;color:var(--text);margin-bottom:6px"><strong>Fix:</strong> ' + escHtml(iss.fix) + '</div>' : '') +
+        (iss.impact ? '<div style="font-size:12px;color:var(--text3);font-style:italic;border-top:1px solid var(--border);padding-top:6px;margin-top:6px">📈 Estimated impact: ' + escHtml(iss.impact) + '</div>' : '') +
+      '</div>';
+    }).join('');
+  }
+  if (!html) html = '<div style="color:var(--text3);padding:20px;text-align:center">Critique returned no actionable items.</div>';
+  bodyEl.innerHTML = html;
+  // Meta + buttons
+  if (metaEl && j.cached_at) {
+    const ageMs = Date.now() - new Date(j.cached_at).getTime();
+    const ageMin = Math.floor(ageMs / 60000);
+    metaEl.textContent = 'ASIN: ' + asin + ' · Model: ' + (cachedModel === 'opus' ? 'Opus' : 'Haiku') + ' · Cached ' + (ageMin < 60 ? ageMin + ' min ago' : Math.floor(ageMin / 60) + 'h ago');
+  }
+  if (btnEl) {
+    const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
+    const me = window._meCache || {};
+    const myRole = (me.role || '').toLowerCase();
+    const myDept = (me.department || '').toLowerCase();
+    const canDeepDive = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
+    let buttons = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" style="font-size:12px">↻ Re-analyse</button>';
+    if (cachedModel !== 'opus' && canDeepDive) {
+      buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px">🔬 Deep dive</button>';
+    }
+    btnEl.innerHTML = buttons;
+  }
+}
+
+function closeAmzCritiqueModal() {
+  document.getElementById('amz-critique-modal').style.display = 'none';
+}
+
+// r15: open a previously-cached critique in the reader modal
+function openSavedCritique(asin) {
+  const stash = (window._amzLastCritique || {})[asin];
+  if (!stash) return;
+  openAmzCritiqueModal(asin, stash.groupKey, stash.j);
 }
 
 function renderAmzCritiqueResult(j, asin, groupKey) {
@@ -4041,9 +4155,14 @@ function renderAmzCritiqueResult(j, asin, groupKey) {
   }
   if (buttonsEl) {
     const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
+    // r15: Opus deep-dive only for owner + managers
+    const me = window._meCache || {};
+    const myRole = (me.role || '').toLowerCase();
+    const myDept = (me.department || '').toLowerCase();
+    const canDeepDive = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
     let buttons = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" style="font-size:12px">↻ Re-analyse (Haiku)</button>';
-    // Only show Opus button if current critique is Haiku
-    if (cachedModel !== 'opus') {
+    // Only show Opus button if (a) current critique is Haiku AND (b) user can deep-dive
+    if (cachedModel !== 'opus' && canDeepDive) {
       buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>';
     }
     buttonsEl.innerHTML = buttons;
