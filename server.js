@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r10 (Amazon sales section on Live Dashboard, daily wasted-by-agent table, top-5 products popup)
+// CampaignPulse — deploy marker 2026-05-04 r11 (agent product-ownership: auto-derive + manual override, per-agent sales attribution, team transparency view)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -425,6 +425,11 @@ async function syncAmazonCatalogue() {
     try {
       await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '2 hours'");
     } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
+    // r11: re-derive owner_agent for newly synced products (manual overrides preserved)
+    try {
+      const dr = await deriveProductOwners();
+      if (dr.ok) console.log('[SP-API catalogue sync] Owner derive: ' + dr.rows_updated + ' rows across ' + dr.parents_scanned + ' parents');
+    } catch(e) { console.error('[SP-API catalogue sync] Owner derive failed: ' + e.message); }
     return { ok: true, total: total, upserted: upserted, withParent: withParent, errors: errors, seconds: parseFloat(seconds) };
   } catch(e) {
     console.error('[SP-API catalogue sync] FAILED: ' + e.message);
@@ -813,10 +818,14 @@ async function initDB() {
       DO $do$ BEGIN
         BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS parent_sku TEXT; EXCEPTION WHEN OTHERS THEN END;
         BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS variation_theme TEXT; EXCEPTION WHEN OTHERS THEN END;
+        -- r11: owner_agent + manual override flag
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS owner_agent TEXT; EXCEPTION WHEN OTHERS THEN END;
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS owner_manual BOOLEAN DEFAULT FALSE; EXCEPTION WHEN OTHERS THEN END;
       END $do$;
       CREATE INDEX IF NOT EXISTS idx_amazon_products_asin ON amazon_products(asin);
       CREATE INDEX IF NOT EXISTS idx_amazon_products_status ON amazon_products(status);
       CREATE INDEX IF NOT EXISTS idx_amazon_products_parent_sku ON amazon_products(parent_sku);
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_owner_agent ON amazon_products(owner_agent);
 
       -- amazon_orders: one row per order. Refreshed every few hours by syncAmazonOrders().
       CREATE TABLE IF NOT EXISTS amazon_orders (
@@ -2457,7 +2466,7 @@ app.get('/api/amazon/products', async function(req, res) {
   try {
     // 1. Fetch all products grouped by parent. Standalones (parent_sku IS NULL) become their own parent.
     const productsRes = await db.query(
-      "SELECT sku, asin, title, status, image_url, parent_sku, variation_theme " +
+      "SELECT sku, asin, title, status, image_url, parent_sku, variation_theme, owner_agent, COALESCE(owner_manual,FALSE) AS owner_manual " +
       "FROM amazon_products " +
       "WHERE status IS NULL OR status NOT LIKE '%REMOVED%' " +
       "ORDER BY COALESCE(parent_sku, sku), sku"
@@ -2511,18 +2520,21 @@ app.get('/api/amazon/products', async function(req, res) {
       if (!parents[groupKey]) {
         parents[groupKey] = {
           parent_sku: groupKey,
-          // Title from first child; for standalones this is the only title we have.
           title: null,
           variation_theme: null,
           children: [],
           image_url: null,
-          standalone: !p.parent_sku
+          standalone: !p.parent_sku,
+          owner_agent: null,
+          owner_manual: false
         };
       }
-      // Use the first non-empty title we see (Amazon doesn't always have a 'parent' product row)
       if (!parents[groupKey].title && p.title) parents[groupKey].title = p.title;
       if (!parents[groupKey].image_url && p.image_url) parents[groupKey].image_url = p.image_url;
       if (!parents[groupKey].variation_theme && p.variation_theme) parents[groupKey].variation_theme = p.variation_theme;
+      // Owner is parent-level — take the first non-null value we see (all children should agree)
+      if (!parents[groupKey].owner_agent && p.owner_agent) parents[groupKey].owner_agent = p.owner_agent;
+      if (p.owner_manual) parents[groupKey].owner_manual = true;
       const childSales = (p.asin && salesByAsin[p.asin]) || (p.sku && salesBySku[p.sku]) || { revenue: 0, units: 0 };
       parents[groupKey].children.push({
         sku: p.sku,
@@ -2561,7 +2573,8 @@ app.get('/api/amazon/products', async function(req, res) {
         total_parents: list.length,
         total_skus: productsRes.rows.length,
         auto_campaigns_exist: autoCampaignsExist.value,
-        advertised_asins_count: advertisedAsins.size
+        advertised_asins_count: advertisedAsins.size,
+        unassigned_count: list.filter(function(p){ return !p.owner_agent; }).length
       }
     });
   } catch(e) {
@@ -2638,23 +2651,225 @@ app.get('/api/amazon/top-products', async function(req, res) {
 });
 
 
+// ── r11: Auto-derive product owner agent from campaign data ────────────────
+// For each parent_sku in amazon_products, scan recent daily_snapshots and look
+// at which agent's campaigns target any of its child ASINs. Most-frequent agent wins.
+// Only updates rows where owner_manual=FALSE (so we don't overwrite manual choices).
+async function deriveProductOwners() {
+  if (!db) return { ok: false, error: 'no-db' };
+  try {
+    // 1. Pull all child SKU + parent + ASIN tuples
+    const productsRes = await db.query(
+      "SELECT sku, asin, parent_sku FROM amazon_products WHERE asin IS NOT NULL"
+    );
+    if (!productsRes.rows.length) return { ok: true, parents_updated: 0, message: 'no products' };
+
+    // 2. Build ASIN → group_key (parent_sku or own sku for standalones) lookup
+    const asinToGroup = {};
+    productsRes.rows.forEach(function(p) {
+      const key = p.parent_sku || p.sku;
+      asinToGroup[p.asin] = key;
+    });
+
+    // 3. Scan last 14 days of snapshots for ASIN-targeted campaigns and tally agents
+    const snapshotsRes = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days'"
+    );
+    // groupAgentCounts[group_key][agent] = count
+    const groupAgentCounts = {};
+    snapshotsRes.rows.forEach(function(snap) {
+      const camps = snap.campaigns || [];
+      camps.forEach(function(c) {
+        const agent = c.agent || c.agentName || null;
+        if (!agent) return;
+        // Look at any ASIN this campaign targets — could be in c.targets, c.asins, c.targetedAsins, or the campaign name
+        const asinSet = new Set();
+        ['targets','asins','targetedAsins'].forEach(function(field) {
+          const arr = c[field];
+          if (Array.isArray(arr)) {
+            arr.forEach(function(t) {
+              const asin = (typeof t === 'string') ? t : (t && (t.asin || t.value));
+              if (asin && /^B[0-9A-Z]{9}$/.test(asin)) asinSet.add(asin);
+            });
+          }
+        });
+        // Also extract any ASINs mentioned in the campaign name (some name conventions include them)
+        if (c.name) {
+          const matches = String(c.name).match(/B[0-9A-Z]{9}/g);
+          if (matches) matches.forEach(function(a){ asinSet.add(a); });
+        }
+        asinSet.forEach(function(asin) {
+          const groupKey = asinToGroup[asin];
+          if (!groupKey) return;
+          if (!groupAgentCounts[groupKey]) groupAgentCounts[groupKey] = {};
+          groupAgentCounts[groupKey][agent] = (groupAgentCounts[groupKey][agent] || 0) + 1;
+        });
+      });
+    });
+
+    // 4. For each group, pick the top agent and write to owner_agent (only if owner_manual=FALSE)
+    let updated = 0;
+    for (const groupKey of Object.keys(groupAgentCounts)) {
+      const counts = groupAgentCounts[groupKey];
+      let topAgent = null;
+      let topCount = 0;
+      Object.keys(counts).forEach(function(a) {
+        if (counts[a] > topCount) { topCount = counts[a]; topAgent = a; }
+      });
+      if (!topAgent) continue;
+      // Update all SKUs whose parent_sku equals groupKey OR (parent_sku IS NULL AND sku == groupKey)
+      try {
+        const r = await db.query(
+          "UPDATE amazon_products SET owner_agent=$1 " +
+          "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)) " +
+          "AND COALESCE(owner_manual, FALSE) = FALSE",
+          [topAgent, groupKey]
+        );
+        if (r.rowCount > 0) updated += r.rowCount;
+      } catch(e) { console.error('[derive-owners] Update error for ' + groupKey + ': ' + e.message); }
+    }
+    console.log('[derive-owners] Updated ' + updated + ' rows across ' + Object.keys(groupAgentCounts).length + ' parent groups');
+    return { ok: true, parents_scanned: Object.keys(groupAgentCounts).length, rows_updated: updated };
+  } catch(e) {
+    console.error('[derive-owners] FAILED: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// PUT /api/amazon/products/:groupKey/owner — manually set the owner agent.
+// groupKey = parent_sku for variants, or the SKU itself for standalones.
+// Body: { agent: 'Aryan' } or { agent: null } to clear.
+// Sets owner_manual=TRUE so future auto-derive runs don't overwrite this.
+// Manager/owner only.
+app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+  if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
+  try {
+    const groupKey = req.params.groupKey;
+    const agent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
+    const r = await db.query(
+      "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
+      "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2))",
+      [agent, groupKey]
+    );
+    // Audit log
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'product_owner_set',$2)",
+        [actor, actor + ' set owner of ' + groupKey + ' to ' + (agent || 'Unassigned')]
+      );
+    } catch(e) {}
+    res.json({ success: true, rows_updated: r.rowCount, group: groupKey, owner: agent });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/admin/derive-product-owners — manually trigger the auto-derive job (owner only).
+app.post('/api/admin/derive-product-owners', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const result = await deriveProductOwners();
+  res.json(result);
+});
+
+// GET /api/amazon/agents — list of agents available as product owners.
+// Returns active users in the Amazon department. Used to populate the owner-assignment dropdown.
+app.get('/api/amazon/agents', async function(req, res) {
+  if (!db) return res.json({ agents: [] });
+  try {
+    const r = await db.query(
+      "SELECT DISTINCT name FROM users " +
+      "WHERE COALESCE(is_active,TRUE)=TRUE " +
+      "AND LOWER(COALESCE(department,'')) IN ('amazon','manager') " +
+      "ORDER BY name ASC"
+    );
+    res.json({ agents: r.rows.map(function(row){ return row.name; }) });
+  } catch(e) {
+    console.error('/api/amazon/agents error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/amazon/sales-by-agent?days=7
+// Returns sales per agent per day — used for the team-transparency panel that all
+// users (not just managers) can see. Each agent's numbers come from orders containing
+// products where amazon_products.owner_agent matches.
+app.get('/api/amazon/sales-by-agent', async function(req, res) {
+  if (!db) return res.json({ agents: [], days: [] });
+  try {
+    const days = Math.min(parseInt(req.query.days || '7'), 30);
+    const r = await db.query(
+      "SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+      "       COALESCE(p.owner_agent, 'Unassigned') AS agent, " +
+      "       SUM(i.item_price * i.quantity) AS gross, " +
+      "       SUM(i.quantity) AS units " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "GROUP BY day, agent ORDER BY day ASC, agent ASC"
+    );
+    const dayMap = {};
+    const agentSet = new Set();
+    r.rows.forEach(function(row) {
+      const d = row.day;
+      const a = row.agent;
+      agentSet.add(a);
+      if (!dayMap[d]) dayMap[d] = {};
+      dayMap[d][a] = { gross: parseFloat(row.gross || 0), units: parseInt(row.units || 0) };
+    });
+    const dayList = Object.keys(dayMap).sort();
+    const agentList = Array.from(agentSet);
+    res.json({ days: dayList, agents: agentList, byDay: dayMap });
+  } catch(e) {
+    console.error('/api/amazon/sales-by-agent error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Returns Amazon sales numbers for the last N days, day-by-day. Powers the
 // net-sales panel on the Amazon dashboard (mirrors Google's Shopify panel).
+// r11: For non-manager users, filters to orders containing only their owned products.
 app.get('/api/amazon/sales-summary', async function(req, res) {
   if (!db) return res.json({ days: [], totals: {} });
   try {
     const days = Math.min(parseInt(req.query.days || '7'), 30);
-    // Sum order_total per day, excluding cancellations
-    const r = await db.query(
-      "SELECT TO_CHAR(purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
-      "       SUM(order_total) AS gross, " +
-      "       COUNT(*) AS order_count, " +
-      "       SUM(num_items) AS units " +
-      "FROM amazon_orders " +
-      "WHERE purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND status NOT IN ('Cancelled','Canceled') " +
-      "GROUP BY day ORDER BY day ASC"
-    );
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userName = (req.user && req.user.name) || '';
+    const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+    // Optional ?agent=Aryan filter (managers only — agents always see their own)
+    const agentFilter = (req.query.agent && isManagerLevel) ? String(req.query.agent) : (isManagerLevel ? null : userName);
+
+    let query;
+    let params = [];
+    if (agentFilter) {
+      // Sum only line items whose ASIN belongs to a product owned by this agent
+      query = "SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+        "       SUM(i.item_price * i.quantity) AS gross, " +
+        "       COUNT(DISTINCT o.order_id) AS order_count, " +
+        "       SUM(i.quantity) AS units " +
+        "FROM amazon_orders o " +
+        "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+        "JOIN amazon_products p ON p.asin = i.asin " +
+        "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+        "AND o.status NOT IN ('Cancelled','Canceled') " +
+        "AND p.owner_agent = $1 " +
+        "GROUP BY day ORDER BY day ASC";
+      params = [agentFilter];
+    } else {
+      // Manager view — full company numbers
+      query = "SELECT TO_CHAR(purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+        "       SUM(order_total) AS gross, " +
+        "       COUNT(*) AS order_count, " +
+        "       SUM(num_items) AS units " +
+        "FROM amazon_orders " +
+        "WHERE purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+        "AND status NOT IN ('Cancelled','Canceled') " +
+        "GROUP BY day ORDER BY day ASC";
+    }
+    const r = await db.query(query, params);
     const dayRows = r.rows.map(function(row) {
       return {
         date: row.day,
@@ -2668,7 +2883,7 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
       orders: dayRows.reduce(function(s, d){ return s + d.orders; }, 0),
       units: dayRows.reduce(function(s, d){ return s + d.units; }, 0)
     };
-    res.json({ days: dayRows, totals: totals });
+    res.json({ days: dayRows, totals: totals, agentFilter: agentFilter, isManagerLevel: isManagerLevel });
   } catch(e) {
     console.error('/api/amazon/sales-summary error: ' + e.message);
     res.status(500).json({ error: e.message });

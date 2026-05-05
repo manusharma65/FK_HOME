@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r10 (Amazon sales on Live Dashboard, daily wasted-by-agent table, top-5 popup) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r11 (agent product ownership: auto-derive + manual override, sales-by-agent panel, my-sales card, unassigned banner) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -408,6 +408,9 @@ tbody tr:hover { background: var(--surface2); }
       <div class="metric-card"><div class="metric-label">Total ad spend</div><div class="metric-value" id="m-spend">—</div><div class="metric-delta" id="m-spend-d"></div></div>
       <div class="metric-card"><div class="metric-label">Blended ACOS</div><div class="metric-value" id="m-acos">—</div><div class="metric-delta" id="m-acos-d"></div></div>
       <div class="metric-card alert"><div class="metric-label">Needs action</div><div class="metric-value" id="m-action">—</div><div class="metric-delta delta-down" id="m-action-d"></div></div>
+      <div class="metric-card alert"><div class="metric-label">Wasted today</div><div class="metric-value" id="m-wasted">—</div><div class="metric-delta delta-down" id="m-wasted-d">Spend with no revenue</div></div>
+      <!-- r11: agent's own sales — visible only when current user is an agent -->
+      <div class="metric-card success" id="m-my-sales-card" style="display:none"><div class="metric-label">My sales today</div><div class="metric-value" id="m-my-sales">—</div><div class="metric-delta delta-up" id="m-my-sales-d">Last 7d: £0</div></div>
     </div>
     <div class="section-header">
       <div><div class="section-title">Campaigns needing action</div><div class="section-sub" id="camp-sub">Loading...</div></div>
@@ -454,6 +457,16 @@ tbody tr:hover { background: var(--surface2); }
         <div id="amz-sales-weekly-rows">
           <div style="color:var(--text3);font-size:13px;padding:8px 0">Loading...</div>
         </div>
+      </div>
+    </div>
+
+    <!-- r11: Sales by agent — daily breakdown (full team transparency, all users see this) -->
+    <div id="amz-sales-by-agent-card" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;padding:0;overflow:hidden">
+      <div style="padding:12px 18px;background:#EAF3DE;border-bottom:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#27500A">Sales by agent · last 7 days</div>
+      </div>
+      <div id="amz-sales-by-agent-rows" style="overflow-x:auto">
+        <div style="padding:14px 18px;color:var(--text3);font-size:13px">Loading...</div>
       </div>
     </div>
 
@@ -1178,6 +1191,9 @@ async function fetchData() {
     loadWastedByAgent().catch(function(e){ console.error('wasted-by-agent error:', e); });
     // r10: load the Amazon sales section (today hero + 7-day table)
     loadAmazonSalesSection().catch(function(e){ console.error('amz-sales error:', e); });
+    // r11: load the per-agent sales transparency panel + agent's own card
+    loadSalesByAgent().catch(function(e){ console.error('sales-by-agent error:', e); });
+    loadMySalesCard().catch(function(e){ console.error('my-sales error:', e); });
   } catch(e) {
     console.error('Fetch error:', e.message);
     document.getElementById('sync-time').textContent = 'Connection error - retrying...';
@@ -1261,6 +1277,18 @@ function renderDashboard() {
   document.getElementById('m-spend').textContent = '£' + parseFloat(m.totalSpend || 0).toFixed(2);
   document.getElementById('m-acos').textContent = (m.blendedAcos || 0) + '%';
   document.getElementById('m-action').textContent = m.needsAction || 0;
+  // r11: wasted-today metric card. Uses the same totalWastedSpend the dashboard already computes
+  // (campaigns with spend > 0 AND sales == 0 today). Falls back to summing campaigns client-side
+  // if the metric isn't present in the response yet.
+  let wastedToday = parseFloat(m.totalWastedSpend || 0);
+  if (!wastedToday && allCampaigns && allCampaigns.length) {
+    wastedToday = allCampaigns.filter(function(c){ return c.spend > 0 && (c.sales === 0 || c.sales === null); })
+      .reduce(function(s,c){ return s + (c.spend||0); }, 0);
+  }
+  const wastedEl = document.getElementById('m-wasted');
+  const wastedDeltaEl = document.getElementById('m-wasted-d');
+  if (wastedEl) wastedEl.textContent = '£' + wastedToday.toFixed(2);
+  if (wastedDeltaEl) wastedDeltaEl.textContent = wastedToday > 0 ? 'Spend with no revenue' : 'No waste today';
   const acosTarget = 12;
   document.getElementById('m-acos-d').textContent = m.blendedAcos > acosTarget ? '▲ Above ' + acosTarget + '% target' : '▼ Within ' + acosTarget + '% target';
   document.getElementById('m-acos-d').className = 'metric-delta ' + (m.blendedAcos > acosTarget ? 'delta-down' : 'delta-up');
@@ -3313,7 +3341,10 @@ async function loadAmazonProducts() {
     const prodRes = await fetch('/api/amazon/products', { headers: getAuthHeaders() });
     const prodData = await prodRes.json();
     amzProductsCache = prodData;
+    // r11: prefetch the agents list so the dropdown is ready when rows render
+    await getAmzAgents();
     renderAmazonUntargeted(prodData);
+    renderUnassignedBanner(prodData.summary || {});
     renderAmazonProductsList(prodData);
   } catch(e) {
     document.getElementById('amz-sales-content').innerHTML = '<div style="color:var(--red);font-size:13px">Could not load Amazon products: ' + escHtml(e.message) + '</div>';
@@ -3400,10 +3431,34 @@ function renderAmazonProductsList(data) {
     el.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">No products synced yet.</div>';
     return;
   }
+  // Determine if current user can edit owners
+  const me = window._meCache || {};
+  const role = (me.role || '').toLowerCase();
+  const canEditOwner = role === 'owner' || role === 'manager' || (me.department || '').toLowerCase() === 'manager';
+  const agents = amzAgentsList || [];
   el.innerHTML = products.map(function(p, idx) {
     const coverageColor = p.ad_coverage_pct === 100 ? 'var(--green)' : (p.ad_coverage_pct >= 50 ? '#f59e0b' : 'var(--red)');
     const variantLabel = p.variation_theme ? p.variation_theme.toLowerCase() : 'variant';
-    return '<div style="border-bottom:1px solid var(--border)">' +
+    // Owner control: dropdown for managers, badge for agents
+    let ownerControl;
+    const ownerValue = p.owner_agent || '';
+    if (canEditOwner) {
+      const options = ['<option value="">— Unassigned —</option>'].concat(
+        agents.map(function(a) {
+          return '<option value="' + escHtml(a) + '"' + (a === ownerValue ? ' selected' : '') + '>' + escHtml(a) + '</option>';
+        })
+      ).join('');
+      ownerControl =
+        '<select onclick="event.stopPropagation()" onchange="setProductOwner(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\', this.value)" ' +
+          'style="font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:' + (ownerValue ? '#EAF3DE' : '#FAEEDA') + ';color:var(--text);min-width:110px">' +
+          options +
+        '</select>';
+    } else {
+      ownerControl = ownerValue ?
+        '<div style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;background:#EAF3DE;color:#27500A">' + escHtml(ownerValue) + '</div>' :
+        '<div style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;background:#FAEEDA;color:#854F0B">Unassigned</div>';
+    }
+    return '<div data-amz-owner="' + escHtml(ownerValue) + '" style="border-bottom:1px solid var(--border)">' +
       '<div style="padding:12px 18px;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="toggleAmzProduct(' + idx + ')">' +
         (p.image_url ? '<img src="' + escHtml(p.image_url) + '" style="width:48px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0">' : '<div style="width:48px;height:48px;background:#eee;border-radius:6px;flex-shrink:0"></div>') +
         '<div style="flex:1;min-width:0">' +
@@ -3414,7 +3469,8 @@ function renderAmazonProductsList(data) {
             ' · ' + (p.total_units_7d || 0) + ' units' +
           '</div>' +
         '</div>' +
-        (!p.standalone ? '<div style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;background:rgba(0,0,0,0.05);color:' + coverageColor + '">' + p.ad_coverage_pct + '% covered</div>' : '') +
+        ownerControl +
+        (!p.standalone ? '<div style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;background:rgba(0,0,0,0.05);color:' + coverageColor + ';margin-left:8px">' + p.ad_coverage_pct + '% covered</div>' : '') +
         '<div id="amz-prod-arrow-' + idx + '" style="color:var(--text3);font-size:14px;margin-left:8px">▶</div>' +
       '</div>' +
       '<div id="amz-prod-detail-' + idx + '" style="display:none;padding:12px 18px 16px 78px;background:var(--surface2)">' +
@@ -3547,18 +3603,32 @@ async function loadWastedByAgent() {
 }
 
 // ─── r10: Amazon sales section on Live Dashboard ───────────────────────────
-// Today hero + 7-day table with Sales / Ad spend / Net / Orders / Units.
+// Today hero + 7-day table with Sales / Ad spend / Net / Wasted / Orders / Units.
 // Each row clickable → opens top-5 popup for that day.
 async function loadAmazonSalesSection() {
   const section = document.getElementById('amz-sales-section');
   if (!section) return;
   try {
-    // Sales summary — gross/orders/units per day from SP-API orders
-    const res = await fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() });
-    const data = await res.json();
+    // Pull sales summary AND wasted-by-agent in parallel — the latter has per-day totals
+    const [salesRes, wasteRes] = await Promise.all([
+      fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() }),
+      fetch('/api/wasted-by-agent', { headers: getAuthHeaders() })
+    ]);
+    const data = await salesRes.json();
+    const wasteData = await wasteRes.json();
     const days = (data.days || []).slice().reverse(); // newest first for display
     const todayKey = days.length ? days[0].date : null;
     const todayRow = days.find(function(d) { return d.date === todayKey; }) || { gross: 0, orders: 0, units: 0 };
+
+    // Build a per-day waste total map by summing all agents' values for that date
+    // (server returns sparklines as { agent: [{date,value}, ...] })
+    const wastedByDay = {};
+    const sparks = (wasteData && wasteData.sparklines) || {};
+    Object.keys(sparks).forEach(function(agent) {
+      (sparks[agent] || []).forEach(function(p) {
+        wastedByDay[p.date] = (wastedByDay[p.date] || 0) + (p.value || 0);
+      });
+    });
 
     // Pull ad spend per day from existing campaign data (so we can compute Net)
     // For now, use today's appData.metrics for today's spend; for historical days
@@ -3585,21 +3655,27 @@ async function loadAmazonSalesSection() {
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Sales</th>' +
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Ad spend</th>' +
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Net</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:#A32D2D;text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Wasted</th>' +
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Orders</th>' +
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Units</th>' +
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">&nbsp;</th>' +
         '</tr></thead><tbody>';
 
-    let totalSales = 0, totalOrders = 0, totalUnits = 0;
+    let totalSales = 0, totalOrders = 0, totalUnits = 0, totalWasted = 0;
     const bodyRows = days.map(function(d) {
       totalSales += d.gross;
       totalOrders += d.orders;
       totalUnits += d.units;
+      const dayWaste = wastedByDay[d.date] || 0;
+      totalWasted += dayWaste;
       // Ad spend per-day from campaign data — for now we only have today's accurately;
       // historical days need a per-day spend endpoint (deferred to later).
       const adSpend = (d.date === todayKey && todayAdSpend != null) ? todayAdSpend : null;
       const adSpendCell = adSpend != null ? '£' + adSpend.toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—';
       const netCell = adSpend != null ? '£' + (d.gross - adSpend).toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—';
+      const wastedCell = dayWaste > 0 ?
+        '<span style="color:#A32D2D;font-weight:600">£' + dayWaste.toFixed(2) + '</span>' :
+        '<span style="color:var(--text3)">£0</span>';
       const dateLabel = (function() {
         try { return new Date(d.date + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); }
         catch(e) { return d.date; }
@@ -3609,6 +3685,7 @@ async function loadAmazonSalesSection() {
         '<td style="padding:8px 6px;text-align:right;font-weight:600">£' + d.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</td>' +
         '<td style="padding:8px 6px;text-align:right;color:var(--text2)">' + adSpendCell + '</td>' +
         '<td style="padding:8px 6px;text-align:right;color:var(--text2);font-weight:600">' + netCell + '</td>' +
+        '<td style="padding:8px 6px;text-align:right">' + wastedCell + '</td>' +
         '<td style="padding:8px 6px;text-align:right;color:var(--text2)">' + d.orders + '</td>' +
         '<td style="padding:8px 6px;text-align:right;color:var(--text2)">' + d.units + '</td>' +
         '<td style="padding:8px 6px;text-align:right;color:var(--accent);font-size:12px">View →</td>' +
@@ -3620,6 +3697,7 @@ async function loadAmazonSalesSection() {
         '<td style="padding:10px 6px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">7-day total</td>' +
         '<td style="padding:10px 6px;text-align:right;font-weight:700">£' + totalSales.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</td>' +
         '<td colspan="2"></td>' +
+        '<td style="padding:10px 6px;text-align:right;font-weight:700;color:#A32D2D">£' + totalWasted.toFixed(2) + '</td>' +
         '<td style="padding:10px 6px;text-align:right;color:var(--text2);font-weight:600">' + totalOrders + '</td>' +
         '<td style="padding:10px 6px;text-align:right;color:var(--text2);font-weight:600">' + totalUnits + '</td>' +
         '<td></td>' +
@@ -3688,6 +3766,202 @@ document.addEventListener('click', function(e) {
   const overlay = document.getElementById('amz-top5-overlay');
   if (overlay && e.target === overlay) closeAmzTop5();
 });
+
+// ─── r11: Sales-by-agent panel (full team transparency) ────────────────────
+async function loadSalesByAgent() {
+  const card = document.getElementById('amz-sales-by-agent-card');
+  const rows = document.getElementById('amz-sales-by-agent-rows');
+  if (!card || !rows) return;
+  try {
+    const res = await fetch('/api/amazon/sales-by-agent?days=7', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const days = data.days || [];
+    const agents = data.agents || [];
+    const byDay = data.byDay || {};
+    if (days.length === 0 || agents.length === 0) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = 'block';
+    // Identify today (latest day in the window)
+    const todayKey = days[days.length - 1];
+    function shortDay(iso) {
+      try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); }
+      catch(e) { return iso; }
+    }
+    // Build header
+    const headerCells = days.map(function(d) {
+      const isToday = d === todayKey;
+      const label = isToday ? 'Today' : shortDay(d);
+      const style = isToday ?
+        'padding:8px 10px;text-align:right;font-size:11px;color:#27500A;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;background:#EAF3DE' :
+        'padding:8px 10px;text-align:right;font-size:11px;color:var(--text3);font-weight:500';
+      return '<th style="' + style + '">' + escHtml(label) + '</th>';
+    }).join('');
+    // Per-day totals + per-agent totals
+    const dayTotals = {};
+    days.forEach(function(d){ dayTotals[d] = 0; });
+    let grandTotal = 0;
+    const bodyRows = agents.map(function(agent) {
+      let agentTotal = 0;
+      const cells = days.map(function(d) {
+        const cell = (byDay[d] && byDay[d][agent]) || { gross: 0, units: 0 };
+        agentTotal += cell.gross;
+        dayTotals[d] = (dayTotals[d] || 0) + cell.gross;
+        const isToday = d === todayKey;
+        const txt = cell.gross > 0 ? '£' + cell.gross.toFixed(0) : '£0';
+        if (isToday) {
+          return '<td style="padding:10px 10px;text-align:right;font-weight:700;color:' + (cell.gross > 0 ? '#27500A' : 'var(--text3)') + ';background:#F4FBEE">' + txt + '</td>';
+        }
+        return '<td style="padding:10px 10px;text-align:right;color:' + (cell.gross > 0 ? 'var(--text2)' : 'var(--text3)') + '">' + txt + '</td>';
+      }).join('');
+      grandTotal += agentTotal;
+      const isUnassigned = agent === 'Unassigned';
+      const labelStyle = isUnassigned ? 'padding:10px 14px;font-weight:600;color:var(--text3);font-style:italic' : 'padding:10px 14px;font-weight:600;color:var(--text)';
+      return '<tr style="border-top:1px solid var(--border)">' +
+        '<td style="' + labelStyle + '">' + escHtml(agent) + '</td>' +
+        cells +
+        '<td style="padding:10px 14px;text-align:right;font-weight:700;color:var(--text)">£' + agentTotal.toFixed(0) + '</td>' +
+      '</tr>';
+    }).join('');
+    // Footer (daily totals)
+    let footerRow = '';
+    if (agents.length > 1) {
+      const footerCells = days.map(function(d) {
+        const v = dayTotals[d] || 0;
+        const isToday = d === todayKey;
+        return '<td style="padding:10px 10px;text-align:right;color:var(--text2);font-weight:600' + (isToday ? ';background:#EAF3DE' : '') + '">£' + v.toFixed(0) + '</td>';
+      }).join('');
+      footerRow = '<tr style="border-top:2px solid var(--border);background:var(--surface2)">' +
+        '<td style="padding:10px 14px;font-weight:600;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Daily total</td>' +
+        footerCells +
+        '<td style="padding:10px 14px;text-align:right;font-weight:700;color:#27500A">£' + grandTotal.toFixed(0) + '</td>' +
+      '</tr>';
+    }
+    rows.innerHTML =
+      '<table style="width:100%;border-collapse:collapse;font-size:13px;min-width:560px">' +
+        '<thead><tr style="background:var(--surface2)">' +
+          '<th style="text-align:left;padding:8px 14px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Agent</th>' +
+          headerCells +
+          '<th style="padding:8px 14px;text-align:right;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Total</th>' +
+        '</tr></thead>' +
+        '<tbody>' + bodyRows + footerRow + '</tbody>' +
+      '</table>';
+  } catch(e) {
+    rows.innerHTML = '<div style="padding:14px 18px;color:var(--red);font-size:13px">Could not load sales-by-agent: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+// ─── r11: My-sales metric card (only shown when current user is an agent) ──
+async function loadMySalesCard() {
+  const card = document.getElementById('m-my-sales-card');
+  if (!card) return;
+  // Determine role/name from auth/me — cached
+  let me = window._meCache;
+  if (!me) {
+    try {
+      const r = await fetch('/api/auth/me', { headers: getAuthHeaders() });
+      me = await r.json();
+      window._meCache = me;
+    } catch(e) { return; }
+  }
+  const role = (me && me.role || '').toLowerCase();
+  const isManagerLevel = role === 'owner' || role === 'manager' || (me && (me.department || '').toLowerCase() === 'manager');
+  if (isManagerLevel) {
+    // Managers see the company total in 'Today's revenue' already — no need for personal card
+    card.style.display = 'none';
+    return;
+  }
+  // Pull this agent's sales — sales-summary auto-filters to the requesting user when they're not a manager
+  try {
+    const res = await fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const days = data.days || [];
+    if (days.length === 0) { card.style.display = 'none'; return; }
+    // Today = newest day in window
+    const todayDate = days[days.length - 1].date;
+    const todayRow = days.find(function(d){ return d.date === todayDate; }) || { gross: 0 };
+    const totalWeek = data.totals && data.totals.gross ? data.totals.gross : 0;
+    card.style.display = 'block';
+    document.getElementById('m-my-sales').textContent = '£' + todayRow.gross.toFixed(2);
+    document.getElementById('m-my-sales-d').textContent = 'Last 7d: £' + totalWeek.toFixed(0);
+  } catch(e) {
+    card.style.display = 'none';
+  }
+}
+
+// ─── r11: Products-page owner dropdown + Unassigned banner ─────────────────
+let amzAgentsList = null;
+async function getAmzAgents() {
+  if (amzAgentsList) return amzAgentsList;
+  try {
+    const r = await fetch('/api/amazon/agents', { headers: getAuthHeaders() });
+    const d = await r.json();
+    amzAgentsList = d.agents || [];
+  } catch(e) { amzAgentsList = []; }
+  return amzAgentsList;
+}
+
+// Called from Products page on every render — adds an Unassigned banner if needed
+function renderUnassignedBanner(summary) {
+  const card = document.getElementById('amz-untargeted-card');
+  if (!card) return;
+  // We re-purpose the existing untargeted card area; an extra unassigned banner is added separately above the products list.
+  let banner = document.getElementById('amz-unassigned-banner');
+  const count = (summary && summary.unassigned_count) || 0;
+  if (count === 0) {
+    if (banner) banner.style.display = 'none';
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'amz-unassigned-banner';
+    banner.style.cssText = 'background:#FAEEDA;border:1px solid #F4C775;border-radius:12px;padding:14px 18px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px';
+    // Insert before the All Products list
+    const productsListContainer = document.getElementById('amz-products-list');
+    if (productsListContainer && productsListContainer.parentNode) {
+      productsListContainer.parentNode.parentNode.insertBefore(banner, productsListContainer.parentNode);
+    }
+  }
+  banner.style.display = 'flex';
+  banner.innerHTML =
+    '<div>' +
+      '<div style="font-size:12px;font-weight:700;color:#854F0B;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">⚠️ ' + count + ' product' + (count === 1 ? '' : 's') + ' unassigned</div>' +
+      '<div style="font-size:12px;color:#633806">Products without an owner agent. Sales for these will not be attributed in the agent breakdown.</div>' +
+    '</div>' +
+    '<button class="btn btn-ghost" onclick="amzScrollToUnassigned()" style="font-size:12px">Show me →</button>';
+}
+
+function amzScrollToUnassigned() {
+  // Find the first product card with no owner and scroll to it
+  const cards = document.querySelectorAll('[data-amz-owner]');
+  for (let i = 0; i < cards.length; i++) {
+    if (cards[i].getAttribute('data-amz-owner') === '') {
+      cards[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      cards[i].style.outline = '2px solid #F4C775';
+      setTimeout(function(){ cards[i].style.outline = ''; }, 2000);
+      return;
+    }
+  }
+}
+
+// Called when manager picks an agent from a product's owner dropdown
+async function setProductOwner(groupKey, agent) {
+  try {
+    const res = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/owner', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+      body: JSON.stringify({ agent: agent || null })
+    });
+    const data = await res.json();
+    if (data.success) {
+      // Refresh products page silently
+      if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
+    } else {
+      alert('Could not set owner: ' + (data.error || 'unknown error'));
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
 
 init();
 setInterval(fetchData, 5 * 60 * 1000);
