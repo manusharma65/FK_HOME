@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r13 (ASIN-level rollup, Active/Dormant filter, Google-style product modal with AI listing critique)
+// CampaignPulse — deploy marker 2026-05-04 r14 (Active/Dormant tabs, twice-daily orders sync, task date timezone fix, foldable ASIN breakdown, polished SKU pill)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -968,7 +968,7 @@ async function initTasksTable() {
         status TEXT DEFAULT 'open',
         agent_notes TEXT,
         task_source TEXT DEFAULT 'daily',
-        created_date DATE DEFAULT CURRENT_DATE,
+        created_date DATE DEFAULT ((NOW() AT TIME ZONE 'Europe/London')::DATE),
         updated_at TIMESTAMP DEFAULT NOW(),
         resolved_at TIMESTAMP
       );
@@ -990,6 +990,23 @@ async function initTasksTable() {
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 1`);
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS last_resolved_date TIMESTAMP`);
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE`);
+    // r14: Fix created_date default to use London time (was UTC, causing tasks created late London evening to show as next day)
+    try { await db.query(`ALTER TABLE campaign_tasks ALTER COLUMN created_date SET DEFAULT ((NOW() AT TIME ZONE 'Europe/London')::DATE)`); } catch(e) {}
+    // r14: One-shot fix for tasks where created_date is in the past but updated_at shows the row is actually from today (London time).
+    // Safe scope: only updates tasks where the row hasn't been touched since being created (resolved_at IS NULL AND first_action_at IS NULL),
+    // and where updated_at falls on a different London-date than created_date by exactly 1 day. This catches the timezone-drift bug
+    // without rewriting genuinely-old tasks.
+    try {
+      const fixRes = await db.query(
+        "UPDATE campaign_tasks SET created_date = ((updated_at AT TIME ZONE 'Europe/London')::DATE) " +
+        "WHERE resolved_at IS NULL " +
+        "AND first_action_at IS NULL " +
+        "AND ((updated_at AT TIME ZONE 'Europe/London')::DATE) - created_date = 1 " +
+        "AND updated_at >= NOW() - INTERVAL '36 hours' " +
+        "RETURNING id"
+      );
+      if (fixRes.rowCount > 0) console.log('[r14 timezone-fix] Re-dated ' + fixRes.rowCount + ' recent task(s) to correct London date');
+    } catch(e) { console.error('[r14 timezone-fix] ' + e.message); }
     console.log('Tasks table ready');
 
     await db.query(`
@@ -2601,8 +2618,9 @@ function computeAmazonDiagnosis(p) {
 app.get('/api/amazon/products', async function(req, res) {
   if (!db) return res.json({ products: [] });
   try {
-    // r13: Active-only filter by default. ?include=all to see dormant products.
-    const includeAll = req.query.include === 'all';
+    // r14: View filter — 'active' (default) | 'dormant' | 'all'
+    // Backwards compat: ?include=all still works.
+    const view = (req.query.view || (req.query.include === 'all' ? 'all' : 'active')).toLowerCase();
 
     // 1. Pull all SKUs (with status/title/asin/parent/owner)
     const productsRes = await db.query(
@@ -2843,8 +2861,11 @@ app.get('/api/amazon/products', async function(req, res) {
       return !(p.buyable_count > 0 && p.active_60d);
     });
 
-    // Default returns active only; ?include=all returns everything
-    const returnList = includeAll ? allParents : activeProducts;
+    // r14: three-way view selector
+    let returnList;
+    if (view === 'dormant') returnList = dormantProducts;
+    else if (view === 'all') returnList = allParents;
+    else returnList = activeProducts;
     returnList.sort(function(a, b) {
       if (a.priority !== b.priority) return a.priority - b.priority;
       return b.total_sales_7d - a.total_sales_7d;
@@ -2863,7 +2884,7 @@ app.get('/api/amazon/products', async function(req, res) {
         urgent_count: returnList.filter(function(p){ return p.priority === 1; }).length,
         attention_count: returnList.filter(function(p){ return p.priority === 2; }).length,
         scale_count: returnList.filter(function(p){ return p.priority === 3; }).length,
-        view: includeAll ? 'all' : 'active'
+        view: view
       }
     });
   } catch(e) {
@@ -5771,8 +5792,10 @@ cron.schedule('30 2 * * *', function() {
   syncAmazonCatalogue().catch(function(e){ console.error('SP-API catalogue cron: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
-// Orders sync: every 4 hours. Pulls last 7 days of activity each run (idempotent upsert).
-cron.schedule('0 */4 * * *', function() {
+// Orders sync: twice a day — 06:00 (covers overnight) and 14:00 (covers morning).
+// Both runs cover last 7 days (idempotent upsert), enough for 7-day team meetings.
+// Reduced from every 4 hours to save SP-API quota and server CPU.
+cron.schedule('0 6,14 * * *', function() {
   if (!spApiConfigured()) return;
   syncAmazonOrders(7).catch(function(e){ console.error('SP-API orders cron: ' + e.message); });
 }, { timezone: 'Europe/London' });

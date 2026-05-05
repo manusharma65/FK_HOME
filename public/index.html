@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r13 (ASIN-level rollup, Active/Dormant filter, big product modal with friction check + AI critique) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r14 (Active/Dormant/All tabs, foldable ASIN breakdown, polished SKU pill) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -779,11 +779,12 @@ tbody tr:hover { background: var(--surface2); }
         <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">All products</div>
         <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
       </div>
-      <!-- r13: Active/All filter -->
+      <!-- r14: Active / Dormant tabs (mutually exclusive) -->
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
         <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
         <button id="amz-filter-active" class="btn btn-primary" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('active')">Active products</button>
-        <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">Include dormant</button>
+        <button id="amz-filter-dormant" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
+        <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
         <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
       </div>
       <div id="amz-products-list" style="padding:0"></div>
@@ -3376,19 +3377,17 @@ function updatePwStrength(inputId, indicatorId) {
 
 // ─── Amazon Products page (r9) ──────────────────────────────────────────────
 let amzProductsCache = null;
-let amzProductView = 'active'; // r13: 'active' or 'all'
+let amzProductView = 'active'; // r14: 'active' | 'dormant' | 'all'
 
 function setAmzProductView(view) {
   amzProductView = view;
-  // Update button states
-  const activeBtn = document.getElementById('amz-filter-active');
-  const allBtn = document.getElementById('amz-filter-all');
-  if (activeBtn && allBtn) {
-    activeBtn.className = view === 'active' ? 'btn btn-primary' : 'btn btn-ghost';
-    activeBtn.style.cssText = 'font-size:12px;padding:5px 10px';
-    allBtn.className = view === 'all' ? 'btn btn-primary' : 'btn btn-ghost';
-    allBtn.style.cssText = 'font-size:12px;padding:5px 10px';
-  }
+  // Update tab styles — three-way exclusive
+  ['active', 'dormant', 'all'].forEach(function(v) {
+    const btn = document.getElementById('amz-filter-' + v);
+    if (!btn) return;
+    btn.className = (v === view) ? 'btn btn-primary' : 'btn btn-ghost';
+    btn.style.cssText = 'font-size:12px;padding:5px 10px';
+  });
   loadAmazonProducts();
 }
 
@@ -3398,8 +3397,8 @@ async function loadAmazonProducts() {
     const salesRes = await fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() });
     const salesData = await salesRes.json();
     renderAmazonSalesPanel(salesData);
-    // 2. Products — pass include=all if user toggled to dormant view
-    const url = amzProductView === 'all' ? '/api/amazon/products?include=all' : '/api/amazon/products';
+    // 2. Products — pass view filter
+    const url = '/api/amazon/products?view=' + encodeURIComponent(amzProductView);
     const prodRes = await fetch(url, { headers: getAuthHeaders() });
     const prodData = await prodRes.json();
     amzProductsCache = prodData;
@@ -3408,9 +3407,11 @@ async function loadAmazonProducts() {
     const counterEl = document.getElementById('amz-view-counter');
     if (counterEl && prodData.summary) {
       const s = prodData.summary;
-      counterEl.textContent = 'Showing ' + s.total_parents_active + ' active' +
-        (amzProductView === 'all' ? ' + ' + s.total_parents_dormant + ' dormant' : '') +
-        ' (' + s.total_skus + ' total SKUs)';
+      let label = '';
+      if (amzProductView === 'active') label = 'Showing ' + s.total_parents_active + ' active (of ' + (s.total_parents_active + s.total_parents_dormant) + ' total)';
+      else if (amzProductView === 'dormant') label = 'Showing ' + s.total_parents_dormant + ' dormant (no recent sales / no buyable listings)';
+      else label = 'Showing all ' + (s.total_parents_active + s.total_parents_dormant) + ' products';
+      counterEl.textContent = label;
     }
     renderAmazonUntargeted(prodData);
     renderUnassignedBanner(prodData.summary || {});
@@ -3617,6 +3618,16 @@ function closeAmzProductModal() {
   document.getElementById('amz-product-modal').style.display = 'none';
 }
 
+// r14: toggle ASIN breakdown table inside the modal
+function toggleAmzAsinBreakdown() {
+  const content = document.getElementById('amz-asin-breakdown-content');
+  const arrow = document.getElementById('amz-asin-fold-arrow');
+  if (!content) return;
+  const isOpen = content.style.display !== 'none';
+  content.style.display = isOpen ? 'none' : 'block';
+  if (arrow) arrow.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+}
+
 // Build the modal body for an Amazon product (parent group with rolled-up data)
 function buildAmzProductModalBody(p) {
   const img = p.image_url ?
@@ -3715,35 +3726,43 @@ function buildAmzProductModalBody(p) {
       tile('Variant theme', p.variation_theme || '—', 'muted'),
     '</div>',
 
-    // ASIN drilldown table
-    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">ASIN breakdown</div>',
-    '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">',
-      '<table style="width:100%;border-collapse:collapse;font-size:13px">',
-        '<thead><tr style="background:var(--surface2);color:var(--text3)">',
-          '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">ASIN</th>',
-          '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">SKUs</th>',
-          '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Status</th>',
-          '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Sales 7d</th>',
-          '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Units 7d</th>',
-          '<th style="text-align:center;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Active 60d</th>',
-          '<th style="text-align:center;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">In ad</th>',
-        '</tr></thead>',
-        '<tbody>',
-        (p.children || []).map(function(c) {
-          const skuList = (c.skus || []).join(', ');
-          const skuLabel = c.sku_count > 1 ? c.sku_count + ' SKUs' : '1 SKU';
-          return '<tr style="border-top:1px solid var(--border)">' +
-            '<td style="padding:10px 12px;font-family:var(--mono);font-weight:600">' + escHtml(c.asin) + '</td>' +
-            '<td style="padding:10px 12px;font-size:11px;color:var(--text3)" title="' + escHtml(skuList) + '">' + skuLabel + '</td>' +
-            '<td style="padding:10px 12px;font-size:11px"><span style="color:var(--text3)">' + escHtml(c.status || '—') + '</span></td>' +
-            '<td style="padding:10px 12px;text-align:right;font-family:var(--mono)">£' + (c.sales_7d || 0).toFixed(2) + '</td>' +
-            '<td style="padding:10px 12px;text-align:right;font-family:var(--mono)">' + (c.units_7d || 0) + '</td>' +
-            '<td style="padding:10px 12px;text-align:center">' + (c.active_60d ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">—</span>') + '</td>' +
-            '<td style="padding:10px 12px;text-align:center">' + (c.in_campaign ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">—</span>') + '</td>' +
-          '</tr>';
-        }).join(''),
-        '</tbody>',
-      '</table>',
+    // ASIN drilldown table — r14: hidden by default, click header to unfold
+    '<div style="margin:24px 0 0">',
+      '<div onclick="toggleAmzAsinBreakdown()" style="cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;padding:10px 0;user-select:none">',
+        '<span id="amz-asin-fold-arrow" style="display:inline-block;font-size:10px;color:var(--text3);transition:transform 0.15s">▶</span>',
+        '<span>ASIN breakdown</span>',
+        '<span style="font-size:11px;color:var(--text3);font-weight:500;text-transform:none;letter-spacing:0;margin-left:4px">(' + (p.children || []).length + ' ASIN' + ((p.children || []).length === 1 ? '' : 's') + ' · click to expand)</span>',
+      '</div>',
+      '<div id="amz-asin-breakdown-content" style="display:none;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:6px">',
+        '<table style="width:100%;border-collapse:collapse;font-size:13px">',
+          '<thead><tr style="background:var(--surface2);color:var(--text3)">',
+            '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">ASIN</th>',
+            '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">SKUs</th>',
+            '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Status</th>',
+            '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Sales 7d</th>',
+            '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Units 7d</th>',
+            '<th style="text-align:center;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Active 60d</th>',
+            '<th style="text-align:center;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">In ad</th>',
+          '</tr></thead>',
+          '<tbody>',
+          (p.children || []).map(function(c) {
+            const skuList = (c.skus || []).join(', ');
+            const skuLabel = c.sku_count > 1 ? c.sku_count + ' SKUs' : '1 SKU';
+            // r14: SKU pill — slightly bigger, clearer colour, still subdued
+            const skuPill = '<span style="display:inline-block;font-size:11px;font-weight:500;color:var(--text2);background:var(--surface3);padding:3px 8px;border-radius:99px;cursor:help" title="' + escHtml(skuList) + '">' + skuLabel + '</span>';
+            return '<tr style="border-top:1px solid var(--border)">' +
+              '<td style="padding:10px 12px;font-family:var(--mono);font-weight:600">' + escHtml(c.asin) + '</td>' +
+              '<td style="padding:10px 12px">' + skuPill + '</td>' +
+              '<td style="padding:10px 12px;font-size:11px"><span style="color:var(--text3)">' + escHtml(c.status || '—') + '</span></td>' +
+              '<td style="padding:10px 12px;text-align:right;font-family:var(--mono)">£' + (c.sales_7d || 0).toFixed(2) + '</td>' +
+              '<td style="padding:10px 12px;text-align:right;font-family:var(--mono)">' + (c.units_7d || 0) + '</td>' +
+              '<td style="padding:10px 12px;text-align:center">' + (c.active_60d ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">—</span>') + '</td>' +
+              '<td style="padding:10px 12px;text-align:center">' + (c.in_campaign ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">—</span>') + '</td>' +
+            '</tr>';
+          }).join(''),
+          '</tbody>',
+        '</table>',
+      '</div>',
     '</div>',
 
     // Friction check (rule-based) — populated by renderAmzFrictionSection
