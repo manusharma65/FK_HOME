@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r7b (timeline system: working days, auto-advance, day strip, not-started warning, ACOS analysis)
+// CampaignPulse — deploy marker 2026-05-04 r8 (SP-API plumbing: catalogue + orders sync, admin diagnostic endpoints, daily cron)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -235,6 +235,252 @@ function getHeaders(profileId, token) {
     'Amazon-Advertising-API-Scope': String(profileId)
   };
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// SP-API (Selling Partner API) — r8
+// ════════════════════════════════════════════════════════════════════════════
+// This is a SEPARATE Amazon API from the Advertising API above. SP-API gives
+// us access to the seller's catalogue, listings, inventory, orders, and pricing.
+// Auth uses LWA (Login With Amazon) — same OAuth flow as the Ads API but with
+// its own refresh token (different scopes granted at consent time).
+//
+// Env vars (must be configured in Railway):
+//   SP_API_CLIENT_ID        — LWA app Client ID
+//   SP_API_CLIENT_SECRET    — LWA app Client Secret
+//   SP_API_REFRESH_TOKEN    — long-lived refresh token from OAuth consent
+//   SP_API_SELLER_ID        — optional; if missing we fetch via /sellers/v1/marketplaceParticipations
+//
+// Endpoints — UK marketplace (A1F83G8C2ARO7P) on EU host.
+
+const SP_API_HOST = 'https://sellingpartnerapi-eu.amazon.com';
+const SP_API_MARKETPLACE_ID = 'A1F83G8C2ARO7P'; // UK
+const spApiState = {
+  accessToken: null,
+  tokenExpiry: 0,
+  sellerId: process.env.SP_API_SELLER_ID || null
+};
+
+function spApiConfigured() {
+  return !!(process.env.SP_API_CLIENT_ID && process.env.SP_API_CLIENT_SECRET && process.env.SP_API_REFRESH_TOKEN);
+}
+
+async function getSpApiAccessToken() {
+  if (!spApiConfigured()) throw new Error('SP-API credentials not configured (need SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, SP_API_REFRESH_TOKEN)');
+  // Cache token for 55 mins (LWA tokens last 60 mins, refresh 5 mins early)
+  if (spApiState.accessToken && Date.now() < spApiState.tokenExpiry - 60000) {
+    return spApiState.accessToken;
+  }
+  console.log('[SP-API] Refreshing access token...');
+  try {
+    const res = await axios.post('https://api.amazon.com/auth/o2/token',
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: process.env.SP_API_REFRESH_TOKEN.trim(),
+        client_id: process.env.SP_API_CLIENT_ID.trim(),
+        client_secret: process.env.SP_API_CLIENT_SECRET.trim()
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    spApiState.accessToken = res.data.access_token;
+    spApiState.tokenExpiry = Date.now() + (res.data.expires_in * 1000);
+    console.log('[SP-API] Token refreshed OK (expires in ' + res.data.expires_in + 's)');
+    return spApiState.accessToken;
+  } catch(e) {
+    const msg = (e.response && e.response.data) ? JSON.stringify(e.response.data) : e.message;
+    console.error('[SP-API] Token refresh FAILED: ' + msg);
+    throw new Error('SP-API token refresh failed: ' + msg);
+  }
+}
+
+// Generic SP-API GET wrapper — handles auth + base URL + retry on 429
+async function spApiGet(pathAndQuery, retryCount) {
+  retryCount = retryCount || 0;
+  const token = await getSpApiAccessToken();
+  try {
+    const res = await axios.get(SP_API_HOST + pathAndQuery, {
+      headers: {
+        'x-amz-access-token': token,
+        'Accept': 'application/json',
+        'User-Agent': 'CampaignPulse/1.0 (Language=Node.js)'
+      },
+      timeout: 30000
+    });
+    return res.data;
+  } catch(e) {
+    // SP-API rate limits — back off and retry up to 3 times
+    if (e.response && e.response.status === 429 && retryCount < 3) {
+      const wait = Math.pow(2, retryCount) * 1000;
+      console.log('[SP-API] Rate limited on ' + pathAndQuery + ', waiting ' + wait + 'ms');
+      await new Promise(function(r){ setTimeout(r, wait); });
+      return spApiGet(pathAndQuery, retryCount + 1);
+    }
+    const status = e.response ? e.response.status : 'no-response';
+    const body = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    console.error('[SP-API] GET ' + pathAndQuery + ' failed (' + status + '): ' + body);
+    throw e;
+  }
+}
+
+// Get the seller ID — needed for some endpoints. Fetches once and caches.
+async function getSellerId() {
+  if (spApiState.sellerId) return spApiState.sellerId;
+  try {
+    const data = await spApiGet('/sellers/v1/marketplaceParticipations');
+    if (data && data.payload && data.payload.length) {
+      // Find the UK marketplace entry
+      const uk = data.payload.find(function(p) {
+        return p.marketplace && p.marketplace.id === SP_API_MARKETPLACE_ID;
+      }) || data.payload[0];
+      if (uk && uk.participation && uk.participation.sellerId) {
+        spApiState.sellerId = uk.participation.sellerId;
+        console.log('[SP-API] Seller ID fetched: ' + spApiState.sellerId);
+        return spApiState.sellerId;
+      }
+    }
+    throw new Error('Seller ID not found in marketplaceParticipations response');
+  } catch(e) {
+    console.error('[SP-API] getSellerId failed: ' + e.message);
+    throw e;
+  }
+}
+
+// ── Sync the seller's product catalogue from SP-API into amazon_products ─────
+// Uses /listings/2021-08-01/items/{sellerId} to enumerate every SKU. Pulls
+// title, ASIN, status, image, price for each. Idempotent — re-running just
+// updates existing rows.
+async function syncAmazonCatalogue() {
+  if (!db) { console.log('[SP-API catalogue sync] No DB — skipping'); return { ok: false, error: 'no-db' }; }
+  if (!spApiConfigured()) { console.log('[SP-API catalogue sync] Not configured — skipping'); return { ok: false, error: 'not-configured' }; }
+  const startedAt = Date.now();
+  let total = 0, upserted = 0, errors = 0;
+  try {
+    const sellerId = await getSellerId();
+    let pageToken = null;
+    let pageNum = 0;
+    do {
+      pageNum++;
+      // includedData controls which fields come back. Keep it lean — we don't need attributes/relationships now.
+      const params = new URLSearchParams({
+        marketplaceIds: SP_API_MARKETPLACE_ID,
+        includedData: 'summaries,offers,images',
+        pageSize: '20'
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const data = await spApiGet('/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?' + params.toString());
+      const items = (data && data.items) || [];
+      total += items.length;
+      for (const item of items) {
+        try {
+          const sku = item.sku;
+          const summary = (item.summaries && item.summaries[0]) || {};
+          const offer = (item.offers && item.offers[0]) || {};
+          const image = (item.images && item.images[0] && item.images[0].images && item.images[0].images[0]) || {};
+          const asin = summary.asin || null;
+          const title = summary.itemName || null;
+          const status = summary.status ? (Array.isArray(summary.status) ? summary.status.join(',') : summary.status) : null;
+          const imageUrl = image.link || null;
+          const priceAmount = offer.price && offer.price.amount ? parseFloat(offer.price.amount) : null;
+          const priceCurrency = offer.price && offer.price.currencyCode ? offer.price.currencyCode : null;
+          await db.query(
+            'INSERT INTO amazon_products (sku, asin, title, status, image_url, price, currency, last_synced_at, raw_summary) ' +
+            'VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8) ' +
+            'ON CONFLICT (sku) DO UPDATE SET asin=$2, title=$3, status=$4, image_url=$5, price=$6, currency=$7, last_synced_at=NOW(), raw_summary=$8',
+            [sku, asin, title, status, imageUrl, priceAmount, priceCurrency, JSON.stringify(summary)]
+          );
+          upserted++;
+        } catch(e) { errors++; console.error('[SP-API catalogue sync] Row error sku=' + (item.sku || '?') + ': ' + e.message); }
+      }
+      pageToken = (data && data.pagination && data.pagination.nextToken) || null;
+      // Safety: don't iterate more than 100 pages (= 2,000 SKUs) per run
+      if (pageNum >= 100) { console.log('[SP-API catalogue sync] Hit page cap (100), stopping pagination'); break; }
+    } while (pageToken);
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log('[SP-API catalogue sync] Done in ' + seconds + 's: ' + total + ' items pulled, ' + upserted + ' upserted, ' + errors + ' errors');
+    // Mark products that didn't appear in this sync as inactive (they were removed from Amazon)
+    try {
+      await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '2 hours'");
+    } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
+    return { ok: true, total: total, upserted: upserted, errors: errors, seconds: parseFloat(seconds) };
+  } catch(e) {
+    console.error('[SP-API catalogue sync] FAILED: ' + e.message);
+    return { ok: false, error: e.message, total: total, upserted: upserted, errors: errors };
+  }
+}
+
+// ── Sync recent orders from SP-API into amazon_orders ───────────────────────
+// Uses /orders/v0/orders. Pulls orders updated in the last N days (default 7).
+// We pull both orders and their line items so we can attribute revenue per SKU.
+async function syncAmazonOrders(daysBack) {
+  if (!db) return { ok: false, error: 'no-db' };
+  if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
+  daysBack = daysBack || 7;
+  const startedAt = Date.now();
+  let total = 0, upserted = 0, errors = 0, itemsUpserted = 0;
+  try {
+    // SP-API requires CreatedAfter in ISO 8601 — and at least 2 minutes in the past
+    const after = new Date(Date.now() - daysBack * 86400000).toISOString();
+    let nextToken = null;
+    let pageNum = 0;
+    do {
+      pageNum++;
+      const params = new URLSearchParams({
+        MarketplaceIds: SP_API_MARKETPLACE_ID,
+        CreatedAfter: after,
+        MaxResultsPerPage: '50'
+      });
+      if (nextToken) params.set('NextToken', nextToken);
+      const data = await spApiGet('/orders/v0/orders?' + params.toString());
+      const orders = (data && data.payload && data.payload.Orders) || [];
+      total += orders.length;
+      for (const o of orders) {
+        try {
+          const orderId = o.AmazonOrderId;
+          const purchaseDate = o.PurchaseDate || null;
+          const orderStatus = o.OrderStatus || null;
+          const orderTotal = o.OrderTotal && o.OrderTotal.Amount ? parseFloat(o.OrderTotal.Amount) : 0;
+          const currency = o.OrderTotal && o.OrderTotal.CurrencyCode ? o.OrderTotal.CurrencyCode : 'GBP';
+          const numItems = parseInt(o.NumberOfItemsShipped || 0) + parseInt(o.NumberOfItemsUnshipped || 0);
+          await db.query(
+            'INSERT INTO amazon_orders (order_id, purchase_date, status, order_total, currency, num_items, last_synced_at, raw_order) ' +
+            'VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7) ' +
+            'ON CONFLICT (order_id) DO UPDATE SET status=$3, order_total=$4, currency=$5, num_items=$6, last_synced_at=NOW(), raw_order=$7',
+            [orderId, purchaseDate, orderStatus, orderTotal, currency, numItems, JSON.stringify(o)]
+          );
+          upserted++;
+          // Pull line items — separate API call per order
+          try {
+            const itemsData = await spApiGet('/orders/v0/orders/' + encodeURIComponent(orderId) + '/orderItems');
+            const items = (itemsData && itemsData.payload && itemsData.payload.OrderItems) || [];
+            for (const it of items) {
+              try {
+                const itemPrice = it.ItemPrice && it.ItemPrice.Amount ? parseFloat(it.ItemPrice.Amount) : 0;
+                const qty = parseInt(it.QuantityOrdered || 0);
+                await db.query(
+                  'INSERT INTO amazon_order_items (order_id, asin, sku, title, quantity, item_price, currency) ' +
+                  'VALUES ($1,$2,$3,$4,$5,$6,$7) ' +
+                  'ON CONFLICT (order_id, sku) DO UPDATE SET quantity=$5, item_price=$6, title=$4',
+                  [orderId, it.ASIN || null, it.SellerSKU || '', it.Title || null, qty, itemPrice, (it.ItemPrice && it.ItemPrice.CurrencyCode) || 'GBP']
+                );
+                itemsUpserted++;
+              } catch(e) { errors++; console.error('[SP-API orders sync] Item error: ' + e.message); }
+            }
+          } catch(e) { errors++; console.error('[SP-API orders sync] Items fetch error for order ' + orderId + ': ' + e.message); }
+        } catch(e) { errors++; console.error('[SP-API orders sync] Order error: ' + e.message); }
+      }
+      nextToken = (data && data.payload && data.payload.NextToken) || null;
+      if (pageNum >= 100) { console.log('[SP-API orders sync] Hit page cap (100), stopping'); break; }
+    } while (nextToken);
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log('[SP-API orders sync] Done in ' + seconds + 's: ' + total + ' orders pulled, ' + upserted + ' upserted, ' + itemsUpserted + ' items, ' + errors + ' errors');
+    return { ok: true, total: total, upserted: upserted, itemsUpserted: itemsUpserted, errors: errors, seconds: parseFloat(seconds) };
+  } catch(e) {
+    console.error('[SP-API orders sync] FAILED: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// END SP-API module
+// ════════════════════════════════════════════════════════════════════════════
 
 async function fetchCampaigns() {
   const token = await getAccessToken();
@@ -522,6 +768,49 @@ async function initDB() {
         updated_at TIMESTAMP DEFAULT NOW()
       );
       INSERT INTO app_settings (id, settings) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING;
+
+      -- ════ SP-API tables (r8) ═══════════════════════════════════════════════
+      -- amazon_products: one row per SKU. Refreshed daily by syncAmazonCatalogue().
+      CREATE TABLE IF NOT EXISTS amazon_products (
+        sku TEXT PRIMARY KEY,
+        asin TEXT,
+        title TEXT,
+        status TEXT,
+        image_url TEXT,
+        price NUMERIC,
+        currency TEXT,
+        last_synced_at TIMESTAMP DEFAULT NOW(),
+        raw_summary JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_asin ON amazon_products(asin);
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_status ON amazon_products(status);
+
+      -- amazon_orders: one row per order. Refreshed every few hours by syncAmazonOrders().
+      CREATE TABLE IF NOT EXISTS amazon_orders (
+        order_id TEXT PRIMARY KEY,
+        purchase_date TIMESTAMP,
+        status TEXT,
+        order_total NUMERIC,
+        currency TEXT,
+        num_items INTEGER,
+        last_synced_at TIMESTAMP DEFAULT NOW(),
+        raw_order JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_orders_date ON amazon_orders(purchase_date);
+
+      -- amazon_order_items: per-line revenue, joined to amazon_products by SKU/ASIN.
+      CREATE TABLE IF NOT EXISTS amazon_order_items (
+        order_id TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        asin TEXT,
+        title TEXT,
+        quantity INTEGER,
+        item_price NUMERIC,
+        currency TEXT,
+        PRIMARY KEY (order_id, sku)
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_order_items_sku ON amazon_order_items(sku);
+      CREATE INDEX IF NOT EXISTS idx_amazon_order_items_asin ON amazon_order_items(asin);
     `);
     console.log('Database connected and tables ready');
     await initTasksTable();
@@ -1914,6 +2203,63 @@ app.get('/api/admin/create-manager', async function(req, res) {
     await db.query("INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (email) DO UPDATE SET password_hash=$3, is_active=TRUE", ['Bobby', 'bobby@fksports.co.uk', hash, 'manager', 'owner']);
     res.json({ success: true, message: 'Manager account created/reset. Email: bobby@fksports.co.uk / Password: FKSports2024!' });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── SP-API admin/diagnostic endpoints (r8) ──────────────────────────────────
+// These let us verify SP-API credentials work without waiting for cron.
+// Owner-only — agents and managers can't trigger ad-hoc syncs.
+
+function requireOwner(req, res) {
+  const role = req.user && (req.user.role || '').toLowerCase();
+  if (role !== 'owner') {
+    res.status(403).json({ error: 'Owner permission required' });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/admin/sp-api/status — quick credentials + connectivity check.
+// Does NOT pull data, just verifies a token can be obtained and seller ID fetched.
+app.get('/api/admin/sp-api/status', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  if (!spApiConfigured()) return res.json({
+    ok: false,
+    configured: false,
+    missing: ['SP_API_CLIENT_ID', 'SP_API_CLIENT_SECRET', 'SP_API_REFRESH_TOKEN'].filter(function(k){ return !process.env[k]; })
+  });
+  try {
+    const token = await getSpApiAccessToken();
+    const sellerId = await getSellerId();
+    // Count what we already have in the DB
+    const productCount = db ? (await db.query('SELECT COUNT(*) as c FROM amazon_products')).rows[0].c : 0;
+    const orderCount = db ? (await db.query('SELECT COUNT(*) as c FROM amazon_orders')).rows[0].c : 0;
+    res.json({
+      ok: true,
+      configured: true,
+      tokenObtained: !!token,
+      sellerId: sellerId,
+      counts: { products: parseInt(productCount), orders: parseInt(orderCount) }
+    });
+  } catch(e) {
+    res.json({ ok: false, configured: true, error: e.message });
+  }
+});
+
+// POST /api/admin/sp-api/sync-catalogue — manually triggers catalogue sync.
+// Returns counts of items pulled/upserted/errors. Useful for first-run testing.
+app.post('/api/admin/sp-api/sync-catalogue', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const result = await syncAmazonCatalogue();
+  res.json(result);
+});
+
+// POST /api/admin/sp-api/sync-orders — manually triggers orders sync.
+// Body: { daysBack: 7 } (optional, default 7).
+app.post('/api/admin/sp-api/sync-orders', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const daysBack = parseInt((req.body && req.body.daysBack) || 7);
+  const result = await syncAmazonOrders(daysBack);
+  res.json(result);
 });
 
 app.post('/api/admin/fix-agent-names', async function(req, res) {
@@ -4254,6 +4600,19 @@ cron.schedule('0 0 * * *', function() {
 // actually changes (so we don't spam the log with no-op rows).
 cron.schedule('1 0 * * *', function() {
   advanceTaskStages().catch(function(e){ console.error('Stage-advance cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// ── SP-API sync crons (r8) ──────────────────────────────────────────────────
+// Catalogue sync: once a day at 02:30 London. Quiet hours, full refresh.
+cron.schedule('30 2 * * *', function() {
+  if (!spApiConfigured()) return;
+  syncAmazonCatalogue().catch(function(e){ console.error('SP-API catalogue cron: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// Orders sync: every 4 hours. Pulls last 7 days of activity each run (idempotent upsert).
+cron.schedule('0 */4 * * *', function() {
+  if (!spApiConfigured()) return;
+  syncAmazonOrders(7).catch(function(e){ console.error('SP-API orders cron: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 async function advanceTaskStages() {
