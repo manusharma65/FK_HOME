@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r12 (Google-style product cards with Amazon-specific diagnosis, smarter owner-derive, owner-role nav fix, compact metric cards) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r13 (ASIN-level rollup, Active/Dormant filter, big product modal with friction check + AI critique) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -779,7 +779,25 @@ tbody tr:hover { background: var(--surface2); }
         <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">All products</div>
         <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
       </div>
+      <!-- r13: Active/All filter -->
+      <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
+        <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
+        <button id="amz-filter-active" class="btn btn-primary" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('active')">Active products</button>
+        <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">Include dormant</button>
+        <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+      </div>
       <div id="amz-products-list" style="padding:0"></div>
+    </div>
+  </div>
+
+  <!-- r13: Amazon big product detail modal -->
+  <div id="amz-product-modal" onclick="if(event.target===this)closeAmzProductModal()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--surface);width:100%;max-width:1100px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px;margin-bottom:30px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);border-radius:14px 14px 0 0;z-index:1">
+        <div style="font-size:18px;font-weight:600;color:var(--text)" id="amz-product-modal-title">Product detail</div>
+        <button class="btn btn-ghost" onclick="closeAmzProductModal()" style="font-size:18px;padding:4px 12px">×</button>
+      </div>
+      <div id="amz-product-modal-body" style="padding:24px"></div>
     </div>
   </div>
 
@@ -3358,19 +3376,42 @@ function updatePwStrength(inputId, indicatorId) {
 
 // ─── Amazon Products page (r9) ──────────────────────────────────────────────
 let amzProductsCache = null;
+let amzProductView = 'active'; // r13: 'active' or 'all'
+
+function setAmzProductView(view) {
+  amzProductView = view;
+  // Update button states
+  const activeBtn = document.getElementById('amz-filter-active');
+  const allBtn = document.getElementById('amz-filter-all');
+  if (activeBtn && allBtn) {
+    activeBtn.className = view === 'active' ? 'btn btn-primary' : 'btn btn-ghost';
+    activeBtn.style.cssText = 'font-size:12px;padding:5px 10px';
+    allBtn.className = view === 'all' ? 'btn btn-primary' : 'btn btn-ghost';
+    allBtn.style.cssText = 'font-size:12px;padding:5px 10px';
+  }
+  loadAmazonProducts();
+}
+
 async function loadAmazonProducts() {
-  // Always re-fetch — sales data updates throughout the day
   try {
     // 1. Sales summary
     const salesRes = await fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() });
     const salesData = await salesRes.json();
     renderAmazonSalesPanel(salesData);
-    // 2. Products (slower — has the JOIN to orders)
-    const prodRes = await fetch('/api/amazon/products', { headers: getAuthHeaders() });
+    // 2. Products — pass include=all if user toggled to dormant view
+    const url = amzProductView === 'all' ? '/api/amazon/products?include=all' : '/api/amazon/products';
+    const prodRes = await fetch(url, { headers: getAuthHeaders() });
     const prodData = await prodRes.json();
     amzProductsCache = prodData;
-    // r11: prefetch the agents list so the dropdown is ready when rows render
     await getAmzAgents();
+    // Update view counter
+    const counterEl = document.getElementById('amz-view-counter');
+    if (counterEl && prodData.summary) {
+      const s = prodData.summary;
+      counterEl.textContent = 'Showing ' + s.total_parents_active + ' active' +
+        (amzProductView === 'all' ? ' + ' + s.total_parents_dormant + ' dormant' : '') +
+        ' (' + s.total_skus + ' total SKUs)';
+    }
     renderAmazonUntargeted(prodData);
     renderUnassignedBanner(prodData.summary || {});
     renderAmazonProductsList(prodData);
@@ -3460,9 +3501,10 @@ function renderAmazonProductsList(data) {
   const urgentTxt = summary.urgent_count > 0 ? ' · ' + summary.urgent_count + ' urgent' : '';
   const attentionTxt = summary.attention_count > 0 ? ' · ' + summary.attention_count + ' attention' : '';
   const scaleTxt = summary.scale_count > 0 ? ' · ' + summary.scale_count + ' scale' : '';
-  countEl.textContent = summary.total_parents + ' parents · ' + summary.total_skus + ' SKUs' + urgentTxt + attentionTxt + scaleTxt;
+  const baseCount = summary.total_parents_active != null ? summary.total_parents_active : (summary.total_parents || 0);
+  countEl.textContent = baseCount + ' products' + urgentTxt + attentionTxt + scaleTxt;
   if (products.length === 0) {
-    el.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">No products synced yet.</div>';
+    el.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">No products to show.</div>';
     return;
   }
   // Determine if current user can edit owners
@@ -3489,11 +3531,12 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     ('<img class="amz-product-img" src="' + escHtml(p.image_url) + '" alt="" onerror="this.outerHTML=&quot;<div class=\\&quot;amz-product-img-placeholder\\&quot;>no image</div>&quot;">') :
     '<div class="amz-product-img-placeholder">no image</div>';
   const pri = '<span class="amz-priority-pill ' + amzPriorityClass(p.priority) + '">' + amzPriorityLabel(p.priority) + '</span>';
-  // Variants summary
-  const variantLabel = p.variation_theme ? p.variation_theme.toLowerCase() : 'variant';
-  const variantsBadge = p.standalone ?
-    '<span style="font-size:11px;color:var(--text3)">Standalone</span>' :
-    '<span style="font-size:11px;color:var(--text3)">' + p.total_children + ' ' + escHtml(variantLabel) + ' variants · ' + p.advertised_children + ' advertised</span>';
+  // Variants summary (now ASIN-level after r13 rollup)
+  const variantsBadge = (function() {
+    if (p.standalone) return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + (p.total_children === 1 ? ' ASIN' : ' ASINs') + '</span>';
+    const variantLabel = p.variation_theme ? p.variation_theme.toLowerCase() : 'variant';
+    return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + ' ' + escHtml(variantLabel) + ' variant' + (p.total_children === 1 ? '' : 's') + ' · ' + p.advertised_children + ' advertised</span>';
+  })();
   // Listing status pill (BUYABLE / INACTIVE)
   let statusPill = '';
   if (p.inactive_count > 0) {
@@ -3537,25 +3580,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     '<div class="amz-diagnosis-line"><strong>' + escHtml(p.diagnosis) + '</strong></div>' : '';
   const actionLine = p.action ?
     '<div class="amz-action-line">→ ' + escHtml(p.action) + '</div>' : '';
-  // Children expand toggle (kept simple — shown when card is clicked)
-  const childrenTable = p.standalone ? '' :
-    '<div id="amz-prod-detail-' + idx + '" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--surface3)">' +
-      '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
-        '<thead><tr style="color:var(--text3)"><th style="text-align:left;padding:6px 4px;font-weight:500">SKU</th><th style="text-align:left;padding:6px 4px;font-weight:500">ASIN</th><th style="text-align:right;padding:6px 4px;font-weight:500">7d Sales</th><th style="text-align:right;padding:6px 4px;font-weight:500">Units</th><th style="text-align:center;padding:6px 4px;font-weight:500">Advertised</th></tr></thead>' +
-        '<tbody>' + p.children.map(function(c) {
-          return '<tr style="border-top:1px solid var(--surface3)">' +
-            '<td style="padding:6px 4px">' + escHtml(c.sku) + '</td>' +
-            '<td style="padding:6px 4px;font-family:var(--mono);font-size:11px">' + escHtml(c.asin || '—') + '</td>' +
-            '<td style="padding:6px 4px;text-align:right;font-family:var(--mono)">£' + (c.sales_7d || 0).toFixed(2) + '</td>' +
-            '<td style="padding:6px 4px;text-align:right;font-family:var(--mono)">' + (c.units_7d || 0) + '</td>' +
-            '<td style="padding:6px 4px;text-align:center">' +
-              (c.in_campaign ? '<span style="color:var(--green);font-weight:600">✓</span>' : '<span style="color:var(--red);font-weight:600">✗</span>') +
-            '</td>' +
-          '</tr>';
-        }).join('') + '</tbody>' +
-      '</table>' +
-    '</div>';
-  return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer" onclick="toggleAmzProduct(' + idx + ')">' +
+  return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer" onclick="openAmzProductModal(' + idx + ')">' +
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
@@ -3563,8 +3588,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       diagnosisLine +
       actionLine +
       stats +
-      childrenTable +
-      (p.standalone ? '' : '<div id="amz-prod-arrow-' + idx + '" style="margin-top:8px;text-align:right;font-size:11px;color:var(--accent);font-weight:500">Click to expand variants ▶</div>') +
+      '<div style="margin-top:8px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>' +
     '</div>' +
   '</div>';
 }
@@ -3573,13 +3597,355 @@ function amzStat(label, value, klass) {
   return '<div class="amz-stat-item"><div class="amz-stat-label">' + label + '</div><div class="amz-stat-value' + (klass ? ' ' + klass : '') + '">' + value + '</div></div>';
 }
 
+// ─── r13: Big product modal ─────────────────────────────────────────────────
+// Opens the full Amazon product detail view — Google-style modal with sections:
+// header, sales, daily revenue, ads, listing health, friction check, AI critique.
+
+function openAmzProductModal(idx) {
+  const cache = amzProductsCache && amzProductsCache.products;
+  if (!cache || !cache[idx]) return;
+  const p = cache[idx];
+  document.getElementById('amz-product-modal-title').textContent = p.title || p.parent_sku;
+  document.getElementById('amz-product-modal-body').innerHTML = buildAmzProductModalBody(p);
+  document.getElementById('amz-product-modal').style.display = 'flex';
+  // Render friction check (instant) + AI critique state on open
+  renderAmzFrictionSection(p);
+  renderAmzCritiqueSection(p);
+}
+
+function closeAmzProductModal() {
+  document.getElementById('amz-product-modal').style.display = 'none';
+}
+
+// Build the modal body for an Amazon product (parent group with rolled-up data)
+function buildAmzProductModalBody(p) {
+  const img = p.image_url ?
+    '<img src="' + escHtml(p.image_url) + '" style="width:200px;height:200px;object-fit:cover;border-radius:10px;background:var(--surface2)" alt="">' :
+    '<div style="width:200px;height:200px;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--text3);border-radius:10px">no image</div>';
+  const pri = '<span class="amz-priority-pill ' + amzPriorityClass(p.priority) + '">' + amzPriorityLabel(p.priority) + '</span>';
+  // Listing status pill
+  let statusPill = '';
+  if (p.inactive_count > 0 && p.buyable_count === 0) {
+    statusPill = '<span class="amz-priority-pill amz-priority-1">ALL INACTIVE</span>';
+  } else if (p.inactive_count > 0) {
+    statusPill = '<span class="amz-priority-pill amz-priority-2">' + p.inactive_count + ' INACTIVE</span>';
+  } else if (p.buyable_count > 0) {
+    statusPill = '<span class="amz-priority-pill amz-priority-3">BUYABLE</span>';
+  }
+  // Owner pill
+  const ownerPill = p.owner_agent ?
+    '<span class="amz-owner-pill amz-owner-assigned">Owner: ' + escHtml(p.owner_agent) + '</span>' :
+    '<span class="amz-owner-pill amz-owner-unassigned">Unassigned</span>';
+  // ASINs list (small)
+  const asinList = (p.asins || []).slice(0, 5).map(function(a){ return escHtml(a); }).join(', ') +
+    ((p.asins || []).length > 5 ? ' +' + (p.asins.length - 5) + ' more' : '');
+
+  // Stat tile helper for the modal — Google-style large tiles
+  function tile(label, val, klass) {
+    let colour = 'var(--text)';
+    if (klass === 'good') colour = 'var(--green)';
+    if (klass === 'warn') colour = 'var(--amber)';
+    if (klass === 'bad') colour = 'var(--red)';
+    if (klass === 'muted') colour = 'var(--text3)';
+    return '<div style="background:var(--surface2);padding:14px 16px;border-radius:10px;border:1px solid var(--border)">' +
+      '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>' +
+      '<div style="font-size:22px;font-weight:700;color:' + colour + ';font-family:var(--mono);line-height:1.1">' + val + '</div>' +
+    '</div>';
+  }
+
+  // Daily revenue bars (last 7 days from today's sales) — fall back if no data
+  const days = [];
+  const now = Date.now();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now - i * 86400000);
+    days.push({ day: d.toLocaleDateString('en-GB', { weekday: 'short' }), shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) });
+  }
+  // We don't have daily-by-product yet. Show a static sparkline-style summary per ASIN child instead.
+  // (A future improvement: fetch /api/amazon/product-daily-revenue?asin=...)
+
+  // Stats classes
+  const acos = p.acos || 0;
+  const acosKlass = acos === 0 ? 'muted' : (acos > 40 ? 'bad' : (acos > 20 ? 'warn' : 'good'));
+  const wastedToday = (p.camp_spend_7d > 0 && p.total_sales_7d === 0) ? p.camp_spend_7d : 0;
+  const coverageKlass = p.ad_coverage_pct === 100 ? 'good' : (p.ad_coverage_pct >= 50 ? 'warn' : 'bad');
+
+  // Build the body
+  return [
+    // Header section
+    '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px">', img,
+      '<div style="flex:1;min-width:300px">',
+        '<div style="font-size:24px;font-weight:700;margin-bottom:10px;letter-spacing:-0.3px">' + escHtml(p.title || '') + '</div>',
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">' + pri + statusPill + ownerPill + '</div>',
+        '<div style="font-size:12px;color:var(--text3);margin-bottom:8px"><strong>ASIN' + ((p.asins||[]).length === 1 ? '' : 's') + ':</strong> ' + asinList + '</div>',
+        '<div style="font-size:12px;color:var(--text3);margin-bottom:12px"><strong>SKUs:</strong> ' + (p.children || []).reduce(function(s,c){ return s + (c.sku_count || 1); }, 0) + ' total across ' + ((p.asins||[]).length) + ' ASIN' + ((p.asins||[]).length === 1 ? '' : 's') + '</div>',
+        '<div style="background:var(--amber-light);border-left:3px solid var(--amber);padding:10px 14px;border-radius:4px;margin-bottom:8px"><strong>Diagnosis:</strong> ' + escHtml(p.diagnosis || 'None') + '</div>',
+        '<div style="background:var(--surface2);border-left:3px solid var(--accent);padding:10px 14px;border-radius:4px"><strong>Action:</strong> ' + escHtml(p.action || 'Monitor') + '</div>',
+      '</div>',
+    '</div>',
+
+    // Sales section
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Sales (Amazon SP-API)</div>',
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
+      tile('Revenue 7d', '£' + (p.total_sales_7d || 0).toFixed(2)),
+      tile('Units 7d', String(p.total_units_7d || 0)),
+      tile('Active', p.active_60d ? 'Yes' : 'No', p.active_60d ? 'good' : 'bad'),
+      tile('Listings', (p.buyable_count + p.inactive_count) + ' total'),
+    '</div>',
+
+    // Amazon Ads section
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Amazon Ads (last 7 days)</div>',
+    (wastedToday > 0 ? '<div style="font-size:13px;color:#dc2626;font-weight:700;margin:-4px 0 10px">⚠ Wasted £' + wastedToday.toFixed(2) + ' over the last 7 days — no sales attributed.</div>' : ''),
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
+      tile('Ad spend', '£' + (p.camp_spend_7d || 0).toFixed(2), p.camp_spend_7d > 0 ? null : 'muted'),
+      tile('Ad sales', '£' + (p.camp_sales_7d || 0).toFixed(2)),
+      tile('Impressions', (p.camp_impressions_7d || 0).toLocaleString('en-GB')),
+      tile('Clicks', (p.camp_clicks_7d || 0).toLocaleString('en-GB')),
+      tile('Conversions', String(p.camp_conversions_7d || 0)),
+      tile('ACOS', acos > 0 ? acos + '%' : '—', acosKlass),
+      tile('Cost/conv', p.cost_per_conv != null ? '£' + p.cost_per_conv.toFixed(2) : '—'),
+      tile('Campaigns', String(p.camp_count || 0)),
+    '</div>',
+
+    // Listing health
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Listing health</div>',
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
+      tile('Ad coverage', p.ad_coverage_pct + '%', coverageKlass),
+      tile('Buyable', String(p.buyable_count), p.buyable_count > 0 ? 'good' : 'bad'),
+      tile('Inactive', String(p.inactive_count), p.inactive_count > 0 ? 'bad' : 'muted'),
+      tile('Variant theme', p.variation_theme || '—', 'muted'),
+    '</div>',
+
+    // ASIN drilldown table
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">ASIN breakdown</div>',
+    '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">',
+      '<table style="width:100%;border-collapse:collapse;font-size:13px">',
+        '<thead><tr style="background:var(--surface2);color:var(--text3)">',
+          '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">ASIN</th>',
+          '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">SKUs</th>',
+          '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Status</th>',
+          '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Sales 7d</th>',
+          '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Units 7d</th>',
+          '<th style="text-align:center;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Active 60d</th>',
+          '<th style="text-align:center;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">In ad</th>',
+        '</tr></thead>',
+        '<tbody>',
+        (p.children || []).map(function(c) {
+          const skuList = (c.skus || []).join(', ');
+          const skuLabel = c.sku_count > 1 ? c.sku_count + ' SKUs' : '1 SKU';
+          return '<tr style="border-top:1px solid var(--border)">' +
+            '<td style="padding:10px 12px;font-family:var(--mono);font-weight:600">' + escHtml(c.asin) + '</td>' +
+            '<td style="padding:10px 12px;font-size:11px;color:var(--text3)" title="' + escHtml(skuList) + '">' + skuLabel + '</td>' +
+            '<td style="padding:10px 12px;font-size:11px"><span style="color:var(--text3)">' + escHtml(c.status || '—') + '</span></td>' +
+            '<td style="padding:10px 12px;text-align:right;font-family:var(--mono)">£' + (c.sales_7d || 0).toFixed(2) + '</td>' +
+            '<td style="padding:10px 12px;text-align:right;font-family:var(--mono)">' + (c.units_7d || 0) + '</td>' +
+            '<td style="padding:10px 12px;text-align:center">' + (c.active_60d ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">—</span>') + '</td>' +
+            '<td style="padding:10px 12px;text-align:center">' + (c.in_campaign ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">—</span>') + '</td>' +
+          '</tr>';
+        }).join(''),
+        '</tbody>',
+      '</table>',
+    '</div>',
+
+    // Friction check (rule-based) — populated by renderAmzFrictionSection
+    '<div id="amz-friction-section" style="margin-top:24px;padding:18px 20px;background:var(--surface2);border:1px solid var(--border);border-radius:12px">',
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">',
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">⚡ Friction check <span id="amz-friction-counts" style="color:var(--text3);font-weight:500;font-size:12px;margin-left:6px"></span></div>',
+      '</div>',
+      '<div id="amz-friction-content" style="font-size:13px;line-height:1.6;color:var(--text)"><div style="color:var(--text3)">Scanning…</div></div>',
+    '</div>',
+
+    // AI listing critique — populated by renderAmzCritiqueSection
+    '<div id="amz-critique-section" style="margin-top:18px;padding:18px 20px;background:var(--surface2);border:1px solid var(--border);border-radius:12px">',
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">',
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔍 Amazon listing critique <span id="amz-critique-meta" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>',
+        '<div id="amz-critique-buttons" style="display:flex;gap:8px;flex-wrap:wrap"></div>',
+      '</div>',
+      '<div id="amz-critique-content" style="font-size:14px;line-height:1.6;color:var(--text)"></div>',
+    '</div>',
+
+    // Action bar
+    '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">',
+      '<button class="btn btn-primary" onclick="amzAssignTask(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">📋 Assign as task</button>',
+      ((p.asins || [])[0] ? '<a class="btn btn-ghost" href="https://www.amazon.co.uk/dp/' + escHtml(p.asins[0]) + '" target="_blank">Open on Amazon →</a>' : ''),
+      '<a class="btn btn-ghost" href="https://sellercentral.amazon.co.uk/inventory" target="_blank">Open in Seller Central →</a>',
+    '</div>'
+  ].join('');
+}
+
+// ─── Friction check (rule-based, instant) — Amazon-specific ────────────────
+function renderAmzFrictionSection(p) {
+  const contentEl = document.getElementById('amz-friction-content');
+  const countsEl = document.getElementById('amz-friction-counts');
+  if (!contentEl) return;
+  const issues = [];
+  // INACTIVE listings
+  if (p.inactive_count > 0 && p.buyable_count === 0) {
+    issues.push({ severity: 'critical', text: 'All listings INACTIVE/SUSPENDED — product not buyable on Amazon' });
+  } else if (p.inactive_count > 0) {
+    issues.push({ severity: 'warn', text: p.inactive_count + ' of ' + (p.inactive_count + p.buyable_count) + ' ASINs INACTIVE — review in Seller Central' });
+  }
+  // Wasted spend
+  if (p.camp_spend_7d > 5 && p.total_sales_7d === 0) {
+    issues.push({ severity: 'critical', text: 'Spent £' + p.camp_spend_7d.toFixed(2) + ' on ads in 7 days with zero sales' });
+  }
+  // High ACOS
+  if (p.acos > 40) {
+    issues.push({ severity: 'critical', text: 'ACOS ' + p.acos + '% — well above 20% target' });
+  } else if (p.acos > 20) {
+    issues.push({ severity: 'warn', text: 'ACOS ' + p.acos + '% — above 20% target' });
+  }
+  // Coverage gap
+  if (p.total_children > 1 && p.ad_coverage_pct < 50) {
+    issues.push({ severity: 'warn', text: 'Only ' + p.advertised_children + ' of ' + p.total_children + ' ASINs are in any campaign (' + p.ad_coverage_pct + '% coverage)' });
+  }
+  // No campaigns at all on a product with sales
+  if (p.camp_count === 0 && p.total_sales_7d > 50) {
+    issues.push({ severity: 'opportunity', text: '£' + p.total_sales_7d.toFixed(0) + ' organic sales but no advertising — launch a Sponsored Products campaign' });
+  }
+  // No conversions despite spend
+  if (p.camp_clicks_7d > 50 && p.camp_conversions_7d === 0 && p.camp_spend_7d > 5) {
+    issues.push({ severity: 'warn', text: p.camp_clicks_7d + ' clicks with 0 conversions — listing may have a conversion-rate problem (price, images, reviews)' });
+  }
+  // Owner unassigned
+  if (!p.owner_agent) {
+    issues.push({ severity: 'info', text: 'No agent assigned — sales not attributed in team breakdown' });
+  }
+  // Render
+  if (issues.length === 0) {
+    contentEl.innerHTML = '<div style="color:var(--green);font-size:13px">✓ No friction detected — product is healthy</div>';
+    if (countsEl) countsEl.textContent = '(no issues)';
+    return;
+  }
+  const sevColors = { critical: 'var(--red)', warn: 'var(--amber)', opportunity: 'var(--green)', info: 'var(--text2)' };
+  const sevIcons = { critical: '⛔', warn: '⚠', opportunity: '↗', info: 'ℹ' };
+  contentEl.innerHTML = issues.map(function(iss) {
+    return '<div style="display:flex;gap:10px;padding:6px 0;border-top:1px solid var(--border);font-size:13px">' +
+      '<div style="flex-shrink:0;color:' + (sevColors[iss.severity] || 'var(--text2)') + ';font-weight:700">' + sevIcons[iss.severity] + '</div>' +
+      '<div style="flex:1">' + escHtml(iss.text) + '</div>' +
+    '</div>';
+  }).join('');
+  if (countsEl) {
+    const counts = { critical: 0, warn: 0, opportunity: 0, info: 0 };
+    issues.forEach(function(i){ counts[i.severity]++; });
+    const parts = [];
+    if (counts.critical) parts.push(counts.critical + ' critical');
+    if (counts.warn) parts.push(counts.warn + ' warn');
+    if (counts.opportunity) parts.push(counts.opportunity + ' opportunity');
+    countsEl.textContent = '(' + parts.join(' · ') + ')';
+  }
+}
+
+// ─── AI critique section — Amazon-specific Claude prompt ───────────────────
+async function renderAmzCritiqueSection(p) {
+  const contentEl = document.getElementById('amz-critique-content');
+  const buttonsEl = document.getElementById('amz-critique-buttons');
+  const metaEl = document.getElementById('amz-critique-meta');
+  if (!contentEl || !buttonsEl) return;
+  const asin = (p.asins || [])[0];
+  if (!asin) {
+    contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">No ASIN available for this product — critique requires a primary ASIN.</div>';
+    return;
+  }
+  const safeKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
+  const runBtnHtml = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\')">🔍 Run listing critique</button>';
+  contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading saved analysis…</div>';
+  buttonsEl.innerHTML = runBtnHtml;
+  // Try cached fetch
+  try {
+    const r = await fetch('/api/amazon/listing-critique?asin=' + encodeURIComponent(asin) + '&cachedOnly=1', { headers: getAuthHeaders() });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.critique) {
+        renderAmzCritiqueResult(j, asin, p.parent_sku);
+        return;
+      }
+    }
+    contentEl.innerHTML =
+      '<div style="color:var(--text);font-size:13px;line-height:1.6">' +
+        '<strong>Amazon-specific listing review</strong> — analyses your title (keyword density, brand placement), bullet points (feature vs benefit), pricing across variants, ad performance, and competitor positioning. Returns a ranked list of fixes.<br><br>' +
+        '<span style="color:var(--text3)">Takes 15–25 seconds. Cached for 24h.</span>' +
+      '</div>';
+    buttonsEl.innerHTML = runBtnHtml;
+  } catch(e) {
+    contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Could not check for saved critique: ' + escHtml(e.message) + '</div>';
+    buttonsEl.innerHTML = runBtnHtml;
+  }
+}
+
+async function runAmzCritique(groupKey, asin) {
+  const contentEl = document.getElementById('amz-critique-content');
+  const buttonsEl = document.getElementById('amz-critique-buttons');
+  if (!contentEl) return;
+  contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">⏳ Analysing listing… this takes 15–25 seconds. Don\'t close this window.</div>';
+  buttonsEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/amazon/listing-critique', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+      body: JSON.stringify({ asin: asin, groupKey: groupKey, forceRefresh: true })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
+      buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\', \'' + asin + '\')">↻ Retry</button>';
+      return;
+    }
+    renderAmzCritiqueResult(j, asin, groupKey);
+  } catch(e) {
+    contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(e.message) + '</div>';
+    buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\', \'' + asin + '\')">↻ Retry</button>';
+  }
+}
+
+function renderAmzCritiqueResult(j, asin, groupKey) {
+  const contentEl = document.getElementById('amz-critique-content');
+  const buttonsEl = document.getElementById('amz-critique-buttons');
+  const metaEl = document.getElementById('amz-critique-meta');
+  if (!contentEl) return;
+  const c = j.critique || {};
+  let html = '';
+  if (c.summary) {
+    html += '<div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:14px 16px;border-radius:8px;margin-bottom:16px;font-size:14px;line-height:1.6"><strong>Summary:</strong> ' + escHtml(c.summary) + '</div>';
+  }
+  if (Array.isArray(c.issues) && c.issues.length) {
+    html += '<div style="font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin:16px 0 10px">Ranked fixes</div>';
+    html += c.issues.map(function(iss, i) {
+      const sev = (iss.severity || 'medium').toLowerCase();
+      const colour = sev === 'high' ? 'var(--red)' : (sev === 'medium' ? 'var(--amber)' : 'var(--text2)');
+      const bg = sev === 'high' ? '#fef2f2' : (sev === 'medium' ? '#fffbeb' : 'var(--surface2)');
+      return '<div style="background:' + bg + ';border-left:3px solid ' + colour + ';padding:12px 14px;border-radius:6px;margin-bottom:8px">' +
+        '<div style="font-weight:600;margin-bottom:4px">' + (i + 1) + '. ' + escHtml(iss.title || '') + ' <span style="font-size:11px;color:' + colour + ';font-weight:700;text-transform:uppercase;margin-left:6px">' + sev + '</span></div>' +
+        '<div style="font-size:13px;color:var(--text2);margin-bottom:6px">' + escHtml(iss.problem || '') + '</div>' +
+        (iss.fix ? '<div style="font-size:13px"><strong>Fix:</strong> ' + escHtml(iss.fix) + '</div>' : '') +
+        (iss.impact ? '<div style="font-size:12px;color:var(--text3);margin-top:4px;font-style:italic">Estimated impact: ' + escHtml(iss.impact) + '</div>' : '') +
+      '</div>';
+    }).join('');
+  }
+  if (!html) html = '<div style="color:var(--text3);font-size:13px">Critique returned no actionable items.</div>';
+  contentEl.innerHTML = html;
+  if (metaEl && j.cached_at) {
+    const ageMs = Date.now() - new Date(j.cached_at).getTime();
+    const ageMin = Math.floor(ageMs / 60000);
+    metaEl.textContent = 'Cached ' + (ageMin < 60 ? ageMin + ' min ago' : Math.floor(ageMin / 60) + 'h ago');
+  }
+  if (buttonsEl) {
+    buttonsEl.innerHTML = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\', \'' + asin + '\')" style="font-size:12px">↻ Re-analyse</button>';
+  }
+}
+
+function amzAssignTask(groupKey) {
+  // Light placeholder — real integration could create a campaign_task. For now, prompt and confirm.
+  const cache = amzProductsCache && amzProductsCache.products;
+  const p = cache ? cache.find(function(x){ return x.parent_sku === groupKey; }) : null;
+  if (!p) return;
+  const note = prompt('Add a note for the task (assigned to: ' + (p.owner_agent || 'unassigned') + ')', p.action || '');
+  if (!note) return;
+  alert('Task creation will be wired in r14. For now, please copy:\n\nProduct: ' + (p.title || groupKey) + '\nOwner: ' + (p.owner_agent || 'Unassigned') + '\nNote: ' + note);
+}
+
 function toggleAmzProduct(idx) {
-  const detail = document.getElementById('amz-prod-detail-' + idx);
-  const arrow = document.getElementById('amz-prod-arrow-' + idx);
-  if (!detail) return;
-  const isOpen = detail.style.display !== 'none';
-  detail.style.display = isOpen ? 'none' : 'block';
-  if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
+  // Legacy stub — kept so older inline-onclick still resolves; routes to modal now.
+  openAmzProductModal(idx);
 }
 
 // ─── r10: Wasted-spend by agent (daily breakdown table) ────────────────────

@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r12 (Google-style product cards with Amazon-specific diagnosis, smarter owner-derive via campaign-name keyword overlap, owner-role nav fix, compact metric cards)
+// CampaignPulse — deploy marker 2026-05-04 r13 (ASIN-level rollup, Active/Dormant filter, Google-style product modal with AI listing critique)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -853,6 +853,13 @@ async function initDB() {
       );
       CREATE INDEX IF NOT EXISTS idx_amazon_order_items_sku ON amazon_order_items(sku);
       CREATE INDEX IF NOT EXISTS idx_amazon_order_items_asin ON amazon_order_items(asin);
+
+      -- r13: amazon_critiques — cached AI listing critique results.
+      CREATE TABLE IF NOT EXISTS amazon_critiques (
+        asin TEXT PRIMARY KEY,
+        critique JSONB NOT NULL,
+        cached_at TIMESTAMP DEFAULT NOW()
+      );
     `);
     console.log('Database connected and tables ready');
     await initTasksTable();
@@ -2594,7 +2601,10 @@ function computeAmazonDiagnosis(p) {
 app.get('/api/amazon/products', async function(req, res) {
   if (!db) return res.json({ products: [] });
   try {
-    // 1. Fetch all products grouped by parent. Standalones (parent_sku IS NULL) become their own parent.
+    // r13: Active-only filter by default. ?include=all to see dormant products.
+    const includeAll = req.query.include === 'all';
+
+    // 1. Pull all SKUs (with status/title/asin/parent/owner)
     const productsRes = await db.query(
       "SELECT sku, asin, title, status, image_url, parent_sku, variation_theme, owner_agent, COALESCE(owner_manual,FALSE) AS owner_manual " +
       "FROM amazon_products " +
@@ -2602,7 +2612,7 @@ app.get('/api/amazon/products', async function(req, res) {
       "ORDER BY COALESCE(parent_sku, sku), sku"
     );
 
-    // 2. Fetch 7-day sales by ASIN — sum item_price × quantity from amazon_order_items joined to recent orders
+    // 2. Sales last 7 days, by ASIN and by SKU (we use both for matching)
     const salesRes = await db.query(
       "SELECT i.asin, i.sku, SUM(i.item_price * i.quantity) AS revenue, SUM(i.quantity) AS units " +
       "FROM amazon_order_items i " +
@@ -2618,8 +2628,18 @@ app.get('/api/amazon/products', async function(req, res) {
       if (row.sku) salesBySku[row.sku] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
     });
 
-    // 3. Build set of advertised ASINs from recent campaigns. Read the last 7 daily snapshots
-    //    and collect every ASIN mentioned in campaign target lists.
+    // r13: Active-window check — has the ASIN sold in last 60 days?
+    const recentAsinsRes = await db.query(
+      "SELECT DISTINCT i.asin FROM amazon_order_items i " +
+      "JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '60 days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin IS NOT NULL"
+    );
+    const activeAsins = new Set();
+    recentAsinsRes.rows.forEach(function(r){ if (r.asin) activeAsins.add(r.asin); });
+
+    // 3. Advertised ASINs from snapshots (last 7d)
     const snapshotsRes = await db.query(
       "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
     );
@@ -2628,11 +2648,7 @@ app.get('/api/amazon/products', async function(req, res) {
     snapshotsRes.rows.forEach(function(snap) {
       const camps = snap.campaigns || [];
       camps.forEach(function(c) {
-        // Auto-targeting campaigns don't have explicit ASIN targets, but they DO advertise products.
-        // We can't tell from snapshot data which products auto picks up — flag separately.
-        const targetingType = (c.targetingType || '').toLowerCase();
-        if (targetingType === 'auto') autoCampaignsExist.value = true;
-        // Manual campaigns: check targets array
+        if ((c.targetingType || '').toLowerCase() === 'auto') autoCampaignsExist.value = true;
         const targets = c.targets || c.asins || c.targetedAsins || [];
         if (Array.isArray(targets)) {
           targets.forEach(function(t) {
@@ -2643,14 +2659,7 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
-    // 4. Group products into parent buckets — now happens below in section 4 (with diagnosis)
-    // 3b. r12: Aggregate campaign spend/sales/ACOS per parent product group
-    //     Match campaigns to parents via the same name-keyword overlap logic used in deriveProductOwners.
-    //     This gives us "Aryan's Yoga Mat" → all 3 campaigns containing "Yoga" + "Mat" → £X spend, £Y sales.
-    // (parseCampaignName + extractTitleKeywords are defined globally above)
-    const groupCampaignStats = {}; // { groupKey: { spend, sales, clicks, campaigns: [c, c, ...] } }
-    const groupTitleKeywords = {}; // groupKey -> Set of title keywords (built lazily below in section 4)
-    // Collect unique recent campaigns
+    // 3b. Recent campaigns (deduped) for spend/sales/ACOS aggregation
     const seenCamp = new Set();
     const recentCampaigns = [];
     snapshotsRes.rows.forEach(function(snap) {
@@ -2659,10 +2668,49 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
-    // 4. Group products into parent buckets
-    const parents = {};
+    // ── r13: NEW GROUPING LOGIC ──────────────────────────────────────────────
+    // Build "asinGroup" — one entry per ASIN. All SKUs sharing an ASIN merge here.
+    // This collapses the FBA/FBM duplicate SKU problem.
+    const asinGroup = {}; // asin -> { skus:[], title, image, status_set, owner... }
+    const noAsinGroup = {}; // SKUs that have no ASIN at all (rare): keyed by sku
     productsRes.rows.forEach(function(p) {
-      const groupKey = p.parent_sku || p.sku;
+      if (p.asin) {
+        if (!asinGroup[p.asin]) {
+          asinGroup[p.asin] = {
+            asin: p.asin,
+            skus: [],
+            titles: [],
+            image_url: null,
+            statuses: new Set(),
+            parent_skus: new Set(),
+            owner_agent: null,
+            owner_manual: false,
+            variation_theme: null
+          };
+        }
+        const g = asinGroup[p.asin];
+        g.skus.push(p.sku);
+        if (p.title) g.titles.push(p.title);
+        if (p.image_url && !g.image_url) g.image_url = p.image_url;
+        if (p.status) g.statuses.add(String(p.status).toUpperCase());
+        if (p.parent_sku) g.parent_skus.add(p.parent_sku);
+        if (p.owner_agent && !g.owner_agent) g.owner_agent = p.owner_agent;
+        if (p.owner_manual) g.owner_manual = true;
+        if (p.variation_theme && !g.variation_theme) g.variation_theme = p.variation_theme;
+      } else {
+        // SKU with no ASIN — treat as own row
+        noAsinGroup[p.sku] = p;
+      }
+    });
+
+    // ── Now build "parent product" rollups: by parent_sku for variants, otherwise by ASIN.
+    // groupKey = parent_sku if any SKU in the ASIN group has one; else the ASIN itself.
+    // This way: 12kg-FBA + 12kg-Amazon (same ASIN) → one row, AND multiple ASINs that share a parent_sku → one row.
+    const parents = {};
+    Object.values(asinGroup).forEach(function(g) {
+      // Pick a group key: use parent_sku if available, else the ASIN
+      const parentSku = Array.from(g.parent_skus)[0] || null;
+      const groupKey = parentSku || ('asin:' + g.asin);
       if (!parents[groupKey]) {
         parents[groupKey] = {
           parent_sku: groupKey,
@@ -2670,53 +2718,66 @@ app.get('/api/amazon/products', async function(req, res) {
           variation_theme: null,
           children: [],
           image_url: null,
-          standalone: !p.parent_sku,
+          standalone: !parentSku,
           owner_agent: null,
           owner_manual: false,
           buyable_count: 0,
-          inactive_count: 0
+          inactive_count: 0,
+          asins: new Set()
         };
       }
-      if (!parents[groupKey].title && p.title) parents[groupKey].title = p.title;
-      if (!parents[groupKey].image_url && p.image_url) parents[groupKey].image_url = p.image_url;
-      if (!parents[groupKey].variation_theme && p.variation_theme) parents[groupKey].variation_theme = p.variation_theme;
-      if (!parents[groupKey].owner_agent && p.owner_agent) parents[groupKey].owner_agent = p.owner_agent;
-      if (p.owner_manual) parents[groupKey].owner_manual = true;
-      // Status counts: child can be BUYABLE, DISCOVERABLE, or INACTIVE/SUSPENDED
-      const status = (p.status || '').toUpperCase();
-      if (status.indexOf('BUYABLE') !== -1) parents[groupKey].buyable_count++;
-      if (status.indexOf('INACTIVE') !== -1 || status.indexOf('SUSPENDED') !== -1) parents[groupKey].inactive_count++;
-      const childSales = (p.asin && salesByAsin[p.asin]) || (p.sku && salesBySku[p.sku]) || { revenue: 0, units: 0 };
-      parents[groupKey].children.push({
-        sku: p.sku,
-        asin: p.asin,
-        status: p.status,
-        in_campaign: p.asin ? advertisedAsins.has(p.asin) : false,
+      const parent = parents[groupKey];
+      // Pick the longest title (usually most descriptive)
+      const longestTitle = g.titles.sort(function(a,b){ return b.length - a.length; })[0] || '';
+      if (!parent.title || longestTitle.length > parent.title.length) parent.title = longestTitle;
+      if (!parent.image_url && g.image_url) parent.image_url = g.image_url;
+      if (!parent.variation_theme && g.variation_theme) parent.variation_theme = g.variation_theme;
+      if (!parent.owner_agent && g.owner_agent) parent.owner_agent = g.owner_agent;
+      if (g.owner_manual) parent.owner_manual = true;
+      // Status: count BUYABLE / INACTIVE per ASIN group
+      const isBuyable = g.statuses.has('BUYABLE') || Array.from(g.statuses).some(function(s){ return s.indexOf('BUYABLE') !== -1; });
+      const isInactive = Array.from(g.statuses).some(function(s){ return s.indexOf('INACTIVE') !== -1 || s.indexOf('SUSPENDED') !== -1; });
+      if (isBuyable) parent.buyable_count++;
+      if (isInactive && !isBuyable) parent.inactive_count++;
+      // Child = the ASIN-group itself, NOT each SKU. SKU detail moves to drilldown.
+      const childSales = salesByAsin[g.asin] || { revenue: 0, units: 0 };
+      // Sum sales across all SKUs that map to this ASIN (in case orders attribute by SKU)
+      g.skus.forEach(function(sku) {
+        if (salesBySku[sku] && (!salesByAsin[g.asin] || salesBySku[sku].revenue !== childSales.revenue)) {
+          // Already covered by ASIN aggregate; skip
+        }
+      });
+      parent.asins.add(g.asin);
+      parent.children.push({
+        asin: g.asin,
+        skus: g.skus,           // all the SKUs that share this ASIN (e.g. FBA + FBM)
+        sku_count: g.skus.length,
+        status: Array.from(g.statuses).join(','),
+        in_campaign: advertisedAsins.has(g.asin),
+        active_60d: activeAsins.has(g.asin),
         sales_7d: childSales.revenue,
         units_7d: childSales.units,
-        image_url: p.image_url
+        image_url: g.image_url
       });
     });
 
-    // 4b. r12: Match campaigns to parent groups via name-keyword overlap, accumulate spend/sales
-    Object.keys(parents).forEach(function(gk) {
-      groupTitleKeywords[gk] = extractTitleKeywords(parents[gk].title || '');
-    });
+    // 4. Match campaigns to parent groups via name-keyword overlap
+    const groupTitleKw = {};
+    Object.keys(parents).forEach(function(gk){ groupTitleKw[gk] = extractTitleKeywords(parents[gk].title || ''); });
+    const groupCampaignStats = {};
     recentCampaigns.forEach(function(c) {
       const parsed = parseCampaignName(c.name || '');
       const hintKw = extractTitleKeywords(parsed.productHint);
       if (hintKw.size === 0) return;
-      // Find best-matching parent for this campaign (highest overlap, must have ≥2 matches)
       let bestKey = null;
       let bestOverlap = 0;
       Object.keys(parents).forEach(function(gk) {
-        const titleKw = groupTitleKeywords[gk];
+        const titleKw = groupTitleKw[gk];
         let overlap = 0;
         hintKw.forEach(function(kw){ if (titleKw.has(kw)) overlap++; });
         if (overlap > bestOverlap) { bestOverlap = overlap; bestKey = gk; }
       });
       if (!bestKey || bestOverlap < 2) return;
-      // Accumulate
       if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0 };
       const s = groupCampaignStats[bestKey];
       s.spend += parseFloat(c.spend || 0);
@@ -2727,8 +2788,8 @@ app.get('/api/amazon/products', async function(req, res) {
       s.count++;
     });
 
-    // 5. Compute per-parent aggregates + diagnosis/action/priority
-    const list = Object.values(parents).map(function(parent) {
+    // 5. Compute per-parent aggregates + diagnosis
+    let allParents = Object.values(parents).map(function(parent) {
       const totalSales = parent.children.reduce(function(s, c){ return s + (c.sales_7d || 0); }, 0);
       const totalUnits = parent.children.reduce(function(s, c){ return s + (c.units_7d || 0); }, 0);
       const advertisedChildren = parent.children.filter(function(c){ return c.in_campaign; }).length;
@@ -2736,7 +2797,8 @@ app.get('/api/amazon/products', async function(req, res) {
       const cs = groupCampaignStats[parent.parent_sku] || { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0 };
       const acos = cs.sales > 0 ? Math.round((cs.spend / cs.sales) * 1000) / 10 : 0;
       const costPerConv = cs.conversions > 0 ? cs.spend / cs.conversions : null;
-      // r12: Amazon-specific diagnosis logic
+      // r13: Activity status — has any child sold in last 60 days?
+      const activeRecent = parent.children.some(function(c){ return c.active_60d; });
       const dx = computeAmazonDiagnosis({
         parent: parent,
         totalSales: totalSales,
@@ -2751,12 +2813,12 @@ app.get('/api/amazon/products', async function(req, res) {
         autoCampaignsExist: autoCampaignsExist.value
       });
       return Object.assign({}, parent, {
+        asins: Array.from(parent.asins),
         total_sales_7d: parseFloat(totalSales.toFixed(2)),
         total_units_7d: totalUnits,
         ad_coverage_pct: adCoveragePct,
         advertised_children: advertisedChildren,
         total_children: parent.children.length,
-        // Campaign-side metrics (matched via name)
         camp_spend_7d: parseFloat(cs.spend.toFixed(2)),
         camp_sales_7d: parseFloat(cs.sales.toFixed(2)),
         camp_clicks_7d: cs.clicks,
@@ -2765,34 +2827,216 @@ app.get('/api/amazon/products', async function(req, res) {
         camp_count: cs.count,
         acos: acos,
         cost_per_conv: costPerConv != null ? parseFloat(costPerConv.toFixed(2)) : null,
-        // Diagnosis + action + priority
+        active_60d: activeRecent,
         priority: dx.priority,
         diagnosis: dx.diagnosis,
         action: dx.action
       });
     });
 
-    // Sort: priority asc (1=urgent first), then sales desc
-    list.sort(function(a, b) {
+    // 6. Active filter — Rule 2 from the spec.
+    // Active = has at least one BUYABLE listing AND has sold in last 60 days.
+    const activeProducts = allParents.filter(function(p){
+      return p.buyable_count > 0 && p.active_60d;
+    });
+    const dormantProducts = allParents.filter(function(p){
+      return !(p.buyable_count > 0 && p.active_60d);
+    });
+
+    // Default returns active only; ?include=all returns everything
+    const returnList = includeAll ? allParents : activeProducts;
+    returnList.sort(function(a, b) {
       if (a.priority !== b.priority) return a.priority - b.priority;
       return b.total_sales_7d - a.total_sales_7d;
     });
 
     res.json({
-      products: list,
+      products: returnList,
       summary: {
-        total_parents: list.length,
+        total_parents_all: allParents.length,
+        total_parents_active: activeProducts.length,
+        total_parents_dormant: dormantProducts.length,
         total_skus: productsRes.rows.length,
         auto_campaigns_exist: autoCampaignsExist.value,
         advertised_asins_count: advertisedAsins.size,
-        unassigned_count: list.filter(function(p){ return !p.owner_agent; }).length,
-        urgent_count: list.filter(function(p){ return p.priority === 1; }).length,
-        attention_count: list.filter(function(p){ return p.priority === 2; }).length,
-        scale_count: list.filter(function(p){ return p.priority === 3; }).length
+        unassigned_count: returnList.filter(function(p){ return !p.owner_agent; }).length,
+        urgent_count: returnList.filter(function(p){ return p.priority === 1; }).length,
+        attention_count: returnList.filter(function(p){ return p.priority === 2; }).length,
+        scale_count: returnList.filter(function(p){ return p.priority === 3; }).length,
+        view: includeAll ? 'all' : 'active'
       }
     });
   } catch(e) {
     console.error('/api/amazon/products error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── r13: Amazon listing critique (AI) ──────────────────────────────────────
+// GET /api/amazon/listing-critique?asin=B...&cachedOnly=1
+//   - cachedOnly=1 returns cached result or null
+//   - omit cachedOnly: if cache <24h old, returns it; else returns null
+// POST /api/amazon/listing-critique  body: { asin, groupKey, forceRefresh }
+//   - Fetches the live Amazon page, calls Claude with Amazon-specific prompt,
+//     stores result in amazon_critiques. Returns the critique JSON.
+//
+// The prompt is Amazon-specific: title/keyword analysis, bullet structure,
+// pricing across variants, ad-attribution, search-term relevance.
+
+app.get('/api/amazon/listing-critique', async function(req, res) {
+  if (!db) return res.json({ critique: null });
+  const asin = String(req.query.asin || '');
+  const cachedOnly = req.query.cachedOnly === '1' || req.query.cachedOnly === 'true';
+  if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
+  try {
+    const r = await db.query("SELECT critique, cached_at FROM amazon_critiques WHERE asin = $1", [asin]);
+    if (!r.rows.length) {
+      if (cachedOnly) return res.json({ critique: null });
+      return res.json({ critique: null });
+    }
+    const row = r.rows[0];
+    const ageMs = Date.now() - new Date(row.cached_at).getTime();
+    if (cachedOnly || ageMs < 24 * 3600 * 1000) {
+      return res.json({ critique: row.critique, cached_at: row.cached_at });
+    }
+    res.json({ critique: null, cached_at: row.cached_at, expired: true });
+  } catch(e) {
+    console.error('/api/amazon/listing-critique GET: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/amazon/listing-critique', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  const asin = String((req.body && req.body.asin) || '');
+  const groupKey = String((req.body && req.body.groupKey) || '');
+  if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
+  try {
+    // Pull product context from our DB — title, status, price, ad performance for the parent group
+    const prodRes = await db.query(
+      "SELECT sku, asin, title, status, image_url, parent_sku, owner_agent FROM amazon_products WHERE asin = $1 OR parent_sku = $2 OR sku = $2",
+      [asin, groupKey]
+    );
+    if (!prodRes.rows.length) return res.status(404).json({ error: 'product not found' });
+    const primary = prodRes.rows.find(function(r){ return r.asin === asin; }) || prodRes.rows[0];
+    const allTitles = Array.from(new Set(prodRes.rows.map(function(r){ return r.title; }).filter(Boolean)));
+    const childAsins = Array.from(new Set(prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean)));
+    const inactiveCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('INACTIVE') !== -1 || (r.status || '').indexOf('SUSPENDED') !== -1; }).length;
+    const buyableCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('BUYABLE') !== -1; }).length;
+
+    // Sales data
+    const salesRes = await db.query(
+      "SELECT SUM(i.item_price * i.quantity) AS revenue, SUM(i.quantity) AS units, COUNT(DISTINCT i.order_id) AS orders " +
+      "FROM amazon_order_items i JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE i.asin = ANY($1) AND o.purchase_date >= NOW() - INTERVAL '30 days' AND o.status NOT IN ('Cancelled','Canceled')",
+      [childAsins]
+    );
+    const sales30d = salesRes.rows[0] || {};
+
+    // Try to fetch the live Amazon page (UK)
+    let livePageContext = '';
+    try {
+      const pageRes = await axios.get('https://www.amazon.co.uk/dp/' + asin, {
+        timeout: 12000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-GB,en;q=0.9'
+        }
+      });
+      // Extract a useful slice (full page is huge — clip)
+      const html = String(pageRes.data || '');
+      // Pull title, bullets, A+ presence, price visibility
+      const titleMatch = html.match(/<span[^>]*id="productTitle"[^>]*>([\s\S]*?)<\/span>/);
+      const bulletsMatch = html.match(/<div[^>]*id="feature-bullets"[\s\S]*?<\/div>/);
+      const priceMatch = html.match(/class="a-offscreen"[^>]*>([£$€]?[\d,.]+)/);
+      const aplusPresent = /aplus-3p-fixed-width|aplus-module/.test(html);
+      const reviewsMatch = html.match(/(\d[\d,]*) (?:global )?ratings/);
+      const titleClean = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : '(not found)';
+      const bulletsClean = bulletsMatch ? bulletsMatch[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1500) : '(not found)';
+      livePageContext =
+        '\n--- Live Amazon page ---\n' +
+        'Title on page: ' + titleClean.slice(0, 300) + '\n' +
+        'Bullets: ' + bulletsClean.slice(0, 1200) + '\n' +
+        'Price visible: ' + (priceMatch ? priceMatch[1] : '(not found)') + '\n' +
+        'A+ content present: ' + (aplusPresent ? 'YES' : 'NO') + '\n' +
+        'Review count: ' + (reviewsMatch ? reviewsMatch[1] : '(not found)') + '\n';
+    } catch(e) {
+      livePageContext = '\n--- Live Amazon page ---\n(could not fetch — Amazon may have blocked the request)\n';
+    }
+
+    // Build the prompt — Amazon-specific
+    const prompt = [
+      'You are an Amazon Marketplace listing-optimisation expert reviewing an FK Sports product on Amazon UK.',
+      '',
+      'PRODUCT CONTEXT (from Seller Central / SP-API):',
+      'Primary ASIN: ' + asin,
+      'Total ASINs in family: ' + childAsins.length,
+      'Stored title(s): ' + allTitles.slice(0, 3).join(' || '),
+      'Listing status: ' + buyableCount + ' BUYABLE, ' + inactiveCount + ' INACTIVE',
+      'Sales last 30 days: £' + parseFloat(sales30d.revenue || 0).toFixed(2) + ', ' + (sales30d.units || 0) + ' units, ' + (sales30d.orders || 0) + ' orders',
+      'Owner agent: ' + (primary.owner_agent || 'unassigned'),
+      livePageContext,
+      '',
+      'TASK: review this listing and identify the highest-impact issues. Focus on Amazon-specific factors:',
+      '1. Title quality — keyword density (front-loaded important terms?), brand placement (FK Sports near front?), length (~150-200 chars optimal), no stuffing',
+      '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion',
+      '3. Image quality and count (Amazon allows up to 9 — are they used?)',
+      '4. A+ content — is it present? If not, that\'s a known conversion lift',
+      '5. Pricing concerns — multi-variant pricing spread, FBA vs FBM duplicates',
+      '6. Ad performance signal — given the 30-day sales above, are ads aligned?',
+      '7. Review count — does the listing need more reviews to convert?',
+      '',
+      'Rank fixes by IMPACT. Higher-impact fixes first.',
+      '',
+      'Return ONLY valid JSON (no markdown fences, no preamble) in this shape:',
+      '{',
+      '  "summary": "2-3 sentence overall assessment",',
+      '  "issues": [',
+      '    { "title": "Short heading", "severity": "high|medium|low", "problem": "What\'s wrong", "fix": "Specific action to take", "impact": "Estimated effect" },',
+      '    ...',
+      '  ]',
+      '}',
+      '',
+      'Provide 3-7 issues. Be specific (avoid generic advice). Focus on what THIS listing needs.'
+    ].join('\n');
+
+    // Call Claude
+    const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-opus-4-5-20251101',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      timeout: 30000
+    });
+
+    let critique = null;
+    try {
+      const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
+      const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+      critique = JSON.parse(cleaned);
+    } catch(parseErr) {
+      console.error('[amz-critique] JSON parse failed: ' + parseErr.message);
+      return res.status(500).json({ error: 'AI returned malformed response' });
+    }
+
+    // Cache result
+    try {
+      await db.query(
+        "INSERT INTO amazon_critiques (asin, critique, cached_at) VALUES ($1, $2, NOW()) " +
+        "ON CONFLICT (asin) DO UPDATE SET critique = $2, cached_at = NOW()",
+        [asin, JSON.stringify(critique)]
+      );
+    } catch(e) { console.error('[amz-critique] Cache write failed: ' + e.message); }
+
+    res.json({ critique: critique, cached_at: new Date().toISOString() });
+  } catch(e) {
+    console.error('/api/amazon/listing-critique POST: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
