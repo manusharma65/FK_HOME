@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r17 (TF-IDF matcher, AD SPEND/NET columns, ASIN-targeted coverage tooltip, real assign-task, tasks open in modal) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r18 (Merge products tool, assign-task with agent picker modal, reassign existing tasks button) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -782,6 +782,7 @@ tbody tr:hover { background: var(--surface2); }
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
           <span id="amz-bulk-status" style="font-size:11px;color:var(--text3)"></span>
           <button id="amz-bulk-btn" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="startAmzBulkCritique()" title="Run AI critique on all active products (Haiku, ~£0.01 each)">🤖 Critique all active</button>
+          <button class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="showMergeProductsModal()" title="Find and merge duplicate parent products">🔗 Merge products</button>
         </div>
       </div>
       <div id="amz-products-list" style="padding:0"></div>
@@ -796,6 +797,20 @@ tbody tr:hover { background: var(--surface2); }
         <button class="btn btn-ghost" onclick="closeAmzProductModal()" style="font-size:18px;padding:4px 12px">×</button>
       </div>
       <div id="amz-product-modal-body" style="padding:24px"></div>
+    </div>
+  </div>
+
+  <!-- r18: Merge products modal — owner/manager only -->
+  <div id="merge-products-modal" onclick="if(event.target===this)closeMergeProductsModal()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--surface);width:100%;max-width:1000px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px;margin-bottom:30px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);border-radius:14px 14px 0 0;z-index:1">
+        <div>
+          <div style="font-size:16px;font-weight:600">Merge duplicate products</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:2px">Clusters of parents sharing distinctive keywords. Pick a canonical parent + sources to merge into it.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="closeMergeProductsModal()" style="font-size:18px;padding:4px 12px">×</button>
+      </div>
+      <div id="merge-products-body" style="padding:18px"></div>
     </div>
   </div>
 
@@ -2739,6 +2754,15 @@ function renderTasks(tab) {
     const cardId = 'task-card-' + t.id;
     const detailId = 'task-detail-' + t.id;
 
+    // r18: Reassign button — manager + owner only. Appended to whatever action block was built above.
+    const _me = window._meCache || {};
+    const _myRole = (_me.role || '').toLowerCase();
+    const _myDept = (_me.department || '').toLowerCase();
+    const _canReassign = ['owner','manager'].indexOf(_myRole) !== -1 || _myDept === 'manager';
+    if (_canReassign) {
+      actionButtons += '<div style="margin-top:6px"><button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--text3)" onclick="event.stopPropagation();showReassignTaskModal(' + t.id + ',&quot;' + escHtml(t.agent_name||'').replace(/"/g, '&quot;') + '&quot;)">↪ Reassign</button></div>';
+    }
+
     // r17: Whole card is clickable to open the detail modal. Action buttons inside use stopPropagation.
     return '<div class="ai-card" id="' + cardId + '" style="' + borderColor + ';cursor:pointer" onclick="openTaskDetailModal(' + t.id + ')">' +
       repeatBanner +
@@ -4438,25 +4462,206 @@ async function refreshHiddenCampaignsList() {
 }
 
 async function amzAssignTask(groupKey) {
-  // r17: Real wire-up — POSTs to /api/amazon/products/:groupKey/assign-task to create a campaign_task row.
+  // r18: Replace prompt() with proper modal — agent dropdown + note textarea.
   const cache = amzProductsCache && amzProductsCache.products;
   const p = cache ? cache.find(function(x){ return x.parent_sku === groupKey; }) : null;
   if (!p) return;
+
+  // Pull agent list
+  let agents = [];
+  try {
+    const r = await fetch('/api/amazon/agents', { headers: getAuthHeaders() });
+    const j = await r.json();
+    agents = j.agents || [];
+  } catch(e) { agents = ['Aryan', 'Satyam']; }
+
+  // Default agent: product owner if set, else first agent
+  const defaultAgent = p.owner_agent || agents[0] || 'Unassigned';
   const defaultNote = p.action || (p.diagnosis ? p.diagnosis : '');
-  const note = prompt('Add a note for the task (assigned to: ' + (p.owner_agent || 'unassigned') + ')', defaultNote);
-  if (!note) return;
+
+  const existing = document.getElementById('amz-assign-task-modal');
+  if (existing) existing.remove();
+
+  const escTitle = escHtml(p.title || groupKey);
+  const agentOptions = agents.concat(['Unassigned']).map(function(a){
+    const sel = a === defaultAgent ? ' selected' : '';
+    return '<option value="' + escHtml(a) + '"' + sel + '>' + escHtml(a) + '</option>';
+  }).join('');
+
+  const html =
+    '<div id="amz-assign-task-modal" onclick="if(event.target===this)closeAssignTaskModal()" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:center;justify-content:center;padding:20px">' +
+      '<div style="background:var(--surface);width:100%;max-width:500px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);padding:22px">' +
+        '<div style="font-size:16px;font-weight:600;margin-bottom:6px">Assign as task</div>' +
+        '<div style="font-size:12px;color:var(--text3);margin-bottom:16px;max-height:48px;overflow:hidden">' + escTitle + '</div>' +
+        '<div style="margin-bottom:14px">' +
+          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Assign to</label>' +
+          '<select id="amz-assign-task-agent" style="width:100%;padding:8px 10px;font-size:14px;border:1px solid var(--border);border-radius:8px;background:white;font-family:inherit">' + agentOptions + '</select>' +
+        '</div>' +
+        '<div style="margin-bottom:18px">' +
+          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Note</label>' +
+          '<textarea id="amz-assign-task-note" rows="4" style="width:100%;padding:8px 10px;font-size:14px;border:1px solid var(--border);border-radius:8px;font-family:inherit;resize:vertical">' + escHtml(defaultNote) + '</textarea>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+          '<button class="btn btn-ghost" onclick="closeAssignTaskModal()" style="font-size:13px">Cancel</button>' +
+          '<button class="btn btn-primary" onclick="submitAssignTask(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\')" style="font-size:13px">Create task</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeAssignTaskModal() {
+  const m = document.getElementById('amz-assign-task-modal');
+  if (m) m.remove();
+}
+
+async function submitAssignTask(groupKey) {
+  const agent = document.getElementById('amz-assign-task-agent').value;
+  const note = document.getElementById('amz-assign-task-note').value.trim();
+  if (!note) { alert('Please enter a note before submitting.'); return; }
   try {
     const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/assign-task', {
       method: 'POST',
       headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
-      body: JSON.stringify({ note: note })
+      body: JSON.stringify({ note: note, agent: agent })
     });
     const j = await r.json();
     if (!r.ok || j.error) { alert('Task creation failed: ' + (j.error || 'unknown')); return; }
+    closeAssignTaskModal();
     alert('Task created and assigned to ' + j.agent + '. Visit the Tasks page to see it.');
+  } catch(e) { alert('Task creation failed: ' + e.message); }
+}
+
+// r18: Reassign existing task — opens modal with agent dropdown.
+async function showReassignTaskModal(taskId, currentAgent) {
+  let agents = [];
+  try {
+    const r = await fetch('/api/amazon/agents', { headers: getAuthHeaders() });
+    const j = await r.json();
+    agents = j.agents || [];
+  } catch(e) { agents = ['Aryan', 'Satyam']; }
+  const existing = document.getElementById('reassign-task-modal');
+  if (existing) existing.remove();
+  const agentOptions = agents.concat(['Unassigned']).map(function(a){
+    const sel = a === currentAgent ? ' selected' : '';
+    return '<option value="' + escHtml(a) + '"' + sel + '>' + escHtml(a) + '</option>';
+  }).join('');
+  const html =
+    '<div id="reassign-task-modal" onclick="if(event.target===this)closeReassignTaskModal()" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:center;justify-content:center;padding:20px">' +
+      '<div style="background:var(--surface);width:100%;max-width:420px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);padding:22px">' +
+        '<div style="font-size:16px;font-weight:600;margin-bottom:16px">Reassign task</div>' +
+        '<div style="margin-bottom:16px">' +
+          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">New assignee</label>' +
+          '<select id="reassign-task-agent" style="width:100%;padding:8px 10px;font-size:14px;border:1px solid var(--border);border-radius:8px;background:white;font-family:inherit">' + agentOptions + '</select>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:6px">Currently: ' + escHtml(currentAgent || 'Unassigned') + '</div>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+          '<button class="btn btn-ghost" onclick="closeReassignTaskModal()" style="font-size:13px">Cancel</button>' +
+          '<button class="btn btn-primary" onclick="submitReassignTask(' + taskId + ')" style="font-size:13px">Reassign</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeReassignTaskModal() {
+  const m = document.getElementById('reassign-task-modal');
+  if (m) m.remove();
+}
+
+async function submitReassignTask(taskId) {
+  const agent = document.getElementById('reassign-task-agent').value;
+  if (!agent) { alert('Pick an agent.'); return; }
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/reassign', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ agent: agent })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Reassign failed: ' + (j.error || 'unknown')); return; }
+    closeReassignTaskModal();
+    closeTaskDetailModal();
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) { alert('Reassign failed: ' + e.message); }
+}
+
+// r18: Merge products modal — finds duplicate parent groups and lets owner merge them.
+async function showMergeProductsModal() {
+  const modal = document.getElementById('merge-products-modal');
+  const body = document.getElementById('merge-products-body');
+  if (!modal || !body) return;
+  modal.style.display = 'flex';
+  body.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px"><div style="font-size:30px;margin-bottom:8px">⏳</div>Loading merge candidates…</div>';
+  try {
+    const r = await fetch('/api/amazon/merge-candidates', { headers: getAuthHeaders() });
+    const j = await r.json();
+    const clusters = j.clusters || [];
+    if (clusters.length === 0) {
+      body.innerHTML = '<div style="text-align:center;color:var(--green);padding:30px;font-size:14px">✓ No duplicate parent clusters detected. Catalog looks clean.</div>';
+      return;
+    }
+    // Render each cluster — for each parent in a cluster, a radio (canonical) + checkbox (source-to-merge)
+    body.innerHTML = clusters.map(function(cl, idx) {
+      const sig = cl.signature || '';
+      const sigLabel = sig ? sig.split('|').map(function(w){ return '<span style="background:var(--surface3);padding:1px 6px;border-radius:99px;font-size:10px;color:var(--text2);margin-right:4px">' + escHtml(w) + '</span>'; }).join('') : '';
+      const rows = cl.parents.map(function(p, pi) {
+        const safeKey = escHtml(p.key).replace(/'/g, "\\'");
+        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px">' +
+          '<input type="radio" name="canonical-' + idx + '" value="' + escHtml(p.key) + '" ' + (pi === 0 ? 'checked' : '') + ' style="cursor:pointer" title="Mark as canonical">' +
+          '<input type="checkbox" name="merge-' + idx + '" value="' + escHtml(p.key) + '" ' + (pi !== 0 ? 'checked' : '') + ' style="cursor:pointer" title="Include in merge">' +
+          '<div style="flex:1;min-width:0;overflow:hidden">' +
+            '<div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(p.title || p.key) + '</div>' +
+            '<div style="font-size:11px;color:var(--text3);margin-top:2px">' + escHtml(p.key) + ' · ' + p.sku_count + ' SKU' + (p.sku_count === 1 ? '' : 's') + '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+      return '<div style="border:1px solid var(--border);border-radius:10px;margin-bottom:14px;overflow:hidden">' +
+        '<div style="background:var(--surface2);padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">' +
+          '<div>' +
+            '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:4px">Cluster: ' + cl.parents.length + ' parents</div>' +
+            sigLabel +
+          '</div>' +
+          '<button class="btn btn-primary" style="font-size:12px" onclick="submitMergeCluster(' + idx + ')">Merge selected →</button>' +
+        '</div>' +
+        '<div style="padding:6px 8px"><div style="display:flex;gap:24px;padding:4px 14px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;border-bottom:1px solid var(--border)"><span>Canonical</span><span style="margin-left:8px">Merge in</span><span style="margin-left:8px">Title</span></div>' + rows + '</div>' +
+      '</div>';
+    }).join('');
+    // Stash for submit handler
+    window._mergeClusters = clusters;
   } catch(e) {
-    alert('Task creation failed: ' + e.message);
+    body.innerHTML = '<div style="color:var(--red);padding:20px">Error loading: ' + escHtml(e.message) + '</div>';
   }
+}
+
+function closeMergeProductsModal() {
+  const m = document.getElementById('merge-products-modal');
+  if (m) m.style.display = 'none';
+}
+
+async function submitMergeCluster(clusterIdx) {
+  const canonicalInput = document.querySelector('input[name="canonical-' + clusterIdx + '"]:checked');
+  if (!canonicalInput) { alert('Pick a canonical parent (radio button).'); return; }
+  const canonicalKey = canonicalInput.value;
+  const mergeInputs = document.querySelectorAll('input[name="merge-' + clusterIdx + '"]:checked');
+  const mergeKeys = Array.from(mergeInputs).map(function(i){ return i.value; }).filter(function(k){ return k !== canonicalKey; });
+  if (mergeKeys.length === 0) { alert('Pick at least one parent to merge into the canonical.'); return; }
+  if (!confirm('Merge ' + mergeKeys.length + ' parent(s) into "' + canonicalKey + '"?\n\nAll their SKUs will be reparented to the canonical. Owner derivation will re-run automatically.')) return;
+  try {
+    const r = await fetch('/api/amazon/products/merge', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ canonicalKey: canonicalKey, mergeKeys: mergeKeys })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Merge failed: ' + (j.error || 'unknown')); return; }
+    alert('Merged ' + mergeKeys.length + ' into "' + canonicalKey + '". ' + j.rows_updated + ' rows updated. Refreshing…');
+    closeMergeProductsModal();
+    if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
+    // Re-open modal showing updated clusters
+    setTimeout(showMergeProductsModal, 500);
+  } catch(e) { alert('Merge failed: ' + e.message); }
 }
 
 function toggleAmzProduct(idx) {

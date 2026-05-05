@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r17 (TF-IDF matcher, AD SPEND/NET columns, 9-day sync, google_state migration, ASIN-targeted coverage label, real assign-task wiring, task-detail modal)
+// CampaignPulse — deploy marker 2026-05-04 r18 (manual product merge tool, unknown-agents detection, reassign tasks endpoint, assign-task modal with agent picker)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3821,11 +3821,131 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// r18: GET /api/amazon/merge-candidates — suggest groups of parents that should likely be merged.
+// Logic: cluster parents by shared distinctive keywords (TF-IDF top words). Parents sharing 2+
+// distinctive words are likely the same product family.
+app.get('/api/amazon/merge-candidates', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const productsRes = await db.query(
+      "SELECT sku, parent_sku, title FROM amazon_products WHERE title IS NOT NULL"
+    );
+    // Build parents map (use parent_sku if present, else sku)
+    const parents = {};
+    productsRes.rows.forEach(function(p) {
+      const key = p.parent_sku || p.sku;
+      if (!parents[key]) parents[key] = { key: key, titles: [], skus: [] };
+      parents[key].titles.push(p.title);
+      parents[key].skus.push(p.sku);
+    });
+    const parentKeys = Object.keys(parents);
+    // Pick representative title for each (longest)
+    parentKeys.forEach(function(k){
+      const titles = parents[k].titles;
+      parents[k].title = titles.sort(function(a, b){ return b.length - a.length; })[0];
+      parents[k].keywords = extractTitleKeywords(parents[k].title);
+    });
+    // IDF map
+    const docCount = parentKeys.length || 1;
+    const wordDocFreq = {};
+    parentKeys.forEach(function(k){
+      parents[k].keywords.forEach(function(kw){ wordDocFreq[kw] = (wordDocFreq[kw] || 0) + 1; });
+    });
+    function _idf(kw){ const df = wordDocFreq[kw] || 0; if (df === 0) return 0; return Math.log(docCount / df); }
+    // For each parent, get its top-3 most distinctive (highest IDF) words
+    parentKeys.forEach(function(k){
+      const kws = Array.from(parents[k].keywords).sort(function(a, b){ return _idf(b) - _idf(a); });
+      parents[k].topWords = kws.slice(0, 3);
+    });
+    // Group parents by their top-2 most distinctive words (sorted as a key)
+    const clusters = {};
+    parentKeys.forEach(function(k){
+      const top = parents[k].topWords.slice(0, 2).sort();
+      if (top.length < 2) return;
+      const clusterKey = top.join('|');
+      if (!clusters[clusterKey]) clusters[clusterKey] = [];
+      clusters[clusterKey].push({
+        key: k,
+        title: parents[k].title,
+        sku_count: parents[k].skus.length,
+        topWords: parents[k].topWords
+      });
+    });
+    // Only return clusters with 2+ parents (those are merge candidates)
+    const candidates = Object.keys(clusters)
+      .filter(function(c){ return clusters[c].length >= 2; })
+      .map(function(c){ return { signature: c, parents: clusters[c] }; })
+      .sort(function(a, b){ return b.parents.length - a.parents.length; });
+    res.json({ clusters: candidates, totalParents: parentKeys.length });
+  } catch(e) {
+    console.error('/api/amazon/merge-candidates error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/admin/derive-product-owners — manually trigger the auto-derive job (owner only).
 app.post('/api/admin/derive-product-owners', async function(req, res) {
   if (!requireOwner(req, res)) return;
   const result = await deriveProductOwners();
   res.json(result);
+});
+
+// r18: POST /api/amazon/products/merge — merge multiple parent groups into one.
+// Body: { canonicalKey: 'Vibration Plates Grey Ama', mergeKeys: ['asin:B0...', 'Vib Plates Amazon'] }
+// Effect: every SKU whose parent_sku matches any mergeKey (or sku matches a standalone)
+// gets parent_sku updated to canonicalKey. Owner can manually pick the canonical title.
+// Manager + owner only.
+app.post('/api/amazon/products/merge', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+  if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
+
+  const canonicalKey = String((req.body && req.body.canonicalKey) || '').trim();
+  const mergeKeys = Array.isArray(req.body && req.body.mergeKeys) ? req.body.mergeKeys.map(function(k){ return String(k).trim(); }).filter(Boolean) : [];
+  if (!canonicalKey) return res.status(400).json({ error: 'canonicalKey required' });
+  if (!mergeKeys.length) return res.status(400).json({ error: 'mergeKeys required' });
+  // Don't allow merging a key into itself (no-op safeguard)
+  const sources = mergeKeys.filter(function(k){ return k !== canonicalKey; });
+  if (!sources.length) return res.status(400).json({ error: 'No keys to merge after excluding canonical' });
+
+  try {
+    let totalUpdated = 0;
+    for (const srcKey of sources) {
+      // Update both:
+      //   (a) rows whose parent_sku = srcKey  → set parent_sku = canonicalKey
+      //   (b) rows whose sku = srcKey AND parent_sku IS NULL (standalone parent itself) → also reparent
+      const r1 = await db.query(
+        "UPDATE amazon_products SET parent_sku = $1 WHERE parent_sku = $2",
+        [canonicalKey, srcKey]
+      );
+      const r2 = await db.query(
+        "UPDATE amazon_products SET parent_sku = $1 WHERE sku = $2 AND (parent_sku IS NULL OR parent_sku = sku)",
+        [canonicalKey, srcKey]
+      );
+      totalUpdated += (r1.rowCount || 0) + (r2.rowCount || 0);
+    }
+    // Audit log
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'product_merge',$2)",
+        [actor, actor + ' merged [' + sources.join(', ') + '] into ' + canonicalKey + ' (' + totalUpdated + ' rows)']
+      );
+    } catch(e) {}
+    // Re-derive owners so campaigns reattach correctly
+    const dr = await deriveProductOwners();
+    res.json({
+      ok: true,
+      canonical: canonicalKey,
+      merged: sources,
+      rows_updated: totalUpdated,
+      derive: dr
+    });
+  } catch(e) {
+    console.error('/api/amazon/products/merge error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /api/amazon/agents — list of agents available as product owners.
@@ -3842,6 +3962,44 @@ app.get('/api/amazon/agents', async function(req, res) {
     res.json({ agents: r.rows.map(function(row){ return row.name; }) });
   } catch(e) {
     console.error('/api/amazon/agents error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r18: GET /api/amazon/unknown-agents — surface agent prefixes appearing in campaign names
+// that don't match any existing user. Lets the owner spot when a new agent shows up
+// in the data and prompt them to create a user account.
+app.get('/api/amazon/unknown-agents', async function(req, res) {
+  if (!db) return res.json({ unknown: [] });
+  try {
+    // Existing user names (lowercased)
+    const ur = await db.query(
+      "SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE"
+    );
+    const knownNames = new Set(ur.rows.map(function(r){ return (r.name || '').toLowerCase(); }));
+    // Recent campaign names from snapshots
+    const sr = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days'"
+    );
+    // Extract every agent prefix found
+    const prefixCounts = {};
+    sr.rows.forEach(function(snap){
+      (snap.campaigns || []).forEach(function(c){
+        const parsed = parseCampaignName(c.name || '');
+        if (parsed.agent) {
+          const lower = parsed.agent.toLowerCase();
+          if (!knownNames.has(lower)) {
+            prefixCounts[parsed.agent] = (prefixCounts[parsed.agent] || 0) + 1;
+          }
+        }
+      });
+    });
+    const unknown = Object.keys(prefixCounts).map(function(name){
+      return { name: name, campaignCount: prefixCounts[name] };
+    }).sort(function(a, b){ return b.campaignCount - a.campaignCount; });
+    res.json({ unknown: unknown });
+  } catch(e) {
+    console.error('/api/amazon/unknown-agents error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4014,6 +4172,31 @@ app.post('/api/tasks/:id/reopen', async function(req, res) {
     const agentName = (task.agent_name && ['Aryan','Satyam','Kunal'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
     await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', agentName, 'reopened', 'Task reopened — moved back to Due', task.status, 'open', parseInt(req.params.id)]);
     res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// r18: POST /api/tasks/:id/reassign — change the agent assigned to a task.
+// Body: { agent: 'Aryan' } (or 'Unassigned')
+// Manager + owner only.
+app.post('/api/tasks/:id/reassign', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+  if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
+  const newAgent = String((req.body && req.body.agent) || '').trim();
+  if (!newAgent) return res.status(400).json({ error: 'Agent required' });
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    const oldAgent = task.agent_name || 'Unassigned';
+    await db.query('UPDATE campaign_tasks SET agent_name=$1, updated_at=NOW() WHERE id=$2', [newAgent, req.params.id]);
+    const actor = (req.user && req.user.name) || 'System';
+    await db.query(
+      "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id) VALUES ($1, $2, $3, $4, 'reassigned', $5, $6)",
+      [task.campaign_id || '', task.campaign_name || '', newAgent, actor, actor + ' reassigned task from ' + oldAgent + ' to ' + newAgent, parseInt(req.params.id)]
+    );
+    res.json({ success: true, oldAgent: oldAgent, newAgent: newAgent });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
