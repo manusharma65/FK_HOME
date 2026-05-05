@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r15 (improved campaign matcher, single-campaign row on card, layered critique reader, Coverage gaps tab) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r16 (more permissive matcher, Hide/Restore for products + campaigns, Hidden tab + modal, Bobby Singh Director display) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -553,6 +553,8 @@ tbody tr:hover { background: var(--surface2); }
         <option value="auto">Auto</option>
         <option value="manual">Manual</option>
       </select>
+      <!-- r16: Hidden campaigns reveal -->
+      <button onclick="showHiddenCampaigns()" class="btn btn-ghost" style="font-size:13px;padding:8px 12px" title="View and restore hidden campaigns">👁 Hidden <span id="hidden-camps-count" style="font-size:11px;color:var(--text3);margin-left:3px"></span></button>
     </div>
     <div class="tabs">
       <button class="tab-btn active" onclick="filterCamps('action',this)">Needs action (<span id="t-action">0</span>)</button>
@@ -767,13 +769,14 @@ tbody tr:hover { background: var(--surface2); }
         <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">All products</div>
         <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
       </div>
-      <!-- r14: Active / Dormant / All / Coverage gaps tabs (mutually exclusive) — r15 adds gaps tab -->
+      <!-- r14: Active / Dormant / All / Coverage gaps tabs (mutually exclusive) — r15 adds gaps tab — r16 adds hidden -->
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
         <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
         <button id="amz-filter-active" class="btn btn-primary" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('active')">Active products</button>
         <button id="amz-filter-dormant" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
         <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
         <button id="amz-filter-gaps" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('gaps')" title="Active products with ad coverage gaps">⚠ Coverage gaps</button>
+        <button id="amz-filter-hidden" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('hidden')" title="Manually hidden products">👁 Hidden <span id="amz-hidden-count" style="font-size:10px;color:var(--text3);margin-left:3px"></span></button>
         <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
         <!-- r14b: Bulk AI critique trigger + status -->
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
@@ -793,6 +796,17 @@ tbody tr:hover { background: var(--surface2); }
         <button class="btn btn-ghost" onclick="closeAmzProductModal()" style="font-size:18px;padding:4px 12px">×</button>
       </div>
       <div id="amz-product-modal-body" style="padding:24px"></div>
+    </div>
+  </div>
+
+  <!-- r16: Hidden campaigns modal -->
+  <div id="hidden-campaigns-modal" onclick="if(event.target===this)closeHiddenCampaigns()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--surface);width:100%;max-width:800px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border)">
+        <div style="font-size:16px;font-weight:600">Hidden campaigns</div>
+        <button class="btn btn-ghost" onclick="closeHiddenCampaigns()" style="font-size:18px;padding:4px 12px">×</button>
+      </div>
+      <div id="hidden-campaigns-body" style="padding:18px"></div>
     </div>
   </div>
 
@@ -1093,10 +1107,19 @@ async function checkAuth() {
         '<button onclick="window.location.href=\'/google.html\'" style="background:#4285F4;border:1px solid #3367D6;cursor:pointer;font-size:13px;font-weight:600;color:#fff;padding:6px 14px;border-radius:8px;font-family:inherit;margin-right:8px">Switch to FK Sports Google</button>';
     }
 
+    // r16: Owner displays as full name + Director title
+    let displayName = data.name;
+    let displayTitle = roleDisplay;
+    if (role === 'owner') {
+      // Promote owner display to full name + Director (overrides "Owner" label)
+      if (displayName === 'Bobby') displayName = 'Bobby Singh';
+      displayTitle = 'Director';
+    }
+
     if (userEl) userEl.innerHTML =
       '<div style="display:flex;flex-direction:column;align-items:flex-end;margin-right:8px">' +
-        '<span style="font-size:15px;font-weight:700;color:var(--text)">' + escHtml(data.name) + '</span>' +
-        '<span style="font-size:12px;font-weight:600;color:var(--accent)">' + escHtml(roleDisplay) + '</span>' +
+        '<span style="font-size:15px;font-weight:700;color:var(--text)">' + escHtml(displayName) + '</span>' +
+        '<span style="font-size:12px;font-weight:600;color:var(--accent)">' + escHtml(displayTitle) + '</span>' +
       '</div>' +
       managerBtns +
       '<button onclick="doLogout()" style="background:var(--surface2);border:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);padding:6px 14px;border-radius:8px;font-family:inherit">Sign Out</button>';
@@ -1241,6 +1264,9 @@ async function fetchData() {
       appData.alerts = (appData.alerts || []).filter(function(a){ return !suppressedAlertIds.has(String(a.campaignId)); });
     }
     allCampaigns = appData.campaigns || [];
+    // r16: hidden campaigns count badge
+    const hcEl = document.getElementById('hidden-camps-count');
+    if (hcEl) hcEl.textContent = appData.hiddenCount ? '(' + appData.hiddenCount + ')' : '';
     renderDashboard();
     updateSyncTime();
     populateFilters();
@@ -1467,6 +1493,10 @@ function renderCampaignTable(tableId, campaigns, showAction) {
       else if (budgetLow) action = '<div class="ag"><button class="btn btn-green" data-cid="' + c.campaignId + '" onclick="approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">Add budget</button></div>';
       else action = '<button class="btn btn-ghost" style="font-size:12px">Scale ↗</button>';
     }
+    // r16: Hide button — appended to action cell
+    const escName = escHtml(c.name).replace(/'/g, "\\'");
+    const hideBtnHtml = ' <button class="btn btn-ghost" style="font-size:11px;padding:2px 6px;color:var(--text3)" onclick="hideCampaign(\'' + c.campaignId + '\',\'' + escName + '\')" title="Hide this campaign from the dashboard">🗙</button>';
+    action = action + hideBtnHtml;
     const typeBadge = isAuto ? '<span class="badge badge-blue" style="font-size:10px">Auto</span>' : '<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>';
     return `<tr>
       <td><div class="camp-name">${escHtml(c.name)}</div><div class="camp-meta">${c.campaignId}</div></td>
@@ -3415,8 +3445,8 @@ let amzProductView = 'active'; // r14: 'active' | 'dormant' | 'all'
 
 function setAmzProductView(view) {
   amzProductView = view;
-  // Update tab styles — four-way exclusive (r15)
-  ['active', 'dormant', 'all', 'gaps'].forEach(function(v) {
+  // Update tab styles — five-way exclusive (r16 adds 'hidden')
+  ['active', 'dormant', 'all', 'gaps', 'hidden'].forEach(function(v) {
     const btn = document.getElementById('amz-filter-' + v);
     if (!btn) return;
     btn.className = (v === view) ? 'btn btn-primary' : 'btn btn-ghost';
@@ -3445,8 +3475,12 @@ async function loadAmazonProducts() {
       if (amzProductView === 'active') label = 'Showing ' + s.total_parents_active + ' active (of ' + (s.total_parents_active + s.total_parents_dormant) + ' total)';
       else if (amzProductView === 'dormant') label = 'Showing ' + s.total_parents_dormant + ' dormant (no recent sales / no buyable listings)';
       else if (amzProductView === 'gaps') label = 'Showing ' + (prodData.products || []).length + ' products with ad coverage gaps';
+      else if (amzProductView === 'hidden') label = 'Showing ' + (s.total_parents_hidden || 0) + ' hidden products';
       else label = 'Showing all ' + (s.total_parents_active + s.total_parents_dormant) + ' products';
       counterEl.textContent = label;
+      // r16: hidden tab badge
+      const hiddenCountEl = document.getElementById('amz-hidden-count');
+      if (hiddenCountEl) hiddenCountEl.textContent = s.total_parents_hidden ? '(' + s.total_parents_hidden + ')' : '';
     }
     // r15: untargeted panel removed — coverage gaps are now a tab in the products list
     renderUnassignedBanner(prodData.summary || {});
@@ -3645,11 +3679,18 @@ function amzProductCard(p, idx, canEditOwner, agents) {
   } else if (p.total_sales_7d > 0 || p.active_60d) {
     campaignsRow = '<div style="margin-top:6px;font-size:11px;color:var(--amber)"><span style="font-weight:600">⚠ Not in any campaign</span></div>';
   }
-  return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer" onclick="openAmzProductModal(' + idx + ')">' +
+  // r16: Hide/Restore button — appears in card header
+  const isHidden = amzProductView === 'hidden';
+  const safeHideKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
+  const hideBtn = isHidden
+    ? '<button onclick="event.stopPropagation();restoreAmzProduct(\'' + safeHideKey + '\')" class="btn btn-ghost" style="font-size:10px;padding:2px 8px;color:var(--green)" title="Restore this product to the main view">↺ Restore</button>'
+    : '<button onclick="event.stopPropagation();hideAmzProduct(\'' + safeHideKey + '\')" class="btn btn-ghost" style="font-size:10px;padding:2px 8px;color:var(--text3)" title="Hide this product from the main view">🗙 Hide</button>';
+
+  return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer' + (isHidden ? ';opacity:0.7' : '') + '" onclick="openAmzProductModal(' + idx + ')">' +
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
-      '<div class="amz-product-meta">' + pri + statusPill + variantsBadge + ownerControl + '</div>' +
+      '<div class="amz-product-meta">' + pri + statusPill + variantsBadge + ownerControl + hideBtn + '</div>' +
       campaignsRow +
       diagnosisLine +
       actionLine +
@@ -4234,6 +4275,112 @@ document.addEventListener('DOMContentLoaded', function() {
     }).catch(function(){});
   }, 2000);
 });
+
+// r16: Hide / restore product handlers
+async function hideAmzProduct(groupKey) {
+  if (!confirm('Hide this product from your main view?\n\nIt will not appear in totals or be analysed by the AI critique. You can restore it from the "Hidden" tab anytime.')) return;
+  try {
+    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/hide', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({})
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Hide failed: ' + (j.error || 'unknown')); return; }
+    loadAmazonProducts();
+  } catch(e) { alert('Hide failed: ' + e.message); }
+}
+
+async function restoreAmzProduct(groupKey) {
+  try {
+    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/restore', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({})
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Restore failed: ' + (j.error || 'unknown')); return; }
+    loadAmazonProducts();
+  } catch(e) { alert('Restore failed: ' + e.message); }
+}
+
+// r16: Hide / restore campaign handlers (used in Live Dashboard campaign rows)
+async function hideCampaign(campaignId, campaignName) {
+  if (!confirm('Hide this campaign from your dashboard?\n\nIt will not appear in totals or alerts. You can restore it from the campaigns hidden filter anytime.')) return;
+  try {
+    const r = await fetch('/api/campaigns/' + encodeURIComponent(campaignId) + '/hide', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ campaignName: campaignName || '' })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Hide failed: ' + (j.error || 'unknown')); return; }
+    fetchData();  // reload dashboard
+  } catch(e) { alert('Hide failed: ' + e.message); }
+}
+
+async function restoreCampaign(campaignId) {
+  try {
+    const r = await fetch('/api/campaigns/' + encodeURIComponent(campaignId) + '/restore', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({})
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Restore failed: ' + (j.error || 'unknown')); return; }
+    refreshHiddenCampaignsList();
+  } catch(e) { alert('Restore failed: ' + e.message); }
+}
+
+// r16: Show modal listing all hidden campaigns
+async function showHiddenCampaigns() {
+  const modal = document.getElementById('hidden-campaigns-modal');
+  if (modal) modal.style.display = 'flex';
+  refreshHiddenCampaignsList();
+}
+
+function closeHiddenCampaigns() {
+  const modal = document.getElementById('hidden-campaigns-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function refreshHiddenCampaignsList() {
+  const body = document.getElementById('hidden-campaigns-body');
+  if (!body) return;
+  body.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">Loading…</div>';
+  try {
+    const r = await fetch('/api/campaigns/hidden', { headers: getAuthHeaders() });
+    const j = await r.json();
+    const list = j.hidden || [];
+    if (list.length === 0) {
+      body.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">No campaigns are currently hidden.</div>';
+      return;
+    }
+    body.innerHTML =
+      '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
+        '<thead><tr style="color:var(--text3);text-align:left">' +
+          '<th style="padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Campaign</th>' +
+          '<th style="padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Hidden by</th>' +
+          '<th style="padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;font-weight:500">When</th>' +
+          '<th style="padding:8px 10px;text-align:right"></th>' +
+        '</tr></thead>' +
+        '<tbody>' +
+        list.map(function(h) {
+          return '<tr style="border-top:1px solid var(--border)">' +
+            '<td style="padding:10px 10px;font-weight:500">' + escHtml(h.campaign_name || h.campaign_id) + '</td>' +
+            '<td style="padding:10px 10px;color:var(--text3)">' + escHtml(h.hidden_by || '') + '</td>' +
+            '<td style="padding:10px 10px;color:var(--text3);font-size:12px">' + formatLondonDateDMY(h.hidden_at) + '</td>' +
+            '<td style="padding:10px 10px;text-align:right">' +
+              '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--green)" onclick="restoreCampaign(\'' + escHtml(h.campaign_id).replace(/'/g, "\\'") + '\')">↺ Restore</button>' +
+            '</td>' +
+          '</tr>';
+        }).join('') +
+        '</tbody>' +
+      '</table>';
+  } catch(e) {
+    body.innerHTML = '<div style="color:var(--red);padding:20px">Error: ' + escHtml(e.message) + '</div>';
+  }
+}
 
 function amzAssignTask(groupKey) {
   // Light placeholder — real integration could create a campaign_task. For now, prompt and confirm.

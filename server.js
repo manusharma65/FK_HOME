@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r15 (improved campaign matcher with stemming/compounds, single-campaign card row, layered critique reader modal, Coverage gaps tab, Opus role-gated)
+// CampaignPulse — deploy marker 2026-05-04 r16 (more permissive matcher, hide/restore for products + campaigns, hidden tab + modal, Bobby Singh Director)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -859,6 +859,21 @@ async function initDB() {
         asin TEXT PRIMARY KEY,
         critique JSONB NOT NULL,
         cached_at TIMESTAMP DEFAULT NOW()
+      );
+
+      -- r16: hidden products and campaigns — soft-hide for visual cleanup
+      CREATE TABLE IF NOT EXISTS hidden_products (
+        parent_sku TEXT PRIMARY KEY,
+        hidden_by TEXT,
+        hidden_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT
+      );
+      CREATE TABLE IF NOT EXISTS hidden_campaigns (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        hidden_by TEXT,
+        hidden_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT
       );
     `);
     console.log('Database connected and tables ready');
@@ -1929,7 +1944,16 @@ app.get('/api/wasted-by-agent', async function(req, res) {
 });
 
 app.get('/api/dashboard', async function(req, res) {
-  const campaigns = state.campaigns;
+  // r16: filter out hidden campaigns from view + totals
+  let hiddenCampaignIds = new Set();
+  if (db) {
+    try {
+      const hr = await db.query("SELECT campaign_id FROM hidden_campaigns");
+      hiddenCampaignIds = new Set(hr.rows.map(function(r){ return String(r.campaign_id); }));
+    } catch(e) {}
+  }
+  const allCampaigns = state.campaigns;
+  const campaigns = allCampaigns.filter(function(c){ return !hiddenCampaignIds.has(String(c.campaignId)); });
   const totalRevenue = campaigns.reduce(function(s, c) { return s + (c.sales || 0); }, 0);
   const totalSpend = campaigns.reduce(function(s, c) { return s + (c.spend || 0); }, 0);
   const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend / totalRevenue) * 1000) / 10 : 0;
@@ -1944,10 +1968,13 @@ app.get('/api/dashboard', async function(req, res) {
       if (dismissedIds.size > 0) filteredAlerts = filteredAlerts.filter(function(a){ return !dismissedIds.has(String(a.campaignId)); });
     } catch(e) {}
   }
+  // Also filter alerts for hidden campaigns
+  if (hiddenCampaignIds.size > 0) filteredAlerts = filteredAlerts.filter(function(a){ return !hiddenCampaignIds.has(String(a.campaignId)); });
 
   res.json({
     metrics: { totalRevenue: totalRevenue.toFixed(2), totalSpend: totalSpend.toFixed(2), blendedAcos: blendedAcos, activeCampaigns: active, needsAction: needsAction },
-    campaigns: campaigns, alerts: filteredAlerts, exhaustionLog: state.exhaustionLog, lastSync: state.lastSync, error: state.error
+    campaigns: campaigns, alerts: filteredAlerts, exhaustionLog: state.exhaustionLog, lastSync: state.lastSync, error: state.error,
+    hiddenCount: hiddenCampaignIds.size
   });
 });
 
@@ -2619,9 +2646,13 @@ function computeAmazonDiagnosis(p) {
 app.get('/api/amazon/products', async function(req, res) {
   if (!db) return res.json({ products: [] });
   try {
-    // r14: View filter — 'active' (default) | 'dormant' | 'all'
+    // r14: View filter — 'active' (default) | 'dormant' | 'all' | 'gaps' | 'hidden'
     // Backwards compat: ?include=all still works.
     const view = (req.query.view || (req.query.include === 'all' ? 'all' : 'active')).toLowerCase();
+
+    // r16: load hidden parent_skus once
+    const hiddenRes = await db.query("SELECT parent_sku FROM hidden_products");
+    const hiddenSet = new Set(hiddenRes.rows.map(function(r){ return r.parent_sku; }));
 
     // 1. Pull all SKUs (with status/title/asin/parent/owner)
     const productsRes = await db.query(
@@ -2795,12 +2826,11 @@ app.get('/api/amazon/products', async function(req, res) {
         const score = keywordOverlapScore(hintKw, titleKw);
         if (score > bestScore) { bestScore = score; bestKey = gk; }
       });
-      // r15: lower threshold — accept any match where score >= 1.5 (1 distinctive word OR 2+ regular)
-      if (!bestKey || bestScore < 1.5) {
-        // Try the looser isCampaignMatch as fallback (catches "kettle"/"bell" via compound expansion)
-        const titleKw = groupTitleKw[bestKey] || new Set();
-        if (!bestKey || !isCampaignMatch(hintKw, titleKw)) return;
-      }
+      // r16: accept any match where score >= 1 AND isCampaignMatch passes
+      // (more inclusive than r15 — covers cases like single keyword "trampoline" matching "Trampoline 8FT")
+      if (!bestKey) return;
+      const bestTitleKw = groupTitleKw[bestKey] || new Set();
+      if (!isCampaignMatch(hintKw, bestTitleKw)) return;
       if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
       const s = groupCampaignStats[bestKey];
       s.spend += parseFloat(c.spend || 0);
@@ -2869,17 +2899,21 @@ app.get('/api/amazon/products', async function(req, res) {
 
     // 6. Active filter — Rule 2 from the spec.
     // Active = has at least one BUYABLE listing AND has sold in last 60 days.
-    const activeProducts = allParents.filter(function(p){
+    // r16: hidden products excluded from all views except 'hidden' itself.
+    const visibleParents = allParents.filter(function(p){ return !hiddenSet.has(p.parent_sku); });
+    const hiddenParents = allParents.filter(function(p){ return hiddenSet.has(p.parent_sku); });
+    const activeProducts = visibleParents.filter(function(p){
       return p.buyable_count > 0 && p.active_60d;
     });
-    const dormantProducts = allParents.filter(function(p){
+    const dormantProducts = visibleParents.filter(function(p){
       return !(p.buyable_count > 0 && p.active_60d);
     });
 
-    // r14: three-way view selector + r15: 'gaps' filter
+    // r14: three-way view selector + r15: 'gaps' filter + r16: 'hidden' filter
     let returnList;
     if (view === 'dormant') returnList = dormantProducts;
-    else if (view === 'all') returnList = allParents;
+    else if (view === 'all') returnList = visibleParents;
+    else if (view === 'hidden') returnList = hiddenParents;
     else if (view === 'gaps') {
       // Coverage gap = active product where ad coverage < 100% OR (has sales but no campaigns at all)
       returnList = activeProducts.filter(function(p) {
@@ -2897,9 +2931,10 @@ app.get('/api/amazon/products', async function(req, res) {
     res.json({
       products: returnList,
       summary: {
-        total_parents_all: allParents.length,
+        total_parents_all: visibleParents.length,
         total_parents_active: activeProducts.length,
         total_parents_dormant: dormantProducts.length,
+        total_parents_hidden: hiddenParents.length,
         total_skus: productsRes.rows.length,
         auto_campaigns_exist: autoCampaignsExist.value,
         advertised_asins_count: advertisedAsins.size,
@@ -3214,6 +3249,80 @@ app.get('/api/amazon/listing-critique-batch/status', function(req, res) {
   res.json(bulkCritiqueState);
 });
 
+// ── r16: Hide / unhide for products and campaigns ─────────────────────────
+// Hidden items are excluded from the main view and from totals. Anyone can hide/restore.
+// They live in dedicated "Hidden" tabs/filters. Independent: product-hide and campaign-hide
+// don't affect each other.
+
+// PRODUCTS
+app.post('/api/amazon/products/:groupKey/hide', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const groupKey = String(req.params.groupKey || '').trim();
+  if (!groupKey) return res.status(400).json({ error: 'groupKey required' });
+  const reason = (req.body && req.body.reason) || '';
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(
+      "INSERT INTO hidden_products (parent_sku, hidden_by, reason) VALUES ($1, $2, $3) " +
+      "ON CONFLICT (parent_sku) DO UPDATE SET hidden_by = $2, hidden_at = NOW(), reason = $3",
+      [groupKey, actor, reason]
+    );
+    res.json({ ok: true, hidden: groupKey });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/amazon/products/:groupKey/restore', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const groupKey = String(req.params.groupKey || '').trim();
+  try {
+    await db.query("DELETE FROM hidden_products WHERE parent_sku = $1", [groupKey]);
+    res.json({ ok: true, restored: groupKey });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/amazon/hidden-products', async function(req, res) {
+  if (!db) return res.json({ products: [] });
+  try {
+    const r = await db.query("SELECT parent_sku, hidden_by, hidden_at, reason FROM hidden_products ORDER BY hidden_at DESC");
+    res.json({ hidden: r.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// CAMPAIGNS
+app.post('/api/campaigns/:campaignId/hide', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  const campaignName = (req.body && req.body.campaignName) || '';
+  const reason = (req.body && req.body.reason) || '';
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(
+      "INSERT INTO hidden_campaigns (campaign_id, campaign_name, hidden_by, reason) VALUES ($1, $2, $3, $4) " +
+      "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name = $2, hidden_by = $3, hidden_at = NOW(), reason = $4",
+      [campaignId, campaignName, actor, reason]
+    );
+    res.json({ ok: true, hidden: campaignId });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/campaigns/:campaignId/restore', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  try {
+    await db.query("DELETE FROM hidden_campaigns WHERE campaign_id = $1", [campaignId]);
+    res.json({ ok: true, restored: campaignId });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/campaigns/hidden', async function(req, res) {
+  if (!db) return res.json({ hidden: [] });
+  try {
+    const r = await db.query("SELECT campaign_id, campaign_name, hidden_by, hidden_at, reason FROM hidden_campaigns ORDER BY hidden_at DESC");
+    res.json({ hidden: r.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/amazon/top-products?date=YYYY-MM-DD&limit=5
 // Returns top N ASINs by revenue for a given day. Joins amazon_orders + amazon_order_items
 // (filtered by date) to amazon_products (for title + image).
@@ -3487,11 +3596,12 @@ function keywordOverlapScore(setA, setB) {
 }
 
 // r15: A campaign matches a product if either:
-//   - 2+ shared keywords (existing rule), OR
-//   - 1 shared keyword that is distinctive (>=5 chars, not a generic word)
-// This fixes the "Kettlebells" problem where campaign hint "Kettle Bells" only shares 1 keyword
-// after stop-word filter, but it's a clearly distinctive match.
+//   - 2+ shared keywords, OR
+//   - 1 shared keyword that is distinctive (>=5 chars), OR
+//   - r16: 1 shared keyword of any length, when ALL the campaign's hint keywords appear in the title
+//     (handles "Bell Set" matching "Kettlebell Heavy Set" — every keyword is in title, so it's a real match)
 function isCampaignMatch(hintKw, titleKw) {
+  if (hintKw.size === 0) return false;
   let overlap = 0;
   let hasDistinctive = false;
   hintKw.forEach(function(kw) {
@@ -3500,7 +3610,11 @@ function isCampaignMatch(hintKw, titleKw) {
       if (kw.length >= 5) hasDistinctive = true;
     }
   });
-  return overlap >= 2 || (overlap >= 1 && hasDistinctive);
+  if (overlap >= 2) return true;
+  if (overlap >= 1 && hasDistinctive) return true;
+  // r16: every hint keyword is in title (small hint, fully matched)
+  if (overlap >= 1 && overlap === hintKw.size) return true;
+  return false;
 }
 
 // PUT /api/amazon/products/:groupKey/owner — manually set the owner agent.
