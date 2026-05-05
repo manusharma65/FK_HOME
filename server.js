@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r16c (parseCampaignName fallback — campaigns without agent prefix now still match products)
+// CampaignPulse — deploy marker 2026-05-04 r17 (TF-IDF matcher, AD SPEND/NET columns, 9-day sync, google_state migration, ASIN-targeted coverage label, real assign-task wiring, task-detail modal)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -443,7 +443,9 @@ async function syncAmazonCatalogue() {
 async function syncAmazonOrders(daysBack) {
   if (!db) return { ok: false, error: 'no-db' };
   if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
-  daysBack = daysBack || 7;
+  // r17: default 9 days (was 7) so the boundary day at the start of the window
+  // is fully captured. London-aligned sales display needs a full 24h per day.
+  daysBack = daysBack || 9;
   const startedAt = Date.now();
   let total = 0, upserted = 0, errors = 0, itemsUpserted = 0;
   try {
@@ -2888,10 +2890,42 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
-    // 4. Match campaigns to parent groups via name-keyword overlap
+    // 4. Match campaigns to parent groups via TF-IDF distinctiveness scoring (r17)
+    // Logic:
+    //   - Build IDF map across all parent product titles. A word appearing in many titles
+    //     is generic ("plate", "fitness", "machine") and gets low weight. A word in few
+    //     titles is distinctive ("vibration", "kettlebell", "trampoline") and gets high weight.
+    //   - For each campaign, compute weighted-overlap score with each candidate product.
+    //   - Pick the highest-scoring product, but only if it crosses a meaningful threshold.
+    //   - This stops "Weight Plates KT" from being picked as the best match for a Vibration
+    //     Plate product just because they share the generic word "plate".
     const groupTitleKw = {};
     Object.keys(parents).forEach(function(gk){ groupTitleKw[gk] = extractTitleKeywords(parents[gk].title || ''); });
+
+    // Build IDF — how many parent titles contain each word
+    const titleDocCount = Object.keys(groupTitleKw).length || 1;
+    const wordDocFreq = {};
+    Object.values(groupTitleKw).forEach(function(set){
+      set.forEach(function(kw){ wordDocFreq[kw] = (wordDocFreq[kw] || 0) + 1; });
+    });
+    // IDF = log(N / df). High value = rare/distinctive. Common words ≈ 0.
+    function idf(kw) {
+      const df = wordDocFreq[kw] || 0;
+      if (df === 0) return 1.5;  // word not in any title — still useful if it appears in product title later
+      return Math.log(titleDocCount / df);
+    }
+
+    // Weighted overlap score using IDF
+    function tfidfScore(hintKw, titleKw) {
+      let score = 0;
+      hintKw.forEach(function(kw){
+        if (titleKw.has(kw)) score += idf(kw);
+      });
+      return score;
+    }
+
     const groupCampaignStats = {};
+    const MATCH_THRESHOLD = 0.5;  // tuned: distinctive 1-word match (e.g. "vibration") scores ~1.5+; generic word matches score <0.5
     recentCampaigns.forEach(function(c) {
       const parsed = parseCampaignName(c.name || '');
       const hintKw = extractTitleKeywords(parsed.productHint);
@@ -2900,14 +2934,12 @@ app.get('/api/amazon/products', async function(req, res) {
       let bestScore = 0;
       Object.keys(parents).forEach(function(gk) {
         const titleKw = groupTitleKw[gk];
-        const score = keywordOverlapScore(hintKw, titleKw);
+        const score = tfidfScore(hintKw, titleKw);
         if (score > bestScore) { bestScore = score; bestKey = gk; }
       });
-      // r16: accept any match where score >= 1 AND isCampaignMatch passes
-      // (more inclusive than r15 — covers cases like single keyword "trampoline" matching "Trampoline 8FT")
-      if (!bestKey) return;
-      const bestTitleKw = groupTitleKw[bestKey] || new Set();
-      if (!isCampaignMatch(hintKw, bestTitleKw)) return;
+      // Only accept the match if score is meaningful (above threshold).
+      // Generic-word-only matches (score ~0.2) are rejected.
+      if (!bestKey || bestScore < MATCH_THRESHOLD) return;
       if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
       const s = groupCampaignStats[bestKey];
       s.spend += parseFloat(c.spend || 0);
@@ -3365,6 +3397,47 @@ app.get('/api/amazon/hidden-products', async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// r17: Create a campaign_task from a product action ("Assign as task" button on product modal)
+// Body: { note: string, agent?: string (override owner), problemType?: string }
+app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const groupKey = String(req.params.groupKey || '').trim();
+  if (!groupKey) return res.status(400).json({ error: 'groupKey required' });
+  const note = String((req.body && req.body.note) || '').trim();
+  if (!note) return res.status(400).json({ error: 'Note required' });
+  const overrideAgent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
+  const problemType = String((req.body && req.body.problemType) || 'product_action').trim();
+  try {
+    const prodRes = await db.query(
+      "SELECT sku, asin, title, owner_agent FROM amazon_products " +
+      "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) LIMIT 1",
+      [groupKey]
+    );
+    if (!prodRes.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const p = prodRes.rows[0];
+    const agentName = overrideAgent || p.owner_agent || 'Unassigned';
+    const productLabel = (p.title || groupKey).slice(0, 200);
+    const r = await db.query(
+      "INSERT INTO campaign_tasks (campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source) " +
+      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+      [
+        'product:' + groupKey,
+        productLabel,
+        agentName,
+        '',
+        problemType,
+        note,
+        8,
+        'product_action'
+      ]
+    );
+    res.json({ ok: true, taskId: r.rows[0].id, agent: agentName });
+  } catch(e) {
+    console.error('/api/amazon/products/:groupKey/assign-task error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // CAMPAIGNS
 app.post('/api/campaigns/:campaignId/hide', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
@@ -3525,30 +3598,50 @@ async function deriveProductOwners() {
 
     // 4. For each campaign, extract agent + product hint, then find matching parent products
     // groupAgentCounts[group_key][agent] = match_count
+    // r17: Use TF-IDF distinctiveness — pick the BEST matching product, not every product that overlaps.
+    // This stops "Satyam | Weight Plates" from being credited to both Weight Plates AND Vibration Plates.
     const groupAgentCounts = {};
     const debugStats = { campaignsWithAgent: 0, campaignsMatched: 0, totalMatches: 0 };
+
+    // Build IDF map across all parent titles
+    const titleDocCount = Object.keys(groupTitles).length || 1;
+    const wordDocFreq = {};
+    Object.values(groupTitles).forEach(function(g){
+      g.keywords.forEach(function(kw){ wordDocFreq[kw] = (wordDocFreq[kw] || 0) + 1; });
+    });
+    function _idf(kw) {
+      const df = wordDocFreq[kw] || 0;
+      if (df === 0) return 1.5;
+      return Math.log(titleDocCount / df);
+    }
+    function _tfidfScore(hintKw, titleKw) {
+      let s = 0;
+      hintKw.forEach(function(kw){ if (titleKw.has(kw)) s += _idf(kw); });
+      return s;
+    }
+    const _MATCH_THRESHOLD = 0.5;
 
     campaigns.forEach(function(c) {
       const parsed = parseCampaignName(c.name || '');
       if (!parsed.agent) return;
       debugStats.campaignsWithAgent++;
-      // Try to also use the campaign's portfolio-derived agent if present (sometimes more reliable)
       const agent = parsed.agent;
-      // Product hint keywords from the campaign name
       const hintKeywords = extractTitleKeywords(parsed.productHint);
       if (hintKeywords.size === 0) return;
-      // Find matching products
-      let matchedThisCampaign = false;
+      // Find the SINGLE best matching product (TF-IDF weighted)
+      let bestKey = null, bestScore = 0;
       Object.keys(groupTitles).forEach(function(groupKey) {
         const titleKw = groupTitles[groupKey].keywords;
-        // r15: use shared isCampaignMatch helper (with compound expansion + singularization)
-        if (isCampaignMatch(hintKeywords, titleKw)) {
-          if (!groupAgentCounts[groupKey]) groupAgentCounts[groupKey] = {};
-          groupAgentCounts[groupKey][agent] = (groupAgentCounts[groupKey][agent] || 0) + 1;
-          matchedThisCampaign = true;
-          debugStats.totalMatches++;
-        }
+        const score = _tfidfScore(hintKeywords, titleKw);
+        if (score > bestScore) { bestScore = score; bestKey = groupKey; }
       });
+      let matchedThisCampaign = false;
+      if (bestKey && bestScore >= _MATCH_THRESHOLD) {
+        if (!groupAgentCounts[bestKey]) groupAgentCounts[bestKey] = {};
+        groupAgentCounts[bestKey][agent] = (groupAgentCounts[bestKey][agent] || 0) + 1;
+        matchedThisCampaign = true;
+        debugStats.totalMatches++;
+      }
       if (matchedThisCampaign) debugStats.campaignsMatched++;
     });
 
@@ -3840,10 +3933,29 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
         units: parseInt(row.units || 0)
       };
     });
+
+    // r17: pull per-day ad spend from daily_snapshots so the table can show Ad Spend + Net
+    try {
+      const spendRes = await db.query(
+        "SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS day, " +
+        "       (metrics->>'totalSpend')::float AS spend " +
+        "FROM daily_snapshots " +
+        "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '" + days + " days' " +
+        "ORDER BY snapshot_date ASC"
+      );
+      const spendByDay = {};
+      spendRes.rows.forEach(function(row){ spendByDay[row.day] = parseFloat(row.spend || 0); });
+      dayRows.forEach(function(d){ d.spend = spendByDay[d.date] || null; });
+    } catch(e) {
+      // If snapshots/metrics not present, leave spend as null — frontend handles it
+      console.error('[sales-summary] spend lookup failed: ' + e.message);
+    }
+
     const totals = {
       gross: dayRows.reduce(function(s, d){ return s + d.gross; }, 0),
       orders: dayRows.reduce(function(s, d){ return s + d.orders; }, 0),
-      units: dayRows.reduce(function(s, d){ return s + d.units; }, 0)
+      units: dayRows.reduce(function(s, d){ return s + d.units; }, 0),
+      spend: dayRows.reduce(function(s, d){ return s + (d.spend || 0); }, 0)
     };
     res.json({ days: dayRows, totals: totals, agentFilter: agentFilter, isManagerLevel: isManagerLevel });
   } catch(e) {
@@ -7320,6 +7432,27 @@ app.listen(PORT, '0.0.0.0', async function() {
   console.log('App running on port ' + PORT);
   await initDB();
   if (db) {
+    // r17: belt-and-braces migrations — ensure tables exist before any hydrate.
+    // The initDB() code above already attempts these inside try/catch, but we've seen
+    // failures on production where the table didn't get created (silent init error).
+    // Run explicit CREATE TABLE IF NOT EXISTS here as a safety net.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_state_snapshots (
+          id SERIAL PRIMARY KEY,
+          received_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          campaigns JSONB,
+          products JSONB,
+          campaigns_count INTEGER DEFAULT 0,
+          products_count INTEGER DEFAULT 0,
+          last_sync_label TEXT
+        )
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gss_received_at ON google_state_snapshots(received_at DESC)");
+      console.log('[r17-migrate] google_state_snapshots ensured');
+    } catch(e) {
+      console.error('[r17-migrate] google_state_snapshots failed: ' + e.message);
+    }
     try {
       const result = await db.query('SELECT settings FROM app_settings WHERE id = 1');
       const settings = result.rows[0]?.settings || {};

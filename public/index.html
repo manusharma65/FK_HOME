@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r16 (more permissive matcher, Hide/Restore for products + campaigns, Hidden tab + modal, Bobby Singh Director display) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r17 (TF-IDF matcher, AD SPEND/NET columns, ASIN-targeted coverage tooltip, real assign-task, tasks open in modal) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -796,6 +796,21 @@ tbody tr:hover { background: var(--surface2); }
         <button class="btn btn-ghost" onclick="closeAmzProductModal()" style="font-size:18px;padding:4px 12px">×</button>
       </div>
       <div id="amz-product-modal-body" style="padding:24px"></div>
+    </div>
+  </div>
+
+  <!-- r17: Task detail modal — opens when a task card is clicked -->
+  <div id="task-detail-modal" onclick="if(event.target===this)closeTaskDetailModal()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--surface);width:100%;max-width:1000px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px;margin-bottom:30px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);border-radius:14px 14px 0 0;z-index:1">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">Task</div>
+          <div id="task-detail-modal-title" style="font-size:18px;font-weight:600;color:var(--text);line-height:1.3"></div>
+          <div id="task-detail-modal-meta" style="font-size:12px;color:var(--text3);margin-top:6px"></div>
+        </div>
+        <button class="btn btn-ghost" onclick="closeTaskDetailModal()" style="font-size:18px;padding:4px 12px;flex-shrink:0">×</button>
+      </div>
+      <div id="task-detail-modal-body" style="padding:18px 24px"></div>
     </div>
   </div>
 
@@ -2724,10 +2739,11 @@ function renderTasks(tab) {
     const cardId = 'task-card-' + t.id;
     const detailId = 'task-detail-' + t.id;
 
-    return '<div class="ai-card" id="' + cardId + '" style="' + borderColor + '">' +
+    // r17: Whole card is clickable to open the detail modal. Action buttons inside use stopPropagation.
+    return '<div class="ai-card" id="' + cardId + '" style="' + borderColor + ';cursor:pointer" onclick="openTaskDetailModal(' + t.id + ')">' +
       repeatBanner +
       scalingCountdown +
-      '<div class="ai-header" style="cursor:pointer" onclick="toggleTaskDetail(' + t.id + ')">' +
+      '<div class="ai-header">' +
         '<div class="ai-icon">' + problemIcon + '</div>' +
         '<div style="flex:1">' +
           '<div class="ai-title" style="font-size:16px">' + escHtml(t.campaign_name) + '</div>' +
@@ -2794,7 +2810,8 @@ function renderTasks(tab) {
         (t.paused_reason ? '<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Pause reason:</strong> ' + escHtml(t.paused_reason) + '</div>' : '') +
         (t.escalation_reason ? '<div style="font-size:15px;color:#7c3aed;margin-bottom:12px"><strong>Scaling reason:</strong> ' + escHtml(t.escalation_reason) + '</div>' : '') +
       '</div>' +
-      actionButtons +
+      // r17: actions wrapped in stopPropagation so action-button clicks don't bubble to card-level modal-open
+      '<div onclick="event.stopPropagation()">' + actionButtons + '</div>' +
     '</div>';
   }).join('');
 }
@@ -2998,7 +3015,43 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
   } catch(e) { container.innerHTML = '<div style="font-size:13px;color:#e53e3e">Error: ' + e.message + '</div>'; }
 }
 
-// ── Toggle Task Detail Panel ─────────────────────────────────────────────
+// ── r17: Open task detail in big modal (replaces inline toggle) ─────────────
+function openTaskDetailModal(taskId) {
+  const card = document.getElementById('task-card-' + taskId);
+  if (!card) return;
+  const modal = document.getElementById('task-detail-modal');
+  const titleEl = document.getElementById('task-detail-modal-title');
+  const metaEl = document.getElementById('task-detail-modal-meta');
+  const bodyEl = document.getElementById('task-detail-modal-body');
+  if (!modal || !bodyEl) return;
+  // Pull title + meta from the card's existing header
+  const titleNode = card.querySelector('.ai-title');
+  const subNode = card.querySelector('.ai-sub');
+  if (titleEl) titleEl.textContent = titleNode ? titleNode.textContent : 'Task';
+  if (metaEl) metaEl.textContent = subNode ? subNode.textContent : '';
+  // The detail panel that was inline already has all the rich content (problem, history, action buttons).
+  // Clone it into the modal body so we don't have to rebuild.
+  const inlineDetail = document.getElementById('task-detail-' + taskId);
+  if (inlineDetail) {
+    // Make sure it's visible inside the modal even if hidden in the card
+    const clone = inlineDetail.cloneNode(true);
+    clone.style.display = 'block';
+    clone.id = 'task-detail-modal-cloned-' + taskId;
+    // Strip any stopPropagation wrappers from the clone (action handlers still work via onclick attributes)
+    bodyEl.innerHTML = '';
+    bodyEl.appendChild(clone);
+  } else {
+    bodyEl.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">No detail available for this task.</div>';
+  }
+  modal.style.display = 'flex';
+}
+
+function closeTaskDetailModal() {
+  const modal = document.getElementById('task-detail-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+// ── Toggle Task Detail Panel (legacy — kept so existing inline elements still resolve) ──
 function toggleTaskDetail(taskId) {
   const detail = document.getElementById('task-detail-' + taskId);
   if (!detail) return;
@@ -3758,14 +3811,16 @@ function buildAmzProductModalBody(p) {
     ((p.asins || []).length > 5 ? ' +' + (p.asins.length - 5) + ' more' : '');
 
   // Stat tile helper for the modal — Google-style large tiles
-  function tile(label, val, klass) {
+  function tile(label, val, klass, tooltip) {
     let colour = 'var(--text)';
     if (klass === 'good') colour = 'var(--green)';
     if (klass === 'warn') colour = 'var(--amber)';
     if (klass === 'bad') colour = 'var(--red)';
     if (klass === 'muted') colour = 'var(--text3)';
-    return '<div style="background:var(--surface2);padding:14px 16px;border-radius:10px;border:1px solid var(--border)">' +
-      '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>' +
+    const titleAttr = tooltip ? ' title="' + escHtml(tooltip) + '"' : '';
+    const helpIcon = tooltip ? ' <span style="color:var(--text3);font-size:10px;cursor:help">ⓘ</span>' : '';
+    return '<div style="background:var(--surface2);padding:14px 16px;border-radius:10px;border:1px solid var(--border)"' + titleAttr + '>' +
+      '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + helpIcon + '</div>' +
       '<div style="font-size:22px;font-weight:700;color:' + colour + ';font-family:var(--mono);line-height:1.1">' + val + '</div>' +
     '</div>';
   }
@@ -3858,7 +3913,7 @@ function buildAmzProductModalBody(p) {
     // Listing health
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Listing health</div>',
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
-      tile('Ad coverage', p.ad_coverage_pct + '%', coverageKlass),
+      tile('ASIN-targeted coverage', p.ad_coverage_pct + '%', coverageKlass, 'Percentage of this product\'s ASINs explicitly targeted by ad campaigns at the ASIN level. Keyword-targeted campaigns are not counted here, even if they advertise the product. 0% does not mean "no ads" — see the Campaigns table above.'),
       tile('Buyable', String(p.buyable_count), p.buyable_count > 0 ? 'good' : 'bad'),
       tile('Inactive', String(p.inactive_count), p.inactive_count > 0 ? 'bad' : 'muted'),
       tile('Variant theme', p.variation_theme || '—', 'muted'),
@@ -4382,14 +4437,26 @@ async function refreshHiddenCampaignsList() {
   }
 }
 
-function amzAssignTask(groupKey) {
-  // Light placeholder — real integration could create a campaign_task. For now, prompt and confirm.
+async function amzAssignTask(groupKey) {
+  // r17: Real wire-up — POSTs to /api/amazon/products/:groupKey/assign-task to create a campaign_task row.
   const cache = amzProductsCache && amzProductsCache.products;
   const p = cache ? cache.find(function(x){ return x.parent_sku === groupKey; }) : null;
   if (!p) return;
-  const note = prompt('Add a note for the task (assigned to: ' + (p.owner_agent || 'unassigned') + ')', p.action || '');
+  const defaultNote = p.action || (p.diagnosis ? p.diagnosis : '');
+  const note = prompt('Add a note for the task (assigned to: ' + (p.owner_agent || 'unassigned') + ')', defaultNote);
   if (!note) return;
-  alert('Task creation will be wired in r14. For now, please copy:\n\nProduct: ' + (p.title || groupKey) + '\nOwner: ' + (p.owner_agent || 'Unassigned') + '\nNote: ' + note);
+  try {
+    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/assign-task', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ note: note })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Task creation failed: ' + (j.error || 'unknown')); return; }
+    alert('Task created and assigned to ' + j.agent + '. Visit the Tasks page to see it.');
+  } catch(e) {
+    alert('Task creation failed: ' + e.message);
+  }
 }
 
 function toggleAmzProduct(idx) {
@@ -4525,9 +4592,8 @@ async function loadAmazonSalesSection() {
       });
     });
 
-    // Pull ad spend per day from existing campaign data (so we can compute Net)
-    // For now, use today's appData.metrics for today's spend; for historical days
-    // we'd need a separate API. Display "—" for historical Net until we add that.
+    // r17: Ad spend now comes per-day from server (daily_snapshots metrics).
+    // Today's row falls back to live in-memory total if snapshot for today doesn't exist yet.
     const todayAdSpend = (window.appData && window.appData.metrics && window.appData.metrics.totalSpend) || null;
 
     // No data state
@@ -4556,18 +4622,20 @@ async function loadAmazonSalesSection() {
           '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">&nbsp;</th>' +
         '</tr></thead><tbody>';
 
-    let totalSales = 0, totalOrders = 0, totalUnits = 0, totalWasted = 0;
+    let totalSales = 0, totalOrders = 0, totalUnits = 0, totalWasted = 0, totalSpend = 0;
     const bodyRows = days.map(function(d) {
       totalSales += d.gross;
       totalOrders += d.orders;
       totalUnits += d.units;
       const dayWaste = wastedByDay[d.date] || 0;
       totalWasted += dayWaste;
-      // Ad spend per-day from campaign data — for now we only have today's accurately;
-      // historical days need a per-day spend endpoint (deferred to later).
-      const adSpend = (d.date === todayKey && todayAdSpend != null) ? todayAdSpend : null;
-      const adSpendCell = adSpend != null ? '£' + adSpend.toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—';
-      const netCell = adSpend != null ? '£' + (d.gross - adSpend).toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—';
+      // r17: per-day spend now comes from server (d.spend). For today, prefer live in-memory totalSpend
+      // because today's snapshot may not be saved yet.
+      let adSpend = (d.date === todayKey && todayAdSpend != null) ? parseFloat(todayAdSpend) : (d.spend != null ? d.spend : null);
+      if (adSpend != null && !isFinite(adSpend)) adSpend = null;
+      if (adSpend != null) totalSpend += adSpend;
+      const adSpendCell = adSpend != null ? '£' + adSpend.toLocaleString('en-GB', {maximumFractionDigits: 0}) : '<span style="color:var(--text3)">—</span>';
+      const netCell = adSpend != null ? '£' + (d.gross - adSpend).toLocaleString('en-GB', {maximumFractionDigits: 0}) : '<span style="color:var(--text3)">—</span>';
       const wastedCell = dayWaste > 0 ?
         '<span style="color:#A32D2D;font-weight:600">£' + dayWaste.toFixed(2) + '</span>' :
         '<span style="color:var(--text3)">£0</span>';
@@ -4591,14 +4659,18 @@ async function loadAmazonSalesSection() {
       '<tr style="background:var(--surface2);border-top:2px solid var(--border)">' +
         '<td style="padding:10px 6px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">7-day total</td>' +
         '<td style="padding:10px 6px;text-align:right;font-weight:700">£' + totalSales.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</td>' +
-        '<td colspan="2"></td>' +
+        '<td style="padding:10px 6px;text-align:right;font-weight:600;color:var(--text2)">' + (totalSpend > 0 ? '£' + totalSpend.toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—') + '</td>' +
+        '<td style="padding:10px 6px;text-align:right;font-weight:700">' + (totalSpend > 0 ? '£' + (totalSales - totalSpend).toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—') + '</td>' +
         '<td style="padding:10px 6px;text-align:right;font-weight:700;color:#A32D2D">£' + totalWasted.toFixed(2) + '</td>' +
         '<td style="padding:10px 6px;text-align:right;color:var(--text2);font-weight:600">' + totalOrders + '</td>' +
         '<td style="padding:10px 6px;text-align:right;color:var(--text2);font-weight:600">' + totalUnits + '</td>' +
         '<td></td>' +
       '</tr>';
 
-    document.getElementById('amz-sales-weekly-rows').innerHTML = headerRow + bodyRows + footerRow + '</tbody></table>';
+    // r17: Seller Central disclaimer (sales come from SP-API order data, London time)
+    const noteHtml = '<div style="padding:8px 14px 10px;font-size:11px;color:var(--text3);font-style:italic;border-top:1px solid var(--border)">Sales totals are computed from order data (London time). Figures may differ from Amazon Seller Central reports by ~1-3% due to refunds, cancellations, and report-timing differences.</div>';
+
+    document.getElementById('amz-sales-weekly-rows').innerHTML = headerRow + bodyRows + footerRow + '</tbody></table>' + noteHtml;
   } catch(e) {
     section.style.display = 'none';
     console.error('loadAmazonSalesSection error:', e);
