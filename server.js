@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r16b (debug endpoint /api/admin/match-debug to trace matcher)
+// CampaignPulse — deploy marker 2026-05-04 r16c (parseCampaignName fallback — campaigns without agent prefix now still match products)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3589,16 +3589,20 @@ async function deriveProductOwners() {
 
 // Parse a campaign name like "Satyam | Yoga Mat KT" → { agent, productHint }
 // Supports both "|" and "@" as the agent separator.
+// r16c: when no agent prefix exists (e.g. "Vibration Pate Auto"), use the whole name
+// as the product hint. Agent is null but matching still works.
 function parseCampaignName(name) {
   if (!name) return { agent: null, productHint: '' };
-  // First token before | or @, trimmed. Must look like a name (alpha only, 3-15 chars).
   const m = String(name).match(/^\s*([A-Za-z]{3,15})\s*[|@]\s*(.*)$/);
-  if (!m) return { agent: null, productHint: '' };
-  const agent = m[1].trim();
-  // Product hint = everything between the agent and the next separator (or end)
-  const rest = m[2] || '';
-  const hint = rest.split(/[|@]/)[0].trim();
-  return { agent: agent, productHint: hint };
+  if (m) {
+    const agent = m[1].trim();
+    const rest = m[2] || '';
+    const hint = rest.split(/[|@]/)[0].trim();
+    return { agent: agent, productHint: hint };
+  }
+  // No agent prefix — use the whole name as hint (split on first | if present, else whole string)
+  const fallback = String(name).split(/[|@]/)[0].trim();
+  return { agent: null, productHint: fallback };
 }
 
 // Extract meaningful lowercase keywords from a title or product hint.
