@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r8d (SP-API: probe relationships/attributes for parent-ASIN discovery before r9 build)
+// CampaignPulse — deploy marker 2026-05-04 r9 (Amazon Products page + wasted-by-agent card with sparklines)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -360,15 +360,13 @@ async function getSellerId() {
 
 // ── Sync the seller's product catalogue from SP-API into amazon_products ─────
 // Uses /listings/2021-08-01/items/{sellerId} to enumerate every SKU.
-// IMPORTANT: this endpoint only reliably accepts `includedData=summaries` for
-// most seller account types. Asking for offers/images here causes 400 errors.
-// We pull title/ASIN/status from summaries; images and pricing get fetched
-// separately via the Catalog API in a follow-up step.
+// Now (r9) also fetches `relationships` so we can populate parent_sku/variation_theme
+// for child variants. Probe established that summaries+relationships is supported.
 async function syncAmazonCatalogue() {
   if (!db) { console.log('[SP-API catalogue sync] No DB — skipping'); return { ok: false, error: 'no-db' }; }
   if (!spApiConfigured()) { console.log('[SP-API catalogue sync] Not configured — skipping'); return { ok: false, error: 'not-configured' }; }
   const startedAt = Date.now();
-  let total = 0, upserted = 0, errors = 0;
+  let total = 0, upserted = 0, errors = 0, withParent = 0;
   try {
     const sellerId = await getSellerId();
     let pageToken = null;
@@ -377,7 +375,7 @@ async function syncAmazonCatalogue() {
       pageNum++;
       const params = new URLSearchParams({
         marketplaceIds: SP_API_MARKETPLACE_ID,
-        includedData: 'summaries',
+        includedData: 'summaries,relationships',
         pageSize: '20'
       });
       if (pageToken) params.set('pageToken', pageToken);
@@ -390,34 +388,44 @@ async function syncAmazonCatalogue() {
           const summary = (item.summaries && item.summaries[0]) || {};
           const asin = summary.asin || null;
           const title = summary.itemName || null;
-          // Status field can be a string or array; normalise to comma-separated string
           let status = null;
           if (summary.status) {
             status = Array.isArray(summary.status) ? summary.status.join(',') : String(summary.status);
           }
-          // mainImage lives inside summaries when summaries are returned in this endpoint
           const imageUrl = (summary.mainImage && summary.mainImage.link) || null;
+          // Extract parent SKU + variation theme from relationships array.
+          // Shape (from probe): item.relationships[0].relationships[0].parentSkus[0]
+          // and ...variationTheme.theme.
+          // If empty array → standalone product (no parent).
+          let parentSku = null;
+          let variationTheme = null;
+          try {
+            const relGroup = (item.relationships && item.relationships[0]) || null;
+            const relInner = (relGroup && relGroup.relationships && relGroup.relationships[0]) || null;
+            if (relInner) {
+              if (relInner.parentSkus && relInner.parentSkus.length) parentSku = relInner.parentSkus[0];
+              if (relInner.variationTheme && relInner.variationTheme.theme) variationTheme = relInner.variationTheme.theme;
+            }
+          } catch(e) { /* malformed relationships — leave null */ }
+          if (parentSku) withParent++;
           await db.query(
-            'INSERT INTO amazon_products (sku, asin, title, status, image_url, last_synced_at, raw_summary) ' +
-            'VALUES ($1,$2,$3,$4,$5,NOW(),$6) ' +
-            'ON CONFLICT (sku) DO UPDATE SET asin=$2, title=$3, status=$4, image_url=$5, last_synced_at=NOW(), raw_summary=$6',
-            [sku, asin, title, status, imageUrl, JSON.stringify(summary)]
+            'INSERT INTO amazon_products (sku, asin, title, status, image_url, parent_sku, variation_theme, last_synced_at, raw_summary) ' +
+            'VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8) ' +
+            'ON CONFLICT (sku) DO UPDATE SET asin=$2, title=$3, status=$4, image_url=$5, parent_sku=$6, variation_theme=$7, last_synced_at=NOW(), raw_summary=$8',
+            [sku, asin, title, status, imageUrl, parentSku, variationTheme, JSON.stringify(summary)]
           );
           upserted++;
         } catch(e) { errors++; console.error('[SP-API catalogue sync] Row error sku=' + (item.sku || '?') + ': ' + e.message); }
       }
       pageToken = (data && data.pagination && data.pagination.nextToken) || null;
-      // Safety: don't iterate more than 100 pages (= 2,000 SKUs) per run
       if (pageNum >= 100) { console.log('[SP-API catalogue sync] Hit page cap (100), stopping pagination'); break; }
     } while (pageToken);
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.log('[SP-API catalogue sync] Done in ' + seconds + 's: ' + total + ' items pulled, ' + upserted + ' upserted, ' + errors + ' errors');
-    // Mark products that didn't appear in this sync as REMOVED (they were taken down or unlisted on Amazon).
-    // Two-hour window means a partial sync won't accidentally wipe everything.
+    console.log('[SP-API catalogue sync] Done in ' + seconds + 's: ' + total + ' items pulled, ' + upserted + ' upserted, ' + withParent + ' had parent_sku, ' + errors + ' errors');
     try {
       await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '2 hours'");
     } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
-    return { ok: true, total: total, upserted: upserted, errors: errors, seconds: parseFloat(seconds) };
+    return { ok: true, total: total, upserted: upserted, withParent: withParent, errors: errors, seconds: parseFloat(seconds) };
   } catch(e) {
     console.error('[SP-API catalogue sync] FAILED: ' + e.message);
     return { ok: false, error: e.message, total: total, upserted: upserted, errors: errors };
@@ -796,11 +804,19 @@ async function initDB() {
         image_url TEXT,
         price NUMERIC,
         currency TEXT,
+        parent_sku TEXT,
+        variation_theme TEXT,
         last_synced_at TIMESTAMP DEFAULT NOW(),
         raw_summary JSONB
       );
+      -- Idempotent column adds for existing deployments (r9):
+      DO $do$ BEGIN
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS parent_sku TEXT; EXCEPTION WHEN OTHERS THEN END;
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS variation_theme TEXT; EXCEPTION WHEN OTHERS THEN END;
+      END $do$;
       CREATE INDEX IF NOT EXISTS idx_amazon_products_asin ON amazon_products(asin);
       CREATE INDEX IF NOT EXISTS idx_amazon_products_status ON amazon_products(status);
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_parent_sku ON amazon_products(parent_sku);
 
       -- amazon_orders: one row per order. Refreshed every few hours by syncAmazonOrders().
       CREATE TABLE IF NOT EXISTS amazon_orders (
@@ -1797,6 +1813,87 @@ async function runDailyTaskScheduler() {
 }
 
 // ── API Routes ────────────────────────────────────────────────────────────
+
+// r7c — Wasted spend per agent: today + 7-day sparkline.
+// "Wasted" follows the same definition used elsewhere in this app:
+//   spend > 0 AND (sales === 0 || sales === null)
+// Reads from daily_snapshots (the same source as the existing dashboard waste totals).
+//
+// Permissions: managers/owners see all agents. Agents see only their own row,
+// so they can't compare themselves to teammates. We pull the requesting user's
+// name from req.user; if missing, we treat as manager-level (legacy fallback).
+app.get('/api/wasted-by-agent', async function(req, res) {
+  if (!db) return res.json({ today: [], sparklines: {} });
+  try {
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userName = (req.user && req.user.name) || '';
+    const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+
+    // Pull last 7 days of snapshots, oldest → newest so sparklines render in the right order
+    const r = await db.query(
+      "SELECT TO_CHAR(snapshot_date,'YYYY-MM-DD') AS day, campaigns " +
+      "FROM daily_snapshots " +
+      "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '6 days' " +
+      "ORDER BY snapshot_date ASC"
+    );
+
+    // For each day, sum wasted-spend per agent (using the same filter as the rest of the app)
+    const wasteByAgentByDay = {}; // { agentName: { '2026-04-29': 12.34, ... } }
+    const allAgents = new Set();
+    const allDays = [];
+    r.rows.forEach(function(snap) {
+      const day = snap.day;
+      allDays.push(day);
+      const camps = snap.campaigns || [];
+      camps.forEach(function(c) {
+        // Match existing waste definition exactly
+        const spend = parseFloat(c.spend || 0);
+        const sales = parseFloat(c.sales || 0);
+        if (!(spend > 0 && (sales === 0 || c.sales === null))) return;
+        const agent = c.agent || c.agentName || 'Unassigned';
+        allAgents.add(agent);
+        if (!wasteByAgentByDay[agent]) wasteByAgentByDay[agent] = {};
+        wasteByAgentByDay[agent][day] = (wasteByAgentByDay[agent][day] || 0) + spend;
+      });
+    });
+
+    // Today's totals (the most recent day in the range — typically the snapshot for today
+    // if the daily sync has run, otherwise yesterday's). Use the last day in allDays.
+    const todayKey = allDays.length ? allDays[allDays.length - 1] : null;
+    let agentList = Array.from(allAgents);
+    // If non-manager, only return their own row
+    if (!isManagerLevel && userName) {
+      agentList = agentList.filter(function(a){ return a === userName; });
+    }
+
+    const today = agentList.map(function(agent) {
+      const todayWaste = todayKey ? (wasteByAgentByDay[agent][todayKey] || 0) : 0;
+      return { agent: agent, wasted_today: parseFloat(todayWaste.toFixed(2)) };
+    });
+    // Sort: highest wasted first
+    today.sort(function(a, b){ return b.wasted_today - a.wasted_today; });
+
+    // Build sparklines: array of [day, value] for each agent across all 7 days
+    const sparklines = {};
+    agentList.forEach(function(agent) {
+      sparklines[agent] = allDays.map(function(d) {
+        return { date: d, value: parseFloat((wasteByAgentByDay[agent][d] || 0).toFixed(2)) };
+      });
+    });
+
+    res.json({
+      today: today,
+      sparklines: sparklines,
+      todayKey: todayKey,
+      days: allDays,
+      isManagerLevel: isManagerLevel
+    });
+  } catch(e) {
+    console.error('/api/wasted-by-agent error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/dashboard', async function(req, res) {
   const campaigns = state.campaigns;
   const totalRevenue = campaigns.reduce(function(s, c) { return s + (c.sales || 0); }, 0);
@@ -2338,6 +2435,176 @@ app.get('/api/admin/sp-api/test-listings', async function(req, res) {
     res.json({ sellerIdFromState: sellerId, results: results });
   } catch(e) {
     res.json({ ok: false, error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// r9 — Amazon products API: parent-grouped view with sales + ad coverage
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/amazon/products
+// Returns parent products with children nested, plus 7-day sales totals and
+// per-child campaign coverage flag. Used by the Sales Dashboard + Untargeted card.
+//
+// Coverage logic:
+//   - "in_campaign" = true if child ASIN appears in any active campaign in `daily_snapshots`
+//     within the last 7 days (we read from the existing campaigns array in snapshots —
+//     they include `targets` arrays per campaign which list the targeted ASINs).
+//   - This is approximate — auto-targeting campaigns may show ads for a product without
+//     ever explicitly listing the ASIN. We flag those as "auto-targeted only" separately.
+app.get('/api/amazon/products', async function(req, res) {
+  if (!db) return res.json({ products: [] });
+  try {
+    // 1. Fetch all products grouped by parent. Standalones (parent_sku IS NULL) become their own parent.
+    const productsRes = await db.query(
+      "SELECT sku, asin, title, status, image_url, parent_sku, variation_theme " +
+      "FROM amazon_products " +
+      "WHERE status IS NULL OR status NOT LIKE '%REMOVED%' " +
+      "ORDER BY COALESCE(parent_sku, sku), sku"
+    );
+
+    // 2. Fetch 7-day sales by ASIN — sum item_price × quantity from amazon_order_items joined to recent orders
+    const salesRes = await db.query(
+      "SELECT i.asin, i.sku, SUM(i.item_price * i.quantity) AS revenue, SUM(i.quantity) AS units " +
+      "FROM amazon_order_items i " +
+      "JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '7 days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "GROUP BY i.asin, i.sku"
+    );
+    const salesByAsin = {};
+    const salesBySku = {};
+    salesRes.rows.forEach(function(row) {
+      if (row.asin) salesByAsin[row.asin] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
+      if (row.sku) salesBySku[row.sku] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
+    });
+
+    // 3. Build set of advertised ASINs from recent campaigns. Read the last 7 daily snapshots
+    //    and collect every ASIN mentioned in campaign target lists.
+    const snapshotsRes = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
+    );
+    const advertisedAsins = new Set();
+    const autoCampaignsExist = { value: false };
+    snapshotsRes.rows.forEach(function(snap) {
+      const camps = snap.campaigns || [];
+      camps.forEach(function(c) {
+        // Auto-targeting campaigns don't have explicit ASIN targets, but they DO advertise products.
+        // We can't tell from snapshot data which products auto picks up — flag separately.
+        const targetingType = (c.targetingType || '').toLowerCase();
+        if (targetingType === 'auto') autoCampaignsExist.value = true;
+        // Manual campaigns: check targets array
+        const targets = c.targets || c.asins || c.targetedAsins || [];
+        if (Array.isArray(targets)) {
+          targets.forEach(function(t) {
+            const asin = (typeof t === 'string') ? t : (t && (t.asin || t.value));
+            if (asin && /^B[0-9A-Z]{9}$/.test(asin)) advertisedAsins.add(asin);
+          });
+        }
+      });
+    });
+
+    // 4. Group products into parent buckets
+    const parents = {};
+    productsRes.rows.forEach(function(p) {
+      const groupKey = p.parent_sku || p.sku; // standalones group under their own SKU
+      if (!parents[groupKey]) {
+        parents[groupKey] = {
+          parent_sku: groupKey,
+          // Title from first child; for standalones this is the only title we have.
+          title: null,
+          variation_theme: null,
+          children: [],
+          image_url: null,
+          standalone: !p.parent_sku
+        };
+      }
+      // Use the first non-empty title we see (Amazon doesn't always have a 'parent' product row)
+      if (!parents[groupKey].title && p.title) parents[groupKey].title = p.title;
+      if (!parents[groupKey].image_url && p.image_url) parents[groupKey].image_url = p.image_url;
+      if (!parents[groupKey].variation_theme && p.variation_theme) parents[groupKey].variation_theme = p.variation_theme;
+      const childSales = (p.asin && salesByAsin[p.asin]) || (p.sku && salesBySku[p.sku]) || { revenue: 0, units: 0 };
+      parents[groupKey].children.push({
+        sku: p.sku,
+        asin: p.asin,
+        status: p.status,
+        in_campaign: p.asin ? advertisedAsins.has(p.asin) : false,
+        sales_7d: childSales.revenue,
+        units_7d: childSales.units,
+        image_url: p.image_url
+      });
+    });
+
+    // 5. Compute per-parent aggregates
+    const list = Object.values(parents).map(function(parent) {
+      const totalSales = parent.children.reduce(function(s, c){ return s + (c.sales_7d || 0); }, 0);
+      const totalUnits = parent.children.reduce(function(s, c){ return s + (c.units_7d || 0); }, 0);
+      const advertisedChildren = parent.children.filter(function(c){ return c.in_campaign; }).length;
+      const adCoveragePct = parent.children.length ? Math.round(100 * advertisedChildren / parent.children.length) : 0;
+      return Object.assign({}, parent, {
+        total_sales_7d: parseFloat(totalSales.toFixed(2)),
+        total_units_7d: totalUnits,
+        ad_coverage_pct: adCoveragePct,
+        advertised_children: advertisedChildren,
+        total_children: parent.children.length
+      });
+    });
+
+    // Sort: highest sales first, then by ad coverage gap (uncovered with sales = top priority)
+    list.sort(function(a, b) {
+      return b.total_sales_7d - a.total_sales_7d;
+    });
+
+    res.json({
+      products: list,
+      summary: {
+        total_parents: list.length,
+        total_skus: productsRes.rows.length,
+        auto_campaigns_exist: autoCampaignsExist.value,
+        advertised_asins_count: advertisedAsins.size
+      }
+    });
+  } catch(e) {
+    console.error('/api/amazon/products error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/amazon/sales-summary?days=7
+// Returns Amazon sales numbers for the last N days, day-by-day. Powers the
+// net-sales panel on the Amazon dashboard (mirrors Google's Shopify panel).
+app.get('/api/amazon/sales-summary', async function(req, res) {
+  if (!db) return res.json({ days: [], totals: {} });
+  try {
+    const days = Math.min(parseInt(req.query.days || '7'), 30);
+    // Sum order_total per day, excluding cancellations
+    const r = await db.query(
+      "SELECT TO_CHAR(purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+      "       SUM(order_total) AS gross, " +
+      "       COUNT(*) AS order_count, " +
+      "       SUM(num_items) AS units " +
+      "FROM amazon_orders " +
+      "WHERE purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND status NOT IN ('Cancelled','Canceled') " +
+      "GROUP BY day ORDER BY day ASC"
+    );
+    const dayRows = r.rows.map(function(row) {
+      return {
+        date: row.day,
+        gross: parseFloat(row.gross || 0),
+        orders: parseInt(row.order_count || 0),
+        units: parseInt(row.units || 0)
+      };
+    });
+    const totals = {
+      gross: dayRows.reduce(function(s, d){ return s + d.gross; }, 0),
+      orders: dayRows.reduce(function(s, d){ return s + d.orders; }, 0),
+      units: dayRows.reduce(function(s, d){ return s + d.units; }, 0)
+    };
+    res.json({ days: dayRows, totals: totals });
+  } catch(e) {
+    console.error('/api/amazon/sales-summary error: ' + e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 

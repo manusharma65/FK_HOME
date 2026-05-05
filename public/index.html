@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r7b (timeline system: working days, day strip, not-started warning, ACOS analysis, decision callouts) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r9 (Products page + wasted-by-agent card with 7-day sparklines) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -337,6 +337,11 @@ tbody tr:hover { background: var(--surface2); }
       Keyword intelligence
       <span class="nav-badge green">AI</span>
     </button>
+    <button class="nav-item" onclick="showPage('products',this)">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6h12M6 3v3"/></svg>
+      Products
+      <span class="nav-badge green">NEW</span>
+    </button>
     <div class="nav-section">Tasks</div>
     <button class="nav-item" onclick="showPage('tasks',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 8l2 2 4-4"/></svg>
@@ -430,6 +435,17 @@ tbody tr:hover { background: var(--surface2); }
           <div style="font-size:12px;color:var(--text3);margin-bottom:6px">These campaigns need review — spend is not converting to revenue</div>
           <button class="btn btn-ghost" style="font-size:12px" onclick="showPage('keywords',document.querySelectorAll('.nav-item')[3])">Check keyword intelligence →</button>
         </div>
+      </div>
+    </div>
+
+    <!-- r7c: Wasted spend by agent — today's totals + 7-day sparklines -->
+    <div id="wasted-by-agent-card" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;padding:0;overflow:hidden">
+      <div style="padding:12px 18px;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text2)">Wasted spend by agent · today</div>
+        <div style="font-size:11px;color:var(--text3)" id="wasted-by-agent-period">Last 7 days</div>
+      </div>
+      <div id="wasted-by-agent-rows" style="padding:6px 0">
+        <div style="padding:14px 18px;color:var(--text3);font-size:13px">Loading...</div>
       </div>
     </div>
 
@@ -655,6 +671,41 @@ tbody tr:hover { background: var(--surface2); }
           <tbody id="stuck-nr-table"><tr><td colspan="8"><div class="loading"><div class="spinner"></div> Loading...</div></td></tr></tbody>
         </table></div>
       </div>
+    </div>
+  </div>
+
+  <!-- PRODUCTS PAGE (r9) -->
+  <div class="page" id="page-products">
+    <div style="margin-bottom:20px">
+      <div class="section-title">Amazon Products</div>
+      <div class="section-sub">Catalogue from SP-API · Sales for last 7 days · Ad coverage tracking</div>
+    </div>
+
+    <!-- Sales summary panel — matches Google's net-sales layout -->
+    <div id="amz-sales-panel" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:20px;padding:0;overflow:hidden">
+      <div style="padding:14px 18px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Amazon sales — last 7 days</div>
+      <div id="amz-sales-content" style="padding:18px"><div class="loading"><div class="spinner"></div> Loading sales...</div></div>
+    </div>
+
+    <!-- Untargeted Products card -->
+    <div id="amz-untargeted-card" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:20px;padding:0;overflow:hidden">
+      <div style="padding:14px 18px;background:#fef3c7;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.05em">⚠️ Untargeted product variants</div>
+          <div style="font-size:12px;color:#92400e;margin-top:2px" id="amz-untargeted-sub">Children with no ad coverage</div>
+        </div>
+        <div id="amz-untargeted-count" style="font-size:24px;font-weight:700;color:#92400e">—</div>
+      </div>
+      <div id="amz-untargeted-content" style="padding:18px"><div class="loading"><div class="spinner"></div> Loading...</div></div>
+    </div>
+
+    <!-- All products list (parent-grouped) -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:0;overflow:hidden">
+      <div style="padding:14px 18px;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">All products</div>
+        <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
+      </div>
+      <div id="amz-products-list" style="padding:0"></div>
     </div>
   </div>
 
@@ -1040,6 +1091,7 @@ function showPage(name, btn) {
   if (name === 'users') loadUsers();
   if (name === 'my-settings') loadMyProfile();
   if (name === 'activity') renderActivity();
+  if (name === 'products') loadAmazonProducts();
   if (name === 'ai') {
     // Don't auto-run AI — show button only to save API credits
     const container = document.getElementById('ai-container');
@@ -1088,6 +1140,8 @@ async function fetchData() {
     renderDashboard();
     updateSyncTime();
     populateFilters();
+    // r7c: load the wasted-by-agent card alongside the main dashboard refresh
+    loadWastedByAgent().catch(function(e){ console.error('wasted-by-agent error:', e); });
   } catch(e) {
     console.error('Fetch error:', e.message);
     document.getElementById('sync-time').textContent = 'Connection error - retrying...';
@@ -3208,6 +3262,226 @@ function updatePwStrength(inputId, indicatorId) {
   var lbl = ind.querySelector('.pw-strength-label');
   if (fill) { fill.style.width = pct + '%'; fill.style.background = color; }
   if (lbl) { lbl.textContent = label; lbl.style.color = color; }
+}
+
+// ─── Amazon Products page (r9) ──────────────────────────────────────────────
+let amzProductsCache = null;
+async function loadAmazonProducts() {
+  // Always re-fetch — sales data updates throughout the day
+  try {
+    // 1. Sales summary
+    const salesRes = await fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() });
+    const salesData = await salesRes.json();
+    renderAmazonSalesPanel(salesData);
+    // 2. Products (slower — has the JOIN to orders)
+    const prodRes = await fetch('/api/amazon/products', { headers: getAuthHeaders() });
+    const prodData = await prodRes.json();
+    amzProductsCache = prodData;
+    renderAmazonUntargeted(prodData);
+    renderAmazonProductsList(prodData);
+  } catch(e) {
+    document.getElementById('amz-sales-content').innerHTML = '<div style="color:var(--red);font-size:13px">Could not load Amazon products: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderAmazonSalesPanel(data) {
+  const el = document.getElementById('amz-sales-content');
+  if (!el) return;
+  const totals = data.totals || { gross: 0, orders: 0, units: 0 };
+  const days = data.days || [];
+  if (days.length === 0) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:13px;text-align:center;padding:24px">No order data yet. The first SP-API sync will populate this within 4 hours, or trigger manually from admin tools.</div>';
+    return;
+  }
+  // Top totals row
+  const totalsRow =
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">' +
+      '<div style="padding:14px;background:var(--surface2);border-radius:8px"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">Gross sales</div><div style="font-size:22px;font-weight:700;color:var(--text)">£' + totals.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</div></div>' +
+      '<div style="padding:14px;background:var(--surface2);border-radius:8px"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">Orders</div><div style="font-size:22px;font-weight:700;color:var(--text)">' + totals.orders.toLocaleString('en-GB') + '</div></div>' +
+      '<div style="padding:14px;background:var(--surface2);border-radius:8px"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">Units</div><div style="font-size:22px;font-weight:700;color:var(--text)">' + totals.units.toLocaleString('en-GB') + '</div></div>' +
+    '</div>';
+  // Day-by-day breakdown
+  const dayRows = days.map(function(d) {
+    return '<tr style="border-bottom:1px solid var(--border)">' +
+      '<td style="padding:8px 12px;font-size:13px">' + escHtml(d.date) + '</td>' +
+      '<td style="padding:8px 12px;text-align:right;font-size:13px;font-weight:600">£' + d.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</td>' +
+      '<td style="padding:8px 12px;text-align:right;font-size:13px;color:var(--text3)">' + d.orders + '</td>' +
+      '<td style="padding:8px 12px;text-align:right;font-size:13px;color:var(--text3)">' + d.units + '</td>' +
+    '</tr>';
+  }).join('');
+  el.innerHTML = totalsRow +
+    '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
+      '<thead><tr style="background:var(--surface2)">' +
+        '<th style="text-align:left;padding:8px 12px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Date</th>' +
+        '<th style="text-align:right;padding:8px 12px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Sales</th>' +
+        '<th style="text-align:right;padding:8px 12px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Orders</th>' +
+        '<th style="text-align:right;padding:8px 12px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Units</th>' +
+      '</tr></thead><tbody>' + dayRows + '</tbody></table>';
+}
+
+function renderAmazonUntargeted(data) {
+  const el = document.getElementById('amz-untargeted-content');
+  const countEl = document.getElementById('amz-untargeted-count');
+  const subEl = document.getElementById('amz-untargeted-sub');
+  if (!el) return;
+  const products = data.products || [];
+  // "Untargeted" = parent has children but ad_coverage_pct < 100
+  const untargeted = products.filter(function(p){ return p.total_children > 0 && p.ad_coverage_pct < 100; });
+  countEl.textContent = untargeted.length;
+  subEl.textContent = (data.summary && data.summary.auto_campaigns_exist) ?
+    'Children with no manual targeting (auto-targeting may still cover some)' :
+    'Children with no ad coverage';
+  if (untargeted.length === 0) {
+    el.innerHTML = '<div style="color:var(--green);font-size:13px;text-align:center;padding:24px">✓ Every product variant is in a campaign — full ad coverage</div>';
+    return;
+  }
+  // Show top 10 by sales (the most painful misses)
+  const top = untargeted.slice(0, 10);
+  el.innerHTML = top.map(function(p) {
+    const uncoveredChildren = p.children.filter(function(c){ return !c.in_campaign; });
+    return '<div style="padding:12px 0;border-bottom:1px solid var(--border)">' +
+      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">' +
+        (p.image_url ? '<img src="' + escHtml(p.image_url) + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;flex-shrink:0">' : '<div style="width:40px;height:40px;background:#eee;border-radius:4px;flex-shrink:0"></div>') +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(p.title || p.parent_sku) + '</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:2px">' + p.advertised_children + ' of ' + p.total_children + ' variants advertised · 7d sales: £' + (p.total_sales_7d || 0).toFixed(2) + '</div>' +
+        '</div>' +
+        '<div style="font-size:11px;font-weight:700;color:#92400e;background:#fde68a;padding:3px 8px;border-radius:99px">' + p.ad_coverage_pct + '%</div>' +
+      '</div>' +
+      '<div style="font-size:12px;color:var(--text3);padding-left:52px">Uncovered: ' + uncoveredChildren.map(function(c){ return escHtml(c.asin || c.sku); }).slice(0, 6).join(', ') + (uncoveredChildren.length > 6 ? ' +' + (uncoveredChildren.length - 6) + ' more' : '') + '</div>' +
+    '</div>';
+  }).join('') + (untargeted.length > 10 ? '<div style="padding:12px 0;text-align:center;font-size:12px;color:var(--text3)">+ ' + (untargeted.length - 10) + ' more parent products with coverage gaps</div>' : '');
+}
+
+function renderAmazonProductsList(data) {
+  const el = document.getElementById('amz-products-list');
+  const countEl = document.getElementById('amz-products-count');
+  if (!el) return;
+  const products = data.products || [];
+  const summary = data.summary || {};
+  countEl.textContent = summary.total_parents + ' parents · ' + summary.total_skus + ' SKUs total';
+  if (products.length === 0) {
+    el.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">No products synced yet.</div>';
+    return;
+  }
+  el.innerHTML = products.map(function(p, idx) {
+    const coverageColor = p.ad_coverage_pct === 100 ? 'var(--green)' : (p.ad_coverage_pct >= 50 ? '#f59e0b' : 'var(--red)');
+    const variantLabel = p.variation_theme ? p.variation_theme.toLowerCase() : 'variant';
+    return '<div style="border-bottom:1px solid var(--border)">' +
+      '<div style="padding:12px 18px;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="toggleAmzProduct(' + idx + ')">' +
+        (p.image_url ? '<img src="' + escHtml(p.image_url) + '" style="width:48px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0">' : '<div style="width:48px;height:48px;background:#eee;border-radius:6px;flex-shrink:0"></div>') +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:14px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(p.title || p.parent_sku) + '</div>' +
+          '<div style="font-size:12px;color:var(--text3);margin-top:2px">' +
+            (p.standalone ? 'Standalone product' : (p.total_children + ' ' + variantLabel + ' variants · ' + p.advertised_children + ' advertised')) +
+            ' · 7d sales: £' + (p.total_sales_7d || 0).toFixed(2) +
+            ' · ' + (p.total_units_7d || 0) + ' units' +
+          '</div>' +
+        '</div>' +
+        (!p.standalone ? '<div style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;background:rgba(0,0,0,0.05);color:' + coverageColor + '">' + p.ad_coverage_pct + '% covered</div>' : '') +
+        '<div id="amz-prod-arrow-' + idx + '" style="color:var(--text3);font-size:14px;margin-left:8px">▶</div>' +
+      '</div>' +
+      '<div id="amz-prod-detail-' + idx + '" style="display:none;padding:12px 18px 16px 78px;background:var(--surface2)">' +
+        '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+          '<thead><tr><th style="text-align:left;padding:6px 8px;color:var(--text3);font-weight:500">SKU</th><th style="text-align:left;padding:6px 8px;color:var(--text3);font-weight:500">ASIN</th><th style="text-align:right;padding:6px 8px;color:var(--text3);font-weight:500">7d Sales</th><th style="text-align:right;padding:6px 8px;color:var(--text3);font-weight:500">Units</th><th style="text-align:center;padding:6px 8px;color:var(--text3);font-weight:500">In campaign?</th></tr></thead>' +
+          '<tbody>' + p.children.map(function(c) {
+            return '<tr style="border-top:1px solid var(--border)">' +
+              '<td style="padding:6px 8px">' + escHtml(c.sku) + '</td>' +
+              '<td style="padding:6px 8px;font-family:monospace;font-size:11px">' + escHtml(c.asin || '—') + '</td>' +
+              '<td style="padding:6px 8px;text-align:right">£' + (c.sales_7d || 0).toFixed(2) + '</td>' +
+              '<td style="padding:6px 8px;text-align:right">' + (c.units_7d || 0) + '</td>' +
+              '<td style="padding:6px 8px;text-align:center">' +
+                (c.in_campaign ? '<span style="color:var(--green);font-weight:600">✓ Yes</span>' : '<span style="color:var(--red);font-weight:600">✗ No</span>') +
+              '</td>' +
+            '</tr>';
+          }).join('') + '</tbody>' +
+        '</table>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function toggleAmzProduct(idx) {
+  const detail = document.getElementById('amz-prod-detail-' + idx);
+  const arrow = document.getElementById('amz-prod-arrow-' + idx);
+  if (!detail) return;
+  const isOpen = detail.style.display !== 'none';
+  detail.style.display = isOpen ? 'none' : 'block';
+  if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
+}
+
+// ─── Wasted-spend by agent (r7c) ────────────────────────────────────────────
+// Renders a small inline SVG sparkline given an array of [{date, value}].
+// Width 80, height 22 — fits inline in a table row without dominating.
+function buildSparkline(points, color) {
+  if (!points || points.length === 0) return '';
+  const w = 80, h = 22, pad = 2;
+  const values = points.map(function(p){ return p.value || 0; });
+  const max = Math.max.apply(null, values);
+  const min = Math.min.apply(null, values);
+  const range = (max - min) || 1;
+  const xStep = (w - pad * 2) / Math.max(points.length - 1, 1);
+  const coords = points.map(function(p, i) {
+    const x = pad + i * xStep;
+    const y = h - pad - ((p.value - min) / range) * (h - pad * 2);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+  // Simple polyline + filled area underneath
+  const areaPath = 'M' + coords.split(' ').join(' L ') + ' L ' + (w - pad) + ',' + (h - pad) + ' L ' + pad + ',' + (h - pad) + ' Z';
+  return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="vertical-align:middle">' +
+    '<path d="' + areaPath + '" fill="' + color + '" opacity="0.15"/>' +
+    '<polyline points="' + coords + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round"/>' +
+  '</svg>';
+}
+
+async function loadWastedByAgent() {
+  const card = document.getElementById('wasted-by-agent-card');
+  const rows = document.getElementById('wasted-by-agent-rows');
+  if (!card || !rows) return;
+  try {
+    const res = await fetch('/api/wasted-by-agent', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const today = data.today || [];
+    const sparklines = data.sparklines || {};
+    if (today.length === 0) {
+      // No agents to show — keep the card hidden so it doesn't take up space
+      card.style.display = 'none';
+      return;
+    }
+    // Total wasted today across visible agents
+    const totalToday = today.reduce(function(s, r){ return s + (r.wasted_today || 0); }, 0);
+    // Hide the whole card if literally nothing wasted across the whole window — unhelpful clutter
+    const has7DayWaste = Object.keys(sparklines).some(function(a) {
+      return sparklines[a].some(function(p){ return p.value > 0; });
+    });
+    if (!has7DayWaste) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = 'block';
+    // Build rows — agent | sparkline | today's £
+    const html = today.map(function(r) {
+      const spark = buildSparkline(sparklines[r.agent] || [], '#dc2626');
+      const todayDisplay = r.wasted_today > 0 ?
+        '<span style="color:var(--red);font-weight:700">£' + r.wasted_today.toFixed(2) + '</span>' :
+        '<span style="color:var(--text3);font-weight:400">£0.00</span>';
+      return '<div style="padding:10px 18px;display:flex;align-items:center;gap:14px;border-top:1px solid var(--border);font-size:13px">' +
+        '<div style="flex:1;font-weight:500;color:var(--text)">' + escHtml(r.agent) + '</div>' +
+        '<div style="width:90px;text-align:center">' + spark + '</div>' +
+        '<div style="width:90px;text-align:right">' + todayDisplay + '</div>' +
+      '</div>';
+    }).join('');
+    // Footer with total — only for managers (since agents only see their own row, total is meaningless)
+    const footer = data.isManagerLevel && today.length > 1 ?
+      '<div style="padding:10px 18px;display:flex;align-items:center;gap:14px;border-top:2px solid var(--border);font-size:13px;background:var(--surface2)">' +
+        '<div style="flex:1;font-weight:600;color:var(--text)">Total — all agents</div>' +
+        '<div style="width:90px"></div>' +
+        '<div style="width:90px;text-align:right;font-weight:700;color:var(--red)">£' + totalToday.toFixed(2) + '</div>' +
+      '</div>' : '';
+    rows.innerHTML = html + footer;
+  } catch(e) {
+    rows.innerHTML = '<div style="padding:14px 18px;color:var(--red);font-size:13px">Could not load wasted-by-agent: ' + escHtml(e.message) + '</div>';
+  }
 }
 
 init();
