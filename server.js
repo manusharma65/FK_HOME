@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r9 (Amazon Products page + wasted-by-agent card with sparklines)
+// CampaignPulse — deploy marker 2026-05-04 r10 (Amazon sales section on Live Dashboard, daily wasted-by-agent table, top-5 products popup)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2570,7 +2570,74 @@ app.get('/api/amazon/products', async function(req, res) {
   }
 });
 
-// GET /api/amazon/sales-summary?days=7
+// GET /api/amazon/top-products?date=YYYY-MM-DD&limit=5
+// Returns top N ASINs by revenue for a given day. Joins amazon_orders + amazon_order_items
+// (filtered by date) to amazon_products (for title + image).
+// If date is omitted or empty, defaults to today (London).
+app.get('/api/amazon/top-products', async function(req, res) {
+  if (!db) return res.json({ products: [], totals: {} });
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '5'), 50);
+    let dateFilter;
+    let dateParam;
+    if (req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)) {
+      dateFilter = "TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1";
+      dateParam = [req.query.date];
+    } else {
+      // Default to today London time
+      dateFilter = "TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = TO_CHAR(NOW() AT TIME ZONE 'Europe/London', 'YYYY-MM-DD')";
+      dateParam = [];
+    }
+
+    // Day totals (gross, orders, units)
+    const totalsRes = await db.query(
+      "SELECT SUM(o.order_total) AS gross, COUNT(*) AS orders, SUM(o.num_items) AS units " +
+      "FROM amazon_orders o " +
+      "WHERE " + dateFilter +
+      " AND o.status NOT IN ('Cancelled','Canceled')",
+      dateParam
+    );
+    const totals = {
+      gross: parseFloat((totalsRes.rows[0] && totalsRes.rows[0].gross) || 0),
+      orders: parseInt((totalsRes.rows[0] && totalsRes.rows[0].orders) || 0),
+      units: parseInt((totalsRes.rows[0] && totalsRes.rows[0].units) || 0)
+    };
+
+    // Top N ASINs by revenue. Group by ASIN (since SKU variants may share ASIN sometimes).
+    const topRes = await db.query(
+      "SELECT i.asin, MAX(i.title) AS title, MAX(p.image_url) AS image_url, " +
+      "       SUM(i.item_price * i.quantity) AS revenue, " +
+      "       SUM(i.quantity) AS units " +
+      "FROM amazon_order_items i " +
+      "JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
+      "WHERE " + dateFilter.replace(/o\./g, 'o.') +
+      " AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin IS NOT NULL " +
+      "GROUP BY i.asin " +
+      "ORDER BY revenue DESC " +
+      "LIMIT " + limit,
+      dateParam
+    );
+
+    const products = topRes.rows.map(function(r) {
+      return {
+        asin: r.asin,
+        title: r.title,
+        image_url: r.image_url,
+        revenue: parseFloat(r.revenue || 0),
+        units: parseInt(r.units || 0)
+      };
+    });
+
+    res.json({ products: products, totals: totals });
+  } catch(e) {
+    console.error('/api/amazon/top-products error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // Returns Amazon sales numbers for the last N days, day-by-day. Powers the
 // net-sales panel on the Amazon dashboard (mirrors Google's Shopify panel).
 app.get('/api/amazon/sales-summary', async function(req, res) {

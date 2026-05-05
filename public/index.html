@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r9 (Products page + wasted-by-agent card with 7-day sparklines) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r10 (Amazon sales on Live Dashboard, daily wasted-by-agent table, top-5 popup) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -438,14 +438,48 @@ tbody tr:hover { background: var(--surface2); }
       </div>
     </div>
 
-    <!-- r7c: Wasted spend by agent — today's totals + 7-day sparklines -->
-    <div id="wasted-by-agent-card" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;padding:0;overflow:hidden">
-      <div style="padding:12px 18px;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text2)">Wasted spend by agent · today</div>
-        <div style="font-size:11px;color:var(--text3)" id="wasted-by-agent-period">Last 7 days</div>
+    <!-- r10: Amazon sales — today hero + weekly breakdown table — clicks open top-5 popup -->
+    <div id="amz-sales-section" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;overflow:hidden">
+      <div id="amz-sales-today" style="padding:16px 20px;background:#EAF3DE;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:11px;color:#27500A;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;margin-bottom:4px">Amazon sales — today</div>
+            <div style="font-size:28px;font-weight:700;color:#173404" id="amz-sales-today-value">£0<span style="font-size:14px;color:#3B6D11;font-weight:400;margin-left:8px" id="amz-sales-today-sub">· loading</span></div>
+          </div>
+          <button class="btn btn-ghost" style="font-size:12px;padding:8px 14px" onclick="showAmzTop5(null)">View today's top 5 →</button>
+        </div>
       </div>
-      <div id="wasted-by-agent-rows" style="padding:6px 0">
+      <div style="padding:14px 20px">
+        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:8px">Last 7 days</div>
+        <div id="amz-sales-weekly-rows">
+          <div style="color:var(--text3);font-size:13px;padding:8px 0">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- r10: Wasted spend by agent — daily breakdown table (replaces sparkline version) -->
+    <div id="wasted-by-agent-card" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;padding:0;overflow:hidden">
+      <div style="padding:12px 18px;background:#FCEBEB;border-bottom:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#791F1F">Wasted spend by agent · last 7 days</div>
+      </div>
+      <div id="wasted-by-agent-rows" style="overflow-x:auto">
         <div style="padding:14px 18px;color:var(--text3);font-size:13px">Loading...</div>
+      </div>
+    </div>
+
+    <!-- r10: Amazon top-5 popup (hidden by default) -->
+    <div id="amz-top5-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center;padding:20px">
+      <div style="background:var(--surface);border-radius:12px;width:100%;max-width:560px;overflow:hidden;max-height:80vh;display:flex;flex-direction:column">
+        <div style="padding:14px 20px;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em" id="amz-top5-title">Top 5 products</div>
+            <div style="font-size:15px;font-weight:600;margin-top:2px" id="amz-top5-subtitle">—</div>
+          </div>
+          <button onclick="closeAmzTop5()" style="background:transparent;border:1px solid var(--border);width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:16px">×</button>
+        </div>
+        <div id="amz-top5-list" style="overflow-y:auto;flex:1">
+          <div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">Loading...</div>
+        </div>
       </div>
     </div>
 
@@ -1142,6 +1176,8 @@ async function fetchData() {
     populateFilters();
     // r7c: load the wasted-by-agent card alongside the main dashboard refresh
     loadWastedByAgent().catch(function(e){ console.error('wasted-by-agent error:', e); });
+    // r10: load the Amazon sales section (today hero + 7-day table)
+    loadAmazonSalesSection().catch(function(e){ console.error('amz-sales error:', e); });
   } catch(e) {
     console.error('Fetch error:', e.message);
     document.getElementById('sync-time').textContent = 'Connection error - retrying...';
@@ -3410,30 +3446,9 @@ function toggleAmzProduct(idx) {
   if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
 }
 
-// ─── Wasted-spend by agent (r7c) ────────────────────────────────────────────
-// Renders a small inline SVG sparkline given an array of [{date, value}].
-// Width 80, height 22 — fits inline in a table row without dominating.
-function buildSparkline(points, color) {
-  if (!points || points.length === 0) return '';
-  const w = 80, h = 22, pad = 2;
-  const values = points.map(function(p){ return p.value || 0; });
-  const max = Math.max.apply(null, values);
-  const min = Math.min.apply(null, values);
-  const range = (max - min) || 1;
-  const xStep = (w - pad * 2) / Math.max(points.length - 1, 1);
-  const coords = points.map(function(p, i) {
-    const x = pad + i * xStep;
-    const y = h - pad - ((p.value - min) / range) * (h - pad * 2);
-    return x.toFixed(1) + ',' + y.toFixed(1);
-  }).join(' ');
-  // Simple polyline + filled area underneath
-  const areaPath = 'M' + coords.split(' ').join(' L ') + ' L ' + (w - pad) + ',' + (h - pad) + ' L ' + pad + ',' + (h - pad) + ' Z';
-  return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="vertical-align:middle">' +
-    '<path d="' + areaPath + '" fill="' + color + '" opacity="0.15"/>' +
-    '<polyline points="' + coords + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round"/>' +
-  '</svg>';
-}
-
+// ─── r10: Wasted-spend by agent (daily breakdown table) ────────────────────
+// Renders one row per agent, one column per day, with totals.
+// Replaces the r7c sparkline version (which was harder to scan).
 async function loadWastedByAgent() {
   const card = document.getElementById('wasted-by-agent-card');
   const rows = document.getElementById('wasted-by-agent-rows');
@@ -3443,46 +3458,236 @@ async function loadWastedByAgent() {
     const data = await res.json();
     const today = data.today || [];
     const sparklines = data.sparklines || {};
-    if (today.length === 0) {
-      // No agents to show — keep the card hidden so it doesn't take up space
+    const days = data.days || [];
+    if (today.length === 0 || days.length === 0) {
       card.style.display = 'none';
       return;
     }
-    // Total wasted today across visible agents
-    const totalToday = today.reduce(function(s, r){ return s + (r.wasted_today || 0); }, 0);
-    // Hide the whole card if literally nothing wasted across the whole window — unhelpful clutter
-    const has7DayWaste = Object.keys(sparklines).some(function(a) {
+    // Skip if no waste at all in the window — no point cluttering the dashboard
+    const hasAnyWaste = Object.keys(sparklines).some(function(a) {
       return sparklines[a].some(function(p){ return p.value > 0; });
     });
-    if (!has7DayWaste) {
+    if (!hasAnyWaste) {
       card.style.display = 'none';
       return;
     }
     card.style.display = 'block';
-    // Build rows — agent | sparkline | today's £
-    const html = today.map(function(r) {
-      const spark = buildSparkline(sparklines[r.agent] || [], '#dc2626');
-      const todayDisplay = r.wasted_today > 0 ?
-        '<span style="color:var(--red);font-weight:700">£' + r.wasted_today.toFixed(2) + '</span>' :
-        '<span style="color:var(--text3);font-weight:400">£0.00</span>';
-      return '<div style="padding:10px 18px;display:flex;align-items:center;gap:14px;border-top:1px solid var(--border);font-size:13px">' +
-        '<div style="flex:1;font-weight:500;color:var(--text)">' + escHtml(r.agent) + '</div>' +
-        '<div style="width:90px;text-align:center">' + spark + '</div>' +
-        '<div style="width:90px;text-align:right">' + todayDisplay + '</div>' +
-      '</div>';
+    // Format day labels — short DD MMM
+    function shortDayLabel(iso) {
+      try {
+        const d = new Date(iso + 'T00:00:00');
+        return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+      } catch(e) { return iso; }
+    }
+    const todayKey = data.todayKey;
+    // Build header — Agent | day1 | day2 | ... | Today | Total
+    const headerCells = days.map(function(d) {
+      const isToday = d === todayKey;
+      const label = isToday ? 'Today' : shortDayLabel(d);
+      const style = isToday ? 'padding:8px 10px;text-align:right;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;background:#FCEBEB' : 'padding:8px 10px;text-align:right;font-size:11px;color:var(--text3);font-weight:500';
+      return '<th style="' + style + '">' + escHtml(label) + '</th>';
     }).join('');
-    // Footer with total — only for managers (since agents only see their own row, total is meaningless)
-    const footer = data.isManagerLevel && today.length > 1 ?
-      '<div style="padding:10px 18px;display:flex;align-items:center;gap:14px;border-top:2px solid var(--border);font-size:13px;background:var(--surface2)">' +
-        '<div style="flex:1;font-weight:600;color:var(--text)">Total — all agents</div>' +
-        '<div style="width:90px"></div>' +
-        '<div style="width:90px;text-align:right;font-weight:700;color:var(--red)">£' + totalToday.toFixed(2) + '</div>' +
-      '</div>' : '';
-    rows.innerHTML = html + footer;
+    // Compute per-day totals (across all visible agents) and per-agent totals
+    const dayTotals = {};
+    days.forEach(function(d){ dayTotals[d] = 0; });
+    let grandTotal = 0;
+    today.forEach(function(r) {
+      const series = sparklines[r.agent] || [];
+      series.forEach(function(p) {
+        dayTotals[p.date] = (dayTotals[p.date] || 0) + (p.value || 0);
+      });
+    });
+    const bodyRows = today.map(function(r) {
+      const series = sparklines[r.agent] || [];
+      const seriesByDate = {};
+      series.forEach(function(p){ seriesByDate[p.date] = p.value || 0; });
+      let agentTotal = 0;
+      const cells = days.map(function(d) {
+        const v = seriesByDate[d] || 0;
+        agentTotal += v;
+        const isToday = d === todayKey;
+        if (isToday) {
+          return '<td style="padding:10px 10px;text-align:right;font-weight:700;color:' + (v > 0 ? '#A32D2D' : 'var(--text3)') + ';background:#FFF8F8">' + (v > 0 ? '£' + v.toFixed(2) : '£0') + '</td>';
+        }
+        return '<td style="padding:10px 10px;text-align:right;color:' + (v > 0 ? 'var(--text2)' : 'var(--text3)') + '">' + (v > 0 ? '£' + v.toFixed(2) : '£0') + '</td>';
+      }).join('');
+      grandTotal += agentTotal;
+      return '<tr style="border-top:1px solid var(--border)">' +
+        '<td style="padding:10px 14px;font-weight:600;color:var(--text)">' + escHtml(r.agent) + '</td>' +
+        cells +
+        '<td style="padding:10px 14px;text-align:right;font-weight:700;color:var(--text)">£' + agentTotal.toFixed(2) + '</td>' +
+      '</tr>';
+    }).join('');
+    // Footer: daily totals + grand total. Only for managers (agents see only own row, so totals are redundant).
+    let footerRow = '';
+    if (data.isManagerLevel && today.length > 1) {
+      const footerCells = days.map(function(d) {
+        const v = dayTotals[d] || 0;
+        const isToday = d === todayKey;
+        return '<td style="padding:10px 10px;text-align:right;color:var(--text2);font-weight:600' + (isToday ? ';background:#FCEBEB' : '') + '">£' + v.toFixed(2) + '</td>';
+      }).join('');
+      footerRow = '<tr style="border-top:2px solid var(--border);background:var(--surface2)">' +
+        '<td style="padding:10px 14px;font-weight:600;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Daily total</td>' +
+        footerCells +
+        '<td style="padding:10px 14px;text-align:right;font-weight:700;color:var(--red)">£' + grandTotal.toFixed(2) + '</td>' +
+      '</tr>';
+    }
+    rows.innerHTML =
+      '<table style="width:100%;border-collapse:collapse;font-size:13px;min-width:560px">' +
+        '<thead><tr style="background:var(--surface2)">' +
+          '<th style="text-align:left;padding:8px 14px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Agent</th>' +
+          headerCells +
+          '<th style="padding:8px 14px;text-align:right;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Total</th>' +
+        '</tr></thead>' +
+        '<tbody>' + bodyRows + footerRow + '</tbody>' +
+      '</table>';
   } catch(e) {
     rows.innerHTML = '<div style="padding:14px 18px;color:var(--red);font-size:13px">Could not load wasted-by-agent: ' + escHtml(e.message) + '</div>';
   }
 }
+
+// ─── r10: Amazon sales section on Live Dashboard ───────────────────────────
+// Today hero + 7-day table with Sales / Ad spend / Net / Orders / Units.
+// Each row clickable → opens top-5 popup for that day.
+async function loadAmazonSalesSection() {
+  const section = document.getElementById('amz-sales-section');
+  if (!section) return;
+  try {
+    // Sales summary — gross/orders/units per day from SP-API orders
+    const res = await fetch('/api/amazon/sales-summary?days=7', { headers: getAuthHeaders() });
+    const data = await res.json();
+    const days = (data.days || []).slice().reverse(); // newest first for display
+    const todayKey = days.length ? days[0].date : null;
+    const todayRow = days.find(function(d) { return d.date === todayKey; }) || { gross: 0, orders: 0, units: 0 };
+
+    // Pull ad spend per day from existing campaign data (so we can compute Net)
+    // For now, use today's appData.metrics for today's spend; for historical days
+    // we'd need a separate API. Display "—" for historical Net until we add that.
+    const todayAdSpend = (window.appData && window.appData.metrics && window.appData.metrics.totalSpend) || null;
+
+    // No data state
+    if (days.length === 0) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = 'block';
+
+    // Today hero
+    document.getElementById('amz-sales-today-value').innerHTML =
+      '£' + todayRow.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) +
+      '<span style="font-size:14px;color:#3B6D11;font-weight:400;margin-left:8px">· ' + todayRow.orders + ' orders · ' + todayRow.units + ' units</span>';
+
+    // Weekly table
+    const headerRow =
+      '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
+        '<thead><tr style="border-bottom:1px solid var(--border)">' +
+          '<th style="text-align:left;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Date</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Sales</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Ad spend</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Net</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Orders</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">Units</th>' +
+          '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:500">&nbsp;</th>' +
+        '</tr></thead><tbody>';
+
+    let totalSales = 0, totalOrders = 0, totalUnits = 0;
+    const bodyRows = days.map(function(d) {
+      totalSales += d.gross;
+      totalOrders += d.orders;
+      totalUnits += d.units;
+      // Ad spend per-day from campaign data — for now we only have today's accurately;
+      // historical days need a per-day spend endpoint (deferred to later).
+      const adSpend = (d.date === todayKey && todayAdSpend != null) ? todayAdSpend : null;
+      const adSpendCell = adSpend != null ? '£' + adSpend.toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—';
+      const netCell = adSpend != null ? '£' + (d.gross - adSpend).toLocaleString('en-GB', {maximumFractionDigits: 0}) : '—';
+      const dateLabel = (function() {
+        try { return new Date(d.date + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); }
+        catch(e) { return d.date; }
+      })();
+      return '<tr style="border-bottom:1px solid var(--border);cursor:pointer" onmouseover="this.style.background=\'var(--surface2)\'" onmouseout="this.style.background=\'\'" onclick="showAmzTop5(\'' + d.date + '\')">' +
+        '<td style="padding:8px 6px">' + escHtml(dateLabel) + (d.date === todayKey ? ' <span style="font-size:10px;color:var(--text3);font-weight:600">TODAY</span>' : '') + '</td>' +
+        '<td style="padding:8px 6px;text-align:right;font-weight:600">£' + d.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</td>' +
+        '<td style="padding:8px 6px;text-align:right;color:var(--text2)">' + adSpendCell + '</td>' +
+        '<td style="padding:8px 6px;text-align:right;color:var(--text2);font-weight:600">' + netCell + '</td>' +
+        '<td style="padding:8px 6px;text-align:right;color:var(--text2)">' + d.orders + '</td>' +
+        '<td style="padding:8px 6px;text-align:right;color:var(--text2)">' + d.units + '</td>' +
+        '<td style="padding:8px 6px;text-align:right;color:var(--accent);font-size:12px">View →</td>' +
+      '</tr>';
+    }).join('');
+
+    const footerRow =
+      '<tr style="background:var(--surface2);border-top:2px solid var(--border)">' +
+        '<td style="padding:10px 6px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">7-day total</td>' +
+        '<td style="padding:10px 6px;text-align:right;font-weight:700">£' + totalSales.toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</td>' +
+        '<td colspan="2"></td>' +
+        '<td style="padding:10px 6px;text-align:right;color:var(--text2);font-weight:600">' + totalOrders + '</td>' +
+        '<td style="padding:10px 6px;text-align:right;color:var(--text2);font-weight:600">' + totalUnits + '</td>' +
+        '<td></td>' +
+      '</tr>';
+
+    document.getElementById('amz-sales-weekly-rows').innerHTML = headerRow + bodyRows + footerRow + '</tbody></table>';
+  } catch(e) {
+    section.style.display = 'none';
+    console.error('loadAmazonSalesSection error:', e);
+  }
+}
+
+// ─── r10: Top-5 popup — shows top 5 ASINs by revenue for a given day ───────
+async function showAmzTop5(dateOrNull) {
+  const overlay = document.getElementById('amz-top5-overlay');
+  const list = document.getElementById('amz-top5-list');
+  const titleEl = document.getElementById('amz-top5-title');
+  const subEl = document.getElementById('amz-top5-subtitle');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  list.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">Loading...</div>';
+  // Format date label
+  let dateLabel = 'Today';
+  if (dateOrNull) {
+    try { dateLabel = new Date(dateOrNull + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }); }
+    catch(e) { dateLabel = dateOrNull; }
+  }
+  titleEl.textContent = 'Top 5 products · ' + dateLabel;
+  try {
+    const url = '/api/amazon/top-products?date=' + encodeURIComponent(dateOrNull || '') + '&limit=5';
+    const res = await fetch(url, { headers: getAuthHeaders() });
+    const data = await res.json();
+    const products = data.products || [];
+    const totals = data.totals || {};
+    subEl.textContent = '£' + (totals.gross || 0).toLocaleString('en-GB', {maximumFractionDigits: 2}) + ' · ' + (totals.orders || 0) + ' orders · ' + (totals.units || 0) + ' units';
+    if (products.length === 0) {
+      list.innerHTML = '<div style="padding:32px 24px;color:var(--text3);font-size:13px;text-align:center">No sales recorded for this day yet.</div>';
+      return;
+    }
+    list.innerHTML = '<div style="padding:8px 0">' + products.map(function(p) {
+      return '<div style="display:flex;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid var(--border)">' +
+        (p.image_url ?
+          '<img src="' + escHtml(p.image_url) + '" style="width:40px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0">' :
+          '<div style="width:40px;height:40px;background:#F1EFE8;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3)">img</div>') +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(p.title || p.asin || p.sku) + '</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:2px">' + escHtml(p.asin || '—') + ' · ' + (p.units || 0) + ' units</div>' +
+        '</div>' +
+        '<div style="text-align:right;flex-shrink:0">' +
+          '<div style="font-size:14px;font-weight:600">£' + (p.revenue || 0).toLocaleString('en-GB', {maximumFractionDigits: 2}) + '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('') + '</div>';
+  } catch(e) {
+    list.innerHTML = '<div style="padding:24px;color:var(--red);font-size:13px;text-align:center">Could not load: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function closeAmzTop5() {
+  const overlay = document.getElementById('amz-top5-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+// Close popup when clicking outside the modal
+document.addEventListener('click', function(e) {
+  const overlay = document.getElementById('amz-top5-overlay');
+  if (overlay && e.target === overlay) closeAmzTop5();
+});
 
 init();
 setInterval(fetchData, 5 * 60 * 1000);
