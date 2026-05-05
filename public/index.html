@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r14a (campaign chips on cards + Campaigns table in modal, SKU pill cursor fix) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r14b (frontend date fix, single-vs-multi campaign placement on cards, Haiku/Opus critique selector, bulk critique button) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -786,6 +786,11 @@ tbody tr:hover { background: var(--surface2); }
         <button id="amz-filter-dormant" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
         <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
         <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+        <!-- r14b: Bulk AI critique trigger + status -->
+        <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+          <span id="amz-bulk-status" style="font-size:11px;color:var(--text3)"></span>
+          <button id="amz-bulk-btn" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="startAmzBulkCritique()" title="Run AI critique on all active products (Haiku, ~£0.01 each)">🤖 Critique all active</button>
+        </div>
       </div>
       <div id="amz-products-list" style="padding:0"></div>
     </div>
@@ -2166,6 +2171,26 @@ function escHtml(str) {
   return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// r14b: Format an incoming date string (often UTC ISO from Postgres DATE) as YYYY-MM-DD in London time.
+// Postgres returns DATE columns as midnight-UTC; the UTC ISO "2026-05-04T23:00:00.000Z" actually
+// represents London midnight on the 5th. This helper returns the calendar day in London regardless.
+function formatLondonDate(input) {
+  if (!input) return '';
+  try {
+    const d = new Date(input);
+    if (isNaN(d.getTime())) return String(input).split('T')[0];
+    return d.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  } catch(e) { return String(input).split('T')[0]; }
+}
+function formatLondonDateDMY(input) {
+  if (!input) return '';
+  try {
+    const d = new Date(input);
+    if (isNaN(d.getTime())) return String(input);
+    return d.toLocaleDateString('en-GB', { timeZone: 'Europe/London' });
+  } catch(e) { return String(input); }
+}
+
 
 
 // ── Underperforming / Stuck Campaigns ─────────────────────────────────────
@@ -2597,7 +2622,10 @@ function renderTasks(tab) {
     const statusColors = { open:'badge-red', in_progress:'badge-amber', complete:'badge-green', scaling:'badge-purple', dismissed:'badge-blue', paused:'badge-amber', archived:'badge-blue' };
     const statusLabels = { open:'Open', in_progress:'In Progress', complete:'Complete', scaling:'Scaling', dismissed:'Dismissed', paused:'Paused', archived:'Archived' };
     const problemIcon = t.problem_type === 'no_activity' ? '😴' : '💸';
-    const dateStr = (t.created_date||'').toString().split('T')[0];
+    // r14b: parse the ISO date as London time, not UTC.
+    // Postgres DATE columns come back as midnight-UTC ISO strings; in London (BST/GMT) that's the previous day.
+    // toLocaleDateString with timezone='Europe/London' returns the correct calendar day.
+    const dateStr = formatLondonDate(t.created_date);
 
     // Scaling countdown
     let scalingCountdown = '';
@@ -3532,11 +3560,15 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     ('<img class="amz-product-img" src="' + escHtml(p.image_url) + '" alt="" onerror="this.outerHTML=&quot;<div class=\\&quot;amz-product-img-placeholder\\&quot;>no image</div>&quot;">') :
     '<div class="amz-product-img-placeholder">no image</div>';
   const pri = '<span class="amz-priority-pill ' + amzPriorityClass(p.priority) + '">' + amzPriorityLabel(p.priority) + '</span>';
-  // Variants summary (now ASIN-level after r13 rollup)
+  // Variants summary (now ASIN-level after r13 rollup) — r14b: append single-campaign name inline if only one campaign
   const variantsBadge = (function() {
-    if (p.standalone) return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + (p.total_children === 1 ? ' ASIN' : ' ASINs') + '</span>';
+    const camps = p.campaigns || [];
+    const singleCampInline = camps.length === 1 ?
+      ' <span style="font-size:11px;color:var(--text2);font-style:italic" title="' + escHtml(camps[0].name) + '"> · in: ' + escHtml(camps[0].name) + '</span>' :
+      '';
+    if (p.standalone) return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + (p.total_children === 1 ? ' ASIN' : ' ASINs') + singleCampInline + '</span>';
     const variantLabel = p.variation_theme ? p.variation_theme.toLowerCase() : 'variant';
-    return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + ' ' + escHtml(variantLabel) + ' variant' + (p.total_children === 1 ? '' : 's') + ' · ' + p.advertised_children + ' advertised</span>';
+    return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + ' ' + escHtml(variantLabel) + ' variant' + (p.total_children === 1 ? '' : 's') + ' · ' + p.advertised_children + ' advertised' + singleCampInline + '</span>';
   })();
   // Listing status pill (BUYABLE / INACTIVE)
   let statusPill = '';
@@ -3581,11 +3613,11 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     '<div class="amz-diagnosis-line"><strong>' + escHtml(p.diagnosis) + '</strong></div>' : '';
   const actionLine = p.action ?
     '<div class="amz-action-line">→ ' + escHtml(p.action) + '</div>' : '';
-  // r14: campaign chips — show up to 3 campaign names this product is targeted in
+  // r14b: campaign chips — only show as chip strip when 2+ campaigns (single-campaign name is inlined into the variant badge above)
   const campsArr = p.campaigns || [];
   let campaignsRow = '';
-  if (campsArr.length > 0) {
-    const visible = campsArr.slice(0, 3);
+  if (campsArr.length >= 2) {
+    const visible = campsArr.slice(0, 4);
     const more = campsArr.length - visible.length;
     const chips = visible.map(function(c) {
       const isPaused = (c.state || '').toLowerCase() === 'paused';
@@ -3594,8 +3626,8 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       return '<span style="display:inline-block;font-size:11px;color:' + colour + ';background:' + bg + ';padding:2px 8px;border-radius:99px;border:1px solid var(--border);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="' + escHtml(c.name) + (isPaused ? ' (paused)' : '') + '">' + escHtml(c.name) + '</span>';
     }).join(' ');
     const moreChip = more > 0 ? ' <span style="display:inline-block;font-size:11px;color:var(--text3);padding:2px 6px">+' + more + ' more</span>' : '';
-    campaignsRow = '<div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;flex-shrink:0">In campaigns:</span>' + chips + moreChip + '</div>';
-  } else if (p.total_sales_7d > 0 || p.active_60d) {
+    campaignsRow = '<div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;flex-shrink:0">In ' + campsArr.length + ' campaigns:</span>' + chips + moreChip + '</div>';
+  } else if (campsArr.length === 0 && (p.total_sales_7d > 0 || p.active_60d)) {
     campaignsRow = '<div style="margin-top:8px;font-size:11px;color:var(--amber)"><span style="font-weight:600">⚠ Not in any campaign</span></div>';
   }
   return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer" onclick="openAmzProductModal(' + idx + ')">' +
@@ -3916,7 +3948,9 @@ async function renderAmzCritiqueSection(p) {
     return;
   }
   const safeKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
-  const runBtnHtml = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\')">🔍 Run listing critique</button>';
+  const runBtnHtml =
+    '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" title="Fast analysis with Claude Haiku (~£0.01)">🔍 Run critique (Haiku)</button>' +
+    ' <button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>';
   contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading saved analysis…</div>';
   buttonsEl.innerHTML = runBtnHtml;
   // Try cached fetch
@@ -3931,8 +3965,8 @@ async function renderAmzCritiqueSection(p) {
     }
     contentEl.innerHTML =
       '<div style="color:var(--text);font-size:13px;line-height:1.6">' +
-        '<strong>Amazon-specific listing review</strong> — analyses your title (keyword density, brand placement), bullet points (feature vs benefit), pricing across variants, ad performance, and competitor positioning. Returns a ranked list of fixes.<br><br>' +
-        '<span style="color:var(--text3)">Takes 15–25 seconds. Cached for 24h.</span>' +
+        '<strong>Amazon-specific listing review</strong> — analyses title (keyword density, brand placement), bullet points (feature vs benefit), pricing across variants, A+ content, and uses search-term data to identify wasted spend and high-converting keywords.<br><br>' +
+        '<span style="color:var(--text3)">Haiku takes 8-15s and costs ~£0.01. Opus takes 20-30s, costs ~£0.05-0.10, but produces more nuanced fixes. Both cached for 24h.</span>' +
       '</div>';
     buttonsEl.innerHTML = runBtnHtml;
   } catch(e) {
@@ -3941,28 +3975,33 @@ async function renderAmzCritiqueSection(p) {
   }
 }
 
-async function runAmzCritique(groupKey, asin) {
+// r14b: model parameter — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
+async function runAmzCritique(groupKey, asin, model) {
   const contentEl = document.getElementById('amz-critique-content');
   const buttonsEl = document.getElementById('amz-critique-buttons');
   if (!contentEl) return;
-  contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">⏳ Analysing listing… this takes 15–25 seconds. Don\'t close this window.</div>';
+  const modelLabel = model === 'opus' ? 'Opus (deep dive)' : 'Haiku (fast)';
+  const expectedTime = model === 'opus' ? '20-30 seconds' : '8-15 seconds';
+  contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">⏳ Analysing listing with ' + modelLabel + '… ' + expectedTime + '. Do not close this window.</div>';
   buttonsEl.innerHTML = '';
   try {
     const r = await fetch('/api/amazon/listing-critique', {
       method: 'POST',
       headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
-      body: JSON.stringify({ asin: asin, groupKey: groupKey, forceRefresh: true })
+      body: JSON.stringify({ asin: asin, groupKey: groupKey, forceRefresh: true, model: model || 'haiku' })
     });
     const j = await r.json();
     if (!r.ok || j.error) {
       contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
-      buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\', \'' + asin + '\')">↻ Retry</button>';
+      const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
+      buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
       return;
     }
     renderAmzCritiqueResult(j, asin, groupKey);
   } catch(e) {
     contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(e.message) + '</div>';
-    buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\', \'' + asin + '\')">↻ Retry</button>';
+    const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
+    buttonsEl.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
   }
 }
 
@@ -3972,6 +4011,9 @@ function renderAmzCritiqueResult(j, asin, groupKey) {
   const metaEl = document.getElementById('amz-critique-meta');
   if (!contentEl) return;
   const c = j.critique || {};
+  // r14b: detect which model produced the cached result
+  const cachedModel = (c._model || '').toLowerCase().indexOf('opus') !== -1 ? 'opus' : 'haiku';
+  const modelLabel = cachedModel === 'opus' ? 'Opus' : 'Haiku';
   let html = '';
   if (c.summary) {
     html += '<div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:14px 16px;border-radius:8px;margin-bottom:16px;font-size:14px;line-height:1.6"><strong>Summary:</strong> ' + escHtml(c.summary) + '</div>';
@@ -3995,12 +4037,84 @@ function renderAmzCritiqueResult(j, asin, groupKey) {
   if (metaEl && j.cached_at) {
     const ageMs = Date.now() - new Date(j.cached_at).getTime();
     const ageMin = Math.floor(ageMs / 60000);
-    metaEl.textContent = 'Cached ' + (ageMin < 60 ? ageMin + ' min ago' : Math.floor(ageMin / 60) + 'h ago');
+    metaEl.textContent = '· ' + modelLabel + ' · cached ' + (ageMin < 60 ? ageMin + ' min ago' : Math.floor(ageMin / 60) + 'h ago');
   }
   if (buttonsEl) {
-    buttonsEl.innerHTML = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + escHtml(groupKey).replace(/'/g, "\\'") + '\', \'' + asin + '\')" style="font-size:12px">↻ Re-analyse</button>';
+    const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
+    let buttons = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" style="font-size:12px">↻ Re-analyse (Haiku)</button>';
+    // Only show Opus button if current critique is Haiku
+    if (cachedModel !== 'opus') {
+      buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>';
+    }
+    buttonsEl.innerHTML = buttons;
   }
 }
+
+// ─── r14b: Bulk AI critique ────────────────────────────────────────────────
+let amzBulkPollInterval = null;
+
+async function startAmzBulkCritique() {
+  if (!confirm('Run AI critique on all active products?\n\nUses Claude Haiku (~£0.01 per product). For ~100 products that is roughly £1-2 total. Runs in background, takes 5-15 minutes.')) return;
+  const btn = document.getElementById('amz-bulk-btn');
+  const statusEl = document.getElementById('amz-bulk-status');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Starting...';
+  try {
+    const r = await fetch('/api/amazon/listing-critique-batch', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+      body: '{}'
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      if (statusEl) statusEl.textContent = 'Failed: ' + (j.error || 'unknown');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    // Start polling
+    pollAmzBulkStatus();
+  } catch(e) {
+    if (statusEl) statusEl.textContent = 'Failed: ' + e.message;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function pollAmzBulkStatus() {
+  const statusEl = document.getElementById('amz-bulk-status');
+  const btn = document.getElementById('amz-bulk-btn');
+  if (amzBulkPollInterval) clearInterval(amzBulkPollInterval);
+  const tick = async function() {
+    try {
+      const r = await fetch('/api/amazon/listing-critique-batch/status', { headers: getAuthHeaders() });
+      const j = await r.json();
+      if (!j) return;
+      if (j.running) {
+        const pct = j.total > 0 ? Math.round(100 * j.done / j.total) : 0;
+        if (statusEl) statusEl.textContent = '⏳ ' + j.done + '/' + j.total + ' (' + pct + '%)' + (j.failed > 0 ? ' · ' + j.failed + ' failed' : '');
+        if (btn) btn.disabled = true;
+      } else {
+        if (j.done > 0 || j.failed > 0) {
+          if (statusEl) statusEl.textContent = '✓ ' + j.done + ' analysed' + (j.failed > 0 ? ', ' + j.failed + ' failed' : '');
+        } else {
+          if (statusEl) statusEl.textContent = '';
+        }
+        if (btn) btn.disabled = false;
+        if (amzBulkPollInterval) { clearInterval(amzBulkPollInterval); amzBulkPollInterval = null; }
+      }
+    } catch(e) { /* ignore */ }
+  };
+  await tick();
+  amzBulkPollInterval = setInterval(tick, 4000);
+}
+
+// On page load, check if a bulk run is already active and resume polling
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(function(){
+    fetch('/api/amazon/listing-critique-batch/status', { headers: getAuthHeaders() }).then(function(r){ return r.json(); }).then(function(j){
+      if (j && j.running) pollAmzBulkStatus();
+    }).catch(function(){});
+  }, 2000);
+});
 
 function amzAssignTask(groupKey) {
   // Light placeholder — real integration could create a campaign_task. For now, prompt and confirm.

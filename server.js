@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r14a (broader timezone fix across snapshots/agents/alerts, campaign chips on product cards + modal table, SKU pill cursor fix)
+// CampaignPulse — deploy marker 2026-05-04 r14b (frontend timezone fix, single-vs-multi campaign card display, Haiku default critique + Opus deep-dive, bulk critique with search-term context)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2943,19 +2943,32 @@ app.post('/api/amazon/listing-critique', async function(req, res) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
   const asin = String((req.body && req.body.asin) || '');
   const groupKey = String((req.body && req.body.groupKey) || '');
+  // r14b: allow caller to choose model — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
+  const requestedModel = String((req.body && req.body.model) || 'haiku').toLowerCase();
+  const modelId = requestedModel === 'opus' ? 'claude-opus-4-5-20251101' : 'claude-haiku-4-5-20251001';
   if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
   try {
-    // Pull product context from our DB — title, status, price, ad performance for the parent group
-    const prodRes = await db.query(
-      "SELECT sku, asin, title, status, image_url, parent_sku, owner_agent FROM amazon_products WHERE asin = $1 OR parent_sku = $2 OR sku = $2",
-      [asin, groupKey]
-    );
-    if (!prodRes.rows.length) return res.status(404).json({ error: 'product not found' });
-    const primary = prodRes.rows.find(function(r){ return r.asin === asin; }) || prodRes.rows[0];
-    const allTitles = Array.from(new Set(prodRes.rows.map(function(r){ return r.title; }).filter(Boolean)));
-    const childAsins = Array.from(new Set(prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean)));
-    const inactiveCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('INACTIVE') !== -1 || (r.status || '').indexOf('SUSPENDED') !== -1; }).length;
-    const buyableCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('BUYABLE') !== -1; }).length;
+    const result = await runListingCritique(asin, groupKey, modelId);
+    res.json(result);
+  } catch(e) {
+    console.error('/api/amazon/listing-critique POST: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r14b: extracted helper so bulk mode can call it. Returns { critique, cached_at, model }.
+async function runListingCritique(asin, groupKey, modelId) {
+  // Pull product context from our DB — title, status, price, ad performance for the parent group
+  const prodRes = await db.query(
+    "SELECT sku, asin, title, status, image_url, parent_sku, owner_agent FROM amazon_products WHERE asin = $1 OR parent_sku = $2 OR sku = $2",
+    [asin, groupKey]
+  );
+  if (!prodRes.rows.length) throw new Error('product not found');
+  const primary = prodRes.rows.find(function(r){ return r.asin === asin; }) || prodRes.rows[0];
+  const allTitles = Array.from(new Set(prodRes.rows.map(function(r){ return r.title; }).filter(Boolean)));
+  const childAsins = Array.from(new Set(prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean)));
+  const inactiveCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('INACTIVE') !== -1 || (r.status || '').indexOf('SUSPENDED') !== -1; }).length;
+  const buyableCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('BUYABLE') !== -1; }).length;
 
     // Sales data
     const salesRes = await db.query(
@@ -2997,6 +3010,49 @@ app.post('/api/amazon/listing-critique', async function(req, res) {
       livePageContext = '\n--- Live Amazon page ---\n(could not fetch — Amazon may have blocked the request)\n';
     }
 
+    // r14b: pull product-relevant search-term data from in-memory keywordState (Advertising API report)
+    // We filter to terms whose campaignName matches this product's title keywords (same logic as deriveProductOwners).
+    let searchTermContext = '';
+    try {
+      const titleKw = extractTitleKeywords(allTitles[0] || '');
+      if (titleKw.size > 0 && Array.isArray(keywordState && keywordState.data) && keywordState.data.length > 0) {
+        // Filter records whose campaignName has ≥2 keyword overlap with this product
+        const relevant = keywordState.data.filter(function(r) {
+          const campKw = extractTitleKeywords((r.campaignName || ''));
+          let overlap = 0;
+          campKw.forEach(function(k){ if (titleKw.has(k)) overlap++; });
+          return overlap >= 2;
+        });
+        if (relevant.length > 0) {
+          // Top wasted (high spend, zero sales)
+          const wasters = relevant
+            .filter(function(r){ return parseFloat(r.cost||0) > 1 && parseInt(r.purchases14d||0) === 0; })
+            .sort(function(a,b){ return parseFloat(b.cost||0) - parseFloat(a.cost||0); })
+            .slice(0, 10);
+          // Top converters (most purchases relative to spend)
+          const converters = relevant
+            .filter(function(r){ return parseInt(r.purchases14d||0) > 0; })
+            .sort(function(a,b){ return parseFloat(b.sales14d||0) - parseFloat(a.sales14d||0); })
+            .slice(0, 10);
+          if (wasters.length || converters.length) {
+            searchTermContext = '\n--- Search-term performance (last 7 days, this products campaigns) ---\n';
+            if (wasters.length) {
+              searchTermContext += 'WASTED SEARCH TERMS (zero sales after spend — candidates for negative keywords):\n';
+              wasters.forEach(function(r){
+                searchTermContext += '  • "' + r.searchTerm + '" → £' + parseFloat(r.cost||0).toFixed(2) + ' spend, ' + (r.clicks||0) + ' clicks, 0 purchases — campaign: ' + r.campaignName + '\n';
+              });
+            }
+            if (converters.length) {
+              searchTermContext += 'CONVERTING SEARCH TERMS (worth amplifying with bid increases or as exact-match keywords):\n';
+              converters.forEach(function(r){
+                searchTermContext += '  • "' + r.searchTerm + '" → ' + r.purchases14d + ' purchases, £' + parseFloat(r.sales14d||0).toFixed(2) + ' sales, ' + (r.matchType||'') + ' match — campaign: ' + r.campaignName + '\n';
+              });
+            }
+          }
+        }
+      }
+    } catch(e) { console.error('[amz-critique] search-term context error: ' + e.message); }
+
     // Build the prompt — Amazon-specific
     const prompt = [
       'You are an Amazon Marketplace listing-optimisation expert reviewing an FK Sports product on Amazon UK.',
@@ -3009,33 +3065,33 @@ app.post('/api/amazon/listing-critique', async function(req, res) {
       'Sales last 30 days: £' + parseFloat(sales30d.revenue || 0).toFixed(2) + ', ' + (sales30d.units || 0) + ' units, ' + (sales30d.orders || 0) + ' orders',
       'Owner agent: ' + (primary.owner_agent || 'unassigned'),
       livePageContext,
+      searchTermContext,
       '',
       'TASK: review this listing and identify the highest-impact issues. Focus on Amazon-specific factors:',
       '1. Title quality — keyword density (front-loaded important terms?), brand placement (FK Sports near front?), length (~150-200 chars optimal), no stuffing',
       '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion',
       '3. Image quality and count (Amazon allows up to 9 — are they used?)',
-      '4. A+ content — is it present? If not, that\'s a known conversion lift',
+      '4. A+ content — is it present? If not, that is a known conversion lift',
       '5. Pricing concerns — multi-variant pricing spread, FBA vs FBM duplicates',
-      '6. Ad performance signal — given the 30-day sales above, are ads aligned?',
+      '6. Ad performance — given the search-term data above, identify wasted-spend terms that should be added as negatives, and high-converting terms to amplify',
       '7. Review count — does the listing need more reviews to convert?',
       '',
-      'Rank fixes by IMPACT. Higher-impact fixes first.',
+      'Rank fixes by IMPACT. Higher-impact fixes first. Be specific — when search-term data is available, name the actual search terms in your recommendations.',
       '',
       'Return ONLY valid JSON (no markdown fences, no preamble) in this shape:',
       '{',
       '  "summary": "2-3 sentence overall assessment",',
       '  "issues": [',
-      '    { "title": "Short heading", "severity": "high|medium|low", "problem": "What\'s wrong", "fix": "Specific action to take", "impact": "Estimated effect" },',
-      '    ...',
+      '    { "title": "Short heading", "severity": "high|medium|low", "problem": "What is wrong", "fix": "Specific action to take", "impact": "Estimated effect" }',
       '  ]',
       '}',
       '',
-      'Provide 3-7 issues. Be specific (avoid generic advice). Focus on what THIS listing needs.'
+      'Provide 3-7 issues. Be specific (avoid generic advice).'
     ].join('\n');
 
-    // Call Claude
+    // Call Claude with the requested model
     const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-5-20251101',
+      model: modelId,
       max_tokens: 2000,
       messages: [{ role: 'user', content: prompt }]
     }, {
@@ -3044,33 +3100,99 @@ app.post('/api/amazon/listing-critique', async function(req, res) {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01'
       },
-      timeout: 30000
+      timeout: 60000
     });
 
     let critique = null;
+    const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
+    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     try {
-      const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
-      const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
       critique = JSON.parse(cleaned);
     } catch(parseErr) {
       console.error('[amz-critique] JSON parse failed: ' + parseErr.message);
-      return res.status(500).json({ error: 'AI returned malformed response' });
+      throw new Error('AI returned malformed response');
     }
 
-    // Cache result
+    // Cache result — store the model used as well so we know whether to re-run with Opus
     try {
+      // Wrap critique to include model info
+      const cachePayload = Object.assign({}, critique, { _model: modelId });
       await db.query(
         "INSERT INTO amazon_critiques (asin, critique, cached_at) VALUES ($1, $2, NOW()) " +
         "ON CONFLICT (asin) DO UPDATE SET critique = $2, cached_at = NOW()",
-        [asin, JSON.stringify(critique)]
+        [asin, JSON.stringify(cachePayload)]
       );
     } catch(e) { console.error('[amz-critique] Cache write failed: ' + e.message); }
 
-    res.json({ critique: critique, cached_at: new Date().toISOString() });
+    return { critique: critique, cached_at: new Date().toISOString(), model: modelId };
+}
+
+// r14b: Bulk critique — runs Haiku-based critique on all active products in background.
+// State is held in memory; client polls /api/amazon/listing-critique-batch/status.
+const bulkCritiqueState = { running: false, total: 0, done: 0, failed: 0, startedAt: null, finishedAt: null, currentAsin: null };
+
+app.post('/api/amazon/listing-critique-batch', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  if (bulkCritiqueState.running) return res.status(409).json({ error: 'A bulk run is already in progress', state: bulkCritiqueState });
+
+  // Build list of ASINs to critique — active products only (BUYABLE + sold in 60d).
+  // We critique one ASIN per parent group (the first child).
+  try {
+    const productsRes = await db.query(
+      "SELECT DISTINCT ON (COALESCE(p.parent_sku, p.sku)) p.asin, p.parent_sku, p.sku " +
+      "FROM amazon_products p " +
+      "WHERE p.asin IS NOT NULL " +
+      "AND (p.status LIKE '%BUYABLE%') " +
+      "AND EXISTS (" +
+      "  SELECT 1 FROM amazon_order_items i JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "  WHERE i.asin = p.asin AND o.purchase_date >= NOW() - INTERVAL '60 days' AND o.status NOT IN ('Cancelled','Canceled')" +
+      ")"
+    );
+    const targets = productsRes.rows.map(function(r){ return { asin: r.asin, groupKey: r.parent_sku || r.sku }; });
+    if (targets.length === 0) return res.json({ ok: true, queued: 0, message: 'no active products to critique' });
+
+    bulkCritiqueState.running = true;
+    bulkCritiqueState.total = targets.length;
+    bulkCritiqueState.done = 0;
+    bulkCritiqueState.failed = 0;
+    bulkCritiqueState.startedAt = new Date().toISOString();
+    bulkCritiqueState.finishedAt = null;
+    bulkCritiqueState.currentAsin = null;
+
+    // Fire-and-forget — process serially so we don't hammer the API
+    (async function() {
+      for (const t of targets) {
+        bulkCritiqueState.currentAsin = t.asin;
+        try {
+          await runListingCritique(t.asin, t.groupKey, 'claude-haiku-4-5-20251001');
+          bulkCritiqueState.done++;
+        } catch(e) {
+          console.error('[bulk-critique] ' + t.asin + ' failed: ' + e.message);
+          bulkCritiqueState.failed++;
+        }
+        // 500ms gap between calls to avoid rate-limit
+        await new Promise(function(r){ setTimeout(r, 500); });
+      }
+      bulkCritiqueState.running = false;
+      bulkCritiqueState.finishedAt = new Date().toISOString();
+      bulkCritiqueState.currentAsin = null;
+      console.log('[bulk-critique] Finished. Done=' + bulkCritiqueState.done + ', Failed=' + bulkCritiqueState.failed);
+    })().catch(function(e){
+      bulkCritiqueState.running = false;
+      bulkCritiqueState.finishedAt = new Date().toISOString();
+      console.error('[bulk-critique] Outer fail: ' + e.message);
+    });
+
+    res.json({ ok: true, queued: targets.length, state: bulkCritiqueState });
   } catch(e) {
-    console.error('/api/amazon/listing-critique POST: ' + e.message);
+    console.error('/api/amazon/listing-critique-batch: ' + e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get('/api/amazon/listing-critique-batch/status', function(req, res) {
+  res.json(bulkCritiqueState);
 });
 
 // GET /api/amazon/top-products?date=YYYY-MM-DD&limit=5
