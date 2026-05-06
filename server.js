@@ -558,6 +558,11 @@ async function refreshAmazonPricingSignals(opts) {
   opts = opts || {};
   const limit = opts.limit || 9999;  // cap for ad-hoc runs; cron passes no limit
   const onlyAsin = opts.onlyAsin || null;
+  // r21: includeAll=true forces refresh of ALL BUYABLE ASINs incl. dormant.
+  // Default (false) restricts to ASINs sold in the last 60 days — same window
+  // as the "active products" filter on the dashboard. Cuts cron from ~247 ASINs
+  // down to ~71, saving ~10 min and ~70% of SP-API quota.
+  const includeAll = opts.includeAll === true;
   if (!db) return { ok: false, error: 'no-db' };
   if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
 
@@ -569,11 +574,29 @@ async function refreshAmazonPricingSignals(opts) {
         "SELECT DISTINCT asin, sku FROM amazon_products WHERE asin = $1 LIMIT 1",
         [onlyAsin]
       )).rows;
-    } else {
+    } else if (includeAll) {
+      // Cron path with explicit include-all override (rare, e.g. one-shot recovery)
       asinRows = (await db.query(
         "SELECT DISTINCT ON (asin) asin, sku FROM amazon_products " +
         "WHERE asin IS NOT NULL AND status LIKE '%BUYABLE%' " +
         "ORDER BY asin LIMIT $1",
+        [limit]
+      )).rows;
+    } else {
+      // r21 default: only BUYABLE ASINs that sold something in the last 60 days.
+      // Dormant ASINs keep their last-known signals (which the UI already treats
+      // as stale > 36h and shows as "—"). Big quota saving.
+      asinRows = (await db.query(
+        "SELECT DISTINCT ON (p.asin) p.asin, p.sku FROM amazon_products p " +
+        "WHERE p.asin IS NOT NULL AND p.status LIKE '%BUYABLE%' " +
+        "AND EXISTS (" +
+        "  SELECT 1 FROM amazon_order_items i " +
+        "  JOIN amazon_orders o ON o.order_id = i.order_id " +
+        "  WHERE i.asin = p.asin " +
+        "  AND o.purchase_date >= NOW() - INTERVAL '60 days' " +
+        "  AND o.status NOT IN ('Cancelled','Canceled')" +
+        ") " +
+        "ORDER BY p.asin LIMIT $1",
         [limit]
       )).rows;
     }
@@ -582,7 +605,7 @@ async function refreshAmazonPricingSignals(opts) {
     return { ok: false, error: e.message };
   }
 
-  console.log('[r20 signals] refreshing ' + asinRows.length + ' ASINs');
+  console.log('[r20 signals] refreshing ' + asinRows.length + ' ASINs' + (onlyAsin ? ' (single)' : (includeAll ? ' (include-all)' : ' (active 60d only — r21 optimization)')));
   const startedAt = Date.now();
   let okCount = 0, errCount = 0;
 
@@ -3212,8 +3235,11 @@ app.post('/api/admin/refresh-pricing-signals', async function(req, res) {
       const sigRow = db ? (await db.query('SELECT * FROM amazon_pricing_signals WHERE asin=$1', [oneAsin])).rows[0] : null;
       return res.json({ ok: true, oneAsin: oneAsin, result: result, row: sigRow });
     }
-    refreshAmazonPricingSignals({}).catch(function(e){ console.error('[admin] refresh-pricing-signals: ' + e.message); });
-    res.json({ ok: true, message: 'Refresh started in background. Check logs and amazon_pricing_signals table.' });
+    // r21: ?includeAll=1 forces refresh of ALL BUYABLE ASINs (incl. dormant).
+    // Default behaviour now restricts to ASINs sold in last 60 days.
+    const includeAll = req.query.includeAll === '1' || req.query.includeAll === 'true';
+    refreshAmazonPricingSignals({ includeAll: includeAll }).catch(function(e){ console.error('[admin] refresh-pricing-signals: ' + e.message); });
+    res.json({ ok: true, includeAll: includeAll, message: 'Refresh started in background (' + (includeAll ? 'all BUYABLE ASINs' : 'active 60d only') + '). Check logs and amazon_pricing_signals table.' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -3452,10 +3478,15 @@ function computeAmazonDiagnosis(p) {
   const sig = p.signals || {};
 
   // ── URGENT cases (priority 1) ──────────────────────────────────────────────
-  // r20d: Stock-out within 30 days — single check, replaces both old < 7d P1 and
-  // < 30d P2 cases. Per Bobby: only flag if running out in next 30d, otherwise
-  // stay quiet. Velocity check (> 0) ensures we only alarm on actively-selling
-  // items, not zero-velocity ASINs where 0 stock = "we don't sell this anymore".
+  // r21: Stock-cover urgency DISABLED. Amazon's SP-API returns inconsistent
+  // FBM/FBA quantities — SKU naming conventions split between "FBA" / "Amazon"
+  // suffixes, fulfillmentAvailability requires explicit includedData but even
+  // then is patchy, and FBA inventory often shows 0 for products with active
+  // warehouse stock. Result was constant false-urgent flags. Cron still
+  // populates fulfillable_qty/stock_cover_days for history, just not surfaced.
+  // Buy Box, ACOS, zero-attributed-sales remain active urgency triggers.
+  // To re-enable when data is reliable: uncomment the block below.
+  /*
   if (sig.stock_cover_days != null && sig.stock_cover_days < 30 &&
       (sig.velocity_30d || 0) > 0 && hasSales) {
     const days = sig.stock_cover_days;
@@ -3472,6 +3503,7 @@ function computeAmazonDiagnosis(p) {
             : 'Send replenishment to FBA — running low'
     };
   }
+  */
   // r20: Buy Box collapse — selling but losing the box more than half the time
   if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 50 && hasSales) {
     return {
@@ -4290,9 +4322,12 @@ async function runListingCritique(asin, groupKey, modelId) {
           lines.push('Price vs lowest competitor: ' + (primarySig.price_vs_lowest >= 0 ? '+£' : '-£') + Math.abs(parseFloat(primarySig.price_vs_lowest)).toFixed(2) + ' (positive = we are more expensive)');
         }
       }
-      if (familyStockCover != null) {
-        lines.push('Stock cover: ' + familyStockCover + ' days (' + totalFulfill + ' units fulfillable, ' + totalVel.toFixed(1) + ' units/day velocity)');
-      }
+      // r21: stock cover removed from critique context — data unreliable from
+      // SP-API (FBM availability patchy, FBA inventory often shows 0 for
+      // products with active warehouse stock). Re-enable when fix lands.
+      // if (familyStockCover != null) {
+      //   lines.push('Stock cover: ' + familyStockCover + ' days (' + totalFulfill + ' units fulfillable, ' + totalVel.toFixed(1) + ' units/day velocity)');
+      // }
       if (oldestContent) {
         lines.push('Last content update: ' + oldestContent + ' (' + contentAge + ' days ago)' + (contentAge > 90 ? ' STALE' : ''));
       }
@@ -4406,7 +4441,6 @@ async function runListingCritique(asin, groupKey, modelId) {
       'CONDITIONAL — only address these when the corresponding data is present in "Operational signals" above:',
       '- Buy Box: if Buy Box win % is given AND below 80%, that is a P1 conversion issue. Diagnose and recommend.',
       '- Pricing: if "Price vs lowest competitor" is given AND positive, recommend a price review.',
-      '- Stock cover: if stock cover days is given AND < 30, recommend FBA replenishment; < 7 is critical.',
       '- Content freshness: if Last content update is given AND > 90 days, recommend refresh.',
       '',
       'CRITICAL RULES — read carefully:',
@@ -5499,17 +5533,29 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
     });
 
     // r17: pull per-day ad spend from daily_snapshots so the table can show Ad Spend + Net
+    // r21: also pull campaigns array as fallback. Older snapshots sometimes have
+    // metrics.totalSpend null (early r17 snapshots wrote campaigns but skipped
+    // metrics roll-up). Sum campaigns[].spend in that case so historical days
+    // don't show "—" gaps for spend.
     try {
       const spendRes = await db.query(
         "SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS day, " +
-        "       (metrics->>'totalSpend')::float AS spend " +
+        "       (metrics->>'totalSpend')::float AS spend, " +
+        "       campaigns " +
         "FROM daily_snapshots " +
         "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '" + days + " days' " +
         "ORDER BY snapshot_date ASC"
       );
       const spendByDay = {};
-      spendRes.rows.forEach(function(row){ spendByDay[row.day] = parseFloat(row.spend || 0); });
-      dayRows.forEach(function(d){ d.spend = spendByDay[d.date] || null; });
+      spendRes.rows.forEach(function(row){
+        let spend = row.spend != null ? parseFloat(row.spend) : null;
+        // r21 fallback: if metrics.totalSpend missing, derive from campaigns
+        if ((spend == null || isNaN(spend)) && Array.isArray(row.campaigns)) {
+          spend = row.campaigns.reduce(function(s, c){ return s + parseFloat(c.spend || 0); }, 0);
+        }
+        if (spend != null && !isNaN(spend)) spendByDay[row.day] = spend;
+      });
+      dayRows.forEach(function(d){ d.spend = spendByDay[d.date] != null ? spendByDay[d.date] : null; });
     } catch(e) {
       // If snapshots/metrics not present, leave spend as null — frontend handles it
       console.error('[sales-summary] spend lookup failed: ' + e.message);
@@ -5885,6 +5931,15 @@ app.get('/api/campaigns/:id/spend-breakdown', async function(req, res) {
     // Pull last 14 days of snapshots (newest first from DB, sorted ascending in result)
     const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date ASC LIMIT 14");
     const breakdown = [];
+    // r21: track snapshot days where the campaign was MISSING — distinguishes
+    // "campaign didn't exist yet" (first appearance), "campaign was paused"
+    // (in snapshot with zero values), and "snapshot didn't run" (day absent
+    // from snapshots entirely). The frontend uses this to explain the day-2
+    // bug class where only 1 row appears.
+    const allSnapshotDays = snapshots.rows.map(function(s) {
+      return typeof s.snapshot_date === 'string' ? s.snapshot_date : new Date(s.snapshot_date).toISOString().slice(0,10);
+    });
+    const daysWithCampaign = [];
     snapshots.rows.forEach(function(snap) {
       const c = (snap.campaigns||[]).find(function(x){ return String(x.campaignId) === String(campaignId); });
       // r7a fix: include EVERY day the campaign existed in the snapshot, not just days with activity.
@@ -5892,6 +5947,7 @@ app.get('/api/campaigns/:id/spend-breakdown', async function(req, res) {
       // making older tasks look like they had only 1 row of data when in fact 5+ days had passed.
       if (c) {
         const d = typeof snap.snapshot_date === 'string' ? snap.snapshot_date : new Date(snap.snapshot_date).toLocaleDateString('en-GB', {timeZone:'Europe/London', year:'numeric', month:'2-digit', day:'2-digit'}).split('/').reverse().join('-');
+        daysWithCampaign.push(d);
         breakdown.push({
           date: d,
           spend: parseFloat(c.spend||0).toFixed(2),
@@ -5906,7 +5962,28 @@ app.get('/api/campaigns/:id/spend-breakdown', async function(req, res) {
     });
     // Show newest first in the UI table (matches the original look)
     breakdown.reverse();
-    res.json({ breakdown });
+    // r21: build a coverage note so the UI can explain "1 row" vs "campaign young"
+    const missingDays = allSnapshotDays.filter(function(d){ return daysWithCampaign.indexOf(d) === -1; });
+    let note = null;
+    if (breakdown.length === 0) {
+      note = 'No daily data found — campaign may not be in any snapshot yet.';
+    } else if (allSnapshotDays.length > 0 && breakdown.length < allSnapshotDays.length) {
+      // Campaign appeared in some snapshots but not others.
+      // Most common case: campaign was created recently — earlier snapshots predate it.
+      const earliestWith = daysWithCampaign.sort()[0];
+      note = 'Campaign first appears in snapshot on ' + earliestWith +
+             '. Earlier days (' + missingDays.length + ') predate the campaign or had a snapshot run that did not include it.';
+    }
+    res.json({
+      breakdown: breakdown,
+      coverage: {
+        snapshot_days_total: allSnapshotDays.length,
+        days_campaign_present: daysWithCampaign.length,
+        days_campaign_missing: missingDays.length,
+        missing_dates: missingDays
+      },
+      note: note
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

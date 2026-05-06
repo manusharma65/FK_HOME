@@ -3004,7 +3004,12 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
     const res = await fetch('/api/campaigns/' + encodeURIComponent(campaignId) + '/spend-breakdown');
     const data = await res.json();
     const rows = data.breakdown || [];
-    if (!rows.length) { container.innerHTML = '<div style="font-size:13px;color:#aaa">No daily data available</div>'; return; }
+    // r21: surface coverage note when fewer rows than expected — explains the
+    // "day 2 task showing 1 row" puzzle (campaign too new for older snapshots).
+    const noteHtml = data.note
+      ? '<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#92400e">ℹ ' + escHtml(data.note) + '</div>'
+      : '';
+    if (!rows.length) { container.innerHTML = noteHtml + '<div style="font-size:13px;color:#aaa">No daily data available</div>'; return; }
     // r7b: weighted-average ACOS summary row (totals across the whole period).
     // Weighted avg = total spend / total revenue × 100 — the correct way to combine
     // daily ACOS values. Mean of daily ACOS would be misleading (a 2% day weighs the
@@ -3033,7 +3038,7 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
         '<div><div style="color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.05em">Total conversions</div><div style="font-weight:600">' + totalConv + '</div></div>' +
         '<div style="margin-left:auto">' + acosBadge + '</div>' +
       '</div>';
-    container.innerHTML = summaryHtml +
+    container.innerHTML = noteHtml + summaryHtml +
       '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
       '<thead><tr style="background:var(--surface2)">' +
         '<th style="text-align:left;padding:6px 10px;font-size:12px;color:#888">Date</th>' +
