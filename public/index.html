@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-04 r18 (Merge products tool, assign-task with agent picker modal, reassign existing tasks button) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r20 (six new product card signals: Buy Box win %, stock cover, reviews, price vs lowest, content age, buyable child count + task modal rebuild + wasted-spend agent prefix fallback) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3040,33 +3040,169 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
 }
 
 // ── r17: Open task detail in big modal (replaces inline toggle) ─────────────
+// r20: Task detail modal — rebuilt from scratch (no cloning).
+// Previously this cloned the inline `task-detail-N` panel into the modal body,
+// which had two bugs:
+//   1. The clone happened while the source had display:none, and inherited
+//      child-level inline styles that left the body looking empty.
+//   2. Action buttons live OUTSIDE the inline detail panel on the card, so
+//      they were missing from the cloned content even when content rendered.
+// Fix: read the full task object from `allTasks` and render fresh markup,
+// including both the rich problem/score/notes details and the full action
+// button bar (Working on it, Mark complete, Pause, Dismiss, Reassign, etc.).
 function openTaskDetailModal(taskId) {
-  const card = document.getElementById('task-card-' + taskId);
-  if (!card) return;
   const modal = document.getElementById('task-detail-modal');
   const titleEl = document.getElementById('task-detail-modal-title');
   const metaEl = document.getElementById('task-detail-modal-meta');
   const bodyEl = document.getElementById('task-detail-modal-body');
   if (!modal || !bodyEl) return;
-  // Pull title + meta from the card's existing header
-  const titleNode = card.querySelector('.ai-title');
-  const subNode = card.querySelector('.ai-sub');
-  if (titleEl) titleEl.textContent = titleNode ? titleNode.textContent : 'Task';
-  if (metaEl) metaEl.textContent = subNode ? subNode.textContent : '';
-  // The detail panel that was inline already has all the rich content (problem, history, action buttons).
-  // Clone it into the modal body so we don't have to rebuild.
-  const inlineDetail = document.getElementById('task-detail-' + taskId);
-  if (inlineDetail) {
-    // Make sure it's visible inside the modal even if hidden in the card
-    const clone = inlineDetail.cloneNode(true);
-    clone.style.display = 'block';
-    clone.id = 'task-detail-modal-cloned-' + taskId;
-    // Strip any stopPropagation wrappers from the clone (action handlers still work via onclick attributes)
-    bodyEl.innerHTML = '';
-    bodyEl.appendChild(clone);
-  } else {
-    bodyEl.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">No detail available for this task.</div>';
+  // Find the task in our local cache. allTasks is set by loadTasks().
+  const t = (Array.isArray(allTasks) ? allTasks : []).find(function(x){ return x.id === taskId; });
+  if (!t) {
+    if (titleEl) titleEl.textContent = 'Task #' + taskId;
+    if (metaEl) metaEl.textContent = '';
+    bodyEl.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">Task not found in current view. Try refreshing.</div>';
+    modal.style.display = 'flex';
+    return;
   }
+  // Derive display fields the same way the inline card does.
+  const dateStr = t.created_at ? new Date(t.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : (t.created_date || '');
+  const wdo = (function() {
+    if (!t.created_at) return 0;
+    const created = new Date(t.created_at);
+    const now = new Date();
+    let count = 0;
+    const cur = new Date(created);
+    while (cur < now) {
+      const dow = cur.getDay();
+      if (dow !== 0 && dow !== 6) count++;
+      cur.setDate(cur.getDate() + 1);
+    }
+    return Math.max(0, count - 1);
+  })();
+  // Stage is what r7b uses on the card — open / discuss / decide / overdue.
+  // The card already computes this; we approximate from working-day-open here.
+  const stage = (function(){
+    if (wdo >= 7) return 'overdue';
+    if (wdo >= 6) return 'decide';
+    if (wdo >= 3) return 'discuss';
+    return 'open';
+  })();
+  const statusLabels = { due: 'Due', in_progress: 'In Progress', complete: 'Complete', paused: 'Paused', dismissed: 'Dismissed', archived: 'Archived', escalated: 'Escalated' };
+  const isRepeat = !!(t.is_repeat_offender || (t.failure_count && t.failure_count >= 2));
+  const isEscalated = t.status === 'escalated' || t.task_stage === 'escalated';
+  const isScaling = t.task_stage === 'scaling';
+  const notStarted = !t.first_action_at && wdo >= 1;
+
+  // Title + meta
+  if (titleEl) titleEl.textContent = t.campaign_name || 'Task';
+  if (metaEl) metaEl.textContent = 'Agent: ' + (t.agent_name || 'Unassigned') + ' · Portfolio: ' + (t.portfolio || '—') + ' · Created: ' + dateStr;
+
+  // Body — problem detail, score, dates, notes
+  const sections = [];
+  if (isRepeat) {
+    sections.push('<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:15px;color:#dc2626"><strong>🚨 REPEAT OFFENDER</strong> — This campaign has failed ' + (t.failure_count||2) + ' time(s) in the last 14 days. A different approach is needed, not the same quick fix.</div>');
+  }
+  sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Problem:</strong> ' + escHtml(t.problem_detail || '—') + '</div>');
+  sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Score:</strong> ' + (t.score || 0) + ' pts · <strong>Working days open:</strong> ' + wdo + ' · <strong>Stage:</strong> ' + stage + '</div>');
+  if (t.first_action_at) {
+    sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>First action:</strong> ' + new Date(t.first_action_at).toLocaleString('en-GB') + '</div>');
+  } else if (notStarted) {
+    sections.push('<div style="font-size:15px;color:#dc2626;margin-bottom:12px"><strong>First action:</strong> not yet — agent has not started this task</div>');
+  }
+  if (t.resolved_at) {
+    sections.push('<div style="font-size:15px;color:var(--green);margin-bottom:12px"><strong>Resolved:</strong> ' + new Date(t.resolved_at).toLocaleString('en-GB') + '</div>');
+  }
+  if (t.agent_notes) {
+    sections.push(
+      '<div style="background:var(--blue-light);border:1px solid rgba(26,111,189,0.15);border-radius:8px;padding:14px 18px;font-size:15px;color:var(--blue);margin-bottom:12px">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+          '<strong>Agent Notes:</strong>' +
+          '<button class="btn btn-ghost" style="font-size:11px;padding:2px 8px" onclick="toggleNoteIgnored(' + t.id + ',this)">' + (t.notes_ignored ? '✓ Restore for AI' : '✗ Strike out') + '</button>' +
+        '</div>' +
+        '<span style="white-space:pre-wrap;line-height:1.7;' + (t.notes_ignored ? 'text-decoration:line-through;opacity:0.45;' : '') + '">' + escHtml(t.agent_notes) + '</span>' +
+        (t.notes_ignored ? '<div style="font-size:11px;color:#e53e3e;margin-top:6px">⚠ Struck out — AI will not use this note</div>' : '') +
+      '</div>'
+    );
+  } else {
+    sections.push('<div style="font-size:15px;color:#bbb;margin-bottom:12px;font-style:italic">No notes added yet.</div>');
+  }
+  if (t.dismissed_reason) {
+    sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Dismiss reason:</strong> ' + escHtml(t.dismissed_reason) + '</div>');
+  }
+  if (t.paused_reason) {
+    sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Pause reason:</strong> ' + escHtml(t.paused_reason) + '</div>');
+  }
+  if (t.escalation_reason) {
+    sections.push('<div style="font-size:15px;color:#7c3aed;margin-bottom:12px"><strong>Scaling reason:</strong> ' + escHtml(t.escalation_reason) + '</div>');
+  }
+  // Spend breakdown button — same as inline detail
+  if (t.campaign_id) {
+    const breakdownContainerId = 'breakdown-modal-' + t.id;
+    sections.push(
+      '<div style="margin-top:8px;margin-bottom:14px">' +
+        '<button class="btn btn-ghost" style="font-size:12px" data-cid="' + escHtml(String(t.campaign_id)) + '" data-bid="' + breakdownContainerId + '" onclick="kwAction(this,&quot;breakdown&quot;)">📊 Show daily spend breakdown</button>' +
+        '<div id="' + breakdownContainerId + '" style="display:none;margin-top:8px"></div>' +
+      '</div>'
+    );
+  }
+
+  // Action buttons — full bar based on status (mirrors the card logic).
+  let actionButtons = '';
+  if (t.status === 'complete' || t.status === 'dismissed' || t.status === 'archived') {
+    const rt = t.resolved_at ? new Date(t.resolved_at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '';
+    actionButtons = '<div style="font-size:14px;color:var(--green);margin-top:8px">✓ ' + (statusLabels[t.status]||t.status) + (rt ? ' · ' + rt : '') + '</div>';
+    if (!t.archived_at && t.status !== 'archived') {
+      actionButtons += '<div class="ag" style="margin-top:6px">' +
+        '<button class="btn btn-ghost" style="font-size:12px" onclick="archiveTask(' + t.id + ')">Archive now</button>' +
+        '<button class="btn btn-amber" style="font-size:12px" onclick="reopenTask(' + t.id + ')">↩ Reopen to Due</button>' +
+        '</div>';
+    }
+  } else if (t.status === 'paused') {
+    actionButtons = '<div style="font-size:14px;color:var(--amber);margin-top:8px">⏸ Paused' + (t.paused_reason ? ' — ' + escHtml(t.paused_reason) : '') + '</div>';
+    if (!t.archived_at) actionButtons += '<div class="ag" style="margin-top:6px">' +
+      '<button class="btn btn-ghost" style="font-size:12px" onclick="archiveTask(' + t.id + ')">Archive now</button>' +
+      '<button class="btn btn-amber" style="font-size:12px" onclick="reopenTask(' + t.id + ')">↩ Reopen to Due</button>' +
+      '</div>';
+  } else if (isScaling) {
+    const daysLeft = t.scaling_deadline ? Math.ceil((new Date(t.scaling_deadline) - new Date()) / (1000*60*60*24)) : 0;
+    actionButtons = '<div class="ag" style="margin-top:8px">' +
+      '<button class="btn btn-green" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;complete&quot;)">✓ Mark resolved</button>' +
+      '<button class="btn btn-red" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;paused&quot;)">Pause campaign</button>' +
+      (daysLeft <= 0 ? '<span style="font-size:12px;color:#dc2626;font-weight:600">⚠️ Window expired!</span>' : '') +
+      '</div>';
+  } else if (isEscalated) {
+    actionButtons = '<div class="ag" style="margin-top:8px">' +
+      '<button class="btn btn-amber" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;in_progress&quot;)">Working on it</button>' +
+      '<button class="btn btn-purple" style="font-size:12px;background:#f3e8ff;color:#7c3aed;border-color:#c4b5fd" onclick="showScalingModal(' + t.id + ')">⏱ Request 7-day scaling</button>' +
+      '<button class="btn btn-green" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;complete&quot;)">Mark complete</button>' +
+      '<button class="btn btn-red" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;paused&quot;)">Pause</button>' +
+      '</div>' +
+      '<button class="btn btn-ghost" style="font-size:12px;margin-top:8px" onclick="loadEscalationAnalysis(' + t.id + ',this)">🤖 Get AI analysis</button>' +
+      '<div id="ai-analysis-modal-' + t.id + '" style="display:none;margin-top:10px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px;font-size:14px;line-height:1.6;color:#0369a1"></div>';
+  } else {
+    actionButtons = '<div class="ag" style="margin-top:8px;flex-wrap:wrap">' +
+      '<button class="btn btn-amber" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;in_progress&quot;)">Working on it</button>' +
+      '<button class="btn btn-green" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;complete&quot;)">Mark complete</button>' +
+      '<button class="btn btn-ghost" style="font-size:12px;background:#f3e8ff;color:#7c3aed;border-color:#c4b5fd" onclick="showScalingModal(' + t.id + ')">⏱ Move to Scaling</button>' +
+      '<button class="btn btn-red" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;paused&quot;)">Pause campaign</button>' +
+      '<button class="btn btn-ghost" style="font-size:12px" onclick="showTaskModal(' + t.id + ',&quot;dismissed&quot;)">Dismiss</button>' +
+      '</div>';
+  }
+  // Reassign — manager + owner only
+  const _me = window._meCache || {};
+  const _myRole = (_me.role || '').toLowerCase();
+  const _myDept = (_me.department || '').toLowerCase();
+  const _canReassign = ['owner','manager'].indexOf(_myRole) !== -1 || _myDept === 'manager';
+  if (_canReassign) {
+    actionButtons += '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">' +
+      '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--text3)" onclick="showReassignTaskModal(' + t.id + ',&quot;' + escHtml(t.agent_name||'').replace(/"/g, '&quot;') + '&quot;)">↪ Reassign to another agent</button>' +
+    '</div>';
+  }
+
+  bodyEl.innerHTML =
+    '<div>' + sections.join('') + '</div>' +
+    '<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">' + actionButtons + '</div>';
   modal.style.display = 'flex';
 }
 
@@ -3722,6 +3858,52 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       amzStat('ACOS', acos > 0 ? acos + '%' : '—', acosClass) +
       amzStat('Coverage', p.ad_coverage_pct + '%', coverageClass) +
     '</div>';
+  // r20: Operational signals — second row, compact. Each cell shows "—" when data missing.
+  const sig = p.signals || {};
+  function bbCell() {
+    if (sig.buy_box_pct_7d == null) {
+      // Not enough days yet — show the "Building (N/7d)" hint
+      const n = sig.buy_box_days || 0;
+      return amzStat('Buy Box 7d', n === 0 ? '—' : 'Building (' + n + '/7d)', 'muted');
+    }
+    const klass = sig.buy_box_pct_7d >= 90 ? 'good' : (sig.buy_box_pct_7d >= 70 ? 'warn' : 'bad');
+    const label = sig.buy_box_days < 7 ? 'Buy Box (' + sig.buy_box_days + '/7d)' : 'Buy Box 7d';
+    return amzStat(label, sig.buy_box_pct_7d + '%', klass);
+  }
+  function stockCell() {
+    if (sig.stock_cover_days == null) return amzStat('Stock cover', '—', 'muted');
+    if (sig.stock_cover_days >= 999) return amzStat('Stock cover', 'Plenty', 'muted');
+    const klass = sig.stock_cover_days < 7 ? 'bad' : (sig.stock_cover_days < 30 ? 'warn' : 'good');
+    return amzStat('Stock cover', sig.stock_cover_days + 'd', klass);
+  }
+  function reviewsCell() {
+    if (sig.reviews_count == null && sig.reviews_avg == null) return amzStat('Reviews', '—', 'muted');
+    const avgStr = sig.reviews_avg != null ? sig.reviews_avg.toFixed(1) + '★' : '—';
+    const cntStr = sig.reviews_count != null ? ' (' + sig.reviews_count + ')' : '';
+    const klass = sig.reviews_avg != null && sig.reviews_avg < 4 ? 'warn' : null;
+    return amzStat('Reviews', avgStr + cntStr, klass);
+  }
+  function priceCell() {
+    if (sig.price_vs_lowest == null) return amzStat('vs lowest', '—', 'muted');
+    const sign = sig.price_vs_lowest > 0 ? '+£' : '−£';
+    const klass = sig.price_vs_lowest > 5 ? 'bad' : (sig.price_vs_lowest > 0 ? 'warn' : 'good');
+    return amzStat('vs lowest', sign + Math.abs(sig.price_vs_lowest).toFixed(2), klass);
+  }
+  function contentCell() {
+    if (sig.content_age_days == null) return amzStat('Content age', '—', 'muted');
+    const klass = sig.content_age_days > 90 ? 'bad' : (sig.content_age_days > 60 ? 'warn' : 'good');
+    return amzStat('Content age', sig.content_age_days + 'd', klass);
+  }
+  const buyableCell = amzStat('Buyable', String(p.buyable_count || 0), p.buyable_count > 0 ? 'good' : 'bad');
+  const signalsRow =
+    '<div class="amz-product-stats" style="margin-top:6px">' +
+      bbCell() +
+      stockCell() +
+      reviewsCell() +
+      priceCell() +
+      contentCell() +
+      buyableCell +
+    '</div>';
   // Diagnosis + action
   const diagnosisLine = p.diagnosis ?
     '<div class="amz-diagnosis-line"><strong>' + escHtml(p.diagnosis) + '</strong></div>' : '';
@@ -3772,6 +3954,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       diagnosisLine +
       actionLine +
       stats +
+      signalsRow +
       '<div style="margin-top:8px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>' +
     '</div>' +
   '</div>';
@@ -3932,6 +4115,65 @@ function buildAmzProductModalBody(p) {
             '<tbody>' + rows + '</tbody>' +
           '</table>' +
         '</div>';
+    })(),
+
+    // r20: Operational signals — Buy Box, Stock cover, Reviews, Price vs comp, Content age
+    (function(){
+      const sig = p.signals || {};
+      const cells = [];
+      // Buy Box win % with "Building" treatment
+      if (sig.buy_box_pct_7d == null) {
+        const n = sig.buy_box_days || 0;
+        cells.push(tile('Buy Box win % (7d)', n === 0 ? '—' : 'Building (' + n + '/7d)', 'muted',
+          'Featured Offer (Buy Box) win percentage averaged over the last 7 days. Pulled from Amazon Sales & Traffic Report. After deploy, takes up to 7 days of data to populate fully.'));
+      } else {
+        const klass = sig.buy_box_pct_7d >= 90 ? 'good' : (sig.buy_box_pct_7d >= 70 ? 'warn' : 'bad');
+        const label = sig.buy_box_days < 7 ? 'Buy Box win % (' + sig.buy_box_days + '/7d)' : 'Buy Box win % (7d)';
+        cells.push(tile(label, sig.buy_box_pct_7d + '%', klass,
+          'Featured Offer (Buy Box) win percentage averaged over the last 7 days. < 80% suggests pricing or stock issues; < 50% is critical.'));
+      }
+      // Stock cover
+      if (sig.stock_cover_days == null) {
+        cells.push(tile('Stock cover', '—', 'muted', 'Days of fulfillable stock at the current 30-day sales velocity. Refreshed nightly via SP-API FBA Inventory.'));
+      } else if (sig.stock_cover_days >= 999) {
+        cells.push(tile('Stock cover', 'Plenty', 'muted', 'In stock but no recent sales — effectively unlimited cover.'));
+      } else {
+        const klass = sig.stock_cover_days < 7 ? 'bad' : (sig.stock_cover_days < 30 ? 'warn' : 'good');
+        const sub = (sig.fulfillable_qty != null ? sig.fulfillable_qty + ' units · ' : '') +
+                    (sig.velocity_30d != null ? sig.velocity_30d.toFixed(1) + '/day' : '');
+        cells.push(tile('Stock cover', sig.stock_cover_days + 'd', klass,
+          sub + ' — replenish to FBA when this drops below 30 days, urgent below 7.'));
+      }
+      // Reviews
+      if (sig.reviews_count == null && sig.reviews_avg == null) {
+        cells.push(tile('Reviews', '—', 'muted', 'Customer review count + average rating. SP-API does not return this for every ASIN; "—" is normal.'));
+      } else {
+        const avgStr = sig.reviews_avg != null ? sig.reviews_avg.toFixed(1) + '★' : '—';
+        const cntStr = sig.reviews_count != null ? sig.reviews_count + ' reviews' : '—';
+        const klass = sig.reviews_avg != null && sig.reviews_avg < 4 ? 'warn' : null;
+        cells.push(tile('Reviews', avgStr + ' (' + cntStr + ')', klass));
+      }
+      // Price vs lowest competitor
+      if (sig.price_vs_lowest == null) {
+        cells.push(tile('Price vs lowest', '—', 'muted', 'Your price minus the lowest "new" competitor offer. Pulled from SP-API Product Pricing — patchy data is normal.'));
+      } else {
+        const sign = sig.price_vs_lowest > 0 ? '+£' : '−£';
+        const klass = sig.price_vs_lowest > 5 ? 'bad' : (sig.price_vs_lowest > 0 ? 'warn' : 'good');
+        const sub = 'You: £' + (sig.your_price != null ? sig.your_price.toFixed(2) : '—') +
+                    ' · Lowest: £' + (sig.lowest_competitor_price != null ? sig.lowest_competitor_price.toFixed(2) : '—');
+        cells.push(tile('Price vs lowest', sign + Math.abs(sig.price_vs_lowest).toFixed(2), klass, sub));
+      }
+      // Content age
+      if (sig.content_age_days == null) {
+        cells.push(tile('Last content update', '—', 'muted', 'Last time the listing content was updated, from SP-API Listings.'));
+      } else {
+        const klass = sig.content_age_days > 90 ? 'bad' : (sig.content_age_days > 60 ? 'warn' : 'good');
+        const sub = sig.last_content_update ? 'Updated ' + sig.last_content_update : '';
+        cells.push(tile('Last content update', sig.content_age_days + ' days', klass,
+          sub + (sig.content_age_days > 90 ? ' — refresh title, bullets, A+ content for SEO' : '')));
+      }
+      return '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Operational signals (SP-API)</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">' + cells.join('') + '</div>';
     })(),
 
     // Listing health

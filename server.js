@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-04 r18 (manual product merge tool, unknown-agents detection, reassign tasks endpoint, assign-task modal with agent picker)
+// CampaignPulse — deploy marker 2026-05-06 r20 (six new product card signals via SP-API + Sales & Traffic Report, wasted-spend agent prefix fallback, task modal rebuild from scratch, AI critique prompt fed new operational signals)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -358,6 +358,36 @@ async function getSellerId() {
   }
 }
 
+// r20: SP-API POST helper. Used for Reports API (createReport, etc.) and other
+// write-style endpoints. Same auth + rate-limit-retry pattern as spApiGet.
+async function spApiPost(pathAndQuery, body, retryCount) {
+  retryCount = retryCount || 0;
+  const token = await getSpApiAccessToken();
+  try {
+    const res = await axios.post(SP_API_HOST + pathAndQuery, body || {}, {
+      headers: {
+        'x-amz-access-token': token,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'CampaignPulse/1.0 (Language=Node.js)'
+      },
+      timeout: 30000
+    });
+    return res.data;
+  } catch(e) {
+    if (e.response && e.response.status === 429 && retryCount < 3) {
+      const wait = Math.pow(2, retryCount) * 1000;
+      console.log('[SP-API] POST rate limited on ' + pathAndQuery + ', waiting ' + wait + 'ms');
+      await new Promise(function(r){ setTimeout(r, wait); });
+      return spApiPost(pathAndQuery, body, retryCount + 1);
+    }
+    const status = e.response ? e.response.status : 'no-response';
+    const errBody = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    console.error('[SP-API] POST ' + pathAndQuery + ' failed (' + status + '): ' + errBody);
+    throw e;
+  }
+}
+
 // ── Sync the seller's product catalogue from SP-API into amazon_products ─────
 // Uses /listings/2021-08-01/items/{sellerId} to enumerate every SKU.
 // Now (r9) also fetches `relationships` so we can populate parent_sku/variation_theme
@@ -508,6 +538,312 @@ async function syncAmazonOrders(daysBack) {
   } catch(e) {
     console.error('[SP-API orders sync] FAILED: ' + e.message);
     return { ok: false, error: e.message };
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// r20: SP-API signal refresher — populates amazon_pricing_signals for active ASINs.
+// One row per ASIN. Refreshed by cron at 03:30 London (after catalogue 02:30,
+// before orders 06:00). Stale > 36h shows "—" on UI.
+//
+// Signals fetched per ASIN:
+//   1. Reviews count + avg ........... /catalog/2022-04-01/items/{ASIN}?includedData=summaries
+//   2. Inventory (fulfillable qty) .... /fba/inventory/v1/summaries
+//   3. Last content update ............ /listings/2021-08-01/items/{sellerId}/{sku}?includedData=summaries
+//   4. Price vs lowest competitor ..... /products/pricing/v0/items/{ASIN}/offers?ItemCondition=New
+//   5. Velocity 30d (computed from amazon_orders) → stock_cover_days = fulfillable_qty / velocity
+// Buy Box win % is NOT here — it comes from amazon_traffic_snapshots (path b).
+// ════════════════════════════════════════════════════════════════════════════
+async function refreshAmazonPricingSignals(opts) {
+  opts = opts || {};
+  const limit = opts.limit || 9999;  // cap for ad-hoc runs; cron passes no limit
+  const onlyAsin = opts.onlyAsin || null;
+  if (!db) return { ok: false, error: 'no-db' };
+  if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
+
+  // 1. Pick the ASINs to refresh — every BUYABLE ASIN, OR the explicit one if onlyAsin is set
+  let asinRows;
+  try {
+    if (onlyAsin) {
+      asinRows = (await db.query(
+        "SELECT DISTINCT asin, sku FROM amazon_products WHERE asin = $1 LIMIT 1",
+        [onlyAsin]
+      )).rows;
+    } else {
+      asinRows = (await db.query(
+        "SELECT DISTINCT ON (asin) asin, sku FROM amazon_products " +
+        "WHERE asin IS NOT NULL AND status LIKE '%BUYABLE%' " +
+        "ORDER BY asin LIMIT $1",
+        [limit]
+      )).rows;
+    }
+  } catch(e) {
+    console.error('[r20 signals] ASIN picker failed: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+
+  console.log('[r20 signals] refreshing ' + asinRows.length + ' ASINs');
+  const startedAt = Date.now();
+  let okCount = 0, errCount = 0;
+
+  // 2. Pre-compute 30-day velocity for ALL these ASINs in one query (faster than per-ASIN)
+  let velocityMap = {};
+  try {
+    const velRes = await db.query(
+      "SELECT i.asin, SUM(i.quantity)::float / 30.0 AS velocity " +
+      "FROM amazon_order_items i JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '30 days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin = ANY($1) " +
+      "GROUP BY i.asin",
+      [asinRows.map(function(r){ return r.asin; })]
+    );
+    velRes.rows.forEach(function(r){ velocityMap[r.asin] = parseFloat(r.velocity || 0); });
+  } catch(e) {
+    console.error('[r20 signals] velocity query failed: ' + e.message);
+  }
+
+  // 3. Walk each ASIN and fetch its signals. Each individual fetch is wrapped so
+  // one failure doesn't abort the run — partial data is better than no data.
+  let sellerId;
+  try { sellerId = await getSellerId(); } catch(e) { console.error('[r20 signals] sellerId fetch failed: ' + e.message); return { ok: false, error: 'no-seller-id' }; }
+
+  for (const row of asinRows) {
+    const asin = row.asin;
+    const sku = row.sku;
+    const sig = {
+      asin: asin,
+      your_price: null,
+      lowest_competitor_price: null,
+      price_vs_lowest: null,
+      reviews_count: null,
+      reviews_avg: null,
+      last_content_update: null,
+      fulfillable_qty: null,
+      velocity_30d: velocityMap[asin] != null ? velocityMap[asin] : 0,
+      stock_cover_days: null,
+      last_error: null
+    };
+    const errors = [];
+
+    // 3a. Catalog item — reviews + browse signals
+    try {
+      const cat = await spApiGet(
+        '/catalog/2022-04-01/items/' + encodeURIComponent(asin) +
+        '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
+        '&includedData=summaries'
+      );
+      const summary = (cat && cat.summaries && cat.summaries[0]) || {};
+      // SP-API may surface reviews under different keys. Try a few.
+      // Note: SP-API does NOT consistently expose review count/rating — many ASINs return nothing
+      // here. We accept patchy data per spec.
+      const rc = summary.totalRatings || summary.numberOfReviews || (summary.itemRatingsAndReviews && summary.itemRatingsAndReviews.totalRatings);
+      const ra = summary.averageRating || (summary.itemRatingsAndReviews && summary.itemRatingsAndReviews.averageRating);
+      if (rc != null) sig.reviews_count = parseInt(rc) || null;
+      if (ra != null) sig.reviews_avg = parseFloat(ra) || null;
+    } catch(e) {
+      errors.push('catalog: ' + (e.response && e.response.status || e.message));
+    }
+
+    // 3b. Last content update — from /listings/items via SKU
+    if (sku) {
+      try {
+        const list = await spApiGet(
+          '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) +
+          '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
+          '&includedData=summaries'
+        );
+        const summary = (list && list.summaries && list.summaries[0]) || {};
+        if (summary.lastUpdatedDate) {
+          // YYYY-MM-DD slice — the field is ISO timestamp like "2025-12-04T10:23:00Z"
+          sig.last_content_update = String(summary.lastUpdatedDate).slice(0, 10);
+        }
+      } catch(e) {
+        errors.push('listings: ' + (e.response && e.response.status || e.message));
+      }
+    }
+
+    // 3c. Inventory (FBA fulfillable qty)
+    try {
+      const inv = await spApiGet(
+        '/fba/inventory/v1/summaries' +
+        '?details=true' +
+        '&granularityType=Marketplace' +
+        '&granularityId=' + SP_API_MARKETPLACE_ID +
+        '&marketplaceIds=' + SP_API_MARKETPLACE_ID +
+        '&sellerSkus=' + encodeURIComponent(sku || '')
+      );
+      const summaries = (inv && inv.payload && inv.payload.inventorySummaries) || [];
+      const match = summaries.find(function(s){ return s.asin === asin || s.sellerSku === sku; }) || summaries[0];
+      if (match) {
+        const detail = match.inventoryDetails || {};
+        sig.fulfillable_qty = parseInt(detail.fulfillableQuantity || match.totalQuantity || 0) || 0;
+      }
+    } catch(e) {
+      errors.push('inventory: ' + (e.response && e.response.status || e.message));
+    }
+
+    // 3d. Price vs lowest competitor — Product Pricing v0 offers
+    try {
+      const pr = await spApiGet(
+        '/products/pricing/v0/items/' + encodeURIComponent(asin) + '/offers' +
+        '?MarketplaceId=' + SP_API_MARKETPLACE_ID +
+        '&ItemCondition=New&CustomerType=Consumer'
+      );
+      const summary = (pr && pr.payload && pr.payload.Summary) || {};
+      const offers = (pr && pr.payload && pr.payload.Offers) || [];
+      // Your price = your offer (sellerId match)
+      const myOffer = offers.find(function(o){ return o.SellerId === sellerId; });
+      if (myOffer && myOffer.ListingPrice && myOffer.ListingPrice.Amount != null) {
+        sig.your_price = parseFloat(myOffer.ListingPrice.Amount) || null;
+      }
+      // Lowest competitor = min of LowestPrices array (excluding our offer)
+      const lowestPrices = summary.LowestPrices || [];
+      const lowestNew = lowestPrices.find(function(lp){ return lp.condition === 'New'; });
+      if (lowestNew && lowestNew.LandedPrice && lowestNew.LandedPrice.Amount != null) {
+        sig.lowest_competitor_price = parseFloat(lowestNew.LandedPrice.Amount) || null;
+      }
+      if (sig.your_price != null && sig.lowest_competitor_price != null) {
+        sig.price_vs_lowest = parseFloat((sig.your_price - sig.lowest_competitor_price).toFixed(2));
+      }
+    } catch(e) {
+      errors.push('pricing: ' + (e.response && e.response.status || e.message));
+    }
+
+    // 4. Compute stock cover days from fulfillable + velocity
+    if (sig.fulfillable_qty != null && sig.velocity_30d > 0) {
+      sig.stock_cover_days = parseFloat((sig.fulfillable_qty / sig.velocity_30d).toFixed(1));
+    } else if (sig.fulfillable_qty != null && sig.fulfillable_qty > 0 && sig.velocity_30d === 0) {
+      // In stock but no recent sales — show large number (effectively "infinite cover")
+      sig.stock_cover_days = 999;
+    }
+
+    if (errors.length) sig.last_error = errors.join(' | ');
+
+    // 5. Upsert into cache table
+    try {
+      await db.query(
+        "INSERT INTO amazon_pricing_signals " +
+        "(asin, your_price, lowest_competitor_price, price_vs_lowest, reviews_count, reviews_avg, " +
+        " last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, last_error, fetched_at) " +
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) " +
+        "ON CONFLICT (asin) DO UPDATE SET " +
+        "your_price=EXCLUDED.your_price, lowest_competitor_price=EXCLUDED.lowest_competitor_price, " +
+        "price_vs_lowest=EXCLUDED.price_vs_lowest, reviews_count=EXCLUDED.reviews_count, " +
+        "reviews_avg=EXCLUDED.reviews_avg, last_content_update=EXCLUDED.last_content_update, " +
+        "fulfillable_qty=EXCLUDED.fulfillable_qty, velocity_30d=EXCLUDED.velocity_30d, " +
+        "stock_cover_days=EXCLUDED.stock_cover_days, last_error=EXCLUDED.last_error, fetched_at=NOW()",
+        [asin, sig.your_price, sig.lowest_competitor_price, sig.price_vs_lowest, sig.reviews_count,
+         sig.reviews_avg, sig.last_content_update, sig.fulfillable_qty, sig.velocity_30d,
+         sig.stock_cover_days, sig.last_error]
+      );
+      okCount++;
+    } catch(e) {
+      console.error('[r20 signals] upsert failed for ' + asin + ': ' + e.message);
+      errCount++;
+    }
+
+    // Tiny pause between ASINs — SP-API rate limits on the tightest endpoints (Pricing) are
+    // 0.5 req/sec burst 1. With 4 endpoints per ASIN, ~600ms between ASINs is conservative.
+    await new Promise(function(r){ setTimeout(r, 600); });
+  }
+
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.log('[r20 signals] done in ' + elapsed + 's — ok=' + okCount + ' err=' + errCount);
+  return { ok: true, refreshed: okCount, errors: errCount, elapsedSec: elapsed };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// r20: Sales-and-Traffic Report ingest (Buy Box win % path b).
+// Calls Reports API — async flow: createReport → poll → download document.
+// One row per (asin, report_date) in amazon_traffic_snapshots.
+// Card metric is AVG(buy_box_pct) over last 7 days where data exists.
+// Backfill endpoint: POST /api/admin/backfill-traffic?days=N (cap 30).
+// ════════════════════════════════════════════════════════════════════════════
+async function fetchSalesAndTrafficReport(reportDate) {
+  // reportDate is a YYYY-MM-DD string for a SINGLE day. Amazon report data
+  // typically lags 24h, so the cron at 04:00 London asks for "yesterday".
+  if (!db || !spApiConfigured()) return { ok: false, error: 'not-configured' };
+  const dateStr = String(reportDate).slice(0, 10);
+
+  try {
+    // Step 1 — request the report. Use childAsin granularity so we get per-ASIN rows.
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: dateStr + 'T00:00:00Z',
+      dataEndTime: dateStr + 'T23:59:59Z',
+      reportOptions: {
+        dateGranularity: 'DAY',
+        asinGranularity: 'CHILD'
+      }
+    });
+    const reportId = createRes && createRes.reportId;
+    if (!reportId) throw new Error('no reportId returned');
+    console.log('[r20 traffic] requested report for ' + dateStr + ' — id=' + reportId);
+
+    // Step 2 — poll until DONE (or fail after ~3 min)
+    let docId = null;
+    const pollStart = Date.now();
+    const maxWait = 180000; // 3 minutes
+    while (Date.now() - pollStart < maxWait) {
+      await new Promise(function(r){ setTimeout(r, 8000); });
+      const status = await spApiGet('/reports/2021-06-30/reports/' + encodeURIComponent(reportId));
+      const procStatus = status && status.processingStatus;
+      if (procStatus === 'DONE') {
+        docId = status.reportDocumentId;
+        break;
+      } else if (procStatus === 'CANCELLED' || procStatus === 'FATAL') {
+        throw new Error('report status ' + procStatus);
+      }
+    }
+    if (!docId) throw new Error('report polling timed out');
+
+    // Step 3 — fetch the document URL, then download + parse
+    const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
+    const docUrl = docMeta && docMeta.url;
+    if (!docUrl) throw new Error('no document url');
+    const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'text' });
+    let payload;
+    try { payload = JSON.parse(docRes.data); }
+    catch(e) { throw new Error('failed to parse report JSON: ' + e.message); }
+
+    // Step 4 — extract per-ASIN rows. Shape:
+    // payload.salesAndTrafficByAsin = [{ parentAsin, childAsin, sku, sales: {...}, traffic: {...} }]
+    const rows = (payload && payload.salesAndTrafficByAsin) || [];
+    let inserted = 0;
+    for (const r of rows) {
+      const asin = r.childAsin || r.parentAsin;
+      if (!asin) continue;
+      const traffic = r.traffic || {};
+      const sales = r.sales || {};
+      const buyBoxPct = traffic.buyBoxPercentage != null ? parseFloat(traffic.buyBoxPercentage) : null;
+      const sessions = traffic.sessions != null ? parseInt(traffic.sessions) : null;
+      const pageViews = traffic.pageViews != null ? parseInt(traffic.pageViews) : null;
+      const unitsOrdered = sales.unitsOrdered != null ? parseInt(sales.unitsOrdered) : null;
+      const orderedSales = (sales.orderedProductSales && sales.orderedProductSales.amount != null) ?
+        parseFloat(sales.orderedProductSales.amount) : null;
+      try {
+        await db.query(
+          "INSERT INTO amazon_traffic_snapshots " +
+          "(asin, report_date, buy_box_pct, sessions, page_views, units_ordered, ordered_product_sales, fetched_at) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,NOW()) " +
+          "ON CONFLICT (asin, report_date) DO UPDATE SET " +
+          "buy_box_pct=EXCLUDED.buy_box_pct, sessions=EXCLUDED.sessions, " +
+          "page_views=EXCLUDED.page_views, units_ordered=EXCLUDED.units_ordered, " +
+          "ordered_product_sales=EXCLUDED.ordered_product_sales, fetched_at=NOW()",
+          [asin, dateStr, buyBoxPct, sessions, pageViews, unitsOrdered, orderedSales]
+        );
+        inserted++;
+      } catch(e) {
+        console.error('[r20 traffic] insert failed for ' + asin + ' ' + dateStr + ': ' + e.message);
+      }
+    }
+    console.log('[r20 traffic] ' + dateStr + ' — ' + inserted + ' rows inserted');
+    return { ok: true, date: dateStr, rows: inserted };
+  } catch(e) {
+    console.error('[r20 traffic] FAILED for ' + dateStr + ': ' + e.message);
+    return { ok: false, date: dateStr, error: e.message };
   }
 }
 
@@ -739,7 +1075,15 @@ async function syncCampaigns() {
       const remaining = Math.max(0, budget - spend);
       const pct = budget > 0 ? Math.round((spend / budget) * 100) : 0;
       const portfolioName = c.portfolioId ? (state.portfolios[c.portfolioId] || '') : '';
-      const agent = portfolioName ? portfolioName.replace('@', '').split(' ')[0] : '';
+      // r20: when no portfolio (or portfolio name doesn't yield an agent), fall back to
+      // parsing the campaign name for an agent prefix ("Satyam | Vibration Plate Auto" → Satyam).
+      // This routes wasted spend on un-portfolioed campaigns into the right agent's row
+      // instead of all dumping into "Unassigned".
+      let agent = portfolioName ? portfolioName.replace('@', '').split(' ')[0] : '';
+      if (!agent) {
+        const parsed = parseCampaignName(c.name || '');
+        if (parsed && parsed.agent) agent = parsed.agent;
+      }
       return {
         campaignId: c.campaignId,
         name: c.name || '',
@@ -877,6 +1221,42 @@ async function initDB() {
         hidden_at TIMESTAMP DEFAULT NOW(),
         reason TEXT
       );
+
+      -- r20: amazon_pricing_signals — cached SP-API operational metrics per ASIN.
+      -- Refreshed by cron at 03:30 London. Stale > 36h on UI surfaces "—".
+      -- price_vs_lowest = your_price - lowest_competitor_price (negative = we are cheaper).
+      CREATE TABLE IF NOT EXISTS amazon_pricing_signals (
+        asin TEXT PRIMARY KEY,
+        your_price NUMERIC(10,2),
+        lowest_competitor_price NUMERIC(10,2),
+        price_vs_lowest NUMERIC(10,2),
+        reviews_count INTEGER,
+        reviews_avg NUMERIC(3,2),
+        last_content_update DATE,
+        fulfillable_qty INTEGER,
+        velocity_30d NUMERIC(8,2),
+        stock_cover_days NUMERIC(8,1),
+        last_error TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_pricing_signals_fetched ON amazon_pricing_signals(fetched_at);
+
+      -- r20: amazon_traffic_snapshots — daily Buy Box %, sessions, page views, units
+      -- pulled from GET_SALES_AND_TRAFFIC_REPORT (Detail Page Sales and Traffic by Child Item).
+      -- Buy Box win % on the product card is rolling 7-day avg from this table.
+      CREATE TABLE IF NOT EXISTS amazon_traffic_snapshots (
+        asin TEXT NOT NULL,
+        report_date DATE NOT NULL,
+        buy_box_pct NUMERIC(5,2),
+        sessions INTEGER,
+        page_views INTEGER,
+        units_ordered INTEGER,
+        ordered_product_sales NUMERIC(10,2),
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (asin, report_date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_traffic_snapshots_date ON amazon_traffic_snapshots(report_date);
+      CREATE INDEX IF NOT EXISTS idx_amazon_traffic_snapshots_asin ON amazon_traffic_snapshots(asin);
     `);
     console.log('Database connected and tables ready');
     await initTasksTable();
@@ -1901,7 +2281,16 @@ app.get('/api/wasted-by-agent', async function(req, res) {
         const spend = parseFloat(c.spend || 0);
         const sales = parseFloat(c.sales || 0);
         if (!(spend > 0 && (sales === 0 || c.sales === null))) return;
-        const agent = c.agent || c.agentName || 'Unassigned';
+        // r20: post-matcher fallback. If agent was not stored on the snapshot
+        // (older snapshots, or campaigns with no portfolio), parse the name.
+        let agent = c.agent || c.agentName || '';
+        if (!agent) {
+          try {
+            const parsed = parseCampaignName(c.name || '');
+            if (parsed && parsed.agent) agent = parsed.agent;
+          } catch(e) {}
+        }
+        if (!agent) agent = 'Unassigned';
         allAgents.add(agent);
         if (!wasteByAgentByDay[agent]) wasteByAgentByDay[agent] = {};
         wasteByAgentByDay[agent][day] = (wasteByAgentByDay[agent][day] || 0) + spend;
@@ -2502,6 +2891,83 @@ app.get('/api/admin/sp-api/test-listings', async function(req, res) {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// r20 — Admin endpoints for SP-API signal refresh + Sales & Traffic backfill
+// ════════════════════════════════════════════════════════════════════════════
+
+// POST /api/admin/refresh-pricing-signals — manually trigger the 03:30 cron
+// for all active ASINs. Returns counts. Owner+manager only.
+app.post('/api/admin/refresh-pricing-signals', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  try {
+    // Run async, don't make the user wait — but return a quick "started" response.
+    // For one-off ASIN testing pass ?asin=B0...
+    const oneAsin = String(req.query.asin || '').trim();
+    if (oneAsin && /^B[0-9A-Z]{9}$/.test(oneAsin)) {
+      const skuRow = db ? (await db.query('SELECT sku FROM amazon_products WHERE asin=$1 LIMIT 1', [oneAsin])).rows[0] : null;
+      const result = await refreshAmazonPricingSignals({ onlyAsin: oneAsin });
+      const sigRow = db ? (await db.query('SELECT * FROM amazon_pricing_signals WHERE asin=$1', [oneAsin])).rows[0] : null;
+      return res.json({ ok: true, oneAsin: oneAsin, result: result, row: sigRow });
+    }
+    refreshAmazonPricingSignals({}).catch(function(e){ console.error('[admin] refresh-pricing-signals: ' + e.message); });
+    res.json({ ok: true, message: 'Refresh started in background. Check logs and amazon_pricing_signals table.' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
+// Reports come back async, so this is fire-and-forget. Owner+manager only.
+app.post('/api/admin/backfill-traffic', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  const days = Math.min(60, Math.max(1, parseInt(req.query.days || '30')));
+  try {
+    // Build date list — yesterday backwards
+    const dates = [];
+    const now = new Date();
+    for (let i = 1; i <= days; i++) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      dates.push(d.toISOString().slice(0, 10));
+    }
+    res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each report takes ~30-90s. Total ~' + Math.ceil(days * 1) + ' min.', dates: dates });
+    // Run sequentially in background — Amazon limits report concurrency
+    (async function() {
+      for (let i = 0; i < dates.length; i++) {
+        try { await fetchSalesAndTrafficReport(dates[i]); }
+        catch(e) { console.error('[admin] backfill ' + dates[i] + ': ' + e.message); }
+      }
+      console.log('[admin] traffic backfill complete (' + days + ' days)');
+    })();
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/pricing-signals-status — show coverage of the cache.
+// Useful for verifying after deploy that the cron is running.
+app.get('/api/admin/pricing-signals-status', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!db) return res.json({ error: 'no DB' });
+  try {
+    const totals = await db.query("SELECT COUNT(*) AS total, " +
+      "COUNT(your_price) AS with_price, COUNT(lowest_competitor_price) AS with_comp, " +
+      "COUNT(reviews_count) AS with_reviews, COUNT(last_content_update) AS with_content_date, " +
+      "COUNT(fulfillable_qty) AS with_inventory, COUNT(stock_cover_days) AS with_stock_cover, " +
+      "MAX(fetched_at) AS last_refresh FROM amazon_pricing_signals");
+    const traffic = await db.query("SELECT COUNT(DISTINCT asin) AS asins, COUNT(*) AS rows, " +
+      "MAX(report_date) AS latest_date, MIN(report_date) AS earliest_date FROM amazon_traffic_snapshots");
+    res.json({ pricingSignals: totals.rows[0], trafficSnapshots: traffic.rows[0] });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // r9 — Amazon products API: parent-grouped view with sales + ad coverage
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -2530,6 +2996,7 @@ const ACOS_TARGET = 20; // company target — could come from settings later
 function computeAmazonDiagnosis(p) {
   // p has: parent, totalSales, totalUnits, adCoveragePct, advertisedChildren, totalChildren,
   //        campaignSpend, campaignSales, acos, campaignCount, autoCampaignsExist
+  // r20: also receives `signals` — buy_box_pct_7d, stock_cover_days, reviews_*, price_vs_lowest, content_age_days
   // Plus parent.buyable_count, parent.inactive_count
   const parent = p.parent;
   const inactiveCount = parent.inactive_count || 0;
@@ -2537,8 +3004,25 @@ function computeAmazonDiagnosis(p) {
   const hasSales = p.totalSales > 0;
   const hasSpend = p.campaignSpend > 0;
   const hasCampaigns = p.campaignCount > 0;
+  const sig = p.signals || {};
 
   // ── URGENT cases (priority 1) ──────────────────────────────────────────────
+  // r20: Stock-out imminent — < 7 days cover and product is selling
+  if (sig.stock_cover_days != null && sig.stock_cover_days < 7 && hasSales) {
+    return {
+      priority: 1,
+      diagnosis: 'Only ' + sig.stock_cover_days + ' days of stock left at current sales rate (' + (sig.fulfillable_qty || 0) + ' units, ' + (sig.velocity_30d || 0).toFixed(1) + '/day)',
+      action: 'Send replenishment to FBA now — stock-out imminent'
+    };
+  }
+  // r20: Buy Box collapse — selling but losing the box more than half the time
+  if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 50 && hasSales) {
+    return {
+      priority: 1,
+      diagnosis: 'Buy Box only ' + sig.buy_box_pct_7d + '% over last 7 days — losing the offer to other sellers',
+      action: 'Check pricing vs competitors and any account/health issues'
+    };
+  }
   // Listing suspended/inactive
   if (inactiveCount > 0 && buyableCount === 0) {
     return {
@@ -2610,6 +3094,38 @@ function computeAmazonDiagnosis(p) {
       priority: 2,
       diagnosis: 'BUYABLE listing with no sales and no advertising in 7 days',
       action: 'Either launch test ads or de-prioritise the listing'
+    };
+  }
+  // r20: Stock cover < 30 days (less urgent than the < 7 day P1 case above)
+  if (sig.stock_cover_days != null && sig.stock_cover_days < 30 && hasSales) {
+    return {
+      priority: 2,
+      diagnosis: sig.stock_cover_days + ' days of stock at current sales rate (' + (sig.fulfillable_qty || 0) + ' units)',
+      action: 'Plan replenishment to FBA — < 30 days cover'
+    };
+  }
+  // r20: Priced materially above lowest competitor — likely losing Buy Box
+  if (sig.price_vs_lowest != null && sig.price_vs_lowest > 5 && hasSales) {
+    return {
+      priority: 2,
+      diagnosis: 'Priced £' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor (£' + (sig.your_price || 0).toFixed(2) + ' vs £' + (sig.lowest_competitor_price || 0).toFixed(2) + ')',
+      action: 'Review pricing — likely losing Buy Box and conversions'
+    };
+  }
+  // r20: Buy Box 50-80% — not catastrophic but losing some sales
+  if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 80 && hasSales) {
+    return {
+      priority: 2,
+      diagnosis: 'Buy Box ' + sig.buy_box_pct_7d + '% over last 7 days (target 90%+)',
+      action: 'Check pricing; ensure stock is sufficient and account health is green'
+    };
+  }
+  // r20: Content stale > 90 days — refresh A+ for SEO + conversion lift
+  if (sig.content_age_days != null && sig.content_age_days > 90 && hasSales) {
+    return {
+      priority: 2,
+      diagnosis: 'Listing content not updated for ' + sig.content_age_days + ' days — Amazon SEO benefits from refresh',
+      action: 'Refresh title keywords, bullets, and A+ content'
     };
   }
 
@@ -2755,6 +3271,48 @@ app.get('/api/amazon/products', async function(req, res) {
     salesRes.rows.forEach(function(row) {
       if (row.asin) salesByAsin[row.asin] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
       if (row.sku) salesBySku[row.sku] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
+    });
+
+    // r20: Pricing signals cache + traffic snapshots — load once for the whole request.
+    // Stale > 36h → treated as missing on the UI side. Buy Box rolling 7d avg here.
+    const STALE_HOURS = 36;
+    const signalsRes = await db.query(
+      "SELECT asin, your_price, lowest_competitor_price, price_vs_lowest, " +
+      "reviews_count, reviews_avg, last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, " +
+      "fetched_at, " +
+      "(EXTRACT(EPOCH FROM (NOW() - fetched_at)) / 3600) AS age_hours " +
+      "FROM amazon_pricing_signals"
+    );
+    const signalsByAsin = {};
+    signalsRes.rows.forEach(function(s) {
+      const stale = parseFloat(s.age_hours || 0) > STALE_HOURS;
+      signalsByAsin[s.asin] = {
+        your_price: stale ? null : (s.your_price != null ? parseFloat(s.your_price) : null),
+        lowest_competitor_price: stale ? null : (s.lowest_competitor_price != null ? parseFloat(s.lowest_competitor_price) : null),
+        price_vs_lowest: stale ? null : (s.price_vs_lowest != null ? parseFloat(s.price_vs_lowest) : null),
+        reviews_count: stale ? null : (s.reviews_count != null ? parseInt(s.reviews_count) : null),
+        reviews_avg: stale ? null : (s.reviews_avg != null ? parseFloat(s.reviews_avg) : null),
+        last_content_update: stale ? null : s.last_content_update,
+        fulfillable_qty: stale ? null : (s.fulfillable_qty != null ? parseInt(s.fulfillable_qty) : null),
+        velocity_30d: stale ? null : (s.velocity_30d != null ? parseFloat(s.velocity_30d) : null),
+        stock_cover_days: stale ? null : (s.stock_cover_days != null ? parseFloat(s.stock_cover_days) : null),
+        signals_stale: stale
+      };
+    });
+    // Buy Box win % rolling 7-day avg per ASIN, plus days-of-data so the UI can
+    // show "Building (N/7d)" until the window is full.
+    const trafficRes = await db.query(
+      "SELECT asin, AVG(buy_box_pct) AS buy_box_avg, COUNT(*) AS days " +
+      "FROM amazon_traffic_snapshots " +
+      "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' AND buy_box_pct IS NOT NULL " +
+      "GROUP BY asin"
+    );
+    const trafficByAsin = {};
+    trafficRes.rows.forEach(function(t) {
+      trafficByAsin[t.asin] = {
+        buy_box_pct_7d: t.buy_box_avg != null ? parseFloat(parseFloat(t.buy_box_avg).toFixed(1)) : null,
+        buy_box_days: parseInt(t.days || 0)
+      };
     });
 
     // r13: Active-window check — has the ASIN sold in last 60 days?
@@ -2970,6 +3528,71 @@ app.get('/api/amazon/products', async function(req, res) {
       const costPerConv = cs.conversions > 0 ? cs.spend / cs.conversions : null;
       // r13: Activity status — has any child sold in last 60 days?
       const activeRecent = parent.children.some(function(c){ return c.active_60d; });
+
+      // r20: aggregate signals across ASINs in this parent group.
+      // Strategy:
+      //   - Buy Box %: weighted avg by sessions if available, else simple avg.
+      //   - Stock cover: SUM of fulfillable_qty / SUM of velocity_30d (treats parent as one unit).
+      //   - Reviews: sum count, weighted-avg rating by count.
+      //   - Price vs lowest: take the primary (highest-revenue) child's value.
+      //   - Last content update: oldest across children (worst case wins, prompts refresh).
+      const childAsins = parent.children.map(function(c){ return c.asin; }).filter(Boolean);
+      let bbSum = 0, bbDays = 0, bbCount = 0;
+      let invQty = 0, invVel = 0, invHas = false;
+      let revSum = 0, revAvgNum = 0, revHas = false;
+      let lastUpd = null;
+      let staleCount = 0;
+      childAsins.forEach(function(asin) {
+        const sig = signalsByAsin[asin];
+        const tr = trafficByAsin[asin];
+        if (sig) {
+          if (sig.signals_stale) staleCount++;
+          if (sig.fulfillable_qty != null) { invQty += sig.fulfillable_qty; invHas = true; }
+          if (sig.velocity_30d != null) invVel += sig.velocity_30d;
+          if (sig.reviews_count != null) { revSum += sig.reviews_count; revHas = true; if (sig.reviews_avg != null) revAvgNum += sig.reviews_avg * sig.reviews_count; }
+          if (sig.last_content_update) {
+            if (!lastUpd || String(sig.last_content_update) < lastUpd) lastUpd = String(sig.last_content_update);
+          }
+        }
+        if (tr && tr.buy_box_pct_7d != null) {
+          bbSum += tr.buy_box_pct_7d; bbCount++;
+          if (tr.buy_box_days > bbDays) bbDays = tr.buy_box_days;
+        }
+      });
+      // Pick the primary child for price (the ASIN with most 7d revenue)
+      let primaryAsin = null, primaryRev = -1;
+      parent.children.forEach(function(c) {
+        if ((c.sales_7d || 0) > primaryRev) { primaryRev = c.sales_7d || 0; primaryAsin = c.asin; }
+      });
+      const primarySig = primaryAsin && signalsByAsin[primaryAsin] ? signalsByAsin[primaryAsin] : null;
+
+      const buyBoxPct7d = bbCount > 0 ? parseFloat((bbSum / bbCount).toFixed(1)) : null;
+      const stockCoverDays = (invHas && invVel > 0) ? parseFloat((invQty / invVel).toFixed(1)) : null;
+      const reviewsCount = revHas ? revSum : null;
+      const reviewsAvg = (revHas && revSum > 0) ? parseFloat((revAvgNum / revSum).toFixed(2)) : null;
+      // Days since last content update
+      let contentAgeDays = null;
+      if (lastUpd) {
+        const last = new Date(lastUpd + 'T00:00:00');
+        contentAgeDays = Math.floor((Date.now() - last.getTime()) / (24*3600*1000));
+      }
+
+      const signals = {
+        buy_box_pct_7d: buyBoxPct7d,
+        buy_box_days: bbDays,                        // 0..7 — used by UI to show "Building (N/7d)"
+        stock_cover_days: stockCoverDays,
+        fulfillable_qty: invHas ? invQty : null,
+        velocity_30d: invVel || null,
+        reviews_count: reviewsCount,
+        reviews_avg: reviewsAvg,
+        last_content_update: lastUpd,                // YYYY-MM-DD or null
+        content_age_days: contentAgeDays,            // null or integer
+        your_price: primarySig ? primarySig.your_price : null,
+        lowest_competitor_price: primarySig ? primarySig.lowest_competitor_price : null,
+        price_vs_lowest: primarySig ? primarySig.price_vs_lowest : null,
+        signals_stale_count: staleCount
+      };
+
       const dx = computeAmazonDiagnosis({
         parent: parent,
         totalSales: totalSales,
@@ -2981,7 +3604,8 @@ app.get('/api/amazon/products', async function(req, res) {
         campaignSales: cs.sales,
         acos: acos,
         campaignCount: cs.count,
-        autoCampaignsExist: autoCampaignsExist.value
+        autoCampaignsExist: autoCampaignsExist.value,
+        signals: signals
       });
       return Object.assign({}, parent, {
         asins: Array.from(parent.asins),
@@ -3002,7 +3626,8 @@ app.get('/api/amazon/products', async function(req, res) {
         active_60d: activeRecent,
         priority: dx.priority,
         diagnosis: dx.diagnosis,
-        action: dx.action
+        action: dx.action,
+        signals: signals
       });
     });
 
@@ -3142,6 +3767,61 @@ async function runListingCritique(asin, groupKey, modelId) {
     );
     const sales30d = salesRes.rows[0] || {};
 
+    // r20: Pull operational signals from cache + 7d Buy Box from traffic snapshots.
+    // These feed into the AI prompt so the critique reasons about pricing, stock,
+    // reviews, content age, and Buy Box win % alongside title/bullets/A+.
+    let signalsContext = '';
+    let signalsHash = '';
+    try {
+      const sigRows = await db.query(
+        "SELECT asin, your_price, lowest_competitor_price, price_vs_lowest, " +
+        "reviews_count, reviews_avg, last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, fetched_at " +
+        "FROM amazon_pricing_signals WHERE asin = ANY($1)", [childAsins]
+      );
+      const trRows = await db.query(
+        "SELECT asin, AVG(buy_box_pct) AS buy_box_avg, COUNT(*) AS days " +
+        "FROM amazon_traffic_snapshots " +
+        "WHERE asin = ANY($1) AND report_date >= CURRENT_DATE - INTERVAL '7 days' AND buy_box_pct IS NOT NULL " +
+        "GROUP BY asin", [childAsins]
+      );
+      const primarySig = sigRows.rows.find(function(r){ return r.asin === asin; }) || sigRows.rows[0] || null;
+      const primaryTr = trRows.rows.find(function(r){ return r.asin === asin; }) || trRows.rows[0] || null;
+      // Aggregate inventory + reviews across the family
+      let totalFulfill = 0, totalVel = 0, totalReviewCount = 0, weightedReviewSum = 0;
+      let oldestContent = null;
+      sigRows.rows.forEach(function(r){
+        if (r.fulfillable_qty != null) totalFulfill += parseInt(r.fulfillable_qty);
+        if (r.velocity_30d != null) totalVel += parseFloat(r.velocity_30d);
+        if (r.reviews_count != null) {
+          totalReviewCount += parseInt(r.reviews_count);
+          if (r.reviews_avg != null) weightedReviewSum += parseFloat(r.reviews_avg) * parseInt(r.reviews_count);
+        }
+        if (r.last_content_update) {
+          const d = String(r.last_content_update).slice(0, 10);
+          if (!oldestContent || d < oldestContent) oldestContent = d;
+        }
+      });
+      const familyStockCover = totalVel > 0 ? (totalFulfill / totalVel).toFixed(1) : null;
+      const familyReviewAvg = totalReviewCount > 0 ? (weightedReviewSum / totalReviewCount).toFixed(2) : null;
+      const contentAge = oldestContent ? Math.floor((Date.now() - new Date(oldestContent + 'T00:00:00').getTime()) / (24*3600*1000)) : null;
+      // Build hash for cache invalidation: one-line digest of all values
+      const hashSrc = [
+        primarySig ? primarySig.your_price : 'np',
+        primarySig ? primarySig.lowest_competitor_price : 'nlc',
+        familyStockCover, totalReviewCount, familyReviewAvg, contentAge,
+        primaryTr ? primaryTr.buy_box_avg : 'nbb', primaryTr ? primaryTr.days : '0'
+      ].join('|');
+      signalsHash = require('crypto').createHash('md5').update(hashSrc).digest('hex').slice(0, 12);
+      signalsContext = '\n--- Operational signals (SP-API + Sales & Traffic Report) ---\n' +
+        'Buy Box win % (last 7 days): ' + (primaryTr && primaryTr.buy_box_avg != null ? parseFloat(primaryTr.buy_box_avg).toFixed(1) + '% (' + primaryTr.days + ' days of data)' : '— (no traffic data yet)') + '\n' +
+        'Your price: ' + (primarySig && primarySig.your_price != null ? '£' + parseFloat(primarySig.your_price).toFixed(2) : '—') + '\n' +
+        'Lowest competitor (new): ' + (primarySig && primarySig.lowest_competitor_price != null ? '£' + parseFloat(primarySig.lowest_competitor_price).toFixed(2) : '—') + '\n' +
+        'Price vs lowest competitor: ' + (primarySig && primarySig.price_vs_lowest != null ? (primarySig.price_vs_lowest >= 0 ? '+£' : '-£') + Math.abs(parseFloat(primarySig.price_vs_lowest)).toFixed(2) + ' (positive = we are more expensive)' : '—') + '\n' +
+        'Stock cover: ' + (familyStockCover != null ? familyStockCover + ' days (' + totalFulfill + ' units fulfillable, ' + totalVel.toFixed(1) + ' units/day velocity)' : '—') + '\n' +
+        'Reviews: ' + (totalReviewCount > 0 ? totalReviewCount + ' reviews, average ' + familyReviewAvg + '★' : '— (no review data)') + '\n' +
+        'Last content update: ' + (oldestContent ? oldestContent + ' (' + contentAge + ' days ago)' + (contentAge > 90 ? ' ⚠ STALE' : '') : '—') + '\n';
+    } catch(e) { console.error('[amz-critique] signals context error: ' + e.message); }
+
     // Try to fetch the live Amazon page (UK)
     let livePageContext = '';
     try {
@@ -3228,6 +3908,7 @@ async function runListingCritique(asin, groupKey, modelId) {
       'Sales last 30 days: £' + parseFloat(sales30d.revenue || 0).toFixed(2) + ', ' + (sales30d.units || 0) + ' units, ' + (sales30d.orders || 0) + ' orders',
       'Owner agent: ' + (primary.owner_agent || 'unassigned'),
       livePageContext,
+      signalsContext,
       searchTermContext,
       '',
       'TASK: review this listing and identify the highest-impact issues. Focus on Amazon-specific factors:',
@@ -3235,11 +3916,14 @@ async function runListingCritique(asin, groupKey, modelId) {
       '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion',
       '3. Image quality and count (Amazon allows up to 9 — are they used?)',
       '4. A+ content — is it present? If not, that is a known conversion lift',
-      '5. Pricing concerns — multi-variant pricing spread, FBA vs FBM duplicates',
+      '5. Pricing concerns — multi-variant pricing spread, FBA vs FBM duplicates, PRICE VS LOWEST COMPETITOR (see Operational signals — if we are materially above the lowest "new" offer, this is likely the dominant Buy Box / conversion problem)',
       '6. Ad performance — given the search-term data above, identify wasted-spend terms that should be added as negatives, and high-converting terms to amplify',
-      '7. Review count — does the listing need more reviews to convert?',
+      '7. Reviews — count and average rating from Operational signals. < 50 reviews or < 4.0★ is a known conversion drag; recommend Vine, follow-up emails, or quality fixes',
+      '8. BUY BOX — if Buy Box win % is below 80% over the last 7 days, that is a P1 conversion issue. Diagnose (price, stock, account health) and recommend',
+      '9. STOCK COVER — if stock cover days is < 30, replenishment is urgent; below 7 it is critical. If we run out, ranking damage compounds',
+      '10. CONTENT FRESHNESS — if Last content update is > 90 days ago, Amazon SEO benefits from a refresh of title/bullets/A+',
       '',
-      'Rank fixes by IMPACT. Higher-impact fixes first. Be specific — when search-term data is available, name the actual search terms in your recommendations.',
+      'Rank fixes by IMPACT. Higher-impact fixes first. Be specific — when search-term data or operational signals are available, NAME the actual values (e.g. "Buy Box at 42% — losing the offer", "priced £8 above competitor").',
       '',
       'Return ONLY valid JSON (no markdown fences, no preamble) in this shape:',
       '{',
@@ -3276,10 +3960,10 @@ async function runListingCritique(asin, groupKey, modelId) {
       throw new Error('AI returned malformed response');
     }
 
-    // Cache result — store the model used as well so we know whether to re-run with Opus
+    // Cache result — store the model used + r20 signals hash so a fresh signal
+    // pull invalidates the cached critique on next read.
     try {
-      // Wrap critique to include model info
-      const cachePayload = Object.assign({}, critique, { _model: modelId });
+      const cachePayload = Object.assign({}, critique, { _model: modelId, _signals_hash: signalsHash || null });
       await db.query(
         "INSERT INTO amazon_critiques (asin, critique, cached_at) VALUES ($1, $2, NOW()) " +
         "ON CONFLICT (asin) DO UPDATE SET critique = $2, cached_at = NOW()",
@@ -3287,7 +3971,7 @@ async function runListingCritique(asin, groupKey, modelId) {
       );
     } catch(e) { console.error('[amz-critique] Cache write failed: ' + e.message); }
 
-    return { critique: critique, cached_at: new Date().toISOString(), model: modelId };
+    return { critique: critique, cached_at: new Date().toISOString(), model: modelId, signals_hash: signalsHash };
 }
 
 // r14b: Bulk critique — runs Haiku-based critique on all active products in background.
@@ -6500,6 +7184,25 @@ cron.schedule('30 2 * * *', function() {
 cron.schedule('0 6,14 * * *', function() {
   if (!spApiConfigured()) return;
   syncAmazonOrders(7).catch(function(e){ console.error('SP-API orders cron: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r20: Pricing signals refresh — 03:30 London. Runs after catalogue sync (02:30)
+// so we have all current ASINs to iterate, before orders sync (06:00).
+cron.schedule('30 3 * * *', function() {
+  if (!spApiConfigured()) return;
+  refreshAmazonPricingSignals({}).catch(function(e){ console.error('[r20-cron] pricing signals: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r20: Sales & Traffic Report — 04:00 London. Pulls yesterday's data
+// (Amazon's report has ~24h lag). Used for Buy Box win % rolling 7-day avg.
+cron.schedule('0 4 * * *', function() {
+  if (!spApiConfigured()) return;
+  // Yesterday in London time
+  const now = new Date();
+  const ldn = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+  ldn.setDate(ldn.getDate() - 1);
+  const dateStr = ldn.toISOString().slice(0, 10);
+  fetchSalesAndTrafficReport(dateStr).catch(function(e){ console.error('[r20-cron] traffic: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 async function advanceTaskStages() {
