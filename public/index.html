@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r21 (Kunal purged, product title search, AI critique → subtasks with dismiss-with-reason gating, Unknown-agents UI in Tasks) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r22 (mapping stripped, owner reassign kept, advertisedProduct report → true per-ASIN spend, day-7 review for Amazon tasks) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2728,6 +2728,26 @@ function renderTasks(tab) {
       repeatBanner = '<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:15px;color:#dc2626"><strong>🚨 REPEAT OFFENDER</strong> — This campaign has failed ' + (t.failure_count||2) + ' time(s) in the last 14 days. A different approach is needed, not the same quick fix.</div>';
     }
 
+    // r22: Day-7 review banner — when wdo >= 7 and no decision yet, show a
+    // prominent banner asking the agent to review. Click opens the day-7 modal.
+    let day7Banner = '';
+    if (t.at_day7) {
+      day7Banner = '<div style="background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:14px 16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:12px">' +
+        '<div>' +
+          '<div style="font-size:14px;font-weight:600;color:#92400E">📅 Day 7 review needed</div>' +
+          '<div style="font-size:12px;color:#92400E;margin-top:2px">This task has been open ' + (t.working_days_open || 0) + ' working days. Review the data and decide: carry on, archive, or stop.</div>' +
+        '</div>' +
+        '<button class="btn btn-primary" style="font-size:13px;flex-shrink:0" onclick="showAmzDay7ReviewModal(' + t.id + ')">Review now</button>' +
+      '</div>';
+    } else if (t.day7_decision) {
+      const labels = { carry_on: '▶ Carrying on', archive: '📦 Archived at day 7', stop: '🛑 Stopped at day 7' };
+      const colours = { carry_on: '#3B6D11', archive: '#854F0B', stop: '#791F1F' };
+      day7Banner = '<div style="background:#F8F8F4;border:1px solid #e5e5dc;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:' + (colours[t.day7_decision] || '#666') + '">' +
+        (labels[t.day7_decision] || t.day7_decision) +
+        (t.day7_note ? ' — <span style="color:#888;font-style:italic">' + escHtml(t.day7_note) + '</span>' : '') +
+      '</div>';
+    }
+
     // Action buttons based on status and tab
     let actionButtons = '';
     if (t.status === 'complete' || t.status === 'dismissed' || t.status === 'archived') {
@@ -2788,6 +2808,7 @@ function renderTasks(tab) {
     // r17: Whole card is clickable to open the detail modal. Action buttons inside use stopPropagation.
     return '<div class="ai-card" id="' + cardId + '" style="' + borderColor + ';cursor:pointer" onclick="openTaskDetailModal(' + t.id + ')">' +
       repeatBanner +
+      day7Banner +
       scalingCountdown +
       '<div class="ai-header">' +
         '<div class="ai-icon">' + problemIcon + '</div>' +
@@ -3130,6 +3151,27 @@ function openTaskDetailModal(taskId) {
   if (isRepeat) {
     sections.push('<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:15px;color:#dc2626"><strong>🚨 REPEAT OFFENDER</strong> — This campaign has failed ' + (t.failure_count||2) + ' time(s) in the last 14 days. A different approach is needed, not the same quick fix.</div>');
   }
+  // r22: Day-7 review banner inside the detail modal
+  if (t.at_day7) {
+    sections.push(
+      '<div style="background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:14px 16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:12px">' +
+        '<div>' +
+          '<div style="font-size:14px;font-weight:600;color:#92400E">📅 Day 7 review needed</div>' +
+          '<div style="font-size:12px;color:#92400E;margin-top:2px">This task has been open ' + (t.working_days_open || wdo) + ' working days. Pick a decision below.</div>' +
+        '</div>' +
+        '<button class="btn btn-primary" style="font-size:13px;flex-shrink:0" onclick="showAmzDay7ReviewModal(' + t.id + ')">Review now</button>' +
+      '</div>'
+    );
+  } else if (t.day7_decision) {
+    const labels = { carry_on: '▶ Carrying on', archive: '📦 Archived at day 7', stop: '🛑 Stopped at day 7' };
+    const colours = { carry_on: '#3B6D11', archive: '#854F0B', stop: '#791F1F' };
+    sections.push(
+      '<div style="background:#F8F8F4;border:1px solid #e5e5dc;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:13px;color:' + (colours[t.day7_decision] || '#666') + '">' +
+        (labels[t.day7_decision] || t.day7_decision) +
+        (t.day7_note ? ' — <span style="color:#888;font-style:italic">' + escHtml(t.day7_note) + '</span>' : '') +
+      '</div>'
+    );
+  }
   sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Problem:</strong> ' + escHtml(t.problem_detail || '—') + '</div>');
   sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Score:</strong> ' + (t.score || 0) + ' pts · <strong>Working days open:</strong> ' + wdo + ' · <strong>Stage:</strong> ' + stage + '</div>');
   if (t.first_action_at) {
@@ -3279,6 +3321,124 @@ function toggleTaskDetail(taskId) {
 }
 
 // ── Unified Task Action Modal ─────────────────────────────────────────────
+// ─── r22: AMAZON DAY-7 REVIEW MODAL ─────────────────────────────────────────
+// Mirrors Google flow. Shows 7d-recent vs 7d-prior metrics, asks agent to
+// pick Carry on / Archive / Stop with note. Decision goes to /day7-decision.
+
+async function showAmzDay7ReviewModal(taskId) {
+  const existing = document.getElementById('task-action-modal');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'task-action-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:white;padding:32px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:680px;max-width:95vw;max-height:90vh;overflow-y:auto">' +
+      '<div style="font-size:18px;font-weight:700;margin-bottom:4px">📅 Day 7 review — what now?</div>' +
+      '<div style="font-size:13px;color:#888;margin-bottom:18px">This task has been open for 7 working days. Review the 7-day data below and pick a decision. The task cannot stay in flight without one.</div>' +
+      '<div id="d7-metrics" style="background:#F8F8F4;border:1px solid #e5e5dc;border-radius:8px;padding:14px;margin-bottom:16px"><div style="color:#888;font-size:13px">Loading metrics…</div></div>' +
+      '<div style="font-size:13px;font-weight:600;color:#333;margin-bottom:8px">Decision</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:12px">' +
+        '<label class="d7-decision-opt" style="flex:1;padding:12px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center" onclick="selectD7Decision(\'carry_on\')">' +
+          '<input type="radio" name="d7decision" value="carry_on" id="d7-carry_on" style="display:none">' +
+          '<div style="font-size:13px;font-weight:600">▶ Carry on</div>' +
+          '<div style="font-size:11px;color:#888;margin-top:2px">Working. Stay the course.</div>' +
+        '</label>' +
+        '<label class="d7-decision-opt" style="flex:1;padding:12px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center" onclick="selectD7Decision(\'archive\')">' +
+          '<input type="radio" name="d7decision" value="archive" id="d7-archive" style="display:none">' +
+          '<div style="font-size:13px;font-weight:600">📦 Archive</div>' +
+          '<div style="font-size:11px;color:#888;margin-top:2px">Job done. Park it.</div>' +
+        '</label>' +
+        '<label class="d7-decision-opt" style="flex:1;padding:12px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center" onclick="selectD7Decision(\'stop\')">' +
+          '<input type="radio" name="d7decision" value="stop" id="d7-stop" style="display:none">' +
+          '<div style="font-size:13px;font-weight:600">🛑 Stop</div>' +
+          '<div style="font-size:11px;color:#888;margin-top:2px">Not working. Dismiss.</div>' +
+        '</label>' +
+      '</div>' +
+      '<textarea id="d7-note" placeholder="Why this decision? Be specific so the team and AI learn — e.g. \'ACOS dropped from 35% to 19%, scaling working\' or \'Spent £200, zero conversions, dismissing\'..." style="width:100%;padding:12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;height:90px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>' +
+      '<div id="d7-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none"></div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">' +
+        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;task-action-modal&quot;).remove()">Cancel</button>' +
+        '<button class="btn btn-primary" style="font-size:13px" onclick="submitD7Decision(' + taskId + ')">Submit decision</button>' +
+      '</div>' +
+    '</div>';
+  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  // Load metrics
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/review-metrics', { headers: getAuthHeaders() });
+    const j = await r.json();
+    renderD7Metrics(j);
+  } catch(e) {
+    document.getElementById('d7-metrics').innerHTML = '<div style="color:#e53e3e;font-size:13px">Could not load metrics: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderD7Metrics(d) {
+  const el = document.getElementById('d7-metrics');
+  if (!el) return;
+  if (!d || !d.recent_7d) { el.innerHTML = '<div style="font-size:13px;color:#888">No metric data available — you can still make the decision based on what you know.</div>'; return; }
+  function fmtMoney(n){ return '£' + (n||0).toFixed(0); }
+  function trendBadge(pct, biggerIsBetter) {
+    if (pct === null || pct === undefined || isNaN(pct)) return '<span style="color:#aaa;font-size:11px">— vs prior 7d</span>';
+    const isUp = pct > 0;
+    const isPositive = biggerIsBetter ? isUp : !isUp;
+    const colour = Math.abs(pct) < 5 ? '#888' : (isPositive ? '#3B6D11' : '#791F1F');
+    const arrow = isUp ? '▲' : '▼';
+    return '<span style="color:' + colour + ';font-size:11px;font-weight:600">' + arrow + ' ' + Math.abs(pct).toFixed(0) + '% vs prior 7d</span>';
+  }
+  const r = d.recent_7d;
+  const t = d.trend_pct || {};
+  el.innerHTML =
+    '<div style="font-size:12px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px">Last 7 days · campaign performance</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">' +
+      '<div><div style="font-size:11px;color:#888">SPEND</div><div style="font-size:18px;font-weight:600">' + fmtMoney(r.spend) + '</div>' + trendBadge(t.spend, false) + '</div>' +
+      '<div><div style="font-size:11px;color:#888">SALES</div><div style="font-size:18px;font-weight:600">' + fmtMoney(r.sales) + '</div>' + trendBadge(t.sales, true) + '</div>' +
+      '<div><div style="font-size:11px;color:#888">ACOS</div><div style="font-size:18px;font-weight:600">' + (r.acos != null ? r.acos + '%' : '—') + '</div><span style="color:#888;font-size:11px">' + (d.prior_7d.acos != null ? 'was ' + d.prior_7d.acos + '%' : '') + '</span></div>' +
+      '<div><div style="font-size:11px;color:#888">CONVERSIONS</div><div style="font-size:18px;font-weight:600">' + (r.conversions || 0) + '</div>' + trendBadge(t.clicks, true) + '</div>' +
+    '</div>' +
+    (r.days_with_data < 7 ? '<div style="font-size:11px;color:#888;margin-top:10px;font-style:italic">Note: only ' + r.days_with_data + ' day(s) of data available — campaign may be newer.</div>' : '');
+}
+
+function selectD7Decision(d) {
+  document.querySelectorAll('.d7-decision-opt').forEach(function(el){
+    el.style.borderColor = '#e5e5e5';
+    el.style.background = 'white';
+  });
+  const sel = document.getElementById('d7-' + d);
+  if (sel) {
+    sel.checked = true;
+    const lbl = sel.parentElement;
+    if (lbl) {
+      lbl.style.borderColor = d === 'carry_on' ? '#3B6D11' : (d === 'archive' ? '#854F0B' : '#791F1F');
+      lbl.style.background = d === 'carry_on' ? '#EAF3DE' : (d === 'archive' ? '#FAEEDA' : '#FCEBEB');
+    }
+  }
+}
+
+async function submitD7Decision(taskId) {
+  const radios = document.querySelectorAll('input[name="d7decision"]:checked');
+  const decision = radios.length ? radios[0].value : null;
+  const note = (document.getElementById('d7-note').value || '').trim();
+  const errEl = document.getElementById('d7-error');
+  if (!decision) { errEl.textContent = 'Pick a decision: Carry on, Archive, or Stop.'; errEl.style.display = ''; return; }
+  if (!note) { errEl.textContent = 'Note is required — explain your decision.'; errEl.style.display = ''; return; }
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/day7-decision', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ decision: decision, note: note })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { errEl.textContent = 'Failed: ' + (j.error || 'unknown'); errEl.style.display = ''; return; }
+    const modal = document.getElementById('task-action-modal');
+    if (modal) modal.remove();
+    await loadTasks();
+  } catch(e) {
+    errEl.textContent = 'Failed: ' + e.message;
+    errEl.style.display = '';
+  }
+}
+
 function showTaskModal(taskId, action) {
   // Remove any existing modal
   const existing = document.getElementById('task-action-modal');
@@ -3305,13 +3465,13 @@ function showTaskModal(taskId, action) {
   overlay.id = 'task-action-modal';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML =
-    '<div style="background:white;padding:28px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:420px;max-width:95vw">' +
-      '<div style="font-size:16px;font-weight:700;margin-bottom:6px">' + (titles[action]||action) + '</div>' +
-      '<div style="font-size:12px;color:#888;margin-bottom:16px">Note is required — this helps the team learn and AI to improve.</div>' +
+    '<div style="background:white;padding:32px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:600px;max-width:95vw">' +
+      '<div style="font-size:18px;font-weight:700;margin-bottom:6px">' + (titles[action]||action) + '</div>' +
+      '<div style="font-size:13px;color:#888;margin-bottom:18px">Note is required — this helps the team learn and AI to improve.</div>' +
       dismissReasonHtml +
-      '<textarea id="tm-notes" placeholder="' + (placeholders[action]||'Add your notes...') + '" style="width:100%;padding:10px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;height:90px;resize:vertical;font-family:inherit;box-sizing:border-box" required></textarea>' +
+      '<textarea id="tm-notes" placeholder="' + (placeholders[action]||'Add your notes...') + '" style="width:100%;padding:12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;height:120px;resize:vertical;font-family:inherit;box-sizing:border-box" required></textarea>' +
       '<div id="tm-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none">Please add a note before continuing.</div>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">' +
         '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;task-action-modal&quot;).remove()">Cancel</button>' +
         '<button class="btn ' + (btnClass[action]||'btn-primary') + '" style="font-size:13px" onclick="submitTaskModal(' + taskId + ',&quot;' + action + '&quot;)">' + (btnLabels[action]||'Confirm') + '</button>' +
       '</div>' +
@@ -4012,14 +4172,6 @@ function amzProductCard(p, idx, canEditOwner, agents) {
   // "Not in any campaign" warning all stripped. The matcher was unreliable; the
   // diagnosis line carries the agent-actionable info now. Bobby will re-do
   // ASIN→campaign mapping with a manual approach later.
-  // r21: campaign-mapping indicator — shows how many campaigns are mapped to
-  // this product. Click is the same as opening the modal — we let the card
-  // click bubble through to openAmzProductModal then user clicks Manage
-  // campaigns. Badge alone signals "needs mapping" vs "all set".
-  const mappedCount = (p.campaigns || []).length;
-  const campaignBadge = mappedCount > 0
-    ? '<span class="amz-priority-pill amz-priority-3" title="' + mappedCount + ' campaign(s) mapped">📊 ' + mappedCount + ' campaign' + (mappedCount === 1 ? '' : 's') + '</span>'
-    : '<span class="amz-priority-pill amz-priority-2" title="No campaigns mapped to this product yet — open and click 🔗 Manage campaigns">📊 No campaigns</span>';
   // r16: Hide/Restore button — appears in card header
   const isHidden = amzProductView === 'hidden';
   const safeHideKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
@@ -4031,7 +4183,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
-      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + campaignBadge + hideBtn + '</div>' +
+      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + hideBtn + '</div>' +
       diagnosisLine +
       actionLine +
       stats +
@@ -4270,8 +4422,6 @@ function buildAmzProductModalBody(p) {
     // Action bar
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">',
       '<button class="btn btn-primary" onclick="amzAssignTask(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">📋 Assign as task</button>',
-      // r21: explicit campaign mapping (replaces gutted matcher)
-      '<button class="btn btn-ghost" onclick="showCampaignMappingModal(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">🔗 Manage campaigns</button>',
       // r21: owner reassign — owner+manager only (server enforces too)
       ((window._meCache && (((window._meCache.role||'').toLowerCase()==='owner') || ((window._meCache.role||'').toLowerCase()==='manager') || ((window._meCache.department||'').toLowerCase()==='manager'))) ? '<button class="btn btn-ghost" onclick="showOwnerReassignModal(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',\'' + escHtml(p.owner_agent || '').replace(/'/g, "\\'") + '\')" style="font-size:13px">👤 Reassign owner</button>' : ''),
       ((p.asins || [])[0] ? '<a class="btn btn-ghost" href="https://www.amazon.co.uk/dp/' + escHtml(p.asins[0]) + '" target="_blank">Open on Amazon →</a>' : ''),
@@ -4811,156 +4961,6 @@ async function amzAssignTask(groupKey) {
 function closeAssignTaskModal() {
   const m = document.getElementById('amz-assign-task-modal');
   if (m) m.remove();
-}
-
-// ─── r21: PRODUCT ↔ CAMPAIGN MAPPING MODAL ──────────────────────────────────
-async function showCampaignMappingModal(parentSku) {
-  const existing = document.getElementById('amz-campaign-map-modal');
-  if (existing) existing.remove();
-
-  // Find the product so we can show its title
-  const cache = amzProductsCache && amzProductsCache.products;
-  const p = cache ? cache.find(function(x){ return x.parent_sku === parentSku; }) : null;
-  const title = p && p.title ? p.title : parentSku;
-
-  // Skeleton
-  const overlay = document.createElement('div');
-  overlay.id = 'amz-campaign-map-modal';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:center;justify-content:center;padding:20px';
-  overlay.innerHTML =
-    '<div style="background:var(--surface);width:100%;max-width:720px;max-height:88vh;display:flex;flex-direction:column;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4)">' +
-      '<div style="padding:20px 22px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start">' +
-        '<div style="flex:1;min-width:0;margin-right:12px">' +
-          '<div style="font-size:16px;font-weight:600;margin-bottom:4px">🔗 Manage campaigns</div>' +
-          '<div style="font-size:12px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(title) + '</div>' +
-        '</div>' +
-        '<button class="btn btn-ghost" onclick="closeCampaignMappingModal()" style="font-size:14px">✕</button>' +
-      '</div>' +
-      '<div id="amz-campaign-map-body" style="flex:1;overflow-y:auto;padding:18px 22px"><div style="color:var(--text3);font-size:13px;text-align:center;padding:30px">Loading campaigns…</div></div>' +
-      '<div style="padding:14px 22px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
-        '<div id="amz-campaign-map-status" style="font-size:12px;color:var(--text3)"></div>' +
-        '<div style="display:flex;gap:8px">' +
-          '<button class="btn btn-ghost" onclick="closeCampaignMappingModal()" style="font-size:13px">Cancel</button>' +
-          '<button class="btn btn-primary" id="amz-campaign-map-save" onclick="submitCampaignMapping(\'' + escHtml(parentSku).replace(/'/g, "\\'") + '\')" style="font-size:13px">Save mapping</button>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
-  overlay.addEventListener('click', function(e){ if(e.target===overlay) closeCampaignMappingModal(); });
-  document.body.appendChild(overlay);
-
-  // Load mapping data
-  try {
-    const r = await fetch('/api/amazon/products/' + encodeURIComponent(parentSku) + '/campaigns', { headers: getAuthHeaders() });
-    const j = await r.json();
-    renderCampaignMappingBody(parentSku, j.mapped || [], j.available || [], j.total_universe || 0, j.total_mapped_globally || 0);
-  } catch(e) {
-    document.getElementById('amz-campaign-map-body').innerHTML = '<div style="color:var(--red);font-size:13px;text-align:center;padding:30px">Could not load campaigns: ' + escHtml(e.message) + '</div>';
-  }
-}
-
-function renderCampaignMappingBody(parentSku, mapped, available, totalUniverse, totalMapped) {
-  const el = document.getElementById('amz-campaign-map-body');
-  if (!el) return;
-
-  // Top: status line
-  const statusLine =
-    '<div style="font-size:12px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:6px">' +
-      'Universe: ' + totalUniverse + ' campaigns active in last 14 days · ' +
-      totalMapped + ' already mapped across all products · ' +
-      available.length + ' still available below.' +
-    '</div>';
-
-  // Currently-mapped section
-  const mappedItems = mapped.length > 0
-    ? mapped.map(function(m){
-        const cleanName = m.campaign_name && m.campaign_name.replace(/^[A-Za-z\s]{3,30}\s*[|@]\s*/, '').trim() || m.campaign_name || '';
-        return (
-          '<label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#EAF3DE;border:1px solid #cfe5b3;border-radius:6px;margin-bottom:6px;cursor:pointer">' +
-            '<input type="checkbox" class="amz-cm-checkbox" data-cid="' + escHtml(m.campaign_id) + '" checked style="width:16px;height:16px">' +
-            '<div style="flex:1;min-width:0">' +
-              '<div style="font-size:13px;color:var(--text);font-weight:500">' + escHtml(cleanName || m.campaign_name || m.campaign_id) + '</div>' +
-              '<div style="font-size:11px;color:var(--text3)">Mapped by ' + escHtml(m.mapped_by || 'unknown') + '</div>' +
-            '</div>' +
-          '</label>'
-        );
-      }).join('')
-    : '<div style="font-size:12px;color:var(--text3);padding:8px;font-style:italic">No campaigns mapped yet — pick from the list below.</div>';
-
-  // Available section — searchable
-  const availableHtml = available.length > 0
-    ? '<input id="amz-cm-search" type="text" placeholder="Search campaign names..." oninput="filterAmzCampaignMapList()" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;font-family:inherit">' +
-      '<div id="amz-cm-available-list" style="max-height:38vh;overflow-y:auto">' +
-      available.map(function(c){
-        const agentBadge = c.agent ? '<span style="font-size:10px;color:#791F1F;background:#FCEBEB;padding:1px 6px;border-radius:3px;margin-left:6px">' + escHtml(c.agent) + '</span>' : '';
-        return (
-          '<label class="amz-cm-row" data-search="' + escHtml((c.display_name || '').toLowerCase() + ' ' + (c.campaign_name || '').toLowerCase()) + '" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer;background:white">' +
-            '<input type="checkbox" class="amz-cm-checkbox" data-cid="' + escHtml(c.campaign_id) + '" style="width:16px;height:16px">' +
-            '<div style="flex:1;min-width:0">' +
-              '<div style="font-size:13px;color:var(--text)">' + escHtml(c.display_name || c.campaign_name) + agentBadge + '</div>' +
-              '<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(c.campaign_name) + '</div>' +
-            '</div>' +
-          '</label>'
-        );
-      }).join('') +
-      '</div>'
-    : '<div style="font-size:12px;color:var(--text3);padding:8px;text-align:center;font-style:italic">No more available campaigns. Either everything\'s mapped, or no recent snapshots.</div>';
-
-  el.innerHTML =
-    statusLine +
-    '<div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Currently mapped (' + mapped.length + ')</div>' +
-    mappedItems +
-    '<div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 6px">Available campaigns (' + available.length + ')</div>' +
-    availableHtml;
-
-  // Update status counter on tick changes
-  function updateCount() {
-    const checked = el.querySelectorAll('.amz-cm-checkbox:checked').length;
-    const status = document.getElementById('amz-campaign-map-status');
-    if (status) status.textContent = checked + ' campaign' + (checked === 1 ? '' : 's') + ' selected';
-  }
-  el.querySelectorAll('.amz-cm-checkbox').forEach(function(cb){ cb.addEventListener('change', updateCount); });
-  updateCount();
-}
-
-function filterAmzCampaignMapList() {
-  const q = (document.getElementById('amz-cm-search').value || '').toLowerCase().trim();
-  const rows = document.querySelectorAll('#amz-cm-available-list .amz-cm-row');
-  rows.forEach(function(r){
-    const haystack = r.dataset.search || '';
-    r.style.display = (!q || haystack.indexOf(q) !== -1) ? '' : 'none';
-  });
-}
-
-function closeCampaignMappingModal() {
-  const m = document.getElementById('amz-campaign-map-modal');
-  if (m) m.remove();
-}
-
-async function submitCampaignMapping(parentSku) {
-  const checkboxes = document.querySelectorAll('#amz-campaign-map-modal .amz-cm-checkbox:checked');
-  const ids = Array.from(checkboxes).map(function(cb){ return cb.dataset.cid; }).filter(Boolean);
-  const btn = document.getElementById('amz-campaign-map-save');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-  try {
-    const r = await fetch('/api/amazon/products/' + encodeURIComponent(parentSku) + '/campaigns', {
-      method: 'POST',
-      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
-      body: JSON.stringify({ campaign_ids: ids })
-    });
-    const j = await r.json();
-    if (!r.ok || j.error) {
-      alert('Save failed: ' + (j.error || 'unknown'));
-      if (btn) { btn.disabled = false; btn.textContent = 'Save mapping'; }
-      return;
-    }
-    closeCampaignMappingModal();
-    // Reload products so the card updates with the new mapping
-    if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
-    alert('Saved — ' + j.mapped + ' campaign' + (j.mapped === 1 ? '' : 's') + ' mapped to this product.');
-  } catch(e) {
-    alert('Save failed: ' + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = 'Save mapping'; }
-  }
 }
 
 // ─── r21: PRODUCT OWNER REASSIGN MODAL ──────────────────────────────────────

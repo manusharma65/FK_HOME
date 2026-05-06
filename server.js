@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r21 (Kunal purged from active lists, product title search, AI critique → subtasks on task assignment with dismiss-with-reason gating, Unknown-agents UI in Tasks modal)
+// CampaignPulse — deploy marker 2026-05-06 r22 (mapping stripped + owner reassign kept, advertisedProduct report → per-ASIN ad spend, day-7 review for Amazon tasks mirrors Google flow)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1441,6 +1441,30 @@ async function initDB() {
       );
       CREATE INDEX IF NOT EXISTS idx_amazon_traffic_snapshots_date ON amazon_traffic_snapshots(report_date);
       CREATE INDEX IF NOT EXISTS idx_amazon_traffic_snapshots_asin ON amazon_traffic_snapshots(asin);
+
+      -- r22: amazon_asin_ad_performance — per-ASIN per-campaign per-day ad spend
+      -- pulled from Sponsored Products advertisedProduct report. Replaces the
+      -- gutted campaign-matcher: each product card shows TRUE per-ASIN ad spend
+      -- (multiple ASINs in one campaign get their share, multiple campaigns
+      -- per ASIN get summed). Daily cron at 04:30 London pulls yesterday.
+      CREATE TABLE IF NOT EXISTS amazon_asin_ad_performance (
+        asin TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        ad_group_id TEXT NOT NULL DEFAULT '',
+        report_date DATE NOT NULL,
+        spend NUMERIC(10,2) DEFAULT 0,
+        sales NUMERIC(10,2) DEFAULT 0,
+        clicks INTEGER DEFAULT 0,
+        impressions INTEGER DEFAULT 0,
+        units INTEGER DEFAULT 0,
+        orders INTEGER DEFAULT 0,
+        campaign_name TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (asin, campaign_id, ad_group_id, report_date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_aap_asin_date ON amazon_asin_ad_performance(asin, report_date);
+      CREATE INDEX IF NOT EXISTS idx_aap_campaign_date ON amazon_asin_ad_performance(campaign_id, report_date);
+      CREATE INDEX IF NOT EXISTS idx_aap_date ON amazon_asin_ad_performance(report_date);
     `);
     console.log('Database connected and tables ready');
     await initTasksTable();
@@ -1713,26 +1737,6 @@ async function initTasksTable() {
       );
       CREATE INDEX IF NOT EXISTS idx_subtasks_task ON task_subtasks(task_id);
       CREATE INDEX IF NOT EXISTS idx_subtasks_status ON task_subtasks(status);
-    `);
-
-    // r21: manual campaign-to-product mapping. Replaces the gutted matcher
-    // (TF-IDF was unreliable). Agents tick which campaigns advertise their
-    // product, system stores it. One campaign → exactly one product (one-to-many
-    // from the product side). Once a campaign is mapped, it disappears from the
-    // available-campaigns dropdown for other products.
-    //
-    // parent_sku is used as the product identifier (matches groupKey across the
-    // app). campaign_id is unique — re-mapping a campaign to a different product
-    // overwrites the existing row.
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS product_campaign_map (
-        campaign_id TEXT PRIMARY KEY,
-        parent_sku TEXT NOT NULL,
-        campaign_name TEXT,
-        mapped_by TEXT,
-        mapped_at TIMESTAMP DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_pcm_parent ON product_campaign_map(parent_sku);
     `);
 
     try {
@@ -2819,6 +2823,153 @@ async function checkSearchTermReport() {
   } catch(e) { console.error('Search term check error: ' + e.message); keywordState.reportId = null; }
 }
 
+// ─── r22: Sponsored Products advertisedProduct report ───────────────────────
+// Pulls per-ASIN per-campaign per-day spend/sales/clicks/impressions/units.
+// Cron at 04:30 London requests yesterday's report; ~2-3 min until ready.
+// Each product card aggregates spend across its ASINs from this table — true
+// per-ASIN attribution (no manual mapping, no campaign-name matching).
+//
+// Two-phase async: requestAdvertisedProductReport queues the report, then
+// checkAdvertisedProductReport polls and downloads + persists when ready.
+const advertisedProductState = { reportId: null, requested: 0, dateRequested: null };
+
+async function requestAdvertisedProductReport(targetDate) {
+  // targetDate: 'YYYY-MM-DD' — defaults to yesterday in London
+  const tz = 'Europe/London';
+  const reqDate = targetDate || (function(){
+    const y = new Date(Date.now() - 24*60*60*1000);
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(y);
+  })();
+  if (advertisedProductState.reportId) {
+    console.log('[r22 ad-perf] report already in flight (' + advertisedProductState.reportId + '), skipping');
+    return { ok: false, reason: 'in-flight' };
+  }
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const res = await axios.post(
+      'https://advertising-api-eu.amazon.com/reporting/reports',
+      {
+        name: 'CampaignPulse advertisedProduct ' + reqDate,
+        startDate: reqDate,
+        endDate: reqDate,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['advertiser'],
+          columns: [
+            'advertisedAsin', 'campaignId', 'campaignName', 'adGroupId', 'adGroupName',
+            'cost', 'clicks', 'impressions',
+            'sales1d', 'sales7d', 'sales14d',
+            'purchases1d', 'purchases7d',
+            'unitsSoldClicks1d', 'unitsSoldClicks7d',
+            'date'
+          ],
+          reportTypeId: 'spAdvertisedProduct',
+          timeUnit: 'DAILY',
+          format: 'GZIP_JSON'
+        }
+      },
+      { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
+    );
+    advertisedProductState.reportId = res.data.reportId;
+    advertisedProductState.requested = Date.now();
+    advertisedProductState.dateRequested = reqDate;
+    console.log('[r22 ad-perf] report requested for ' + reqDate + ' — id=' + res.data.reportId);
+    return { ok: true, reportId: res.data.reportId };
+  } catch(e) {
+    const status = e.response && e.response.status;
+    const body = e.response && e.response.data;
+    console.error('[r22 ad-perf] request error: ' + (status ? 'HTTP ' + status + ' ' : '') + e.message + (body ? ' ' + JSON.stringify(body).slice(0, 300) : ''));
+    return { ok: false, error: e.message };
+  }
+}
+
+async function checkAdvertisedProductReport() {
+  if (!advertisedProductState.reportId) return { ok: false, reason: 'no-report' };
+  if (!db) return { ok: false, reason: 'no-db' };
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const statusRes = await axios.get(
+      'https://advertising-api-eu.amazon.com/reporting/reports/' + advertisedProductState.reportId,
+      { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
+    );
+    const status = statusRes.data.status;
+    console.log('[r22 ad-perf] status=' + status);
+    if (status === 'PENDING' || status === 'PROCESSING') return { ok: false, reason: 'pending', status: status };
+    if (status === 'FAILED') {
+      console.error('[r22 ad-perf] report FAILED — ' + JSON.stringify(statusRes.data).slice(0, 300));
+      advertisedProductState.reportId = null;
+      return { ok: false, reason: 'failed' };
+    }
+    if (status !== 'COMPLETED') return { ok: false, reason: 'unknown-status', status: status };
+    // Download + persist
+    const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+    const zlib = require('zlib');
+    const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+    const records = JSON.parse(decompressed.toString());
+    console.log('[r22 ad-perf] downloaded ' + records.length + ' records for ' + advertisedProductState.dateRequested);
+
+    let inserted = 0, errors = 0;
+    for (const r of records) {
+      const asin = r.advertisedAsin || r.asin;
+      const cid = r.campaignId != null ? String(r.campaignId) : null;
+      const aid = r.adGroupId != null ? String(r.adGroupId) : '';
+      const date = r.date || advertisedProductState.dateRequested;
+      if (!asin || !cid || !date) continue;
+      try {
+        await db.query(
+          "INSERT INTO amazon_asin_ad_performance " +
+          "(asin, campaign_id, ad_group_id, report_date, spend, sales, clicks, impressions, units, orders, campaign_name, fetched_at) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) " +
+          "ON CONFLICT (asin, campaign_id, ad_group_id, report_date) DO UPDATE SET " +
+          "spend=EXCLUDED.spend, sales=EXCLUDED.sales, clicks=EXCLUDED.clicks, " +
+          "impressions=EXCLUDED.impressions, units=EXCLUDED.units, orders=EXCLUDED.orders, " +
+          "campaign_name=EXCLUDED.campaign_name, fetched_at=NOW()",
+          [
+            asin, cid, aid, date,
+            parseFloat(r.cost || 0),
+            parseFloat(r.sales7d || r.sales14d || r.sales1d || 0),
+            parseInt(r.clicks || 0),
+            parseInt(r.impressions || 0),
+            parseInt(r.unitsSoldClicks7d || r.unitsSoldClicks1d || 0),
+            parseInt(r.purchases7d || r.purchases1d || 0),
+            r.campaignName || null
+          ]
+        );
+        inserted++;
+      } catch(e) {
+        errors++;
+        if (errors < 5) console.error('[r22 ad-perf] insert error: ' + e.message);
+      }
+    }
+    console.log('[r22 ad-perf] persisted ' + inserted + ' rows (' + errors + ' errors) for ' + advertisedProductState.dateRequested);
+    advertisedProductState.reportId = null;
+    return { ok: true, inserted: inserted, errors: errors, date: advertisedProductState.dateRequested };
+  } catch(e) {
+    console.error('[r22 ad-perf] check error: ' + e.message);
+    advertisedProductState.reportId = null;
+    return { ok: false, error: e.message };
+  }
+}
+
+// One-shot helper: fire-and-poll for a single date. Used by the daily cron and
+// also by the admin backfill endpoint.
+async function fetchAdvertisedProductReport(targetDate) {
+  const reqResult = await requestAdvertisedProductReport(targetDate);
+  if (!reqResult.ok) return reqResult;
+  // Poll up to 10 minutes (every 30s)
+  for (let i = 0; i < 20; i++) {
+    await new Promise(function(r){ setTimeout(r, 30000); });
+    const checkResult = await checkAdvertisedProductReport();
+    if (checkResult.ok) return checkResult;
+    if (checkResult.reason === 'failed' || checkResult.reason === 'unknown-status') return checkResult;
+  }
+  return { ok: false, reason: 'timeout', message: 'Report did not complete within 10 minutes' };
+}
+
 async function analyseKeywords() {
   if (!keywordState.data || !keywordState.data.length) return;
   if (!process.env.ANTHROPIC_API_KEY) { keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); return; }
@@ -3391,6 +3542,49 @@ app.get('/api/admin/debug-sku/:asin', async function(req, res) {
     console.error('/api/admin/debug-sku/:asin error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// r22: POST /api/admin/fetch-ad-performance?date=YYYY-MM-DD — pull a single
+// day's advertisedProduct report. Defaults to yesterday. Owner+manager only.
+// Synchronous (waits for the report to complete, ~2-3 min).
+app.post('/api/admin/fetch-ad-performance', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  const date = String(req.query.date || '').trim();
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  try {
+    // Fire and forget — return immediately so the user doesn't have to wait
+    fetchAdvertisedProductReport(date || null).catch(function(e){ console.error('[admin] fetch-ad-performance: ' + e.message); });
+    res.json({ ok: true, message: 'Report fetch started in background. Check logs in ~2-3 minutes for completion.', date: date || 'yesterday' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r22: POST /api/admin/backfill-ad-performance?days=14 — backfill last N days.
+// Sequential because Amazon Ads has report quota. ~3 min per day.
+app.post('/api/admin/backfill-ad-performance', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  const days = Math.min(parseInt(req.query.days || '14'), 60);
+  // Run async; don't block the response
+  (async function() {
+    console.log('[r22 backfill] starting ' + days + ' days');
+    for (let i = 1; i <= days; i++) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const dateStr = d.toISOString().slice(0, 10);
+      try {
+        const result = await fetchAdvertisedProductReport(dateStr);
+        console.log('[r22 backfill] ' + dateStr + ': ' + JSON.stringify(result));
+      } catch(e) {
+        console.error('[r22 backfill] ' + dateStr + ' error: ' + e.message);
+      }
+      // Brief pause between days to be kind to the report quota
+      await new Promise(function(r){ setTimeout(r, 5000); });
+    }
+    console.log('[r22 backfill] done');
+  })().catch(function(e){ console.error('[r22 backfill] outer error: ' + e.message); });
+  res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each day takes ~2-3 min, total ~' + (days * 3) + ' min. Check server logs.' });
 });
 
 // POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
@@ -3987,41 +4181,50 @@ app.get('/api/amazon/products', async function(req, res) {
     // section header. It used parseCampaignName (still in this file at the
     // bottom), extractTitleKeywords, isCampaignMatch, and an IDF table. Pull
     // from r20b commit if needed.
-    // r21: Manual product↔campaign mapping replaces the gutted matcher.
-    // We pull every mapping row, then aggregate the matching campaign stats
-    // (spend/sales/etc) from recent snapshots. Products with no mapping get
-    // empty stats — they show "No campaigns mapped" in the UI.
+    // r21→r22: Manual mapping was tried and stripped (architecturally wrong —
+    // multiple listings of same product can share campaigns). Replaced with
+    // r22 advertisedProduct report which gives true ASIN-level spend from
+    // Amazon Ads. Stats below come from amazon_asin_ad_performance keyed by
+    // ASIN, aggregated per parent product. See r22 cron block.
     const groupCampaignStats = {};
     try {
-      const mapRes = await db.query("SELECT campaign_id, parent_sku FROM product_campaign_map");
-      // Build campaign_id → parent_sku index
-      const cidToParent = {};
-      mapRes.rows.forEach(function(r){ cidToParent[String(r.campaign_id)] = r.parent_sku; });
-      // Aggregate stats from the recentCampaigns set (already loaded above
-      // for advertised-ASIN detection)
-      recentCampaigns.forEach(function(c){
-        if (!c.campaignId) return;
-        const parentSku = cidToParent[String(c.campaignId)];
-        if (!parentSku) return;
-        if (!groupCampaignStats[parentSku]) {
-          groupCampaignStats[parentSku] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
-        }
-        const g = groupCampaignStats[parentSku];
-        g.spend += parseFloat(c.spend || 0);
-        g.sales += parseFloat(c.sales || 0);
-        g.clicks += parseInt(c.clicks || 0);
-        g.impressions += parseInt(c.impressions || 0);
-        g.conversions += parseInt(c.orders || c.purchases || c.conversions || 0);
-        g.count++;
-        g.campaigns.push({
-          campaignId: String(c.campaignId),
-          name: c.name || '',
-          spend: parseFloat(c.spend || 0),
-          sales: parseFloat(c.sales || 0),
-          state: c.state || c.status || null
+      // Pull last-7-day per-ASIN ad metrics from r22 advertisedProduct table.
+      // Each ASIN's spend gets attributed to its parent product.
+      const adRes = await db.query(
+        "SELECT asin, " +
+        "       SUM(spend) AS spend, SUM(sales) AS sales, " +
+        "       SUM(clicks) AS clicks, SUM(impressions) AS impressions, " +
+        "       SUM(units) AS conversions, " +
+        "       COUNT(DISTINCT campaign_id) AS campaign_count, " +
+        "       array_agg(DISTINCT campaign_id) AS campaign_ids " +
+        "FROM amazon_asin_ad_performance " +
+        "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+        "GROUP BY asin"
+      );
+      // Build parent-level aggregates by walking each parent's children ASINs
+      Object.values(parents).forEach(function(parent) {
+        const parentSku = parent.parent_sku;
+        const childAsins = parent.children.map(function(c){ return c.asin; }).filter(Boolean);
+        if (!childAsins.length) return;
+        let g = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
+        const seenCampaigns = new Set();
+        adRes.rows.forEach(function(r){
+          if (childAsins.indexOf(r.asin) === -1) return;
+          g.spend += parseFloat(r.spend || 0);
+          g.sales += parseFloat(r.sales || 0);
+          g.clicks += parseInt(r.clicks || 0);
+          g.impressions += parseInt(r.impressions || 0);
+          g.conversions += parseInt(r.conversions || 0);
+          (r.campaign_ids || []).forEach(function(cid){ if (cid) seenCampaigns.add(cid); });
         });
+        g.count = seenCampaigns.size;
+        if (g.count > 0 || g.spend > 0) groupCampaignStats[parentSku] = g;
       });
-    } catch(e) { console.error('[r21] product-campaign mapping aggregation: ' + e.message); }
+    } catch(e) {
+      // If amazon_asin_ad_performance doesn't exist yet (pre-r22 boot), table
+      // creation hasn't run — fall through to empty stats. Cards will show £0.
+      if (!/does not exist/.test(e.message)) console.error('[r22] ASIN ad perf aggregation: ' + e.message);
+    }
 
     // 5. Compute per-parent aggregates + diagnosis
     let allParents = Object.values(parents).map(function(parent) {
@@ -4838,135 +5041,130 @@ app.post('/api/tasks/:id/subtasks/:sid/reopen', async function(req, res) {
   }
 });
 
-// ─── r21: PRODUCT ↔ CAMPAIGN MAPPING ────────────────────────────────────────
-// Replaces the gutted TF-IDF matcher. Agents tick which campaigns advertise
-// their product; the mapping is stored explicitly. One campaign maps to
-// exactly one product (one-to-many from the product side). Mapped campaigns
-// disappear from other products' available-list so the task shrinks over time.
+// ─── r22: AMAZON DAY-7 REVIEW ───────────────────────────────────────────────
+// Mirrors the Google day7 flow on the same campaign_tasks table. At day 7+,
+// agent must hit Carry on / Archive / Stop with a note before the task can
+// proceed. The day7_decision columns are shared (Google added them in r17,
+// just enabling them for Amazon now).
 
-// GET /api/amazon/products/:parentSku/campaigns — what's mapped + what's available.
-// Returns:
-//   mapped:    [{ campaign_id, campaign_name, mapped_by, mapped_at }, ...]
-//   available: [{ campaign_id, campaign_name, display_name, agent }, ...]
-//              (every recent campaign NOT yet mapped to ANY product)
-app.get('/api/amazon/products/:parentSku/campaigns', async function(req, res) {
-  if (!db) return res.json({ mapped: [], available: [] });
-  const parentSku = String(req.params.parentSku || '').trim();
-  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
-  try {
-    // 1. Already-mapped campaigns for this product
-    const mappedRes = await db.query(
-      "SELECT campaign_id, campaign_name, mapped_by, mapped_at FROM product_campaign_map WHERE parent_sku=$1 ORDER BY campaign_name ASC",
-      [parentSku]
-    );
-    // 2. ALL mapped campaigns across all products — to exclude from the available list
-    const allMappedRes = await db.query("SELECT campaign_id FROM product_campaign_map");
-    const mappedSet = new Set(allMappedRes.rows.map(function(r){ return String(r.campaign_id); }));
-    // 3. Recent campaigns from snapshots (last 14 days) — the universe of options
-    const sr = await db.query(
-      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 14"
-    );
-    const seen = new Set();
-    const universe = [];
-    sr.rows.forEach(function(snap){
-      (snap.campaigns || []).forEach(function(c){
-        if (!c.campaignId) return;
-        const cid = String(c.campaignId);
-        if (seen.has(cid)) return;
-        seen.add(cid);
-        const rawName = c.name || '';
-        const parsed = parseCampaignName(rawName);
-        // Display name: drop the agent prefix and trailing junk so the dropdown
-        // is scannable. "Aryan | Yoga Mat KT | something" → "Yoga Mat KT".
-        let displayName = rawName;
-        if (parsed.agent) {
-          displayName = rawName.replace(/^\s*[A-Za-z\s]{3,30}\s*[|@]\s*/, '').trim();
-        }
-        // Take everything before the second separator if there's still noise
-        const cleanedDisplay = (displayName.split(/[|@]/)[0] || displayName).trim() || rawName;
-        universe.push({
-          campaign_id: cid,
-          campaign_name: rawName,
-          display_name: cleanedDisplay,
-          agent: parsed.agent || null,
-          state: c.state || c.status || null
-        });
-      });
-    });
-    // 4. Available = universe minus everything mapped to any product
-    const available = universe.filter(function(c){ return !mappedSet.has(c.campaign_id); });
-    // Sort: by display_name alphabetically for easy scanning
-    available.sort(function(a, b){ return (a.display_name || '').localeCompare(b.display_name || ''); });
-    res.json({ mapped: mappedRes.rows, available: available, total_universe: universe.length, total_mapped_globally: mappedSet.size });
-  } catch(e) {
-    console.error('/api/amazon/products/:parentSku/campaigns GET error: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// POST /api/amazon/products/:parentSku/campaigns — body: { campaign_ids: [...] }
-// Replaces the mapping for this product entirely. Pass [] to clear all.
-// Permissions: owner+manager any product; agents only their own products.
-app.post('/api/amazon/products/:parentSku/campaigns', async function(req, res) {
+// GET /api/tasks/:id/review-metrics — last 7 days vs prior 7 days for the
+// underlying campaign or product. Used to populate the day-7 review modal.
+app.get('/api/tasks/:id/review-metrics', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
-  const parentSku = String(req.params.parentSku || '').trim();
-  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
-  const ids = Array.isArray(req.body && req.body.campaign_ids) ? req.body.campaign_ids.map(String) : null;
-  if (ids === null) return res.status(400).json({ error: 'campaign_ids array required' });
-  const actor = (req.user && req.user.name) || 'unknown';
-  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
-  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
-  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  const id = parseInt(req.params.id);
   try {
-    // Permission gate: agents can only map their own products
-    if (!isPriv) {
-      const owner = await db.query(
-        "SELECT owner_agent FROM amazon_products WHERE parent_sku=$1 OR (parent_sku IS NULL AND sku=$1) LIMIT 1",
-        [parentSku]
+    const tr = await db.query("SELECT id, campaign_id, campaign_name, created_date FROM campaign_tasks WHERE id=$1", [id]);
+    if (!tr.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const t = tr.rows[0];
+    // Two windows: last 7 days, and the 7 days before that (for trend)
+    let recent = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, days: 0 };
+    let prior  = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, days: 0 };
+    try {
+      // Walk last 14 days of snapshots, bucket into recent (0-6) vs prior (7-13)
+      const sn = await db.query(
+        "SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS day, campaigns " +
+        "FROM daily_snapshots " +
+        "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' " +
+        "ORDER BY snapshot_date DESC"
       );
-      const ownerAgent = owner.rows[0] && owner.rows[0].owner_agent;
-      const canon = canonicalAgent(actor);
-      if (!ownerAgent || canonicalAgent(ownerAgent) !== canon) {
-        return res.status(403).json({ error: 'You can only map campaigns to your own products. Owner or manager can map any.' });
-      }
-    }
-    // Look up campaign names for each ID from snapshots so the mapping carries
-    // human-readable labels (without re-querying snapshots on every read).
-    const sr = await db.query(
-      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 7"
-    );
-    const nameById = {};
-    sr.rows.forEach(function(snap){
-      (snap.campaigns || []).forEach(function(c){
-        if (c.campaignId && !nameById[String(c.campaignId)]) nameById[String(c.campaignId)] = c.name || '';
+      sn.rows.forEach(function(snap, idx) {
+        if (!t.campaign_id) return;
+        const c = (snap.campaigns || []).find(function(x){ return String(x.campaignId) === String(t.campaign_id); });
+        if (!c) return;
+        const bucket = idx < 7 ? recent : prior;
+        bucket.spend += parseFloat(c.spend || 0);
+        bucket.sales += parseFloat(c.sales || 0);
+        bucket.clicks += parseInt(c.clicks || 0);
+        bucket.impressions += parseInt(c.impressions || 0);
+        bucket.conversions += parseInt(c.orders || c.purchases || c.conversions || 0);
+        bucket.days++;
       });
-    });
-    // Replace mapping atomically: delete this product's existing rows, then re-insert.
-    // ON CONFLICT on campaign_id (the PK) — re-mapping a campaign to a different
-    // product silently moves it (last write wins).
-    await db.query("DELETE FROM product_campaign_map WHERE parent_sku=$1", [parentSku]);
-    let inserted = 0, conflicts = [];
-    for (const cid of ids) {
-      const cidStr = String(cid).trim();
-      if (!cidStr) continue;
-      try {
-        await db.query(
-          "INSERT INTO product_campaign_map (campaign_id, parent_sku, campaign_name, mapped_by, mapped_at) " +
-          "VALUES ($1, $2, $3, $4, NOW()) " +
-          "ON CONFLICT (campaign_id) DO UPDATE SET parent_sku=$2, campaign_name=$3, mapped_by=$4, mapped_at=NOW()",
-          [cidStr, parentSku, nameById[cidStr] || '', actor]
-        );
-        inserted++;
-      } catch(e) {
-        conflicts.push({ campaign_id: cidStr, error: e.message });
-      }
+    } catch(e) { console.error('[r22 review-metrics] snapshot lookup: ' + e.message); }
+
+    function trend(rec, pri) {
+      if (!pri || pri === 0) return null;
+      return ((rec - pri) / pri) * 100;
     }
-    res.json({ ok: true, mapped: inserted, conflicts: conflicts });
+    res.json({
+      task: { id: t.id, campaign_id: t.campaign_id, campaign_name: t.campaign_name, created_date: t.created_date },
+      recent_7d: {
+        spend: parseFloat(recent.spend.toFixed(2)),
+        sales: parseFloat(recent.sales.toFixed(2)),
+        clicks: recent.clicks,
+        impressions: recent.impressions,
+        conversions: recent.conversions,
+        acos: recent.sales > 0 ? Math.round((recent.spend / recent.sales) * 1000) / 10 : null,
+        days_with_data: recent.days
+      },
+      prior_7d: {
+        spend: parseFloat(prior.spend.toFixed(2)),
+        sales: parseFloat(prior.sales.toFixed(2)),
+        clicks: prior.clicks,
+        impressions: prior.impressions,
+        conversions: prior.conversions,
+        acos: prior.sales > 0 ? Math.round((prior.spend / prior.sales) * 1000) / 10 : null,
+        days_with_data: prior.days
+      },
+      trend_pct: {
+        spend: trend(recent.spend, prior.spend),
+        sales: trend(recent.sales, prior.sales),
+        clicks: trend(recent.clicks, prior.clicks)
+      }
+    });
   } catch(e) {
-    console.error('/api/amazon/products/:parentSku/campaigns POST error: ' + e.message);
+    console.error('/api/tasks/:id/review-metrics error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
+
+// POST /api/tasks/:id/day7-decision — body: { decision: 'carry_on'|'archive'|'stop', note }
+app.post('/api/tasks/:id/day7-decision', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = parseInt(req.params.id);
+  const decision = String((req.body && req.body.decision) || '').trim().toLowerCase();
+  const note = String((req.body && req.body.note) || '').trim();
+  if (['carry_on','archive','stop'].indexOf(decision) === -1) {
+    return res.status(400).json({ error: 'decision must be one of: carry_on, archive, stop' });
+  }
+  if (!note) return res.status(400).json({ error: 'note required for day-7 decision' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    // Translate decision into status side-effect:
+    // - carry_on: keeps status, just records the decision
+    // - archive: status=archived
+    // - stop: status=dismissed (with note)
+    let newStatus = null;
+    if (decision === 'archive') newStatus = 'archived';
+    if (decision === 'stop') newStatus = 'dismissed';
+    if (newStatus) {
+      await db.query(
+        "UPDATE campaign_tasks SET day7_decision=$1, day7_decision_at=NOW(), day7_note=$2, status=$3, archived_at=CASE WHEN $3='archived' THEN NOW() ELSE archived_at END WHERE id=$4",
+        [decision, note, newStatus, id]
+      );
+    } else {
+      await db.query(
+        "UPDATE campaign_tasks SET day7_decision=$1, day7_decision_at=NOW(), day7_note=$2 WHERE id=$3",
+        [decision, note, id]
+      );
+    }
+    try {
+      const t = (await db.query("SELECT campaign_id, campaign_name, agent_name FROM campaign_tasks WHERE id=$1", [id])).rows[0] || {};
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1, $2, $3, $4, $5)",
+        [t.campaign_id || '', t.campaign_name || '', actor, 'day7_' + decision, note]
+      );
+    } catch(_) {}
+    res.json({ ok: true, decision: decision, new_status: newStatus });
+  } catch(e) {
+    console.error('/api/tasks/:id/day7-decision error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r21: PRODUCT OWNER REASSIGN ────────────────────────────────────────────
+// Reassign a product to a different agent (owner+manager only). Mapping system
+// was stripped — owner reassign remains because it's how we ensure no
+// duplicate ownership.
 
 // POST /api/amazon/products/:parentSku/owner — reassign product owner.
 // body: { agent: 'Aryan' } (or 'Unassigned'). Owner+manager only.
@@ -6318,6 +6516,11 @@ app.get('/api/tasks', async function(req, res) {
       // (display layer decides whether to show grace-period or warning styling).
       const createdTodayLondon = workingDaysBetween(t.created_date, today) === 0 && toLondonDate(t.created_date).getTime() === toLondonDate(today).getTime();
       const notStarted = !t.first_action_at && wdo >= 1; // no action on/before yesterday
+      // r22: Day-7 review pattern (mirrors Google flow). At wdo >= 7, agent
+      // must hit Carry on / Archive / Stop with note before task can move on.
+      // The Google day7_decision columns are reused for Amazon since they're
+      // on the same campaign_tasks table.
+      const atDay7 = wdo >= 7 && !t.day7_decision && t.status !== 'complete' && t.status !== 'archived' && t.status !== 'dismissed';
       return Object.assign({}, t, {
         working_days_open: wdo,
         task_stage: liveStage,
@@ -6325,7 +6528,8 @@ app.get('/api/tasks', async function(req, res) {
         next_milestone_label: milestone.label,
         not_started_warning: notStarted,
         created_today: createdTodayLondon,
-        subtask_counts: subtaskCounts[t.id] || { open: 0, complete: 0, dismissed: 0, total: 0 }
+        subtask_counts: subtaskCounts[t.id] || { open: 0, complete: 0, dismissed: 0, total: 0 },
+        at_day7: atDay7
       });
     });
     res.json({ tasks });
@@ -8493,6 +8697,18 @@ cron.schedule('0 4 * * *', function() {
   ldn.setDate(ldn.getDate() - 1);
   const dateStr = ldn.toISOString().slice(0, 10);
   fetchSalesAndTrafficReport(dateStr).catch(function(e){ console.error('[r20-cron] traffic: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r22: Sponsored Products advertisedProduct Report — 04:30 London. Pulls
+// yesterday's per-ASIN per-campaign spend. Each product card aggregates from
+// amazon_asin_ad_performance keyed by ASIN — true per-ASIN attribution.
+cron.schedule('30 4 * * *', function() {
+  // Yesterday in London time
+  const now = new Date();
+  const ldn = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+  ldn.setDate(ldn.getDate() - 1);
+  const dateStr = ldn.toISOString().slice(0, 10);
+  fetchAdvertisedProductReport(dateStr).catch(function(e){ console.error('[r22-cron] advertisedProduct: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 async function advanceTaskStages() {
