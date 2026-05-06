@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r22 (per-ASIN ad spend, day-7 review, active-task block, underperforming snooze, friction uses ad-perf, dashboard campaigns alert-only, agents live-only, refresh restores page, diagnostics stripped)
+// CampaignPulse — deploy marker 2026-05-06 r23 (snooze moved to underperforming campaigns 1d/3d/7d/30d, "Work on it" replaced, Tasks rename, all-campaigns modal, traffic snapshots diagnostic, audit cleanup)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1466,20 +1466,24 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_aap_campaign_date ON amazon_asin_ad_performance(campaign_id, report_date);
       CREATE INDEX IF NOT EXISTS idx_aap_date ON amazon_asin_ad_performance(report_date);
 
-      -- r22: amazon_product_snooze — temporarily hide a product from
-      -- Underperforming view. Auto-expires at snoozed_until. Product still
-      -- appears in All / Urgent / Working as normal — only Underperforming
-      -- filters it out. Promotes back to visibility automatically when
-      -- bucket changes to urgent (handled in frontend).
-      CREATE TABLE IF NOT EXISTS amazon_product_snooze (
-        parent_sku TEXT PRIMARY KEY,
+      -- r23: amazon_campaign_snooze — temporarily hide an underperforming
+      -- campaign from the Underperforming page. Auto-expires at snoozed_until.
+      -- Replaces r22 amazon_product_snooze (table dropped if empty).
+      CREATE TABLE IF NOT EXISTS amazon_campaign_snooze (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
         snoozed_until TIMESTAMP NOT NULL,
         snoozed_by TEXT,
         snoozed_at TIMESTAMP DEFAULT NOW(),
-        snooze_reason TEXT
+        snooze_reason TEXT,
+        snooze_action TEXT  -- 'snooze' or 'dismiss' (30d=dismiss-ish but explicit)
       );
-      CREATE INDEX IF NOT EXISTS idx_snooze_until ON amazon_product_snooze(snoozed_until);
+      CREATE INDEX IF NOT EXISTS idx_camp_snooze_until ON amazon_campaign_snooze(snoozed_until);
     `);
+
+    // r23: drop the old product snooze table (introduced r22, never deployed).
+    // Wrapped in try/catch in case it never existed.
+    try { await db.query("DROP TABLE IF EXISTS amazon_product_snooze"); } catch(e) {}
     console.log('Database connected and tables ready');
     await initTasksTable();
   } catch(e) {
@@ -3474,6 +3478,50 @@ app.post('/api/admin/backfill-ad-performance', async function(req, res) {
   res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each day takes ~2-3 min, total ~' + (days * 3) + ' min. Check server logs.' });
 });
 
+// r23: POST /api/admin/traffic-diagnose?date=YYYY-MM-DD — runs ONE day and
+// returns Amazon's actual response. Use this to figure out why the traffic
+// snapshots table has 0 rows after a backfill attempt. Synchronous (~3 min
+// for one day). Owner+manager only.
+app.post('/api/admin/traffic-diagnose', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured', spApi: { configured: false } });
+  const date = String(req.query.date || '').trim() || new Date(Date.now() - 24*60*60*1000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  // Don't await fetchSalesAndTrafficReport directly — it has 3-min poll. Return
+  // immediately and let caller hit pricing-signals-status / row counts after.
+  // But ALSO try to capture the createReport step result (quick, ~1 sec).
+  try {
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: date + 'T00:00:00Z',
+      dataEndTime: date + 'T23:59:59Z',
+      reportOptions: { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
+    });
+    const reportId = createRes && createRes.reportId;
+    res.json({
+      ok: !!reportId,
+      step: 'createReport',
+      date: date,
+      reportId: reportId || null,
+      response: createRes,
+      message: reportId
+        ? 'Report queued successfully. Poll /reports/2021-06-30/reports/' + reportId + ' or wait ~3 min and check /api/admin/pricing-signals-status for row counts. If counts stay 0 after polling completes, the report itself returned empty (data not available for this date).'
+        : 'Report request rejected by Amazon. Check the response above for the reason — common causes: insufficient permissions on the SP-API role, marketplace ID mismatch, date in future or > 90 days old.'
+    });
+  } catch(e) {
+    res.status(500).json({
+      ok: false,
+      step: 'createReport',
+      date: date,
+      error: e.message,
+      stack: (e.stack || '').slice(0, 800),
+      hint: 'createReport failed. Check error message — if it mentions "InvalidScopeException" or "Unauthorized", the SP-API role is missing the Amazon Selling Partner Reports scope. If "InvalidDateRange", the date is too old or in the future.'
+    });
+  }
+});
+
 // POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
 // Reports come back async, so this is fire-and-forget. Owner+manager only.
 app.post('/api/admin/backfill-traffic', async function(req, res) {
@@ -4129,21 +4177,8 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     } catch(e) { console.error('[r22] active-task lookup error: ' + e.message); }
 
-    // r22: also pre-fetch snooze state per parent_sku
+    // r23: product snooze removed — snooze is now on campaigns only.
     const snoozeByParent = {};
-    try {
-      // Auto-cleanup expired snoozes on every read (cheap, runs daily-ish)
-      await db.query("DELETE FROM amazon_product_snooze WHERE snoozed_until <= NOW()");
-      const sRes = await db.query(
-        "SELECT parent_sku, snoozed_until, snoozed_by, snoozed_at, snooze_reason " +
-        "FROM amazon_product_snooze WHERE snoozed_until > NOW()"
-      );
-      sRes.rows.forEach(function(s){
-        snoozeByParent[s.parent_sku] = s;
-      });
-    } catch(e) {
-      if (!/does not exist/.test(e.message)) console.error('[r22] snooze lookup error: ' + e.message);
-    }
 
     // 5. Compute per-parent aggregates + diagnosis
     let allParents = Object.values(parents).map(function(parent) {
@@ -5216,43 +5251,54 @@ app.post('/api/amazon/products/:parentSku/owner', async function(req, res) {
 });
 
 // ─── r22: PRODUCT SNOOZE ────────────────────────────────────────────────────
-// Hide a product from the Underperforming bucket for N days. Still visible in
-// All / Urgent / Working as normal. Auto-expires at snoozed_until. Frontend
-// can detect when a snoozed product becomes Urgent and ignore the snooze
-// (we trust the bucket more than a stale snooze).
+// ─── r23: CAMPAIGN SNOOZE / DISMISS ─────────────────────────────────────────
+// Hide an underperforming campaign for N days. Used on the Underperforming
+// page (/page-stuck) — replaces the old "Work on it (1 week)" fixed-duration
+// flag with proper 1d/3d/7d/30d options. Snoozed campaigns auto-return to
+// the Underperforming list when the timer expires.
 
-// POST /api/amazon/products/:parentSku/snooze
-//   body: { days: 1|3|7|30, reason?: string }
-app.post('/api/amazon/products/:parentSku/snooze', async function(req, res) {
+// POST /api/amazon/campaigns/:campaignId/snooze
+//   body: { days: 1|3|7|30, reason: string, action?: 'snooze'|'dismiss' }
+app.post('/api/amazon/campaigns/:campaignId/snooze', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
-  const parentSku = String(req.params.parentSku || '').trim();
+  const campaignId = String(req.params.campaignId || '').trim();
   const days = parseInt((req.body && req.body.days) || 0);
-  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
   if ([1, 3, 7, 30].indexOf(days) === -1) return res.status(400).json({ error: 'days must be 1, 3, 7, or 30' });
-  const reason = String((req.body && req.body.reason) || '').trim() || null;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'reason required' });
+  const action = (String((req.body && req.body.action) || 'snooze').toLowerCase() === 'dismiss') ? 'dismiss' : 'snooze';
+  const campaignName = String((req.body && req.body.campaignName) || '').trim() || null;
   const actor = (req.user && req.user.name) || 'unknown';
   try {
     await db.query(
-      "INSERT INTO amazon_product_snooze (parent_sku, snoozed_until, snoozed_by, snoozed_at, snooze_reason) " +
-      "VALUES ($1, NOW() + ($2 || ' days')::interval, $3, NOW(), $4) " +
-      "ON CONFLICT (parent_sku) DO UPDATE SET snoozed_until=EXCLUDED.snoozed_until, " +
-      "snoozed_by=EXCLUDED.snoozed_by, snoozed_at=NOW(), snooze_reason=EXCLUDED.snooze_reason",
-      [parentSku, days, actor, reason]
+      "INSERT INTO amazon_campaign_snooze (campaign_id, campaign_name, snoozed_until, snoozed_by, snoozed_at, snooze_reason, snooze_action) " +
+      "VALUES ($1, $2, NOW() + ($3 || ' days')::interval, $4, NOW(), $5, $6) " +
+      "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name=EXCLUDED.campaign_name, snoozed_until=EXCLUDED.snoozed_until, " +
+      "snoozed_by=EXCLUDED.snoozed_by, snoozed_at=NOW(), snooze_reason=EXCLUDED.snooze_reason, snooze_action=EXCLUDED.snooze_action",
+      [campaignId, campaignName, days, actor, reason, action]
     );
-    res.json({ ok: true, days: days });
+    // Audit log
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1, $2, $3, $4, $5)",
+        [campaignId, campaignName || '', actor, 'campaign_' + action + '_' + days + 'd', reason]
+      );
+    } catch(_) {}
+    res.json({ ok: true, days: days, action: action });
   } catch(e) {
-    console.error('/api/amazon/products/:parentSku/snooze error: ' + e.message);
+    console.error('/api/amazon/campaigns/:campaignId/snooze error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// DELETE /api/amazon/products/:parentSku/snooze — un-snooze (returns to view immediately)
-app.delete('/api/amazon/products/:parentSku/snooze', async function(req, res) {
+// DELETE /api/amazon/campaigns/:campaignId/snooze — un-snooze
+app.delete('/api/amazon/campaigns/:campaignId/snooze', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
-  const parentSku = String(req.params.parentSku || '').trim();
-  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
   try {
-    const r = await db.query("DELETE FROM amazon_product_snooze WHERE parent_sku=$1 RETURNING parent_sku", [parentSku]);
+    const r = await db.query("DELETE FROM amazon_campaign_snooze WHERE campaign_id=$1 RETURNING campaign_id", [campaignId]);
     res.json({ ok: true, removed: r.rowCount > 0 });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -6049,21 +6095,6 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
   }
 });
 
-app.post('/api/admin/fix-agent-names', async function(req, res) {
-  if (!db) return res.status(500).json({ error: 'No DB' });
-  const knownAgents = ['Aryan', 'Satyam'];
-  try {
-    const tasks = await db.query("SELECT id, campaign_name FROM campaign_tasks WHERE (agent_name IS NULL OR agent_name NOT IN ('Aryan','Satyam'))");
-    let fixed = 0, deleted = 0;
-    for (const row of tasks.rows) {
-      const parts = (row.campaign_name || '').split(/[|@]/);
-      const extracted = parts[0].trim().substring(0, 30);
-      if (knownAgents.includes(extracted)) { await db.query('UPDATE campaign_tasks SET agent_name=$1 WHERE id=$2', [extracted, row.id]); fixed++; }
-      else { await db.query('DELETE FROM campaign_tasks WHERE id=$1', [row.id]); deleted++; }
-    }
-    res.json({ success: true, fixed, deleted });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
 
 app.post('/api/tasks/:id/escalation-analysis', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
@@ -6257,11 +6288,22 @@ app.get('/api/stuck-campaigns', async function(req, res) {
     const result = await db.query('SELECT snapshot_date, campaigns FROM daily_snapshots ORDER BY snapshot_date DESC LIMIT 7');
     const snapshots = result.rows;
     if (snapshots.length < 3) return res.json({ noActivity: [], noRevenue: [], days: snapshots.length });
+    // r23: pre-fetch active snoozes so we can hide snoozed campaigns from the list.
+    // Auto-cleanup expired ones on every read.
+    const snoozedSet = new Set();
+    try {
+      await db.query("DELETE FROM amazon_campaign_snooze WHERE snoozed_until <= NOW()");
+      const sRes = await db.query("SELECT campaign_id FROM amazon_campaign_snooze WHERE snoozed_until > NOW()");
+      sRes.rows.forEach(function(r){ snoozedSet.add(String(r.campaign_id)); });
+    } catch(e) {
+      if (!/does not exist/.test(e.message)) console.error('[r23] campaign-snooze lookup: ' + e.message);
+    }
     const campHistory = {};
     snapshots.forEach(function(snap) {
       const camps = snap.campaigns || [];
       const date = snap.snapshot_date;
       camps.forEach(function(c) {
+        if (snoozedSet.has(String(c.campaignId))) return;  // r23: skip snoozed
         if (!campHistory[c.campaignId]) campHistory[c.campaignId] = { name: c.name, portfolio: c.portfolio||'', agent: c.agent||'', targetingType: c.targetingType||'', days: [] };
         campHistory[c.campaignId].days.push({ date, impressions: c.impressions||0, spend: c.spend||0, sales: c.sales||0, acos: c.acos||0, dailyBudget: c.dailyBudget||0 });
       });
@@ -6360,10 +6402,6 @@ app.get('/api/tasks', async function(req, res) {
   } catch(e) { res.json({ tasks: [], error: e.message }); }
 });
 
-app.post('/api/admin/cleanup-tasks', async function(req, res) {
-  if (!db) return res.status(500).json({ error: 'No DB' });
-  try { const deleted = await db.query("DELETE FROM campaign_tasks WHERE agent_name IS NULL OR agent_name NOT IN ('Aryan','Satyam') RETURNING id"); res.json({ success: true, deleted: deleted.rowCount }); } catch(e) { res.status(500).json({ error: e.message }); }
-});
 
 app.post('/api/tasks/:id/status', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });

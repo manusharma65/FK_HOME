@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r22 (per-ASIN ad spend, day-7 review, active-task block, snooze, friction fixed, dashboard alert-only campaigns, refresh restores page) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r23 (campaign snooze 1d/3d/7d/30d, Tasks renamed, all-campaigns modal, traffic snapshots fix, audit cleanup) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -381,7 +381,7 @@ tbody tr:hover { background: var(--surface2); }
     <div class="nav-section">Tasks</div>
     <button class="nav-item" onclick="showPage('tasks',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 8l2 2 4-4"/></svg>
-      Campaign tasks
+      Tasks
       <span class="nav-badge" id="tasks-badge" style="display:none;background:var(--red)">0</span>
     </button>
     <div class="nav-section">Reports</div>
@@ -877,7 +877,7 @@ tbody tr:hover { background: var(--surface2); }
   <div class="page" id="page-tasks">
     <div style="margin-bottom:20px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
       <div>
-        <div class="section-title">Campaign Tasks</div>
+        <div class="section-title">Tasks</div>
         <div class="section-sub">Daily tasks at 8am · Auto-archived after 3 working days · 7-day scaling window available from Escalation</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
@@ -1250,7 +1250,7 @@ function sortReport(col) {
   if (ind) ind.textContent = reportSortState.dir === -1 ? ' ↓' : ' ↑';
   renderReport();
 }
-const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Campaign Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
+const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showPage(name, btn) {
@@ -2327,9 +2327,9 @@ async function loadStuckCampaigns() {
         '<td class="mono">£' + c.totalSpend + '</td>' +
         '<td class="mono">£' + c.lastBudget + '</td>' +
         '<td style="font-size:12px;color:var(--text3)">Zero impressions — bid too low or targeting broken</td>' +
-        '<td><div class="ag">' +
+        '<td><div class="ag" style="flex-wrap:wrap;gap:4px">' +
           '<button class="btn btn-red" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;pause&quot;)">Pause</button>' +
-          '<button class="btn btn-ghost" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;review&quot;)">Work on it (1 week)</button>' +
+          '<button class="btn btn-ghost" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showSnoozeModal(this)">💤 Snooze</button>' +
           '</div></td>' +
         '</tr>';
     }).join('') : '<tr><td colspan="8"><div class="empty">No campaigns with 3+ days zero activity</div></td></tr>';
@@ -2349,9 +2349,9 @@ async function loadStuckCampaigns() {
         '<td class="mono" style="color:var(--red);font-weight:600">£' + c.totalWastedSpend + '</td>' +
         '<td class="mono ' + (parseFloat(c.avgAcos)>35?'acos-high':parseFloat(c.avgAcos)>12?'acos-warn':'') + '">' + c.avgAcos + '%</td>' +
         '<td style="font-size:12px;color:var(--text3)">Spend with zero attributed revenue</td>' +
-        '<td><div class="ag">' +
+        '<td><div class="ag" style="flex-wrap:wrap;gap:4px">' +
           '<button class="btn btn-red" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;pause&quot;)">Pause</button>' +
-          '<button class="btn btn-ghost" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showStuckModal(this,&quot;review&quot;)">Work on it (1 week)</button>' +
+          '<button class="btn btn-ghost" style="font-size:11px" data-cid="' + c.campaignId + '" data-cname="' + escHtml(c.name) + '" onclick="showSnoozeModal(this)">💤 Snooze</button>' +
           '</div></td>' +
         '</tr>';
     }).join('') : '<tr><td colspan="8"><div class="empty">No campaigns with 7+ days spend and no revenue</div></td></tr>';
@@ -2961,6 +2961,79 @@ async function toggleNoteIgnored(taskId, btn) {
       await loadTasks();
     }
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── r23: Campaign Snooze Modal — replaces "Work on it (1 week)" ──────────
+// Lets agent snooze an underperforming campaign for 1d / 3d / 7d / 30d, with
+// a required reason. 30d is effectively dismiss. Snoozed campaigns drop out
+// of /api/stuck-campaigns until the timer expires.
+function showSnoozeModal(btn) {
+  const campaignId = btn.getAttribute('data-cid');
+  const campaignName = btn.getAttribute('data-cname');
+  const existing = document.getElementById('snooze-modal');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'snooze-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:white;padding:32px;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.25);width:600px;max-width:95vw">' +
+      '<div style="font-size:18px;font-weight:700;margin-bottom:6px">💤 Snooze underperforming campaign</div>' +
+      '<div style="font-size:13px;color:#555;margin-bottom:4px">' + escHtml(campaignName) + '</div>' +
+      '<div style="font-size:12px;color:#888;margin-bottom:16px">The campaign will hide from the Underperforming list for the chosen period. It auto-returns when the timer expires (or sooner if you unsnooze it).</div>' +
+      '<div style="font-size:12px;font-weight:600;color:#333;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">For how long?</div>' +
+      '<div id="snooze-options" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">' +
+        '<label class="snooze-opt" data-days="1" style="padding:12px 8px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center"><input type="radio" name="snooze-days" value="1" style="display:none"><div style="font-weight:600">1 day</div><div style="font-size:11px;color:#888;margin-top:2px">Quick check-back</div></label>' +
+        '<label class="snooze-opt" data-days="3" style="padding:12px 8px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center"><input type="radio" name="snooze-days" value="3" style="display:none"><div style="font-weight:600">3 days</div><div style="font-size:11px;color:#888;margin-top:2px">Short observation</div></label>' +
+        '<label class="snooze-opt" data-days="7" style="padding:12px 8px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center"><input type="radio" name="snooze-days" value="7" style="display:none"><div style="font-weight:600">7 days</div><div style="font-size:11px;color:#888;margin-top:2px">Working on it</div></label>' +
+        '<label class="snooze-opt" data-days="30" style="padding:12px 8px;border:2px solid #e5e5e5;border-radius:8px;cursor:pointer;text-align:center"><input type="radio" name="snooze-days" value="30" style="display:none"><div style="font-weight:600">30 days</div><div style="font-size:11px;color:#888;margin-top:2px">Dismiss / park</div></label>' +
+      '</div>' +
+      '<div style="font-size:12px;font-weight:600;color:#333;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">Why? <span style="color:#e53e3e;font-weight:normal">(required)</span></div>' +
+      '<textarea id="snooze-reason" placeholder="Why are you snoozing? e.g. \'Already raised bids, watching for 3 days\' or \'Seasonal, parking until next quarter\'..." style="width:100%;padding:12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;height:90px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>' +
+      '<div id="snooze-error" style="color:#e53e3e;font-size:12px;margin-top:4px;display:none"></div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">' +
+        '<button class="btn btn-ghost" style="font-size:13px" onclick="document.getElementById(&quot;snooze-modal&quot;).remove()">Cancel</button>' +
+        '<button class="btn btn-primary" style="font-size:13px" onclick="submitSnooze(' + JSON.stringify(campaignId) + ',' + JSON.stringify(campaignName) + ')">Snooze</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  // Click handlers for the option pills
+  overlay.querySelectorAll('.snooze-opt').forEach(function(el){
+    el.addEventListener('click', function(){
+      overlay.querySelectorAll('.snooze-opt').forEach(function(o){
+        o.style.borderColor = '#e5e5e5'; o.style.background = 'white';
+      });
+      el.style.borderColor = '#0F1F3A'; el.style.background = '#F5F5F0';
+      const radio = el.querySelector('input'); if (radio) radio.checked = true;
+    });
+  });
+  // Default to 7 days
+  const def = overlay.querySelector('.snooze-opt[data-days="7"]');
+  if (def) def.click();
+  setTimeout(function(){ const ta = document.getElementById('snooze-reason'); if(ta) ta.focus(); }, 50);
+  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
+}
+
+async function submitSnooze(campaignId, campaignName) {
+  const radios = document.querySelectorAll('input[name="snooze-days"]:checked');
+  const days = radios.length ? parseInt(radios[0].value) : null;
+  const reason = (document.getElementById('snooze-reason').value || '').trim();
+  const errEl = document.getElementById('snooze-error');
+  if (!days) { errEl.textContent = 'Pick a duration.'; errEl.style.display = ''; return; }
+  if (!reason) { errEl.textContent = 'Reason is required.'; errEl.style.display = ''; return; }
+  try {
+    const r = await fetch('/api/amazon/campaigns/' + encodeURIComponent(campaignId) + '/snooze', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ days: days, reason: reason, campaignName: campaignName, action: days === 30 ? 'dismiss' : 'snooze' })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { errEl.textContent = 'Snooze failed: ' + (j.error || 'unknown'); errEl.style.display = ''; return; }
+    document.getElementById('snooze-modal').remove();
+    loadStuckCampaigns();
+  } catch(e) {
+    errEl.textContent = 'Snooze failed: ' + e.message;
+    errEl.style.display = '';
+  }
 }
 
 // ── Underperforming Campaign Modal (Pause / Work on it 1 week) ───────────
@@ -4061,13 +4134,8 @@ function renderAmazonProductsList(data) {
   if (!el) return;
   const allProducts = data.products || [];
   // r21: apply title search filter (does nothing if amzProductSearchTerm is empty)
-  // r22: hide snoozed products from Underperforming bucket only — they still show
-  //      in All / Urgent / Working as normal. If a snoozed product becomes Urgent,
-  //      we ignore the snooze (we trust the bucket more than a stale snooze).
-  const products = allProducts.filter(amzProductMatchesSearch).filter(function(p){
-    if (amzProductView === 'underperforming' && p.snooze && p.bucket !== 'urgent') return false;
-    return true;
-  });
+  // r23: product-level snooze removed; snooze is on Underperforming Campaigns now.
+  const products = allProducts.filter(amzProductMatchesSearch);
   const summary = data.summary || {};
   // r20c: bucket-aware count summary for the products header
   const urgentTxt = summary.urgent_count > 0 ? ' · ' + summary.urgent_count + ' urgent' : '';
@@ -4205,14 +4273,6 @@ function amzProductCard(p, idx, canEditOwner, agents) {
   if (p.active_task) {
     activeTaskBadge = '<span class="amz-priority-pill amz-priority-2" title="Already assigned to ' + escHtml(p.active_task.agent_name||'') + ' (status: ' + escHtml(p.active_task.status) + ')" onclick="event.stopPropagation();showPage(\'tasks\', document.querySelector(&quot;.nav-item[onclick*=\\&quot;showPage(\\\'tasks\\\'\\&quot;]&quot;))" style="cursor:pointer">🛠 ' + escHtml(p.active_task.agent_name||'') + '</span>';
   }
-  // r22: snooze badge
-  let snoozeBadge = '';
-  if (p.snooze) {
-    const until = new Date(p.snooze.snoozed_until);
-    const hoursLeft = Math.max(0, Math.round((until - new Date()) / 36e5));
-    const label = hoursLeft >= 24 ? Math.round(hoursLeft / 24) + 'd left' : hoursLeft + 'h left';
-    snoozeBadge = '<span class="amz-priority-pill" style="background:#f0f0f0;color:#666;font-size:10px" title="Snoozed by ' + escHtml(p.snooze.snoozed_by || '') + '">💤 ' + label + '</span>';
-  }
   // r16: Hide/Restore button — appears in card header
   const isHidden = amzProductView === 'hidden';
   const safeHideKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
@@ -4224,7 +4284,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
-      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + activeTaskBadge + snoozeBadge + hideBtn + '</div>' +
+      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + activeTaskBadge + hideBtn + '</div>' +
       diagnosisLine +
       actionLine +
       stats +
@@ -4469,20 +4529,8 @@ function buildAmzProductModalBody(p) {
       } else {
         buttons.push('<button class="btn btn-primary" onclick="amzAssignTask(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">📋 Assign as task</button>');
       }
-      // r22: Underperforming snooze
-      if (p.bucket === 'underperforming' && !p.active_task) {
-        if (p.snooze) {
-          const until = new Date(p.snooze.snoozed_until).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
-          buttons.push('<div style="font-size:12px;color:#666;background:#f5f5f5;padding:6px 10px;border-radius:6px;display:flex;gap:8px;align-items:center">💤 Snoozed until ' + escHtml(until) + ' <button class="btn btn-ghost" style="font-size:11px" onclick="amzUnsnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')">Unsnooze</button></div>');
-        } else {
-          buttons.push('<div style="display:inline-flex;gap:4px;align-items:center"><span style="font-size:12px;color:#666">💤 Snooze:</span>' +
-            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',1)">1d</button>' +
-            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',3)">3d</button>' +
-            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',7)">7d</button>' +
-            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',30)">30d</button>' +
-            '</div>');
-        }
-      }
+      // r23: snooze moved from Products to Underperforming Campaigns. Products
+      // page no longer offers snooze (it's a campaign-level concept now).
       // r21: owner reassign — owner+manager only
       if (window._meCache && (((window._meCache.role||'').toLowerCase()==='owner') || ((window._meCache.role||'').toLowerCase()==='manager') || ((window._meCache.department||'').toLowerCase()==='manager'))) {
         buttons.push('<button class="btn btn-ghost" onclick="showOwnerReassignModal(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',\'' + escHtml(p.owner_agent || '').replace(/'/g, "\\'") + '\')" style="font-size:13px">👤 Reassign owner</button>');
@@ -4844,36 +4892,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }).catch(function(){});
   }, 2000);
 });
-
-// r22: Snooze helpers — temporarily hide an underperforming product
-async function amzSnooze(groupKey, days) {
-  const reason = prompt('Snooze "' + ((amzProductsCache && amzProductsCache.products && (amzProductsCache.products.find(function(x){return x.parent_sku===groupKey;})||{}).title) || groupKey) + '" for ' + days + ' day(s)?\n\nOptional: why are you snoozing? (e.g. "Waiting for review approval")');
-  if (reason === null) return;
-  try {
-    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/snooze', {
-      method: 'POST',
-      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
-      body: JSON.stringify({ days: days, reason: reason || null })
-    });
-    const j = await r.json();
-    if (!r.ok || j.error) { alert('Snooze failed: ' + (j.error || 'unknown')); return; }
-    closeAmzProductModal();
-    loadAmazonProducts();
-  } catch(e) { alert('Snooze failed: ' + e.message); }
-}
-
-async function amzUnsnooze(groupKey) {
-  if (!confirm('Unsnooze this product? It will appear in Underperforming again.')) return;
-  try {
-    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/snooze', {
-      method: 'DELETE',
-      headers: getAuthHeaders()
-    });
-    if (!r.ok) { alert('Unsnooze failed.'); return; }
-    closeAmzProductModal();
-    loadAmazonProducts();
-  } catch(e) { alert('Unsnooze failed: ' + e.message); }
-}
 
 // r16: Hide / restore product handlers
 async function hideAmzProduct(groupKey) {
