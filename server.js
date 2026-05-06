@@ -4372,9 +4372,13 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
   const overrideAgent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
   const problemType = String((req.body && req.body.problemType) || 'product_action').trim();
   try {
+    // r21 fix: when a parent has multiple SKU rows, ones with NULL ASIN can win
+    // the LIMIT 1 lottery and break the assign. Order by ASIN-NOT-NULL first so
+    // we always pick a row with an ASIN if any sibling has one.
     const prodRes = await db.query(
       "SELECT sku, asin, title, owner_agent FROM amazon_products " +
-      "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) LIMIT 1",
+      "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) " +
+      "ORDER BY (asin IS NULL) ASC, sku ASC LIMIT 1",
       [groupKey]
     );
     if (!prodRes.rows.length) return res.status(404).json({ error: 'Product not found' });
@@ -5101,9 +5105,11 @@ app.get('/api/amazon/unknown-agents', async function(req, res) {
   }
 });
 
-// r21: GET /api/tasks/orphaned — tasks assigned to agent names NOT in active users.
-// Owner+manager only. Used by the "Unknown agents" modal on the Tasks page so
-// orphaned work can be reassigned to a real agent or archived.
+// r21: GET /api/tasks/orphaned — Amazon tasks assigned to agent names NOT in
+// active Amazon-department users. Owner+manager only. Used by the "Unknown
+// agents" modal on the Amazon Tasks page so orphaned work can be reassigned
+// or archived. Scoped to department='amazon' — Google tasks have their own
+// flow (Rahul/Anuj are seeded distinct from Amazon agents).
 app.get('/api/tasks/orphaned', async function(req, res) {
   if (!db) return res.json({ tasks: [] });
   const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
@@ -5111,14 +5117,21 @@ app.get('/api/tasks/orphaned', async function(req, res) {
   const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
   if (!isPrivileged) return res.status(403).json({ error: 'Owner or manager role required' });
   try {
-    const ur = await db.query("SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE");
+    // Active Amazon agents only — Google agents (Rahul/Anuj) shouldn't make
+    // an Amazon task look "assigned"; they live in a different department.
+    const ur = await db.query(
+      "SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE " +
+      "AND LOWER(COALESCE(department,'')) IN ('amazon','manager')"
+    );
     const activeNames = ur.rows.map(function(r){ return r.name; }).filter(Boolean);
     if (activeNames.length === 0) return res.json({ tasks: [] });
-    // Find open/in-progress tasks where agent_name is NULL or NOT in active users
+    // Find open/in-progress Amazon tasks where agent_name is NULL or NOT in active Amazon users.
+    // department defaults to 'amazon' on the column so legacy rows pre-r17 are included via COALESCE.
     const tr = await db.query(
       "SELECT id, campaign_id, campaign_name, agent_name, status, problem_type, " +
       "problem_detail, created_date, days_persisted FROM campaign_tasks " +
-      "WHERE status IN ('open','in_progress','scaling') " +
+      "WHERE COALESCE(department,'amazon')='amazon' " +
+      "AND status IN ('open','in_progress','scaling') " +
       "AND (agent_name IS NULL OR NOT (agent_name = ANY($1))) " +
       "ORDER BY created_date DESC LIMIT 200",
       [activeNames]
@@ -5244,6 +5257,171 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
     res.json({ days: dayRows, totals: totals, agentFilter: agentFilter, isManagerLevel: isManagerLevel });
   } catch(e) {
     console.error('/api/amazon/sales-summary error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r21: GET /api/admin/sales-gap-diagnosis?days=7 — diagnoses why the headline
+// 7-day sales total differs from the per-agent sum. Owner+manager only.
+//
+// The historical £20k gap had THREE structural causes:
+// 1. amazon_orders.order_total includes shipping + tax + order-level discounts.
+//    SUM(item_price * quantity) only counts line subtotals — excludes shipping.
+// 2. num_items vs SUM(quantity) diverge after partial refunds (num_items doesn't
+//    always update).
+// 3. Order line items with NULL asin contribute to the line-item sum but cannot
+//    join to amazon_products, so they vanish from per-agent attribution.
+//
+// This endpoint surfaces all three so the gap becomes observable, not mysterious.
+app.get('/api/admin/sales-gap-diagnosis', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Owner or manager role required' });
+  try {
+    const days = Math.min(parseInt(req.query.days || '7'), 30);
+
+    // 1. Headline total — exactly the sales-summary manager-view query
+    const headlineRes = await db.query(
+      "SELECT SUM(order_total) AS gross, SUM(num_items) AS units, COUNT(*) AS orders " +
+      "FROM amazon_orders " +
+      "WHERE purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND status NOT IN ('Cancelled','Canceled')"
+    );
+    const headline = headlineRes.rows[0] || {};
+
+    // 2. Line-item total — same shape as sales-by-agent, summed across all agents
+    const lineItemRes = await db.query(
+      "SELECT SUM(i.item_price * i.quantity) AS line_gross, " +
+      "       SUM(i.quantity) AS line_units " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled')"
+    );
+    const lineItem = lineItemRes.rows[0] || {};
+
+    // 3. Per-agent breakdown (matches sales-by-agent) — sum across agents
+    const agentRes = await db.query(
+      "SELECT COALESCE(p.owner_agent, 'Unassigned') AS agent, " +
+      "       SUM(i.item_price * i.quantity) AS gross, " +
+      "       SUM(i.quantity) AS units, " +
+      "       COUNT(DISTINCT o.order_id) AS orders " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "GROUP BY COALESCE(p.owner_agent, 'Unassigned') " +
+      "ORDER BY gross DESC"
+    );
+    const agentBreakdown = agentRes.rows.map(function(r){
+      return { agent: r.agent, gross: parseFloat(r.gross || 0), units: parseInt(r.units || 0), orders: parseInt(r.orders || 0) };
+    });
+    const agentSum = agentBreakdown.reduce(function(s, a){ return s + a.gross; }, 0);
+
+    // 4. Items with NULL asin — these silently vanish from per-agent attribution
+    const nullAsinRes = await db.query(
+      "SELECT COUNT(*) AS rows, SUM(i.item_price * i.quantity) AS gross, SUM(i.quantity) AS units " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin IS NULL"
+    );
+    const nullAsin = nullAsinRes.rows[0] || {};
+
+    // 5. Items where asin doesn't match any amazon_products row — bucketed as Unassigned
+    const unmatchedRes = await db.query(
+      "SELECT COUNT(*) AS rows, SUM(i.item_price * i.quantity) AS gross, " +
+      "       COUNT(DISTINCT i.asin) AS distinct_asins " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin IS NOT NULL " +
+      "AND p.asin IS NULL"
+    );
+    const unmatched = unmatchedRes.rows[0] || {};
+
+    // 6. Items where amazon_products row exists but owner_agent is NULL
+    const noOwnerRes = await db.query(
+      "SELECT COUNT(*) AS rows, SUM(i.item_price * i.quantity) AS gross " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "JOIN amazon_products p ON p.asin = i.asin " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND p.owner_agent IS NULL"
+    );
+    const noOwner = noOwnerRes.rows[0] || {};
+
+    // 7. Estimate shipping/tax delta — order_total vs sum of items in the same orders
+    const deltaRes = await db.query(
+      "WITH order_items AS (" +
+      "  SELECT i.order_id, SUM(i.item_price * i.quantity) AS items_gross " +
+      "  FROM amazon_order_items i " +
+      "  GROUP BY i.order_id" +
+      ") " +
+      "SELECT SUM(o.order_total - COALESCE(oi.items_gross, 0)) AS shipping_tax_delta, " +
+      "       COUNT(*) FILTER (WHERE o.order_total > COALESCE(oi.items_gross, 0) + 0.50) AS orders_with_delta " +
+      "FROM amazon_orders o " +
+      "LEFT JOIN order_items oi ON oi.order_id = o.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled')"
+    );
+    const delta = deltaRes.rows[0] || {};
+
+    const headlineGross = parseFloat(headline.gross || 0);
+    const lineItemGross = parseFloat(lineItem.line_gross || 0);
+    const totalGap = headlineGross - agentSum;
+
+    res.json({
+      window_days: days,
+      // The two numbers people are comparing on the dashboard
+      headline_sales: {
+        gross: headlineGross,
+        orders: parseInt(headline.orders || 0),
+        units: parseInt(headline.units || 0),
+        source: 'amazon_orders.order_total — includes shipping, tax, order-level discounts'
+      },
+      per_agent_sum: {
+        gross: agentSum,
+        breakdown: agentBreakdown,
+        source: 'sum of (item_price × quantity) per line item, grouped by amazon_products.owner_agent'
+      },
+      total_gap: parseFloat(totalGap.toFixed(2)),
+      gap_components: {
+        shipping_tax_and_discount_delta: parseFloat(parseFloat(delta.shipping_tax_delta || 0).toFixed(2)),
+        shipping_tax_delta_explanation: 'Difference between order_total and sum of (item_price × quantity) for the same orders. Captures shipping income, VAT (if not already in item_price), and order-level discounts. Affects ' + parseInt(delta.orders_with_delta || 0) + ' orders.',
+        line_items_with_null_asin: {
+          rows: parseInt(nullAsin.rows || 0),
+          gross: parseFloat(parseFloat(nullAsin.gross || 0).toFixed(2)),
+          units: parseInt(nullAsin.units || 0),
+          explanation: 'Line items missing an ASIN — silently dropped from per-agent attribution.'
+        },
+        line_items_with_unmatched_asin: {
+          rows: parseInt(unmatched.rows || 0),
+          gross: parseFloat(parseFloat(unmatched.gross || 0).toFixed(2)),
+          distinct_asins: parseInt(unmatched.distinct_asins || 0),
+          explanation: 'Line items where ASIN does not exist in amazon_products. Get bucketed as "Unassigned" — visible in agent totals but not really attributed.'
+        },
+        line_items_with_owner_null: {
+          rows: parseInt(noOwner.rows || 0),
+          gross: parseFloat(parseFloat(noOwner.gross || 0).toFixed(2)),
+          explanation: 'amazon_products row exists but owner_agent is NULL. Show under "Unassigned".'
+        }
+      },
+      sanity_check: {
+        line_item_gross: parseFloat(lineItemGross.toFixed(2)),
+        line_item_minus_agent_sum: parseFloat((lineItemGross - agentSum).toFixed(2)),
+        line_item_minus_agent_sum_explanation: 'Should be ~0. If non-zero, the LEFT JOIN to amazon_products is dropping rows somehow (unlikely with LEFT but worth checking).'
+      }
+    });
+  } catch(e) {
+    console.error('/api/admin/sales-gap-diagnosis error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
