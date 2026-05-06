@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r20c (clean card view + Urgent/Underperforming/Working buckets, campaign matcher removed (manual ASIN→campaign mapping coming later), Kunal soft-deleted with task reassignment to Bobby, AI critique drops live-page review scrape and uses conditional signal instructions)
+// CampaignPulse — deploy marker 2026-05-06 r20d (FBA + FBM stock combined for stock cover, fulfillment_mode column added, stock-cover diagnosis only fires when running out in next 30 days, Kunal tasks archived not reassigned, content age uses newest not oldest)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -622,6 +622,7 @@ async function refreshAmazonPricingSignals(opts) {
       fulfillable_qty: null,
       velocity_30d: velocityMap[asin] != null ? velocityMap[asin] : 0,
       stock_cover_days: null,
+      fulfillment_mode: null,
       last_error: null
     };
     const errors = [];
@@ -645,79 +646,121 @@ async function refreshAmazonPricingSignals(opts) {
       errors.push('catalog: ' + (e.response && e.response.status || e.message));
     }
 
-    // 3b. Last content update — from /listings/items via SKU
-    if (sku) {
+    // 3b + 3c (r20d): Walk EVERY SKU for this ASIN and pull both
+    //   - last content update (from listings summaries)
+    //   - FBM warehouse stock (from listings.fulfillmentAvailability where
+    //     fulfillmentChannelCode='DEFAULT' — i.e. merchant-fulfilled)
+    // Then add FBA fulfillable on top via the inventory call.
+    //
+    // Why this matters: many of FK Sports' ASINs have BOTH an FBA SKU (often
+    // CLOSED with 0 units) and an FBM SKU (Active with 500 in the warehouse).
+    // Pre-r20d the code only saw the FBA side and reported "0 stock cover" for
+    // products that actually had plenty of warehouse inventory.
+    //
+    // Convention agreed with Bobby:
+    //   - Any SKU containing "FBA" (case-insensitive) is FBA-fulfilled
+    //   - Anything else is MFN/FBM
+    //   - fulfillment_mode is 'fba' / 'fbm' / 'mixed' / null based on what's present
+    let allSkus = [];
+    try {
+      const skuRows = await db.query(
+        "SELECT sku, status FROM amazon_products WHERE asin=$1",
+        [asin]
+      );
+      allSkus = skuRows.rows;
+    } catch(e) {
+      // Fall back to just the picked SKU
+      if (sku) allSkus = [{ sku: sku, status: '' }];
+    }
+
+    let fbmQty = 0;        // sum of FBM/warehouse fulfillable across all SKUs
+    let hasFbaSku = false; // any SKU named like FBA
+    let hasFbmSku = false; // any SKU NOT named like FBA
+    for (const r of allSkus) {
+      const sk = r.sku;
+      if (!sk) continue;
+      const isFbaSku = /fba/i.test(sk);
+      if (isFbaSku) hasFbaSku = true; else hasFbmSku = true;
+
       try {
+        // includedData=summaries,offers — `offers` carries fulfillmentAvailability
+        // for SP-API listings v2021-08-01. summaries gives lastUpdatedDate.
         const list = await spApiGet(
-          '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) +
+          '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sk) +
           '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
-          '&includedData=summaries'
+          '&includedData=summaries,offers'
         );
+        // Last content update — keep the MOST RECENT lastUpdatedDate across SKUs
+        // (using the freshest one — at least one SKU was updated then)
         const summary = (list && list.summaries && list.summaries[0]) || {};
         if (summary.lastUpdatedDate) {
-          // YYYY-MM-DD slice — the field is ISO timestamp like "2025-12-04T10:23:00Z"
-          sig.last_content_update = String(summary.lastUpdatedDate).slice(0, 10);
+          const d = String(summary.lastUpdatedDate).slice(0, 10);
+          if (!sig.last_content_update || d > sig.last_content_update) {
+            sig.last_content_update = d;
+          }
+        }
+        // FBM stock — fulfillmentAvailability lives on offers OR at the top of
+        // the response depending on the API version. Try both.
+        const fa = (list && list.fulfillmentAvailability)
+                   || (list && list.offers && list.offers[0] && list.offers[0].fulfillmentAvailability)
+                   || [];
+        if (Array.isArray(fa)) {
+          fa.forEach(function(entry) {
+            const channel = String(entry.fulfillmentChannelCode || entry.fulfillment_channel_code || '').toUpperCase();
+            const qty = entry.quantity != null ? parseInt(entry.quantity) : null;
+            if (qty == null || !isFinite(qty)) return;
+            // DEFAULT = merchant-fulfilled (FBM/warehouse)
+            // AMAZON_NA / AMAZON_EU / AMAZON_* = FBA — already counted via inventory call
+            if (channel === 'DEFAULT' || channel === '' || channel === 'MERCHANT') {
+              fbmQty += qty;
+            }
+          });
         }
       } catch(e) {
-        errors.push('listings: ' + (e.response && e.response.status || e.message));
+        errors.push('listings(' + sk + '): ' + (e.response && e.response.status || e.message));
       }
     }
 
-    // 3c. Inventory (FBA fulfillable qty)
-    // r20 fix: SP-API can return inventory under several response shapes. Also,
-    // a single ASIN often has multiple SKUs (FBA + FBM duplicates, MultipackQty
-    // bundles) and we want the SUM across all of them, not just the first match.
-    // Critically, when a SKU is FBM-only or has no FBA inventory at all, the API
-    // returns NO row for that SKU — we should treat that as 0, not null, so the
-    // stock-cover calculation can run.
+    // 3c. Inventory (FBA fulfillable qty) — same call as before but now ADDED
+    // to the FBM total rather than replacing it.
+    let fbaQty = 0;
+    let fbaCallSucceeded = false;
     try {
-      // Pull every SKU the seller has for this ASIN. We use marketplaceIds=ALL
-      // by querying without a sellerSkus filter and matching by ASIN locally.
-      // The /summaries endpoint is paginated for large sellers; one call here
-      // returns up to 50 results, plenty for a single-ASIN refresh.
       const inv = await spApiGet(
         '/fba/inventory/v1/summaries' +
         '?details=true' +
         '&granularityType=Marketplace' +
         '&granularityId=' + SP_API_MARKETPLACE_ID +
-        '&marketplaceIds=' + SP_API_MARKETPLACE_ID +
-        (sku ? '&sellerSkus=' + encodeURIComponent(sku) : '')
+        '&marketplaceIds=' + SP_API_MARKETPLACE_ID
       );
       const summaries = (inv && inv.payload && inv.payload.inventorySummaries) || [];
-      // Find every entry that maps to OUR ASIN (multiple SKUs may share one ASIN).
-      // If the API returned an empty list (i.e. SKU not in FBA at all), treat as 0.
-      const matches = summaries.filter(function(s){ return s.asin === asin || s.sellerSku === sku; });
-      if (matches.length === 0) {
-        // No FBA presence — that's a known-zero, not unknown-null. Card will
-        // show "0d" with the < 7d red colour and a P1 stock-out diagnosis.
-        sig.fulfillable_qty = 0;
-      } else {
-        let total = 0;
-        let anyFound = false;
-        matches.forEach(function(m) {
-          const detail = m.inventoryDetails || {};
-          // Try every documented shape:
-          //   detail.fulfillableQuantity (camelCase, current API)
-          //   detail.FulfillableQuantity (legacy PascalCase)
-          //   m.totalQuantity            (sometimes only the rollup is set)
-          const candidates = [
-            detail.fulfillableQuantity,
-            detail.FulfillableQuantity,
-            m.totalQuantity
-          ];
-          for (let i = 0; i < candidates.length; i++) {
-            const v = candidates[i];
-            if (v != null) {
-              const n = parseInt(v);
-              if (isFinite(n)) { total += n; anyFound = true; break; }
-            }
+      const matches = summaries.filter(function(s){ return s.asin === asin; });
+      fbaCallSucceeded = true;
+      matches.forEach(function(m) {
+        const detail = m.inventoryDetails || {};
+        const candidates = [
+          detail.fulfillableQuantity,
+          detail.FulfillableQuantity,
+          m.totalQuantity
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+          const v = candidates[i];
+          if (v != null) {
+            const n = parseInt(v);
+            if (isFinite(n)) { fbaQty += n; break; }
           }
-        });
-        sig.fulfillable_qty = anyFound ? total : 0;
-      }
+        }
+      });
     } catch(e) {
       errors.push('inventory: ' + (e.response && e.response.status || e.message));
     }
+
+    // Combine — total stock available across all channels.
+    sig.fulfillable_qty = fbaQty + fbmQty;
+    if (hasFbaSku && hasFbmSku) sig.fulfillment_mode = 'mixed';
+    else if (hasFbmSku) sig.fulfillment_mode = 'fbm';
+    else if (hasFbaSku) sig.fulfillment_mode = 'fba';
+    else sig.fulfillment_mode = null;
 
     // 3d. Price vs lowest competitor — Product Pricing v0 offers
     // r20 fix: SP-API returns prices in MULTIPLE shapes depending on the marketplace
@@ -837,17 +880,18 @@ async function refreshAmazonPricingSignals(opts) {
       await db.query(
         "INSERT INTO amazon_pricing_signals " +
         "(asin, your_price, lowest_competitor_price, price_vs_lowest, reviews_count, reviews_avg, " +
-        " last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, last_error, fetched_at) " +
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) " +
+        " last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, fulfillment_mode, last_error, fetched_at) " +
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) " +
         "ON CONFLICT (asin) DO UPDATE SET " +
         "your_price=EXCLUDED.your_price, lowest_competitor_price=EXCLUDED.lowest_competitor_price, " +
         "price_vs_lowest=EXCLUDED.price_vs_lowest, reviews_count=EXCLUDED.reviews_count, " +
         "reviews_avg=EXCLUDED.reviews_avg, last_content_update=EXCLUDED.last_content_update, " +
         "fulfillable_qty=EXCLUDED.fulfillable_qty, velocity_30d=EXCLUDED.velocity_30d, " +
-        "stock_cover_days=EXCLUDED.stock_cover_days, last_error=EXCLUDED.last_error, fetched_at=NOW()",
+        "stock_cover_days=EXCLUDED.stock_cover_days, fulfillment_mode=EXCLUDED.fulfillment_mode, " +
+        "last_error=EXCLUDED.last_error, fetched_at=NOW()",
         [asin, sig.your_price, sig.lowest_competitor_price, sig.price_vs_lowest, sig.reviews_count,
          sig.reviews_avg, sig.last_content_update, sig.fulfillable_qty, sig.velocity_30d,
-         sig.stock_cover_days, sig.last_error]
+         sig.stock_cover_days, sig.fulfillment_mode, sig.last_error]
       );
       okCount++;
     } catch(e) {
@@ -1348,9 +1392,14 @@ async function initDB() {
         fulfillable_qty INTEGER,
         velocity_30d NUMERIC(8,2),
         stock_cover_days NUMERIC(8,1),
+        fulfillment_mode TEXT,
         last_error TEXT,
         fetched_at TIMESTAMP DEFAULT NOW()
       );
+      -- r20d: Idempotent migration — for environments that already created the
+      -- table before fulfillment_mode existed. ADD COLUMN IF NOT EXISTS is
+      -- supported in Postgres 9.6+; Railway is 14+.
+      ALTER TABLE amazon_pricing_signals ADD COLUMN IF NOT EXISTS fulfillment_mode TEXT;
       CREATE INDEX IF NOT EXISTS idx_amazon_pricing_signals_fetched ON amazon_pricing_signals(fetched_at);
 
       -- r20: amazon_traffic_snapshots — daily Buy Box %, sessions, page views, units
@@ -1617,32 +1666,40 @@ async function initTasksTable() {
         if (r.rowCount > 0) console.log("Bobby promoted to role='owner'");
       } catch(e) { console.error('Owner role promotion error: ' + e.message); }
 
-      // r20c: Kunal cleanup — soft-delete his user account and reassign open
-      // tasks to Bobby. Idempotent — checks is_active before doing anything.
+      // r20c → r20d: Kunal cleanup — soft-delete his user account and ARCHIVE
+      // his open tasks (Bobby has paused all his campaigns, so reassigning is
+      // pointless — they're obsolete). Idempotent — re-runs are safe because
+      // the second pass finds zero open Kunal tasks.
       try {
         const kunalRes = await db.query(
-          "SELECT id, name FROM users WHERE name='Kunal' AND COALESCE(is_active,TRUE)=TRUE"
+          "SELECT id, name FROM users WHERE name='Kunal'"
         );
         if (kunalRes.rows.length > 0) {
-          // 1. Reassign open Kunal tasks to Bobby
-          const reassignRes = await db.query(
-            "UPDATE campaign_tasks SET agent_name='Bobby Singh' " +
+          // 1. Archive open Kunal tasks (status NOT IN complete/dismissed/archived)
+          const archivedRes = await db.query(
+            "UPDATE campaign_tasks SET " +
+              "status='archived', " +
+              "resolved_at=COALESCE(resolved_at, NOW()), " +
+              "archived_at=COALESCE(archived_at, NOW()), " +
+              "dismissed_reason=COALESCE(dismissed_reason, 'Kunal removed from team — campaigns paused') " +
             "WHERE agent_name='Kunal' AND status NOT IN ('complete','dismissed','archived') " +
             "RETURNING id"
           );
-          // 2. Soft-delete Kunal
-          await db.query("UPDATE users SET is_active=FALSE WHERE name='Kunal'");
-          // 3. Activity log entry — survives forever
-          try {
-            await db.query(
-              "INSERT INTO activity_log (action, agent_name, campaign_id, details) " +
-              "VALUES ('user_removed', 'Bobby Singh', NULL, $1)",
-              ['Kunal soft-deleted (left team); ' + reassignRes.rowCount + ' open tasks reassigned to Bobby Singh']
-            );
-          } catch(_e) { /* activity_log shape may differ — ignore if it does */ }
-          console.log('[r20c] Kunal cleanup: soft-deleted user, reassigned ' + reassignRes.rowCount + ' open tasks to Bobby');
+          // 2. Soft-delete Kunal (only if still active — keeps idempotent)
+          const deactivateRes = await db.query("UPDATE users SET is_active=FALSE WHERE name='Kunal' AND COALESCE(is_active,TRUE)=TRUE");
+          // 3. Activity log entry — only if we actually did anything this run
+          if (archivedRes.rowCount > 0 || deactivateRes.rowCount > 0) {
+            try {
+              await db.query(
+                "INSERT INTO activity_log (action, agent_name, campaign_id, details) " +
+                "VALUES ('user_removed', 'Bobby Singh', NULL, $1)",
+                ['Kunal removed (left team, campaigns paused); ' + archivedRes.rowCount + ' open tasks archived']
+              );
+            } catch(_e) { /* activity_log shape may differ — ignore if it does */ }
+            console.log('[r20d] Kunal cleanup: archived ' + archivedRes.rowCount + ' open tasks, soft-deleted user');
+          }
         }
-      } catch(e) { console.error('[r20c] Kunal cleanup error: ' + e.message); }
+      } catch(e) { console.error('[r20d] Kunal cleanup error: ' + e.message); }
     } catch(e) { console.error('User init error: ' + e.message); }
     console.log('Auth tables ready');
 
@@ -3161,13 +3218,24 @@ function computeAmazonDiagnosis(p) {
   const sig = p.signals || {};
 
   // ── URGENT cases (priority 1) ──────────────────────────────────────────────
-  // r20: Stock-out imminent — < 7 days cover and product is selling
-  if (sig.stock_cover_days != null && sig.stock_cover_days < 7 && hasSales) {
+  // r20d: Stock-out within 30 days — single check, replaces both old < 7d P1 and
+  // < 30d P2 cases. Per Bobby: only flag if running out in next 30d, otherwise
+  // stay quiet. Velocity check (> 0) ensures we only alarm on actively-selling
+  // items, not zero-velocity ASINs where 0 stock = "we don't sell this anymore".
+  if (sig.stock_cover_days != null && sig.stock_cover_days < 30 &&
+      (sig.velocity_30d || 0) > 0 && hasSales) {
+    const days = sig.stock_cover_days;
+    const isCritical = days < 7;
+    const channelLabel = sig.fulfillment_mode === 'fbm' ? ' (warehouse stock)'
+                       : sig.fulfillment_mode === 'mixed' ? ' (FBA + warehouse combined)'
+                       : '';
     return {
-      priority: 1,
-      evidence: sig.stock_cover_days + 'd stock cover, selling ' + (sig.velocity_30d || 0).toFixed(1) + '/day',
-      diagnosis: 'Only ' + sig.stock_cover_days + ' days of stock left at current sales rate (' + (sig.fulfillable_qty || 0) + ' units, ' + (sig.velocity_30d || 0).toFixed(1) + '/day)',
-      action: 'Send replenishment to FBA now — stock-out imminent'
+      priority: isCritical ? 1 : 2,
+      evidence: days + 'd cover' + (sig.fulfillment_mode === 'fbm' ? ' (FBM)' : ''),
+      diagnosis: 'Only ' + days + ' days of stock left at current sales rate (' + (sig.fulfillable_qty || 0) + ' units' + channelLabel + ', ' + (sig.velocity_30d || 0).toFixed(1) + '/day)',
+      action: sig.fulfillment_mode === 'fbm' ? 'Replenish warehouse — running low'
+            : sig.fulfillment_mode === 'mixed' ? 'Replenish stock — running low across FBA + warehouse'
+            : 'Send replenishment to FBA — running low'
     };
   }
   // r20: Buy Box collapse — selling but losing the box more than half the time
@@ -3261,15 +3329,8 @@ function computeAmazonDiagnosis(p) {
       action: 'Either launch test ads or de-prioritise the listing'
     };
   }
-  // r20: Stock cover < 30 days (less urgent than the < 7 day P1 case above)
-  if (sig.stock_cover_days != null && sig.stock_cover_days < 30 && hasSales) {
-    return {
-      priority: 2,
-      evidence: sig.stock_cover_days + 'd stock cover',
-      diagnosis: sig.stock_cover_days + ' days of stock at current sales rate (' + (sig.fulfillable_qty || 0) + ' units)',
-      action: 'Plan replenishment to FBA — < 30 days cover'
-    };
-  }
+  // r20d: stock cover < 30d cases are now handled in the URGENT block above
+  // (merged with the < 7d critical check) — single place, single rule.
   // r20: Priced materially above lowest competitor — likely losing Buy Box
   if (sig.price_vs_lowest != null && sig.price_vs_lowest > 5 && hasSales) {
     return {
@@ -3452,7 +3513,7 @@ app.get('/api/amazon/products', async function(req, res) {
     const signalsRes = await db.query(
       "SELECT asin, your_price, lowest_competitor_price, price_vs_lowest, " +
       "reviews_count, reviews_avg, last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, " +
-      "fetched_at, " +
+      "fulfillment_mode, fetched_at, " +
       "(EXTRACT(EPOCH FROM (NOW() - fetched_at)) / 3600) AS age_hours " +
       "FROM amazon_pricing_signals"
     );
@@ -3469,6 +3530,7 @@ app.get('/api/amazon/products', async function(req, res) {
         fulfillable_qty: stale ? null : (s.fulfillable_qty != null ? parseInt(s.fulfillable_qty) : null),
         velocity_30d: stale ? null : (s.velocity_30d != null ? parseFloat(s.velocity_30d) : null),
         stock_cover_days: stale ? null : (s.stock_cover_days != null ? parseFloat(s.stock_cover_days) : null),
+        fulfillment_mode: stale ? null : (s.fulfillment_mode || null),  // r20d
         signals_stale: stale
       };
     });
@@ -3656,16 +3718,19 @@ app.get('/api/amazon/products', async function(req, res) {
       // r20: aggregate signals across ASINs in this parent group.
       // Strategy:
       //   - Buy Box %: weighted avg by sessions if available, else simple avg.
-      //   - Stock cover: SUM of fulfillable_qty / SUM of velocity_30d (treats parent as one unit).
+      //   - Stock cover: SUM of fulfillable_qty / SUM of velocity_30d.
       //   - Reviews: sum count, weighted-avg rating by count.
       //   - Price vs lowest: take the primary (highest-revenue) child's value.
-      //   - Last content update: oldest across children (worst case wins, prompts refresh).
+      //   - Last content update: NEWEST across children (r20d fix — was oldest,
+      //     which made every multi-ASIN parent look stale unfairly).
+      //   - Fulfillment mode: 'mixed' if any child differs, else single mode.
       const childAsins = parent.children.map(function(c){ return c.asin; }).filter(Boolean);
       let bbSum = 0, bbDays = 0, bbCount = 0;
       let invQty = 0, invVel = 0, invHas = false;
       let revSum = 0, revAvgNum = 0, revHas = false;
       let lastUpd = null;
       let staleCount = 0;
+      let fulfillmentModes = new Set();   // r20d: collect distinct modes seen across children
       childAsins.forEach(function(asin) {
         const sig = signalsByAsin[asin];
         const tr = trafficByAsin[asin];
@@ -3675,8 +3740,10 @@ app.get('/api/amazon/products', async function(req, res) {
           if (sig.velocity_30d != null) invVel += sig.velocity_30d;
           if (sig.reviews_count != null) { revSum += sig.reviews_count; revHas = true; if (sig.reviews_avg != null) revAvgNum += sig.reviews_avg * sig.reviews_count; }
           if (sig.last_content_update) {
-            if (!lastUpd || String(sig.last_content_update) < lastUpd) lastUpd = String(sig.last_content_update);
+            const d = String(sig.last_content_update).slice(0, 10);
+            if (!lastUpd || d > lastUpd) lastUpd = d;  // most recent wins
           }
+          if (sig.fulfillment_mode) fulfillmentModes.add(sig.fulfillment_mode);
         }
         if (tr && tr.buy_box_pct_7d != null) {
           bbSum += tr.buy_box_pct_7d; bbCount++;
@@ -3700,6 +3767,13 @@ app.get('/api/amazon/products', async function(req, res) {
         const last = new Date(lastUpd + 'T00:00:00');
         contentAgeDays = Math.floor((Date.now() - last.getTime()) / (24*3600*1000));
       }
+      // r20d: roll fulfillment modes up to a single label for the parent
+      let parentFulfillmentMode = null;
+      if (fulfillmentModes.size === 1) {
+        parentFulfillmentMode = Array.from(fulfillmentModes)[0];   // 'fba' or 'fbm' or 'mixed'
+      } else if (fulfillmentModes.size > 1) {
+        parentFulfillmentMode = 'mixed';
+      }
 
       const signals = {
         buy_box_pct_7d: buyBoxPct7d,
@@ -3714,6 +3788,7 @@ app.get('/api/amazon/products', async function(req, res) {
         your_price: primarySig ? primarySig.your_price : null,
         lowest_competitor_price: primarySig ? primarySig.lowest_competitor_price : null,
         price_vs_lowest: primarySig ? primarySig.price_vs_lowest : null,
+        fulfillment_mode: parentFulfillmentMode,     // r20d
         signals_stale_count: staleCount
       };
 
