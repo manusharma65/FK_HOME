@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r22 (mapping stripped, owner reassign kept, advertisedProduct report → true per-ASIN spend, day-7 review for Amazon tasks) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r22 (per-ASIN ad spend, day-7 review, active-task block, snooze, friction fixed, dashboard alert-only campaigns, refresh restores page) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1259,6 +1259,8 @@ function showPage(name, btn) {
   document.getElementById('page-' + name).classList.add('active');
   if (btn) btn.classList.add('active');
   document.getElementById('page-title').textContent = pageTitles[name] || name;
+  // r22: persist last page so refresh lands back where the user was
+  try { localStorage.setItem('cp_last_page', name); } catch(_) {}
   if (name === 'campaigns') renderAllCampaigns();
   if (name === 'report') renderReport();
   if (name === 'history') loadHistoryDates();
@@ -1397,9 +1399,18 @@ function renderDashboardTable() {
   if (dashTab === 'spend_no_revenue') toShow = spendNoRev.sort(function(a,b){ return (b.spend||0)-(a.spend||0); });
   else if (dashTab === 'no_activity') toShow = noActivity;
   else {
-    const needsAction = camps.filter(c => c.budgetRemaining <= 0.01 || c.acos > 35 || c.budgetPct >= 80);
-    const healthy = camps.filter(c => c.budgetRemaining > 0.01 && c.acos <= 35 && c.budgetPct < 80).slice(0,3);
-    toShow = [...needsAction, ...healthy].slice(0, 12);
+    // r22: Dashboard "needs action" tab now shows ONLY budget alerts (out-of-budget
+    // or budget-low). High-ACOS / healthy campaigns live in All Campaigns instead.
+    // Mirrors the alerts feed at the top — quick budget add / dismiss view only.
+    toShow = camps.filter(function(c){
+      return c.budgetRemaining <= 0.01 || c.budgetPct >= 80;
+    }).sort(function(a,b){
+      // Out of budget first, then by % spent descending
+      const aOut = a.budgetRemaining <= 0.01 ? 0 : 1;
+      const bOut = b.budgetRemaining <= 0.01 ? 0 : 1;
+      if (aOut !== bOut) return aOut - bOut;
+      return (b.budgetPct || 0) - (a.budgetPct || 0);
+    });
   }
   renderCampaignTable('dash-table', toShow, true);
 }
@@ -3835,6 +3846,17 @@ async function init() {
   }
   try { await fetchData(); } catch(e) { console.error('Init error:', e); setTimeout(init, 3000); }
   loadSettings();
+  // r22: restore last visited page on refresh. Skip if this is a fresh login
+  // (no token before this session) or invalid page name.
+  try {
+    const last = localStorage.getItem('cp_last_page');
+    const validPages = ['dashboard','campaigns','ai','keywords','report','activity','settings','tasks','agent-performance','stuck','history','users','my-settings','products'];
+    if (last && validPages.indexOf(last) !== -1 && last !== 'dashboard') {
+      // Find the matching nav button so it gets the active class
+      const btn = document.querySelector('.nav-item[onclick*="showPage(\'' + last + '\'"]');
+      showPage(last, btn);
+    }
+  } catch(_) {}
 }
 
 // ─── Password eye toggle + strength helpers (r6) ────────────────────────
@@ -4039,7 +4061,13 @@ function renderAmazonProductsList(data) {
   if (!el) return;
   const allProducts = data.products || [];
   // r21: apply title search filter (does nothing if amzProductSearchTerm is empty)
-  const products = allProducts.filter(amzProductMatchesSearch);
+  // r22: hide snoozed products from Underperforming bucket only — they still show
+  //      in All / Urgent / Working as normal. If a snoozed product becomes Urgent,
+  //      we ignore the snooze (we trust the bucket more than a stale snooze).
+  const products = allProducts.filter(amzProductMatchesSearch).filter(function(p){
+    if (amzProductView === 'underperforming' && p.snooze && p.bucket !== 'urgent') return false;
+    return true;
+  });
   const summary = data.summary || {};
   // r20c: bucket-aware count summary for the products header
   const urgentTxt = summary.urgent_count > 0 ? ' · ' + summary.urgent_count + ' urgent' : '';
@@ -4172,6 +4200,19 @@ function amzProductCard(p, idx, canEditOwner, agents) {
   // "Not in any campaign" warning all stripped. The matcher was unreliable; the
   // diagnosis line carries the agent-actionable info now. Bobby will re-do
   // ASIN→campaign mapping with a manual approach later.
+  // r22: active-task badge — shows if a product already has open task
+  let activeTaskBadge = '';
+  if (p.active_task) {
+    activeTaskBadge = '<span class="amz-priority-pill amz-priority-2" title="Already assigned to ' + escHtml(p.active_task.agent_name||'') + ' (status: ' + escHtml(p.active_task.status) + ')" onclick="event.stopPropagation();showPage(\'tasks\', document.querySelector(&quot;.nav-item[onclick*=\\&quot;showPage(\\\'tasks\\\'\\&quot;]&quot;))" style="cursor:pointer">🛠 ' + escHtml(p.active_task.agent_name||'') + '</span>';
+  }
+  // r22: snooze badge
+  let snoozeBadge = '';
+  if (p.snooze) {
+    const until = new Date(p.snooze.snoozed_until);
+    const hoursLeft = Math.max(0, Math.round((until - new Date()) / 36e5));
+    const label = hoursLeft >= 24 ? Math.round(hoursLeft / 24) + 'd left' : hoursLeft + 'h left';
+    snoozeBadge = '<span class="amz-priority-pill" style="background:#f0f0f0;color:#666;font-size:10px" title="Snoozed by ' + escHtml(p.snooze.snoozed_by || '') + '">💤 ' + label + '</span>';
+  }
   // r16: Hide/Restore button — appears in card header
   const isHidden = amzProductView === 'hidden';
   const safeHideKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
@@ -4183,7 +4224,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
-      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + hideBtn + '</div>' +
+      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + activeTaskBadge + snoozeBadge + hideBtn + '</div>' +
       diagnosisLine +
       actionLine +
       stats +
@@ -4419,14 +4460,37 @@ function buildAmzProductModalBody(p) {
       '<div id="amz-critique-content" style="font-size:14px;line-height:1.6;color:var(--text)"></div>',
     '</div>',
 
-    // Action bar
-    '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">',
-      '<button class="btn btn-primary" onclick="amzAssignTask(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">📋 Assign as task</button>',
-      // r21: owner reassign — owner+manager only (server enforces too)
-      ((window._meCache && (((window._meCache.role||'').toLowerCase()==='owner') || ((window._meCache.role||'').toLowerCase()==='manager') || ((window._meCache.department||'').toLowerCase()==='manager'))) ? '<button class="btn btn-ghost" onclick="showOwnerReassignModal(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',\'' + escHtml(p.owner_agent || '').replace(/'/g, "\\'") + '\')" style="font-size:13px">👤 Reassign owner</button>' : ''),
-      ((p.asins || [])[0] ? '<a class="btn btn-ghost" href="https://www.amazon.co.uk/dp/' + escHtml(p.asins[0]) + '" target="_blank">Open on Amazon →</a>' : ''),
-      '<a class="btn btn-ghost" href="https://sellercentral.amazon.co.uk/inventory" target="_blank">Open in Seller Central →</a>',
-    '</div>'
+    // Action bar — r22: shows existing active task, snooze controls, owner reassign
+    (function() {
+      const buttons = [];
+      // r22: if active task exists, show "view task" instead of "assign as task"
+      if (p.active_task) {
+        buttons.push('<div style="font-size:13px;color:#92400E;background:#FEF3C7;border:1px solid #FCD34D;padding:8px 12px;border-radius:8px;display:flex;align-items:center;gap:8px"><span>🛠</span><span>Active task with <strong>' + escHtml(p.active_task.agent_name || 'an agent') + '</strong> (status: ' + escHtml(p.active_task.status) + ')</span><button class="btn btn-ghost" style="font-size:12px;margin-left:auto" onclick="showPage(\'tasks\', document.querySelector(\'.nav-item[onclick*=&quot;showPage(\\\'tasks\\\'&quot;]\'))">View task →</button></div>');
+      } else {
+        buttons.push('<button class="btn btn-primary" onclick="amzAssignTask(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">📋 Assign as task</button>');
+      }
+      // r22: Underperforming snooze
+      if (p.bucket === 'underperforming' && !p.active_task) {
+        if (p.snooze) {
+          const until = new Date(p.snooze.snoozed_until).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+          buttons.push('<div style="font-size:12px;color:#666;background:#f5f5f5;padding:6px 10px;border-radius:6px;display:flex;gap:8px;align-items:center">💤 Snoozed until ' + escHtml(until) + ' <button class="btn btn-ghost" style="font-size:11px" onclick="amzUnsnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')">Unsnooze</button></div>');
+        } else {
+          buttons.push('<div style="display:inline-flex;gap:4px;align-items:center"><span style="font-size:12px;color:#666">💤 Snooze:</span>' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',1)">1d</button>' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',3)">3d</button>' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',7)">7d</button>' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px" onclick="amzSnooze(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',30)">30d</button>' +
+            '</div>');
+        }
+      }
+      // r21: owner reassign — owner+manager only
+      if (window._meCache && (((window._meCache.role||'').toLowerCase()==='owner') || ((window._meCache.role||'').toLowerCase()==='manager') || ((window._meCache.department||'').toLowerCase()==='manager'))) {
+        buttons.push('<button class="btn btn-ghost" onclick="showOwnerReassignModal(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',\'' + escHtml(p.owner_agent || '').replace(/'/g, "\\'") + '\')" style="font-size:13px">👤 Reassign owner</button>');
+      }
+      if ((p.asins || [])[0]) buttons.push('<a class="btn btn-ghost" href="https://www.amazon.co.uk/dp/' + escHtml(p.asins[0]) + '" target="_blank">Open on Amazon →</a>');
+      buttons.push('<a class="btn btn-ghost" href="https://sellercentral.amazon.co.uk/inventory" target="_blank">Open in Seller Central →</a>');
+      return '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' + buttons.join('') + '</div>';
+    })()
   ].join('');
 }
 
@@ -4452,10 +4516,14 @@ function renderAmzFrictionSection(p) {
   } else if (p.acos > 20) {
     issues.push({ severity: 'warn', text: 'ACOS ' + p.acos + '% — above 20% target' });
   }
-  // Coverage gap
-  if (p.total_children > 1 && p.ad_coverage_pct < 50) {
-    issues.push({ severity: 'warn', text: 'Only ' + p.advertised_children + ' of ' + p.total_children + ' ASINs are in any campaign (' + p.ad_coverage_pct + '% coverage)' });
-  }
+  // Coverage gap — r22: now driven by ad-perf data via camp_count, not the
+  // broken in_campaign flag (which was based on c.targets snapshot field that
+  // rarely populates). If product has multiple ASINs but ad-perf data shows
+  // < half advertised, flag it.
+  // (Removed old "in any campaign" warning — replaced with the camp_count check below.)
+  // No coverage warning here for now — the wasted-spend, high-ACOS, and
+  // no-conversions checks below cover the "ads aren't working" cases more
+  // precisely than a coverage percentage based on stale snapshot data.
   // No campaigns at all on a product with sales
   if (p.camp_count === 0 && p.total_sales_7d > 50) {
     issues.push({ severity: 'opportunity', text: '£' + p.total_sales_7d.toFixed(0) + ' organic sales but no advertising — launch a Sponsored Products campaign' });
@@ -4777,6 +4845,36 @@ document.addEventListener('DOMContentLoaded', function() {
   }, 2000);
 });
 
+// r22: Snooze helpers — temporarily hide an underperforming product
+async function amzSnooze(groupKey, days) {
+  const reason = prompt('Snooze "' + ((amzProductsCache && amzProductsCache.products && (amzProductsCache.products.find(function(x){return x.parent_sku===groupKey;})||{}).title) || groupKey) + '" for ' + days + ' day(s)?\n\nOptional: why are you snoozing? (e.g. "Waiting for review approval")');
+  if (reason === null) return;
+  try {
+    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/snooze', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ days: days, reason: reason || null })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Snooze failed: ' + (j.error || 'unknown')); return; }
+    closeAmzProductModal();
+    loadAmazonProducts();
+  } catch(e) { alert('Snooze failed: ' + e.message); }
+}
+
+async function amzUnsnooze(groupKey) {
+  if (!confirm('Unsnooze this product? It will appear in Underperforming again.')) return;
+  try {
+    const r = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/snooze', {
+      method: 'DELETE',
+      headers: getAuthHeaders()
+    });
+    if (!r.ok) { alert('Unsnooze failed.'); return; }
+    closeAmzProductModal();
+    loadAmazonProducts();
+  } catch(e) { alert('Unsnooze failed: ' + e.message); }
+}
+
 // r16: Hide / restore product handlers
 async function hideAmzProduct(groupKey) {
   if (!confirm('Hide this product from your main view?\n\nIt will not appear in totals or be analysed by the AI critique. You can restore it from the "Hidden" tab anytime.')) return;
@@ -4889,29 +4987,42 @@ async function amzAssignTask(groupKey) {
   const p = cache ? cache.find(function(x){ return x.parent_sku === groupKey; }) : null;
   if (!p) return;
 
-  // r21: hard-block if no cached AI critique. Subtasks are seeded from critique
-  // bullets so without it the agent has no actionable list. Show a clear modal
-  // pointing them at the Run AI critique button.
-  if (!p.asin) {
-    alert('This product has no ASIN. Refresh the catalogue sync and try again.');
+  // r22: block double-assignment client-side. Server also blocks but UX better here.
+  if (p.active_task) {
+    if (!confirm('This product already has an active task assigned to ' + (p.active_task.agent_name || 'an agent') + ' (status: ' + p.active_task.status + ').\n\nMark that task complete first, OR click OK to view the existing task on the Tasks page.')) return;
+    showPage('tasks', document.querySelector('.nav-item[onclick*="showPage(\'tasks\'"]'));
     return;
   }
-  try {
-    const cr = await fetch('/api/amazon/listing-critique?asin=' + encodeURIComponent(p.asin) + '&cachedOnly=1', { headers: getAuthHeaders() });
-    const cj = await cr.json();
-    const issues = cj && cj.critique && Array.isArray(cj.critique.issues) ? cj.critique.issues : [];
-    if (!cj || !cj.critique || issues.length === 0) {
-      alert(
-        'Run AI critique on this product before assigning as a task.\n\n' +
-        'Each issue from the critique becomes a subtask the agent must complete or dismiss-with-reason. ' +
-        'Without a critique, the agent would have nothing to action.\n\n' +
-        'Open the product → click "🤖 Run AI critique" → then assign as task.'
-      );
+
+  // r21: hard-block if no cached AI critique. Subtasks are seeded from critique
+  // bullets so without it the agent has no actionable list. r22: owner/manager
+  // can override if the product genuinely has no ASIN (data quality issue).
+  if (!p.asin) {
+    const me = window._meCache || {};
+    const isPriv = ((me.role||'').toLowerCase()==='owner') || ((me.role||'').toLowerCase()==='manager') || ((me.department||'').toLowerCase()==='manager');
+    if (!isPriv) {
+      alert('This product has no ASIN — cannot run AI critique. Ask a manager or owner to assign this task with manual instructions.');
       return;
     }
-  } catch(e) {
-    alert('Could not check AI critique cache: ' + e.message);
-    return;
+    // Owner/manager: skip critique check, allow direct assignment
+  } else {
+    try {
+      const cr = await fetch('/api/amazon/listing-critique?asin=' + encodeURIComponent(p.asin) + '&cachedOnly=1', { headers: getAuthHeaders() });
+      const cj = await cr.json();
+      const issues = cj && cj.critique && Array.isArray(cj.critique.issues) ? cj.critique.issues : [];
+      if (!cj || !cj.critique || issues.length === 0) {
+        alert(
+          'Run AI critique on this product before assigning as a task.\n\n' +
+          'Each issue from the critique becomes a subtask the agent must complete or dismiss-with-reason. ' +
+          'Without a critique, the agent would have nothing to action.\n\n' +
+          'Open the product → click "🤖 Run AI critique" → then assign as task.'
+        );
+        return;
+      }
+    } catch(e) {
+      alert('Could not check AI critique cache: ' + e.message);
+      return;
+    }
   }
 
   // Pull agent list

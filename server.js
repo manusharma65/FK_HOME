@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r22 (mapping stripped + owner reassign kept, advertisedProduct report → per-ASIN ad spend, day-7 review for Amazon tasks mirrors Google flow)
+// CampaignPulse — deploy marker 2026-05-06 r22 (per-ASIN ad spend, day-7 review, active-task block, underperforming snooze, friction uses ad-perf, dashboard campaigns alert-only, agents live-only, refresh restores page, diagnostics stripped)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1465,6 +1465,20 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_aap_asin_date ON amazon_asin_ad_performance(asin, report_date);
       CREATE INDEX IF NOT EXISTS idx_aap_campaign_date ON amazon_asin_ad_performance(campaign_id, report_date);
       CREATE INDEX IF NOT EXISTS idx_aap_date ON amazon_asin_ad_performance(report_date);
+
+      -- r22: amazon_product_snooze — temporarily hide a product from
+      -- Underperforming view. Auto-expires at snoozed_until. Product still
+      -- appears in All / Urgent / Working as normal — only Underperforming
+      -- filters it out. Promotes back to visibility automatically when
+      -- bucket changes to urgent (handled in frontend).
+      CREATE TABLE IF NOT EXISTS amazon_product_snooze (
+        parent_sku TEXT PRIMARY KEY,
+        snoozed_until TIMESTAMP NOT NULL,
+        snoozed_by TEXT,
+        snoozed_at TIMESTAMP DEFAULT NOW(),
+        snooze_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_snooze_until ON amazon_product_snooze(snoozed_until);
     `);
     console.log('Database connected and tables ready');
     await initTasksTable();
@@ -3416,133 +3430,6 @@ app.post('/api/admin/refresh-pricing-signals', async function(req, res) {
   }
 });
 
-// r21: GET /api/admin/debug-sku/:asin — return RAW SP-API responses for one ASIN.
-// Used to diagnose stock-fetch bugs — shows exactly what listings + inventory APIs
-// return so we can see if our parsing assumptions hold for a given product. Owner
-// + manager only. Returns ALL SKUs for the ASIN, plus the raw listings response
-// for each, plus the FBA inventory matches. No DB writes, safe to call repeatedly.
-app.get('/api/admin/debug-sku/:asin', async function(req, res) {
-  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
-  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
-  if (['owner','manager'].indexOf(role) === -1 && dept !== 'manager') return res.status(403).json({ error: 'manager+ only' });
-  const asin = String(req.params.asin || '').trim();
-  if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
-  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
-  if (!db) return res.status(500).json({ error: 'No DB' });
-  try {
-    const sellerId = await getSellerId();
-    const skusRes = await db.query("SELECT sku, asin, status, parent_sku FROM amazon_products WHERE asin=$1", [asin]);
-    const skus = skusRes.rows;
-    const skuDetails = [];
-    for (const r of skus) {
-      const sk = r.sku;
-      if (!sk) continue;
-      const detail = {
-        sku: sk,
-        status: r.status,
-        is_fba_by_name: /fba/i.test(sk),
-        listings_response: null,
-        listings_error: null,
-        // Specifically what we extract today:
-        parsed: { fulfillmentAvailability_path: null, channel: null, qty: null }
-      };
-      try {
-        const list = await spApiGet(
-          '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sk) +
-          '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
-          '&includedData=summaries,offers'
-        );
-        // Don't return the entire summaries blob — it can be huge. Trim.
-        detail.listings_response = {
-          has_summaries: !!(list && list.summaries),
-          first_summary_keys: list && list.summaries && list.summaries[0] ? Object.keys(list.summaries[0]) : [],
-          lastUpdatedDate: list && list.summaries && list.summaries[0] && list.summaries[0].lastUpdatedDate || null,
-          // Top-level fulfillmentAvailability (where r20d looks first)
-          top_level_fa: list && list.fulfillmentAvailability ? list.fulfillmentAvailability : null,
-          // Offers shape (where r20d looks second)
-          has_offers: !!(list && list.offers),
-          offers_count: list && list.offers ? list.offers.length : 0,
-          first_offer_keys: list && list.offers && list.offers[0] ? Object.keys(list.offers[0]) : [],
-          first_offer_fa: list && list.offers && list.offers[0] && list.offers[0].fulfillmentAvailability || null,
-          // ALSO check other possible shapes — these keys exist in some SP-API versions:
-          attributes_fa: list && list.attributes && list.attributes.fulfillment_availability || null,
-          all_top_level_keys: list ? Object.keys(list) : []
-        };
-        // Apply our current parser logic to see what we'd extract:
-        const fa = (list && list.fulfillmentAvailability)
-                   || (list && list.offers && list.offers[0] && list.offers[0].fulfillmentAvailability)
-                   || [];
-        if (Array.isArray(fa) && fa.length > 0) {
-          detail.parsed.fulfillmentAvailability_path = list.fulfillmentAvailability ? 'top_level' : 'offers[0]';
-          detail.parsed.entries = fa.map(function(e){
-            return {
-              fulfillmentChannelCode: e.fulfillmentChannelCode || null,
-              fulfillment_channel_code: e.fulfillment_channel_code || null,
-              quantity: e.quantity != null ? e.quantity : null,
-              all_keys: Object.keys(e)
-            };
-          });
-        } else {
-          detail.parsed.fulfillmentAvailability_path = 'NOT FOUND in any expected location';
-        }
-      } catch(e) {
-        detail.listings_error = (e.response && e.response.status ? 'HTTP ' + e.response.status + ' ' : '') + e.message;
-      }
-      skuDetails.push(detail);
-    }
-
-    // FBA inventory call — same as the refresh path
-    let inventoryMatches = [];
-    let inventoryError = null;
-    try {
-      const inv = await spApiGet(
-        '/fba/inventory/v1/summaries' +
-        '?details=true' +
-        '&granularityType=Marketplace' +
-        '&granularityId=' + SP_API_MARKETPLACE_ID +
-        '&marketplaceIds=' + SP_API_MARKETPLACE_ID
-      );
-      const summaries = (inv && inv.payload && inv.payload.inventorySummaries) || [];
-      inventoryMatches = summaries.filter(function(s){ return s.asin === asin; }).map(function(s){
-        return {
-          asin: s.asin,
-          sellerSku: s.sellerSku,
-          fnSku: s.fnSku,
-          totalQuantity: s.totalQuantity,
-          inventoryDetails: s.inventoryDetails || null,
-          all_top_keys: Object.keys(s)
-        };
-      });
-    } catch(e) {
-      inventoryError = (e.response && e.response.status ? 'HTTP ' + e.response.status + ' ' : '') + e.message;
-    }
-
-    // Current cached row (for comparison)
-    const cachedRes = await db.query("SELECT * FROM amazon_pricing_signals WHERE asin=$1", [asin]);
-    const cached = cachedRes.rows[0] || null;
-
-    res.json({
-      asin: asin,
-      sellerId: sellerId,
-      skus_in_db: skus,
-      sku_count: skus.length,
-      sku_details: skuDetails,
-      fba_inventory_matches: inventoryMatches,
-      fba_inventory_error: inventoryError,
-      current_cache_row: cached,
-      diagnosis_hints: {
-        all_skus_classified_as_fbm_by_name: skuDetails.every(function(d){ return !d.is_fba_by_name; }),
-        all_skus_classified_as_fba_by_name: skuDetails.every(function(d){ return d.is_fba_by_name; }),
-        no_listings_data_at_all: skuDetails.every(function(d){ return !d.listings_response || d.listings_response.all_top_level_keys.length === 0; }),
-        listings_calls_with_errors: skuDetails.filter(function(d){ return d.listings_error; }).length,
-        skus_with_fa_extracted: skuDetails.filter(function(d){ return d.parsed && d.parsed.entries && d.parsed.entries.length > 0; }).length
-      }
-    });
-  } catch(e) {
-    console.error('/api/admin/debug-sku/:asin error: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // r22: POST /api/admin/fetch-ad-performance?date=YYYY-MM-DD — pull a single
 // day's advertisedProduct report. Defaults to yesterday. Owner+manager only.
@@ -4226,6 +4113,38 @@ app.get('/api/amazon/products', async function(req, res) {
       if (!/does not exist/.test(e.message)) console.error('[r22] ASIN ad perf aggregation: ' + e.message);
     }
 
+    // r22: pre-fetch active tasks keyed by parent_sku so cards can show
+    // "🛠 Already assigned to X" badge and block double-assign.
+    const activeTaskByParent = {};
+    try {
+      const tRes = await db.query(
+        "SELECT id, campaign_id, agent_name, status FROM campaign_tasks " +
+        "WHERE status NOT IN ('complete','archived','dismissed') " +
+        "AND campaign_id LIKE 'product:%'"
+      );
+      tRes.rows.forEach(function(t){
+        const parentSku = t.campaign_id.replace(/^product:/, '');
+        // Last write wins if there are duplicates (shouldn't happen — we block in r22)
+        activeTaskByParent[parentSku] = { id: t.id, agent_name: t.agent_name, status: t.status };
+      });
+    } catch(e) { console.error('[r22] active-task lookup error: ' + e.message); }
+
+    // r22: also pre-fetch snooze state per parent_sku
+    const snoozeByParent = {};
+    try {
+      // Auto-cleanup expired snoozes on every read (cheap, runs daily-ish)
+      await db.query("DELETE FROM amazon_product_snooze WHERE snoozed_until <= NOW()");
+      const sRes = await db.query(
+        "SELECT parent_sku, snoozed_until, snoozed_by, snoozed_at, snooze_reason " +
+        "FROM amazon_product_snooze WHERE snoozed_until > NOW()"
+      );
+      sRes.rows.forEach(function(s){
+        snoozeByParent[s.parent_sku] = s;
+      });
+    } catch(e) {
+      if (!/does not exist/.test(e.message)) console.error('[r22] snooze lookup error: ' + e.message);
+    }
+
     // 5. Compute per-parent aggregates + diagnosis
     let allParents = Object.values(parents).map(function(parent) {
       const totalSales = parent.children.reduce(function(s, c){ return s + (c.sales_7d || 0); }, 0);
@@ -4364,7 +4283,11 @@ app.get('/api/amazon/products', async function(req, res) {
         diagnosis: dx.diagnosis,
         action: dx.action,
         evidence: dx.evidence || null,  // r20c: short evidence line for card subtitle
-        signals: signals
+        signals: signals,
+        // r22: active task block (so card can show "🛠 Already assigned" badge)
+        active_task: activeTaskByParent[parent.parent_sku] || null,
+        // r22: snooze state — if snoozed, set so frontend can hide from Underperforming
+        snooze: snoozeByParent[parent.parent_sku] || null
       });
     });
 
@@ -4595,6 +4518,59 @@ async function runListingCritique(asin, groupKey, modelId) {
       }
     } catch(e) { console.error('[amz-critique] signals context error: ' + e.message); }
 
+    // r22: Per-ASIN ad performance — pulled from amazon_asin_ad_performance.
+    // This is the core "are we wasting money?" signal. Summed across child ASINs
+    // for the family card, last 7 days. Does NOT explode response size — it
+    // adds one summary block to the prompt, not per-ASIN-bullets.
+    let adPerfContext = '';
+    try {
+      if (childAsins.length > 0) {
+        const adRes = await db.query(
+          "SELECT asin, " +
+          "       SUM(spend) AS spend, SUM(sales) AS sales, " +
+          "       SUM(clicks) AS clicks, SUM(impressions) AS impressions, " +
+          "       SUM(orders) AS orders, " +
+          "       COUNT(DISTINCT campaign_id) AS campaign_count " +
+          "FROM amazon_asin_ad_performance " +
+          "WHERE asin = ANY($1) AND report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+          "GROUP BY asin",
+          [childAsins]
+        );
+        let famSpend = 0, famSales = 0, famClicks = 0, famImpr = 0, famOrders = 0, famCampSet = new Set();
+        const perAsinSummary = [];
+        adRes.rows.forEach(function(r){
+          famSpend += parseFloat(r.spend || 0);
+          famSales += parseFloat(r.sales || 0);
+          famClicks += parseInt(r.clicks || 0);
+          famImpr += parseInt(r.impressions || 0);
+          famOrders += parseInt(r.orders || 0);
+          famCampSet.add(r.asin); // for unique advertised-ASIN count
+          // Per-ASIN one-liner only if >1 ASIN advertised (otherwise redundant with totals)
+          if (childAsins.length > 1) {
+            perAsinSummary.push('  ' + r.asin + ': £' + parseFloat(r.spend||0).toFixed(2) + ' spend, £' + parseFloat(r.sales||0).toFixed(2) + ' sales, ' + r.orders + ' orders');
+          }
+        });
+        if (famSpend > 0 || famImpr > 0) {
+          const ctr = famImpr > 0 ? (famClicks / famImpr * 100).toFixed(2) : '—';
+          const cvr = famClicks > 0 ? (famOrders / famClicks * 100).toFixed(2) : '—';
+          const acos = famSales > 0 ? (famSpend / famSales * 100).toFixed(1) : null;
+          const adAcos = acos != null ? acos + '%' : 'N/A (zero attributed sales)';
+          adPerfContext = '\n--- Ad performance (last 7 days, per-ASIN aggregated) ---\n' +
+            'Total spend: £' + famSpend.toFixed(2) + '\n' +
+            'Attributed sales: £' + famSales.toFixed(2) + '\n' +
+            'ACOS: ' + adAcos + '\n' +
+            'Clicks: ' + famClicks + ' (CTR ' + ctr + '%)\n' +
+            'Orders attributed: ' + famOrders + ' (CVR ' + cvr + '%)\n' +
+            'Active in ' + adRes.rows.length + ' of ' + childAsins.length + ' child ASIN(s)\n' +
+            (perAsinSummary.length ? perAsinSummary.join('\n') + '\n' : '');
+        } else {
+          adPerfContext = '\n--- Ad performance (last 7 days) ---\n(no ad spend on any child ASIN — product is not being advertised)\n';
+        }
+      }
+    } catch(e) {
+      if (!/does not exist/.test(e.message)) console.error('[amz-critique] ad-perf context error: ' + e.message);
+    }
+
     // Try to fetch the live Amazon page (UK)
     let livePageContext = '';
     try {
@@ -4684,6 +4660,7 @@ async function runListingCritique(asin, groupKey, modelId) {
       'Owner agent: ' + (primary.owner_agent || 'unassigned'),
       livePageContext,
       signalsContext,
+      adPerfContext,
       searchTermContext,
       '',
       'TASK: figure out why this listing might not be selling well and identify the highest-impact fixes. Focus on what is visible from the live page and the operational signals that ARE provided.',
@@ -4693,7 +4670,7 @@ async function runListingCritique(asin, groupKey, modelId) {
       '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion, missing benefits',
       '3. A+ content — is it present? If not, that is a known conversion lift',
       '4. Image quality (qualitative observation only — note if hero image looks weak, lifestyle missing, etc. Do NOT invent image counts — Amazon page does not expose this reliably)',
-      '5. Ad performance — if search-term data is provided above, identify wasted-spend terms (high spend, low conversion) and high-converting terms to amplify. Skip this if no search-term data',
+      '5. Ad performance — review the "Ad performance" block above. If spend > £20 AND attributed sales = £0 over 7 days, that is a P1 wasted-spend problem — diagnose and recommend (likely conversion-rate issue: pricing, listing quality, or targeting). If CTR < 0.3% on 1000+ impressions, the listing is failing to attract clicks — diagnose. If CTR is healthy but CVR is < 5%, the page is failing to convert clicks to orders. If search-term data is also provided, identify wasted-spend terms vs converters.',
       '',
       'CONDITIONAL — only address these when the corresponding data is present in "Operational signals" above:',
       '- Buy Box: if Buy Box win % is given AND below 80%, that is a P1 conversion issue. Diagnose and recommend.',
@@ -4866,6 +4843,9 @@ app.get('/api/amazon/hidden-products', async function(req, res) {
 
 // r17: Create a campaign_task from a product action ("Assign as task" button on product modal)
 // Body: { note: string, agent?: string (override owner), problemType?: string }
+// r22: Block double-assignment. If this product already has an active task, reject.
+//      No-ASIN products: allow task creation if owner/manager (skip critique requirement);
+//      agents still need critique, since their workflow depends on the subtasks.
 app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const groupKey = String(req.params.groupKey || '').trim();
@@ -4874,38 +4854,73 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
   if (!note) return res.status(400).json({ error: 'Note required' });
   const overrideAgent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
   const problemType = String((req.body && req.body.problemType) || 'product_action').trim();
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
   try {
-    // r21 fix: when a parent has multiple SKU rows, ones with NULL ASIN can win
-    // the LIMIT 1 lottery and break the assign. Order by ASIN-NOT-NULL first so
-    // we always pick a row with an ASIN if any sibling has one.
+    // r22: gather ALL SKUs for this groupKey, not just one. Pick the best-ASIN row.
     const prodRes = await db.query(
       "SELECT sku, asin, title, owner_agent FROM amazon_products " +
       "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) " +
-      "ORDER BY (asin IS NULL) ASC, sku ASC LIMIT 1",
+      "ORDER BY (asin IS NULL) ASC, sku ASC",
       [groupKey]
     );
     if (!prodRes.rows.length) return res.status(404).json({ error: 'Product not found' });
     const p = prodRes.rows[0];
+    const allAsins = prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean);
 
-    // r21: Cached AI critique is REQUIRED before assigning. Each issue from the
-    // critique becomes a subtask the agent must complete or dismiss-with-reason
-    // before the card can be marked complete. This guarantees the agent knows
-    // exactly what to do — no vague "fix this product" tasks.
-    if (!p.asin) return res.status(400).json({ error: 'Product has no ASIN — cannot run AI critique. Refresh catalogue sync first.' });
-    const critRes = await db.query("SELECT critique, cached_at FROM amazon_critiques WHERE asin = $1", [p.asin]);
-    if (!critRes.rows.length) {
-      return res.status(412).json({
-        error: 'no_critique',
-        message: 'Run AI critique on this product before assigning as a task. Each fix becomes a subtask the agent must complete or dismiss.'
-      });
-    }
-    const critique = critRes.rows[0].critique || {};
-    const issues = Array.isArray(critique.issues) ? critique.issues : [];
-    if (!issues.length) {
-      return res.status(412).json({
-        error: 'empty_critique',
-        message: 'AI critique exists but found no issues to act on. Re-run the critique or pick a different product.'
-      });
+    // r22: block double-assignment. If an open task already references this
+    // product (by parent_sku in campaign_id, or by any of its ASINs in the
+    // problem_detail), don't let another one be created.
+    try {
+      const existing = await db.query(
+        "SELECT id, agent_name, status FROM campaign_tasks " +
+        "WHERE status NOT IN ('complete','archived','dismissed') " +
+        "AND (campaign_id = $1 OR campaign_id LIKE $2)",
+        ['product:' + groupKey, '%' + groupKey + '%']
+      );
+      if (existing.rows.length > 0) {
+        const e = existing.rows[0];
+        return res.status(409).json({
+          error: 'task_exists',
+          message: 'This product already has an active task assigned to ' + (e.agent_name || 'an agent') + ' (status: ' + e.status + '). Mark that task complete before creating a new one.',
+          existing_task_id: e.id
+        });
+      }
+    } catch(dupErr) { console.error('[r22] dup-task check error: ' + dupErr.message); }
+
+    // r22: AI critique handling
+    //   - If the product has at least one ASIN AND a cached critique → seed subtasks (r21 flow)
+    //   - If the product has NO ASIN at all (data quality issue) AND user is owner/manager:
+    //       allow task creation without subtasks. The note is the agent's instruction.
+    //   - Else: block, ask for critique first.
+    let issues = [];
+    if (!p.asin && allAsins.length === 0) {
+      // No ASIN at all on any sibling row. Owner/manager can override.
+      if (!isPriv) {
+        return res.status(400).json({
+          error: 'no_asin_for_critique',
+          message: 'This product has no ASIN, so AI critique cannot run. Ask a manager or owner to assign this task manually with clear instructions.'
+        });
+      }
+      // Owner override: allow task creation, no subtasks. Note is the brief.
+    } else {
+      const asinForCritique = p.asin || allAsins[0];
+      const critRes = await db.query("SELECT critique, cached_at FROM amazon_critiques WHERE asin = $1", [asinForCritique]);
+      if (!critRes.rows.length) {
+        return res.status(412).json({
+          error: 'no_critique',
+          message: 'Run AI critique on this product before assigning as a task. Each fix becomes a subtask the agent must complete or dismiss.'
+        });
+      }
+      const critique = critRes.rows[0].critique || {};
+      issues = Array.isArray(critique.issues) ? critique.issues : [];
+      if (!issues.length) {
+        return res.status(412).json({
+          error: 'empty_critique',
+          message: 'AI critique exists but found no issues to act on. Re-run the critique or pick a different product.'
+        });
+      }
     }
 
     const agentName = overrideAgent || p.owner_agent || 'Unassigned';
@@ -5196,6 +5211,50 @@ app.post('/api/amazon/products/:parentSku/owner', async function(req, res) {
     res.json({ ok: true, rows_updated: r.rowCount, owner_agent: canonical });
   } catch(e) {
     console.error('/api/amazon/products/:parentSku/owner error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r22: PRODUCT SNOOZE ────────────────────────────────────────────────────
+// Hide a product from the Underperforming bucket for N days. Still visible in
+// All / Urgent / Working as normal. Auto-expires at snoozed_until. Frontend
+// can detect when a snoozed product becomes Urgent and ignore the snooze
+// (we trust the bucket more than a stale snooze).
+
+// POST /api/amazon/products/:parentSku/snooze
+//   body: { days: 1|3|7|30, reason?: string }
+app.post('/api/amazon/products/:parentSku/snooze', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const parentSku = String(req.params.parentSku || '').trim();
+  const days = parseInt((req.body && req.body.days) || 0);
+  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  if ([1, 3, 7, 30].indexOf(days) === -1) return res.status(400).json({ error: 'days must be 1, 3, 7, or 30' });
+  const reason = String((req.body && req.body.reason) || '').trim() || null;
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(
+      "INSERT INTO amazon_product_snooze (parent_sku, snoozed_until, snoozed_by, snoozed_at, snooze_reason) " +
+      "VALUES ($1, NOW() + ($2 || ' days')::interval, $3, NOW(), $4) " +
+      "ON CONFLICT (parent_sku) DO UPDATE SET snoozed_until=EXCLUDED.snoozed_until, " +
+      "snoozed_by=EXCLUDED.snoozed_by, snoozed_at=NOW(), snooze_reason=EXCLUDED.snooze_reason",
+      [parentSku, days, actor, reason]
+    );
+    res.json({ ok: true, days: days });
+  } catch(e) {
+    console.error('/api/amazon/products/:parentSku/snooze error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/amazon/products/:parentSku/snooze — un-snooze (returns to view immediately)
+app.delete('/api/amazon/products/:parentSku/snooze', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const parentSku = String(req.params.parentSku || '').trim();
+  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  try {
+    const r = await db.query("DELETE FROM amazon_product_snooze WHERE parent_sku=$1 RETURNING parent_sku", [parentSku]);
+    res.json({ ok: true, removed: r.rowCount > 0 });
+  } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -5986,241 +6045,6 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
     res.json({ days: dayRows, totals: totals, agentFilter: agentFilter, isManagerLevel: isManagerLevel });
   } catch(e) {
     console.error('/api/amazon/sales-summary error: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// r21: GET /api/admin/sales-gap-diagnosis?days=7 — diagnoses why the headline
-// 7-day sales total differs from the per-agent sum. Owner+manager only.
-//
-// The historical £20k gap had THREE structural causes:
-// 1. amazon_orders.order_total includes shipping + tax + order-level discounts.
-//    SUM(item_price * quantity) only counts line subtotals — excludes shipping.
-// 2. num_items vs SUM(quantity) diverge after partial refunds (num_items doesn't
-//    always update).
-// 3. Order line items with NULL asin contribute to the line-item sum but cannot
-//    join to amazon_products, so they vanish from per-agent attribution.
-//
-// This endpoint surfaces all three so the gap becomes observable, not mysterious.
-app.get('/api/admin/sales-gap-diagnosis', async function(req, res) {
-  if (!db) return res.status(500).json({ error: 'No DB' });
-  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
-  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
-  const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
-  if (!isPrivileged) return res.status(403).json({ error: 'Owner or manager role required' });
-  try {
-    const days = Math.min(parseInt(req.query.days || '7'), 30);
-
-    // 1. Headline total — exactly the sales-summary manager-view query
-    const headlineRes = await db.query(
-      "SELECT SUM(order_total) AS gross, SUM(num_items) AS units, COUNT(*) AS orders " +
-      "FROM amazon_orders " +
-      "WHERE purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND status NOT IN ('Cancelled','Canceled')"
-    );
-    const headline = headlineRes.rows[0] || {};
-
-    // 2. Line-item total — same shape as sales-by-agent, summed across all agents
-    const lineItemRes = await db.query(
-      "SELECT SUM(i.item_price * i.quantity) AS line_gross, " +
-      "       SUM(i.quantity) AS line_units " +
-      "FROM amazon_orders o " +
-      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled')"
-    );
-    const lineItem = lineItemRes.rows[0] || {};
-
-    // 3. Per-agent breakdown (matches sales-by-agent) — sum across agents
-    const agentRes = await db.query(
-      "SELECT COALESCE(p.owner_agent, 'Unassigned') AS agent, " +
-      "       SUM(i.item_price * i.quantity) AS gross, " +
-      "       SUM(i.quantity) AS units, " +
-      "       COUNT(DISTINCT o.order_id) AS orders " +
-      "FROM amazon_orders o " +
-      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled') " +
-      "GROUP BY COALESCE(p.owner_agent, 'Unassigned') " +
-      "ORDER BY gross DESC"
-    );
-    const agentBreakdown = agentRes.rows.map(function(r){
-      return { agent: r.agent, gross: parseFloat(r.gross || 0), units: parseInt(r.units || 0), orders: parseInt(r.orders || 0) };
-    });
-    const agentSum = agentBreakdown.reduce(function(s, a){ return s + a.gross; }, 0);
-
-    // 4. Items with NULL asin — these silently vanish from per-agent attribution
-    const nullAsinRes = await db.query(
-      "SELECT COUNT(*) AS rows, SUM(i.item_price * i.quantity) AS gross, SUM(i.quantity) AS units " +
-      "FROM amazon_orders o " +
-      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled') " +
-      "AND i.asin IS NULL"
-    );
-    const nullAsin = nullAsinRes.rows[0] || {};
-
-    // 5. Items where asin doesn't match any amazon_products row — bucketed as Unassigned
-    const unmatchedRes = await db.query(
-      "SELECT COUNT(*) AS rows, SUM(i.item_price * i.quantity) AS gross, " +
-      "       COUNT(DISTINCT i.asin) AS distinct_asins " +
-      "FROM amazon_orders o " +
-      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled') " +
-      "AND i.asin IS NOT NULL " +
-      "AND p.asin IS NULL"
-    );
-    const unmatched = unmatchedRes.rows[0] || {};
-
-    // 6. Items where amazon_products row exists but owner_agent is NULL
-    const noOwnerRes = await db.query(
-      "SELECT COUNT(*) AS rows, SUM(i.item_price * i.quantity) AS gross " +
-      "FROM amazon_orders o " +
-      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "JOIN amazon_products p ON p.asin = i.asin " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled') " +
-      "AND p.owner_agent IS NULL"
-    );
-    const noOwner = noOwnerRes.rows[0] || {};
-
-    // 7. Estimate shipping/tax delta — order_total vs sum of items in the same orders
-    const deltaRes = await db.query(
-      "WITH order_items AS (" +
-      "  SELECT i.order_id, SUM(i.item_price * i.quantity) AS items_gross " +
-      "  FROM amazon_order_items i " +
-      "  GROUP BY i.order_id" +
-      ") " +
-      "SELECT SUM(o.order_total - COALESCE(oi.items_gross, 0)) AS shipping_tax_delta, " +
-      "       COUNT(*) FILTER (WHERE o.order_total > COALESCE(oi.items_gross, 0) + 0.50) AS orders_with_delta " +
-      "FROM amazon_orders o " +
-      "LEFT JOIN order_items oi ON oi.order_id = o.order_id " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled')"
-    );
-    const delta = deltaRes.rows[0] || {};
-
-    // 8. r21 fix: duplicate-SKU detection. ASINs with multiple amazon_products rows
-    // multiply line items in the per-agent join. This is the real bug.
-    const dupSkuRes = await db.query(
-      "SELECT COUNT(*) AS asins_with_dups, " +
-      "       SUM(skus_per_asin - 1) AS extra_rows " +
-      "FROM (" +
-      "  SELECT asin, COUNT(*) AS skus_per_asin " +
-      "  FROM amazon_products " +
-      "  WHERE asin IS NOT NULL " +
-      "  GROUP BY asin HAVING COUNT(*) > 1" +
-      ") sub"
-    );
-    const dupSku = dupSkuRes.rows[0] || {};
-
-    // 9. Inconsistent owner_agent names — common cause: "Aryan" vs "Aryan Tomar"
-    const ownerNamesRes = await db.query(
-      "SELECT owner_agent, COUNT(*) AS skus FROM amazon_products " +
-      "WHERE owner_agent IS NOT NULL " +
-      "GROUP BY owner_agent ORDER BY owner_agent ASC"
-    );
-    const ownerNames = ownerNamesRes.rows.map(function(r){
-      return { agent: r.owner_agent, skus: parseInt(r.skus) };
-    });
-
-    // 10. The de-duplicated per-agent total — what the agent breakdown SHOULD be:
-    // collapse line items to one row per (order_id, asin) before joining to products.
-    const dedupedAgentRes = await db.query(
-      "WITH unique_lines AS (" +
-      "  SELECT i.order_id, i.asin, " +
-      "         SUM(i.item_price * i.quantity) AS gross, " +
-      "         SUM(i.quantity) AS units " +
-      "  FROM amazon_orders o " +
-      "  JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "  WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "  AND o.status NOT IN ('Cancelled','Canceled') " +
-      "  GROUP BY i.order_id, i.asin" +
-      "), " +
-      "agent_for_asin AS (" +
-      "  SELECT asin, MAX(owner_agent) AS owner_agent " +
-      "  FROM amazon_products " +
-      "  WHERE asin IS NOT NULL " +
-      "  GROUP BY asin" +
-      ") " +
-      "SELECT COALESCE(a.owner_agent, 'Unassigned') AS agent, " +
-      "       SUM(ul.gross) AS gross " +
-      "FROM unique_lines ul " +
-      "LEFT JOIN agent_for_asin a ON a.asin = ul.asin " +
-      "GROUP BY COALESCE(a.owner_agent, 'Unassigned') " +
-      "ORDER BY gross DESC"
-    );
-    const dedupedAgents = dedupedAgentRes.rows.map(function(r){
-      return { agent: r.agent, gross: parseFloat(parseFloat(r.gross || 0).toFixed(2)) };
-    });
-    const dedupedSum = dedupedAgents.reduce(function(s, a){ return s + a.gross; }, 0);
-
-    const headlineGross = parseFloat(headline.gross || 0);
-    const lineItemGross = parseFloat(lineItem.line_gross || 0);
-    const totalGap = headlineGross - agentSum;
-
-    res.json({
-      window_days: days,
-      // The two numbers people are comparing on the dashboard
-      headline_sales: {
-        gross: headlineGross,
-        orders: parseInt(headline.orders || 0),
-        units: parseInt(headline.units || 0),
-        source: 'amazon_orders.order_total — includes shipping, tax, order-level discounts'
-      },
-      per_agent_sum: {
-        gross: agentSum,
-        breakdown: agentBreakdown,
-        source: 'sum of (item_price × quantity) per line item, grouped by amazon_products.owner_agent'
-      },
-      total_gap: parseFloat(totalGap.toFixed(2)),
-      gap_components: {
-        shipping_tax_and_discount_delta: parseFloat(parseFloat(delta.shipping_tax_delta || 0).toFixed(2)),
-        shipping_tax_delta_explanation: 'Difference between order_total and sum of (item_price × quantity) for the same orders. Captures shipping income, VAT (if not already in item_price), and order-level discounts. Affects ' + parseInt(delta.orders_with_delta || 0) + ' orders.',
-        line_items_with_null_asin: {
-          rows: parseInt(nullAsin.rows || 0),
-          gross: parseFloat(parseFloat(nullAsin.gross || 0).toFixed(2)),
-          units: parseInt(nullAsin.units || 0),
-          explanation: 'Line items missing an ASIN — silently dropped from per-agent attribution.'
-        },
-        line_items_with_unmatched_asin: {
-          rows: parseInt(unmatched.rows || 0),
-          gross: parseFloat(parseFloat(unmatched.gross || 0).toFixed(2)),
-          distinct_asins: parseInt(unmatched.distinct_asins || 0),
-          explanation: 'Line items where ASIN does not exist in amazon_products. Get bucketed as "Unassigned" — visible in agent totals but not really attributed.'
-        },
-        line_items_with_owner_null: {
-          rows: parseInt(noOwner.rows || 0),
-          gross: parseFloat(parseFloat(noOwner.gross || 0).toFixed(2)),
-          explanation: 'amazon_products row exists but owner_agent is NULL. Show under "Unassigned".'
-        }
-      },
-      sanity_check: {
-        line_item_gross: parseFloat(lineItemGross.toFixed(2)),
-        line_item_minus_agent_sum: parseFloat((lineItemGross - agentSum).toFixed(2)),
-        line_item_minus_agent_sum_explanation: 'Should be ~0. If non-zero, the LEFT JOIN to amazon_products is dropping rows somehow (unlikely with LEFT but worth checking).'
-      },
-      // r21 root-cause additions
-      duplicate_sku_diagnosis: {
-        asins_with_multiple_skus: parseInt(dupSku.asins_with_dups || 0),
-        extra_join_rows: parseInt(dupSku.extra_rows || 0),
-        explanation: 'Each ASIN with >1 SKU rows in amazon_products causes the per-agent JOIN to multiply line items by the number of SKU rows. This is the primary cause of agent totals being LARGER than line-item totals. Fix: collapse line items to one row per (order_id, asin) before joining.'
-      },
-      owner_agent_names: {
-        list: ownerNames,
-        explanation: 'All distinct owner_agent values currently in amazon_products. Look for typos or duplicates like "Aryan" vs "Aryan Tomar" — these split a single agent across multiple buckets and need normalising.'
-      },
-      deduped_per_agent: {
-        gross_total: parseFloat(dedupedSum.toFixed(2)),
-        breakdown: dedupedAgents,
-        explanation: 'What the per-agent breakdown SHOULD show after collapsing duplicate-SKU joins. Compare to per_agent_sum.gross above. If this number is close to line_item_gross (' + parseFloat(lineItemGross.toFixed(2)) + '), the duplicate-SKU theory is confirmed.'
-      }
-    });
-  } catch(e) {
-    console.error('/api/admin/sales-gap-diagnosis error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
