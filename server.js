@@ -1715,6 +1715,26 @@ async function initTasksTable() {
       CREATE INDEX IF NOT EXISTS idx_subtasks_status ON task_subtasks(status);
     `);
 
+    // r21: manual campaign-to-product mapping. Replaces the gutted matcher
+    // (TF-IDF was unreliable). Agents tick which campaigns advertise their
+    // product, system stores it. One campaign → exactly one product (one-to-many
+    // from the product side). Once a campaign is mapped, it disappears from the
+    // available-campaigns dropdown for other products.
+    //
+    // parent_sku is used as the product identifier (matches groupKey across the
+    // app). campaign_id is unique — re-mapping a campaign to a different product
+    // overwrites the existing row.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS product_campaign_map (
+        campaign_id TEXT PRIMARY KEY,
+        parent_sku TEXT NOT NULL,
+        campaign_name TEXT,
+        mapped_by TEXT,
+        mapped_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_pcm_parent ON product_campaign_map(parent_sku);
+    `);
+
     try {
       const userCount = await db.query('SELECT COUNT(*) as cnt FROM users');
       if (parseInt(userCount.rows[0].cnt) === 0) {
@@ -3967,7 +3987,41 @@ app.get('/api/amazon/products', async function(req, res) {
     // section header. It used parseCampaignName (still in this file at the
     // bottom), extractTitleKeywords, isCampaignMatch, and an IDF table. Pull
     // from r20b commit if needed.
+    // r21: Manual product↔campaign mapping replaces the gutted matcher.
+    // We pull every mapping row, then aggregate the matching campaign stats
+    // (spend/sales/etc) from recent snapshots. Products with no mapping get
+    // empty stats — they show "No campaigns mapped" in the UI.
     const groupCampaignStats = {};
+    try {
+      const mapRes = await db.query("SELECT campaign_id, parent_sku FROM product_campaign_map");
+      // Build campaign_id → parent_sku index
+      const cidToParent = {};
+      mapRes.rows.forEach(function(r){ cidToParent[String(r.campaign_id)] = r.parent_sku; });
+      // Aggregate stats from the recentCampaigns set (already loaded above
+      // for advertised-ASIN detection)
+      recentCampaigns.forEach(function(c){
+        if (!c.campaignId) return;
+        const parentSku = cidToParent[String(c.campaignId)];
+        if (!parentSku) return;
+        if (!groupCampaignStats[parentSku]) {
+          groupCampaignStats[parentSku] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
+        }
+        const g = groupCampaignStats[parentSku];
+        g.spend += parseFloat(c.spend || 0);
+        g.sales += parseFloat(c.sales || 0);
+        g.clicks += parseInt(c.clicks || 0);
+        g.impressions += parseInt(c.impressions || 0);
+        g.conversions += parseInt(c.orders || c.purchases || c.conversions || 0);
+        g.count++;
+        g.campaigns.push({
+          campaignId: String(c.campaignId),
+          name: c.name || '',
+          spend: parseFloat(c.spend || 0),
+          sales: parseFloat(c.sales || 0),
+          state: c.state || c.status || null
+        });
+      });
+    } catch(e) { console.error('[r21] product-campaign mapping aggregation: ' + e.message); }
 
     // 5. Compute per-parent aggregates + diagnosis
     let allParents = Object.values(parents).map(function(parent) {
@@ -4780,6 +4834,170 @@ app.post('/api/tasks/:id/subtasks/:sid/reopen', async function(req, res) {
     res.json({ ok: true, status: 'open' });
   } catch(e) {
     console.error('/api/tasks/:id/subtasks/:sid/reopen error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r21: PRODUCT ↔ CAMPAIGN MAPPING ────────────────────────────────────────
+// Replaces the gutted TF-IDF matcher. Agents tick which campaigns advertise
+// their product; the mapping is stored explicitly. One campaign maps to
+// exactly one product (one-to-many from the product side). Mapped campaigns
+// disappear from other products' available-list so the task shrinks over time.
+
+// GET /api/amazon/products/:parentSku/campaigns — what's mapped + what's available.
+// Returns:
+//   mapped:    [{ campaign_id, campaign_name, mapped_by, mapped_at }, ...]
+//   available: [{ campaign_id, campaign_name, display_name, agent }, ...]
+//              (every recent campaign NOT yet mapped to ANY product)
+app.get('/api/amazon/products/:parentSku/campaigns', async function(req, res) {
+  if (!db) return res.json({ mapped: [], available: [] });
+  const parentSku = String(req.params.parentSku || '').trim();
+  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  try {
+    // 1. Already-mapped campaigns for this product
+    const mappedRes = await db.query(
+      "SELECT campaign_id, campaign_name, mapped_by, mapped_at FROM product_campaign_map WHERE parent_sku=$1 ORDER BY campaign_name ASC",
+      [parentSku]
+    );
+    // 2. ALL mapped campaigns across all products — to exclude from the available list
+    const allMappedRes = await db.query("SELECT campaign_id FROM product_campaign_map");
+    const mappedSet = new Set(allMappedRes.rows.map(function(r){ return String(r.campaign_id); }));
+    // 3. Recent campaigns from snapshots (last 14 days) — the universe of options
+    const sr = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 14"
+    );
+    const seen = new Set();
+    const universe = [];
+    sr.rows.forEach(function(snap){
+      (snap.campaigns || []).forEach(function(c){
+        if (!c.campaignId) return;
+        const cid = String(c.campaignId);
+        if (seen.has(cid)) return;
+        seen.add(cid);
+        const rawName = c.name || '';
+        const parsed = parseCampaignName(rawName);
+        // Display name: drop the agent prefix and trailing junk so the dropdown
+        // is scannable. "Aryan | Yoga Mat KT | something" → "Yoga Mat KT".
+        let displayName = rawName;
+        if (parsed.agent) {
+          displayName = rawName.replace(/^\s*[A-Za-z\s]{3,30}\s*[|@]\s*/, '').trim();
+        }
+        // Take everything before the second separator if there's still noise
+        const cleanedDisplay = (displayName.split(/[|@]/)[0] || displayName).trim() || rawName;
+        universe.push({
+          campaign_id: cid,
+          campaign_name: rawName,
+          display_name: cleanedDisplay,
+          agent: parsed.agent || null,
+          state: c.state || c.status || null
+        });
+      });
+    });
+    // 4. Available = universe minus everything mapped to any product
+    const available = universe.filter(function(c){ return !mappedSet.has(c.campaign_id); });
+    // Sort: by display_name alphabetically for easy scanning
+    available.sort(function(a, b){ return (a.display_name || '').localeCompare(b.display_name || ''); });
+    res.json({ mapped: mappedRes.rows, available: available, total_universe: universe.length, total_mapped_globally: mappedSet.size });
+  } catch(e) {
+    console.error('/api/amazon/products/:parentSku/campaigns GET error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/amazon/products/:parentSku/campaigns — body: { campaign_ids: [...] }
+// Replaces the mapping for this product entirely. Pass [] to clear all.
+// Permissions: owner+manager any product; agents only their own products.
+app.post('/api/amazon/products/:parentSku/campaigns', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const parentSku = String(req.params.parentSku || '').trim();
+  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  const ids = Array.isArray(req.body && req.body.campaign_ids) ? req.body.campaign_ids.map(String) : null;
+  if (ids === null) return res.status(400).json({ error: 'campaign_ids array required' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  try {
+    // Permission gate: agents can only map their own products
+    if (!isPriv) {
+      const owner = await db.query(
+        "SELECT owner_agent FROM amazon_products WHERE parent_sku=$1 OR (parent_sku IS NULL AND sku=$1) LIMIT 1",
+        [parentSku]
+      );
+      const ownerAgent = owner.rows[0] && owner.rows[0].owner_agent;
+      const canon = canonicalAgent(actor);
+      if (!ownerAgent || canonicalAgent(ownerAgent) !== canon) {
+        return res.status(403).json({ error: 'You can only map campaigns to your own products. Owner or manager can map any.' });
+      }
+    }
+    // Look up campaign names for each ID from snapshots so the mapping carries
+    // human-readable labels (without re-querying snapshots on every read).
+    const sr = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 7"
+    );
+    const nameById = {};
+    sr.rows.forEach(function(snap){
+      (snap.campaigns || []).forEach(function(c){
+        if (c.campaignId && !nameById[String(c.campaignId)]) nameById[String(c.campaignId)] = c.name || '';
+      });
+    });
+    // Replace mapping atomically: delete this product's existing rows, then re-insert.
+    // ON CONFLICT on campaign_id (the PK) — re-mapping a campaign to a different
+    // product silently moves it (last write wins).
+    await db.query("DELETE FROM product_campaign_map WHERE parent_sku=$1", [parentSku]);
+    let inserted = 0, conflicts = [];
+    for (const cid of ids) {
+      const cidStr = String(cid).trim();
+      if (!cidStr) continue;
+      try {
+        await db.query(
+          "INSERT INTO product_campaign_map (campaign_id, parent_sku, campaign_name, mapped_by, mapped_at) " +
+          "VALUES ($1, $2, $3, $4, NOW()) " +
+          "ON CONFLICT (campaign_id) DO UPDATE SET parent_sku=$2, campaign_name=$3, mapped_by=$4, mapped_at=NOW()",
+          [cidStr, parentSku, nameById[cidStr] || '', actor]
+        );
+        inserted++;
+      } catch(e) {
+        conflicts.push({ campaign_id: cidStr, error: e.message });
+      }
+    }
+    res.json({ ok: true, mapped: inserted, conflicts: conflicts });
+  } catch(e) {
+    console.error('/api/amazon/products/:parentSku/campaigns POST error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/amazon/products/:parentSku/owner — reassign product owner.
+// body: { agent: 'Aryan' } (or 'Unassigned'). Owner+manager only.
+app.post('/api/amazon/products/:parentSku/owner', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  if (!isPriv) return res.status(403).json({ error: 'Owner or manager only' });
+  const parentSku = String(req.params.parentSku || '').trim();
+  const newAgent = String((req.body && req.body.agent) || '').trim();
+  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  if (!newAgent) return res.status(400).json({ error: 'agent required (use "Unassigned" to clear)' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    // Canonicalise the agent name before storing
+    const canonical = newAgent.toLowerCase() === 'unassigned' ? null : (canonicalAgent(newAgent) || newAgent);
+    const r = await db.query(
+      "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2) RETURNING sku",
+      [canonical, parentSku]
+    );
+    // Audit-log it
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1, $2, $3, $4, $5)",
+        ['product:' + parentSku, parentSku, actor, 'owner_reassigned', 'Owner set to ' + (canonical || 'Unassigned')]
+      );
+    } catch(_) {}
+    res.json({ ok: true, rows_updated: r.rowCount, owner_agent: canonical });
+  } catch(e) {
+    console.error('/api/amazon/products/:parentSku/owner error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
