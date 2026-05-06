@@ -3219,6 +3219,134 @@ app.post('/api/admin/refresh-pricing-signals', async function(req, res) {
   }
 });
 
+// r21: GET /api/admin/debug-sku/:asin — return RAW SP-API responses for one ASIN.
+// Used to diagnose stock-fetch bugs — shows exactly what listings + inventory APIs
+// return so we can see if our parsing assumptions hold for a given product. Owner
+// + manager only. Returns ALL SKUs for the ASIN, plus the raw listings response
+// for each, plus the FBA inventory matches. No DB writes, safe to call repeatedly.
+app.get('/api/admin/debug-sku/:asin', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1 && dept !== 'manager') return res.status(403).json({ error: 'manager+ only' });
+  const asin = String(req.params.asin || '').trim();
+  if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const sellerId = await getSellerId();
+    const skusRes = await db.query("SELECT sku, asin, status, parent_sku FROM amazon_products WHERE asin=$1", [asin]);
+    const skus = skusRes.rows;
+    const skuDetails = [];
+    for (const r of skus) {
+      const sk = r.sku;
+      if (!sk) continue;
+      const detail = {
+        sku: sk,
+        status: r.status,
+        is_fba_by_name: /fba/i.test(sk),
+        listings_response: null,
+        listings_error: null,
+        // Specifically what we extract today:
+        parsed: { fulfillmentAvailability_path: null, channel: null, qty: null }
+      };
+      try {
+        const list = await spApiGet(
+          '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sk) +
+          '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
+          '&includedData=summaries,offers'
+        );
+        // Don't return the entire summaries blob — it can be huge. Trim.
+        detail.listings_response = {
+          has_summaries: !!(list && list.summaries),
+          first_summary_keys: list && list.summaries && list.summaries[0] ? Object.keys(list.summaries[0]) : [],
+          lastUpdatedDate: list && list.summaries && list.summaries[0] && list.summaries[0].lastUpdatedDate || null,
+          // Top-level fulfillmentAvailability (where r20d looks first)
+          top_level_fa: list && list.fulfillmentAvailability ? list.fulfillmentAvailability : null,
+          // Offers shape (where r20d looks second)
+          has_offers: !!(list && list.offers),
+          offers_count: list && list.offers ? list.offers.length : 0,
+          first_offer_keys: list && list.offers && list.offers[0] ? Object.keys(list.offers[0]) : [],
+          first_offer_fa: list && list.offers && list.offers[0] && list.offers[0].fulfillmentAvailability || null,
+          // ALSO check other possible shapes — these keys exist in some SP-API versions:
+          attributes_fa: list && list.attributes && list.attributes.fulfillment_availability || null,
+          all_top_level_keys: list ? Object.keys(list) : []
+        };
+        // Apply our current parser logic to see what we'd extract:
+        const fa = (list && list.fulfillmentAvailability)
+                   || (list && list.offers && list.offers[0] && list.offers[0].fulfillmentAvailability)
+                   || [];
+        if (Array.isArray(fa) && fa.length > 0) {
+          detail.parsed.fulfillmentAvailability_path = list.fulfillmentAvailability ? 'top_level' : 'offers[0]';
+          detail.parsed.entries = fa.map(function(e){
+            return {
+              fulfillmentChannelCode: e.fulfillmentChannelCode || null,
+              fulfillment_channel_code: e.fulfillment_channel_code || null,
+              quantity: e.quantity != null ? e.quantity : null,
+              all_keys: Object.keys(e)
+            };
+          });
+        } else {
+          detail.parsed.fulfillmentAvailability_path = 'NOT FOUND in any expected location';
+        }
+      } catch(e) {
+        detail.listings_error = (e.response && e.response.status ? 'HTTP ' + e.response.status + ' ' : '') + e.message;
+      }
+      skuDetails.push(detail);
+    }
+
+    // FBA inventory call — same as the refresh path
+    let inventoryMatches = [];
+    let inventoryError = null;
+    try {
+      const inv = await spApiGet(
+        '/fba/inventory/v1/summaries' +
+        '?details=true' +
+        '&granularityType=Marketplace' +
+        '&granularityId=' + SP_API_MARKETPLACE_ID +
+        '&marketplaceIds=' + SP_API_MARKETPLACE_ID
+      );
+      const summaries = (inv && inv.payload && inv.payload.inventorySummaries) || [];
+      inventoryMatches = summaries.filter(function(s){ return s.asin === asin; }).map(function(s){
+        return {
+          asin: s.asin,
+          sellerSku: s.sellerSku,
+          fnSku: s.fnSku,
+          totalQuantity: s.totalQuantity,
+          inventoryDetails: s.inventoryDetails || null,
+          all_top_keys: Object.keys(s)
+        };
+      });
+    } catch(e) {
+      inventoryError = (e.response && e.response.status ? 'HTTP ' + e.response.status + ' ' : '') + e.message;
+    }
+
+    // Current cached row (for comparison)
+    const cachedRes = await db.query("SELECT * FROM amazon_pricing_signals WHERE asin=$1", [asin]);
+    const cached = cachedRes.rows[0] || null;
+
+    res.json({
+      asin: asin,
+      sellerId: sellerId,
+      skus_in_db: skus,
+      sku_count: skus.length,
+      sku_details: skuDetails,
+      fba_inventory_matches: inventoryMatches,
+      fba_inventory_error: inventoryError,
+      current_cache_row: cached,
+      diagnosis_hints: {
+        all_skus_classified_as_fbm_by_name: skuDetails.every(function(d){ return !d.is_fba_by_name; }),
+        all_skus_classified_as_fba_by_name: skuDetails.every(function(d){ return d.is_fba_by_name; }),
+        no_listings_data_at_all: skuDetails.every(function(d){ return !d.listings_response || d.listings_response.all_top_level_keys.length === 0; }),
+        listings_calls_with_errors: skuDetails.filter(function(d){ return d.listings_error; }).length,
+        skus_with_fa_extracted: skuDetails.filter(function(d){ return d.parsed && d.parsed.entries && d.parsed.entries.length > 0; }).length
+      }
+    });
+  } catch(e) {
+    console.error('/api/admin/debug-sku/:asin error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
 // Reports come back async, so this is fire-and-forget. Owner+manager only.
 app.post('/api/admin/backfill-traffic', async function(req, res) {
