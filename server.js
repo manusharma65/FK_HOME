@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r20 (six new product card signals via SP-API + Sales & Traffic Report, wasted-spend agent prefix fallback, task modal rebuild from scratch, AI critique prompt fed new operational signals)
+// CampaignPulse — deploy marker 2026-05-06 r20b (r20 + parser fixes: pricing/inventory tolerate all SP-API response shapes; sales section "today" uses real London date with placeholder when orders not yet synced)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -664,26 +664,70 @@ async function refreshAmazonPricingSignals(opts) {
     }
 
     // 3c. Inventory (FBA fulfillable qty)
+    // r20 fix: SP-API can return inventory under several response shapes. Also,
+    // a single ASIN often has multiple SKUs (FBA + FBM duplicates, MultipackQty
+    // bundles) and we want the SUM across all of them, not just the first match.
+    // Critically, when a SKU is FBM-only or has no FBA inventory at all, the API
+    // returns NO row for that SKU — we should treat that as 0, not null, so the
+    // stock-cover calculation can run.
     try {
+      // Pull every SKU the seller has for this ASIN. We use marketplaceIds=ALL
+      // by querying without a sellerSkus filter and matching by ASIN locally.
+      // The /summaries endpoint is paginated for large sellers; one call here
+      // returns up to 50 results, plenty for a single-ASIN refresh.
       const inv = await spApiGet(
         '/fba/inventory/v1/summaries' +
         '?details=true' +
         '&granularityType=Marketplace' +
         '&granularityId=' + SP_API_MARKETPLACE_ID +
         '&marketplaceIds=' + SP_API_MARKETPLACE_ID +
-        '&sellerSkus=' + encodeURIComponent(sku || '')
+        (sku ? '&sellerSkus=' + encodeURIComponent(sku) : '')
       );
       const summaries = (inv && inv.payload && inv.payload.inventorySummaries) || [];
-      const match = summaries.find(function(s){ return s.asin === asin || s.sellerSku === sku; }) || summaries[0];
-      if (match) {
-        const detail = match.inventoryDetails || {};
-        sig.fulfillable_qty = parseInt(detail.fulfillableQuantity || match.totalQuantity || 0) || 0;
+      // Find every entry that maps to OUR ASIN (multiple SKUs may share one ASIN).
+      // If the API returned an empty list (i.e. SKU not in FBA at all), treat as 0.
+      const matches = summaries.filter(function(s){ return s.asin === asin || s.sellerSku === sku; });
+      if (matches.length === 0) {
+        // No FBA presence — that's a known-zero, not unknown-null. Card will
+        // show "0d" with the < 7d red colour and a P1 stock-out diagnosis.
+        sig.fulfillable_qty = 0;
+      } else {
+        let total = 0;
+        let anyFound = false;
+        matches.forEach(function(m) {
+          const detail = m.inventoryDetails || {};
+          // Try every documented shape:
+          //   detail.fulfillableQuantity (camelCase, current API)
+          //   detail.FulfillableQuantity (legacy PascalCase)
+          //   m.totalQuantity            (sometimes only the rollup is set)
+          const candidates = [
+            detail.fulfillableQuantity,
+            detail.FulfillableQuantity,
+            m.totalQuantity
+          ];
+          for (let i = 0; i < candidates.length; i++) {
+            const v = candidates[i];
+            if (v != null) {
+              const n = parseInt(v);
+              if (isFinite(n)) { total += n; anyFound = true; break; }
+            }
+          }
+        });
+        sig.fulfillable_qty = anyFound ? total : 0;
       }
     } catch(e) {
       errors.push('inventory: ' + (e.response && e.response.status || e.message));
     }
 
     // 3d. Price vs lowest competitor — Product Pricing v0 offers
+    // r20 fix: SP-API returns prices in MULTIPLE shapes depending on the marketplace
+    // and seller history. Tolerate every shape we've seen rather than the one we
+    // hoped for. Source-of-truth fields can live in:
+    //   - Summary.LowestPrices[].LandedPrice.Amount   (most common)
+    //   - Summary.LowestPrices[].ListingPrice.Amount  (when shipping is excluded)
+    //   - Summary.BuyBoxPrices[].LandedPrice.Amount   (Buy Box winner only)
+    //   - Offers[].ListingPrice.Amount                (raw offers — pick min after excluding ours)
+    // Condition field is also inconsistent: 'New' / 'new' / 'NEW'. Treat case-insensitively.
     try {
       const pr = await spApiGet(
         '/products/pricing/v0/items/' + encodeURIComponent(asin) + '/offers' +
@@ -692,16 +736,76 @@ async function refreshAmazonPricingSignals(opts) {
       );
       const summary = (pr && pr.payload && pr.payload.Summary) || {};
       const offers = (pr && pr.payload && pr.payload.Offers) || [];
-      // Your price = your offer (sellerId match)
-      const myOffer = offers.find(function(o){ return o.SellerId === sellerId; });
-      if (myOffer && myOffer.ListingPrice && myOffer.ListingPrice.Amount != null) {
-        sig.your_price = parseFloat(myOffer.ListingPrice.Amount) || null;
+
+      // Helper — pull a numeric Amount from a price-object shape, trying common keys.
+      function priceAmount(obj) {
+        if (!obj) return null;
+        // Try LandedPrice → ListingPrice → Price (sometimes flat) → top-level Amount
+        const candidates = [
+          obj.LandedPrice && obj.LandedPrice.Amount,
+          obj.ListingPrice && obj.ListingPrice.Amount,
+          obj.Price && obj.Price.Amount,
+          obj.Amount
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+          const v = candidates[i];
+          if (v != null && isFinite(parseFloat(v))) return parseFloat(v);
+        }
+        return null;
       }
-      // Lowest competitor = min of LowestPrices array (excluding our offer)
-      const lowestPrices = summary.LowestPrices || [];
-      const lowestNew = lowestPrices.find(function(lp){ return lp.condition === 'New'; });
-      if (lowestNew && lowestNew.LandedPrice && lowestNew.LandedPrice.Amount != null) {
-        sig.lowest_competitor_price = parseFloat(lowestNew.LandedPrice.Amount) || null;
+      function isNew(condStr) {
+        return String(condStr || '').toLowerCase() === 'new';
+      }
+
+      // Your price — try the offer matching our seller, then fall back to Buy Box if it's ours
+      const myOffer = offers.find(function(o){ return o.SellerId === sellerId; });
+      if (myOffer) {
+        const p = priceAmount(myOffer);
+        if (p != null) sig.your_price = p;
+      }
+      // Fallback: BuyBoxPrices in Summary contains seller-winning prices
+      if (sig.your_price == null) {
+        const bb = (summary.BuyBoxPrices || []).filter(function(b){ return isNew(b.condition || b.Condition); });
+        for (const b of bb) {
+          // Some payloads include sellerId on Buy Box entry
+          if (b.sellerId === sellerId || b.SellerId === sellerId) {
+            const p = priceAmount(b);
+            if (p != null) { sig.your_price = p; break; }
+          }
+        }
+      }
+
+      // Lowest competitor — try every documented place, take the minimum.
+      let candidatePrices = [];
+      // 1. Summary.LowestPrices (any "new" entry)
+      (summary.LowestPrices || []).forEach(function(lp) {
+        if (!isNew(lp.condition || lp.Condition)) return;
+        const p = priceAmount(lp);
+        if (p != null) candidatePrices.push(p);
+      });
+      // 2. Summary.BuyBoxPrices (any "new" entry — even if not ours)
+      (summary.BuyBoxPrices || []).forEach(function(bp) {
+        if (!isNew(bp.condition || bp.Condition)) return;
+        const p = priceAmount(bp);
+        if (p != null) candidatePrices.push(p);
+      });
+      // 3. Raw Offers — exclude our own seller, take new condition only
+      offers.forEach(function(o) {
+        if (o.SellerId === sellerId) return;
+        const cond = o.SubCondition || o.condition || (o.ItemCondition && o.ItemCondition);
+        // SP-API offers from /items/{asin}/offers with ItemCondition=New filter often
+        // omit the condition field entirely (already filtered). Don't reject on missing condition.
+        if (cond && !isNew(cond)) return;
+        const p = priceAmount(o);
+        if (p != null) candidatePrices.push(p);
+      });
+      // De-dupe and pick the minimum, EXCLUDING our own price (it can leak in via Summary)
+      if (candidatePrices.length) {
+        const filtered = sig.your_price != null ?
+          candidatePrices.filter(function(p){ return Math.abs(p - sig.your_price) > 0.01; }) :
+          candidatePrices;
+        const pool = filtered.length ? filtered : candidatePrices;
+        sig.lowest_competitor_price = parseFloat(Math.min.apply(null, pool).toFixed(2));
       }
       if (sig.your_price != null && sig.lowest_competitor_price != null) {
         sig.price_vs_lowest = parseFloat((sig.your_price - sig.lowest_competitor_price).toFixed(2));

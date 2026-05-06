@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r20 (six new product card signals: Buy Box win %, stock cover, reviews, price vs lowest, content age, buyable child count + task modal rebuild + wasted-spend agent prefix fallback) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r20b (r20 + parser fixes for pricing/inventory + sales section uses real London "today") -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -5025,8 +5025,26 @@ async function loadAmazonSalesSection() {
     ]);
     const data = await salesRes.json();
     const wasteData = await wasteRes.json();
-    const days = (data.days || []).slice().reverse(); // newest first for display
-    const todayKey = days.length ? days[0].date : null;
+    // r20 fix: don't trust the most-recent-row-as-today — orders sync runs at 06:00/14:00
+    // London, so before the morning run, the latest row in `data.days` is yesterday.
+    // Compute "today" from London time and PREPEND a placeholder row if missing,
+    // so the dashboard always shows a TODAY row labelled with the actual date.
+    const todayKey = (function() {
+      try {
+        const now = new Date();
+        // Format the current moment in Europe/London as YYYY-MM-DD
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+        return parts; // en-CA returns YYYY-MM-DD
+      } catch(e) {
+        return new Date().toISOString().slice(0, 10);
+      }
+    })();
+    let serverDays = (data.days || []).slice();
+    // Make sure today is in the array — if not, append a zero row before reversing
+    if (!serverDays.find(function(d){ return d.date === todayKey; })) {
+      serverDays.push({ date: todayKey, gross: 0, orders: 0, units: 0, spend: null, _placeholder: true });
+    }
+    const days = serverDays.slice().reverse(); // newest first for display
     const todayRow = days.find(function(d) { return d.date === todayKey; }) || { gross: 0, orders: 0, units: 0 };
 
     // Build a per-day waste total map by summing all agents' values for that date
@@ -5050,10 +5068,12 @@ async function loadAmazonSalesSection() {
     }
     section.style.display = 'block';
 
-    // Today hero
-    document.getElementById('amz-sales-today-value').innerHTML =
-      '£' + todayRow.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) +
+    // Today hero — note when today is a placeholder (orders not yet synced)
+    const heroSuffix = todayRow._placeholder ?
+      '<span style="font-size:12px;color:var(--text3);font-weight:400;margin-left:8px">— orders sync runs at 06:00 + 14:00 London</span>' :
       '<span style="font-size:14px;color:#3B6D11;font-weight:400;margin-left:8px">· ' + todayRow.orders + ' orders · ' + todayRow.units + ' units</span>';
+    document.getElementById('amz-sales-today-value').innerHTML =
+      '£' + todayRow.gross.toLocaleString('en-GB', {maximumFractionDigits: 2}) + heroSuffix;
 
     // Weekly table
     const headerRow =
