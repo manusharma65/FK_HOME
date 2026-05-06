@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r20d (FBA + FBM stock combined for stock cover, fulfillment_mode column added, stock-cover diagnosis only fires when running out in next 30 days, Kunal tasks archived not reassigned, content age uses newest not oldest)
+// CampaignPulse — deploy marker 2026-05-06 r21 (Kunal purged from active lists, product title search, AI critique → subtasks on task assignment with dismiss-with-reason gating, Unknown-agents UI in Tasks modal)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1632,6 +1632,28 @@ async function initTasksTable() {
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_from TEXT");
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS notes_ignored BOOLEAN DEFAULT FALSE");
 
+    // r21: subtasks table — populated when a product card is assigned as a task.
+    // Each subtask = one bullet point from the AI critique. Agent can complete or
+    // dismiss-with-reason but cannot delete. Card cannot move to 'complete' until
+    // every subtask is in ('complete','dismissed').
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS task_subtasks (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES campaign_tasks(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        dismiss_reason TEXT,
+        completed_at TIMESTAMP,
+        completed_by TEXT,
+        dismissed_at TIMESTAMP,
+        dismissed_by TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_subtasks_task ON task_subtasks(task_id);
+      CREATE INDEX IF NOT EXISTS idx_subtasks_status ON task_subtasks(status);
+    `);
+
     try {
       const userCount = await db.query('SELECT COUNT(*) as cnt FROM users');
       if (parseInt(userCount.rows[0].cnt) === 0) {
@@ -2334,7 +2356,7 @@ async function runDailyTaskScheduler() {
       camps.forEach(function(c) {
         if (!c.campaignId) return;
         const agent = extractAgentFromCampaign(c.name) || 'Unassigned';
-        if (!['Aryan','Satyam','Kunal'].includes(agent)) return;
+        if (!['Aryan','Satyam'].includes(agent)) return;
         if (!campHistory[c.campaignId]) {
           campHistory[c.campaignId] = { campaignId: c.campaignId, name: c.name || '', agent: agent, portfolio: c.portfolio || '', targetingType: c.targetingType || '', days: [] };
         }
@@ -2768,7 +2790,7 @@ app.get('/api/agent-performance', async function(req, res) {
     const summary = await db.query("SELECT agent_name, status, COUNT(*) as count FROM campaign_tasks WHERE created_date > NOW() - INTERVAL '30 days' GROUP BY agent_name, status ORDER BY agent_name, status");
     const alertResponses = await db.query("SELECT agent_name, action, COUNT(*) as count FROM activity_log WHERE action IN ('budget_added','alert_dismissed','alert_ignored') AND logged_at > NOW() - INTERVAL '30 days' GROUP BY agent_name, action ORDER BY agent_name");
     const kwActions = await db.query("SELECT dismissed_by as agent_name, reason, COUNT(*) as count FROM keyword_dismissals WHERE dismissed_at > NOW() - INTERVAL '30 days' GROUP BY dismissed_by, reason ORDER BY dismissed_by");
-    const prompt = 'You are analyzing Amazon PPC campaign management performance for FK Sports.\n\nAGENT ACTIVITY LOG (last 30 days):\n' + JSON.stringify(logs.rows, null, 2) + '\n\nREPEAT OFFENDERS:\n' + JSON.stringify(repeats.rows, null, 2) + '\n\nTASK SUMMARY PER AGENT:\n' + JSON.stringify(summary.rows, null, 2) + '\n\nALERT RESPONSE TRACKING:\n' + JSON.stringify(alertResponses.rows, null, 2) + '\n\nKEYWORD ACTIONS PER AGENT:\n' + JSON.stringify(kwActions.rows, null, 2) + '\n\nAnalyze each agent (Aryan, Satyam, Kunal) performance. For each agent provide:\n1. Overall performance rating (Strong/Average/Needs Improvement)\n2. Tasks completed vs abandoned vs dismissed\n3. Alert response rate\n4. Patterns in their notes\n5. Repeat offender campaigns they own\n6. Keyword intelligence actions\n7. One specific actionable recommendation\n\nBe direct and honest. 4-5 sentences per agent.';
+    const prompt = 'You are analyzing Amazon PPC campaign management performance for FK Sports.\n\nAGENT ACTIVITY LOG (last 30 days):\n' + JSON.stringify(logs.rows, null, 2) + '\n\nREPEAT OFFENDERS:\n' + JSON.stringify(repeats.rows, null, 2) + '\n\nTASK SUMMARY PER AGENT:\n' + JSON.stringify(summary.rows, null, 2) + '\n\nALERT RESPONSE TRACKING:\n' + JSON.stringify(alertResponses.rows, null, 2) + '\n\nKEYWORD ACTIONS PER AGENT:\n' + JSON.stringify(kwActions.rows, null, 2) + '\n\nAnalyze each agent (Aryan, Satyam) performance. For each agent provide:\n1. Overall performance rating (Strong/Average/Needs Improvement)\n2. Tasks completed vs abandoned vs dismissed\n3. Alert response rate\n4. Patterns in their notes\n5. Repeat offender campaigns they own\n6. Keyword intelligence actions\n7. One specific actionable recommendation\n\nBe direct and honest. 4-5 sentences per agent.';
     const response = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 1500, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     const analysis = response.data.content[0].text;
     agentPerfCache = { data: analysis, generated: Date.now() };
@@ -4357,6 +4379,28 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
     );
     if (!prodRes.rows.length) return res.status(404).json({ error: 'Product not found' });
     const p = prodRes.rows[0];
+
+    // r21: Cached AI critique is REQUIRED before assigning. Each issue from the
+    // critique becomes a subtask the agent must complete or dismiss-with-reason
+    // before the card can be marked complete. This guarantees the agent knows
+    // exactly what to do — no vague "fix this product" tasks.
+    if (!p.asin) return res.status(400).json({ error: 'Product has no ASIN — cannot run AI critique. Refresh catalogue sync first.' });
+    const critRes = await db.query("SELECT critique, cached_at FROM amazon_critiques WHERE asin = $1", [p.asin]);
+    if (!critRes.rows.length) {
+      return res.status(412).json({
+        error: 'no_critique',
+        message: 'Run AI critique on this product before assigning as a task. Each fix becomes a subtask the agent must complete or dismiss.'
+      });
+    }
+    const critique = critRes.rows[0].critique || {};
+    const issues = Array.isArray(critique.issues) ? critique.issues : [];
+    if (!issues.length) {
+      return res.status(412).json({
+        error: 'empty_critique',
+        message: 'AI critique exists but found no issues to act on. Re-run the critique or pick a different product.'
+      });
+    }
+
     const agentName = overrideAgent || p.owner_agent || 'Unassigned';
     const productLabel = (p.title || groupKey).slice(0, 200);
     const r = await db.query(
@@ -4373,9 +4417,119 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
         'product_action'
       ]
     );
-    res.json({ ok: true, taskId: r.rows[0].id, agent: agentName });
+    const taskId = r.rows[0].id;
+
+    // r21: seed subtasks from critique issues. Body = "title — fix" so the agent
+    // sees both what's wrong and what to do. Severity is preserved as a prefix.
+    let subtaskCount = 0;
+    for (let i = 0; i < issues.length; i++) {
+      const iss = issues[i] || {};
+      const title = String(iss.title || '').trim();
+      const fix = String(iss.fix || iss.problem || '').trim();
+      const severity = String(iss.severity || '').trim().toLowerCase();
+      if (!title && !fix) continue;
+      const body = (severity && severity !== 'low' ? '[' + severity.toUpperCase() + '] ' : '') +
+                   (title ? title + (fix ? ' — ' + fix : '') : fix);
+      try {
+        await db.query(
+          "INSERT INTO task_subtasks (task_id, position, body, status) VALUES ($1, $2, $3, 'open')",
+          [taskId, i, body.slice(0, 1000)]
+        );
+        subtaskCount++;
+      } catch(subErr) { console.error('[r21] subtask insert error: ' + subErr.message); }
+    }
+    res.json({ ok: true, taskId: taskId, agent: agentName, subtaskCount: subtaskCount });
   } catch(e) {
     console.error('/api/amazon/products/:groupKey/assign-task error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r21: SUBTASKS ──────────────────────────────────────────────────────────
+// Subtasks are seeded from cached AI critique when a product card is assigned
+// as a task. Agents cannot delete them — only complete or dismiss-with-reason.
+// Card cannot move to status='complete' until every subtask is in
+// ('complete','dismissed').
+
+// GET /api/tasks/:id/subtasks — list all subtasks for a task
+app.get('/api/tasks/:id/subtasks', async function(req, res) {
+  if (!db) return res.json({ subtasks: [] });
+  try {
+    const r = await db.query(
+      "SELECT id, task_id, position, body, status, dismiss_reason, " +
+      "completed_at, completed_by, dismissed_at, dismissed_by " +
+      "FROM task_subtasks WHERE task_id=$1 ORDER BY position ASC, id ASC",
+      [parseInt(req.params.id)]
+    );
+    res.json({ subtasks: r.rows });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks GET error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/subtasks/:sid/complete — mark a subtask done (toggleable)
+app.post('/api/tasks/:id/subtasks/:sid/complete', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    const cur = await db.query("SELECT status FROM task_subtasks WHERE id=$1 AND task_id=$2", [parseInt(req.params.sid), parseInt(req.params.id)]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Subtask not found' });
+    const isComplete = cur.rows[0].status === 'complete';
+    if (isComplete) {
+      // Toggle back to open
+      await db.query("UPDATE task_subtasks SET status='open', completed_at=NULL, completed_by=NULL WHERE id=$1", [parseInt(req.params.sid)]);
+      return res.json({ ok: true, status: 'open' });
+    }
+    // Cannot complete a dismissed subtask without un-dismissing first
+    if (cur.rows[0].status === 'dismissed') {
+      return res.status(400).json({ error: 'Subtask is dismissed. Un-dismiss it first if you want to mark complete.' });
+    }
+    await db.query(
+      "UPDATE task_subtasks SET status='complete', completed_at=NOW(), completed_by=$1 WHERE id=$2",
+      [actor, parseInt(req.params.sid)]
+    );
+    res.json({ ok: true, status: 'complete' });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks/:sid/complete error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/subtasks/:sid/dismiss — body: { reason }. Mark as dismissed
+// with a required reason. Idempotent — re-posting updates the reason.
+app.post('/api/tasks/:id/subtasks/:sid/dismiss', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'Dismiss reason is required' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    const cur = await db.query("SELECT status FROM task_subtasks WHERE id=$1 AND task_id=$2", [parseInt(req.params.sid), parseInt(req.params.id)]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Subtask not found' });
+    await db.query(
+      "UPDATE task_subtasks SET status='dismissed', dismiss_reason=$1, dismissed_at=NOW(), dismissed_by=$2 WHERE id=$3",
+      [reason.slice(0, 500), actor, parseInt(req.params.sid)]
+    );
+    res.json({ ok: true, status: 'dismissed' });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks/:sid/dismiss error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/subtasks/:sid/reopen — un-dismiss or un-complete back to open
+app.post('/api/tasks/:id/subtasks/:sid/reopen', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const r = await db.query(
+      "UPDATE task_subtasks SET status='open', completed_at=NULL, completed_by=NULL, dismissed_at=NULL, dismissed_by=NULL, dismiss_reason=NULL " +
+      "WHERE id=$1 AND task_id=$2 RETURNING id",
+      [parseInt(req.params.sid), parseInt(req.params.id)]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Subtask not found' });
+    res.json({ ok: true, status: 'open' });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks/:sid/reopen error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4911,6 +5065,7 @@ app.get('/api/amazon/agents', async function(req, res) {
 // r18: GET /api/amazon/unknown-agents — surface agent prefixes appearing in campaign names
 // that don't match any existing user. Lets the owner spot when a new agent shows up
 // in the data and prompt them to create a user account.
+// r21: paired with GET /api/tasks/orphaned below for orphaned task view.
 app.get('/api/amazon/unknown-agents', async function(req, res) {
   if (!db) return res.json({ unknown: [] });
   try {
@@ -4942,6 +5097,35 @@ app.get('/api/amazon/unknown-agents', async function(req, res) {
     res.json({ unknown: unknown });
   } catch(e) {
     console.error('/api/amazon/unknown-agents error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r21: GET /api/tasks/orphaned — tasks assigned to agent names NOT in active users.
+// Owner+manager only. Used by the "Unknown agents" modal on the Tasks page so
+// orphaned work can be reassigned to a real agent or archived.
+app.get('/api/tasks/orphaned', async function(req, res) {
+  if (!db) return res.json({ tasks: [] });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Owner or manager role required' });
+  try {
+    const ur = await db.query("SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE");
+    const activeNames = ur.rows.map(function(r){ return r.name; }).filter(Boolean);
+    if (activeNames.length === 0) return res.json({ tasks: [] });
+    // Find open/in-progress tasks where agent_name is NULL or NOT in active users
+    const tr = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, status, problem_type, " +
+      "problem_detail, created_date, days_persisted FROM campaign_tasks " +
+      "WHERE status IN ('open','in_progress','scaling') " +
+      "AND (agent_name IS NULL OR NOT (agent_name = ANY($1))) " +
+      "ORDER BY created_date DESC LIMIT 200",
+      [activeNames]
+    );
+    res.json({ tasks: tr.rows, activeAgents: activeNames });
+  } catch(e) {
+    console.error('/api/tasks/orphaned error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -5066,9 +5250,9 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
 
 app.post('/api/admin/fix-agent-names', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
-  const knownAgents = ['Aryan', 'Satyam', 'Kunal'];
+  const knownAgents = ['Aryan', 'Satyam'];
   try {
-    const tasks = await db.query("SELECT id, campaign_name FROM campaign_tasks WHERE (agent_name IS NULL OR agent_name NOT IN ('Aryan','Satyam','Kunal'))");
+    const tasks = await db.query("SELECT id, campaign_name FROM campaign_tasks WHERE (agent_name IS NULL OR agent_name NOT IN ('Aryan','Satyam'))");
     let fixed = 0, deleted = 0;
     for (const row of tasks.rows) {
       const parts = (row.campaign_name || '').split(/[|@]/);
@@ -5111,7 +5295,7 @@ app.post('/api/tasks/:id/reopen', async function(req, res) {
     if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
     const task = taskRes.rows[0];
     await db.query('UPDATE campaign_tasks SET status=$1, resolved_at=NULL, updated_at=NOW() WHERE id=$2', ['open', req.params.id]);
-    const agentName = (task.agent_name && ['Aryan','Satyam','Kunal'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
+    const agentName = (task.agent_name && ['Aryan','Satyam'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
     await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', agentName, 'reopened', 'Task reopened — moved back to Due', task.status, 'open', parseInt(req.params.id)]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -5292,7 +5476,24 @@ app.post('/api/settings', async function(req, res) {
 app.get('/api/tasks', async function(req, res) {
   if (!db) return res.json({ tasks: [] });
   try {
-    const result = await db.query("SELECT * FROM campaign_tasks WHERE agent_name IN ('Aryan','Satyam','Kunal') ORDER BY score DESC, created_date DESC LIMIT 500");
+    const result = await db.query("SELECT * FROM campaign_tasks WHERE agent_name IN ('Aryan','Satyam') ORDER BY score DESC, created_date DESC LIMIT 500");
+    // r21: bulk-fetch subtask counts for all tasks in one query — no N+1
+    const taskIds = result.rows.map(function(r){ return r.id; });
+    const subtaskCounts = {};
+    if (taskIds.length > 0) {
+      try {
+        const subRes = await db.query(
+          "SELECT task_id, status, COUNT(*)::int AS cnt FROM task_subtasks " +
+          "WHERE task_id = ANY($1::int[]) GROUP BY task_id, status",
+          [taskIds]
+        );
+        subRes.rows.forEach(function(row) {
+          if (!subtaskCounts[row.task_id]) subtaskCounts[row.task_id] = { open: 0, complete: 0, dismissed: 0, total: 0 };
+          subtaskCounts[row.task_id][row.status] = row.cnt;
+          subtaskCounts[row.task_id].total += row.cnt;
+        });
+      } catch(subErr) { console.error('[r21] subtask count fetch error: ' + subErr.message); }
+    }
     // r7b: enrich each row with computed timeline fields so the frontend doesn't
     // have to know about working days. working_days_open is the canonical age count;
     // task_stage is recomputed live (the cron persists it but live computation is
@@ -5313,7 +5514,8 @@ app.get('/api/tasks', async function(req, res) {
         next_milestone: milestone.next,
         next_milestone_label: milestone.label,
         not_started_warning: notStarted,
-        created_today: createdTodayLondon
+        created_today: createdTodayLondon,
+        subtask_counts: subtaskCounts[t.id] || { open: 0, complete: 0, dismissed: 0, total: 0 }
       });
     });
     res.json({ tasks });
@@ -5322,7 +5524,7 @@ app.get('/api/tasks', async function(req, res) {
 
 app.post('/api/admin/cleanup-tasks', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
-  try { const deleted = await db.query("DELETE FROM campaign_tasks WHERE agent_name IS NULL OR agent_name NOT IN ('Aryan','Satyam','Kunal') RETURNING id"); res.json({ success: true, deleted: deleted.rowCount }); } catch(e) { res.status(500).json({ error: e.message }); }
+  try { const deleted = await db.query("DELETE FROM campaign_tasks WHERE agent_name IS NULL OR agent_name NOT IN ('Aryan','Satyam') RETURNING id"); res.json({ success: true, deleted: deleted.rowCount }); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/tasks/:id/status', async function(req, res) {
@@ -5332,6 +5534,26 @@ app.post('/api/tasks/:id/status', async function(req, res) {
     const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
     const task = taskRes.rows[0] || {};
     const statusBefore = task.status || 'unknown';
+    // r21: gate completion behind subtasks. If any subtask is still 'open',
+    // refuse the complete transition with an actionable message. Dismissed
+    // counts as resolved. Tasks without subtasks (e.g. legacy / non-product
+    // tasks) skip this check.
+    if (status === 'complete') {
+      try {
+        const pendRes = await db.query(
+          "SELECT COUNT(*)::int AS cnt FROM task_subtasks WHERE task_id=$1 AND status='open'",
+          [req.params.id]
+        );
+        const pending = pendRes.rows[0] && pendRes.rows[0].cnt || 0;
+        if (pending > 0) {
+          return res.status(409).json({
+            error: 'subtasks_pending',
+            message: 'Cannot mark complete — ' + pending + ' subtask' + (pending === 1 ? '' : 's') + ' still open. Tick or dismiss each one first.',
+            pending: pending
+          });
+        }
+      } catch(gateErr) { console.error('[r21] subtask gate check error: ' + gateErr.message); }
+    }
     let query, params;
     if (status === 'dismissed') { const endOfDay = new Date(); endOfDay.setHours(23, 59, 59, 999); query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, dismissed_reason=$3, updated_at=NOW(), resolved_at=NOW(), suppressed_until=$4 WHERE id=$5'; params = [status, notes||'', dismissedReason||notes||'', endOfDay.toISOString(), req.params.id]; }
     else if (status === 'paused') { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, paused_reason=$3, updated_at=NOW(), resolved_at=NOW() WHERE id=$4'; params = [status, notes||pausedReason||'', pausedReason||notes||'', req.params.id]; }
@@ -5341,7 +5563,7 @@ app.post('/api/tasks/:id/status', async function(req, res) {
     else { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW() WHERE id=$3'; params = [status, notes||'', req.params.id]; }
     await db.query(query, params);
     try {
-      const logAgent = (task.agent_name && ['Aryan','Satyam','Kunal'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
+      const logAgent = (task.agent_name && ['Aryan','Satyam'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
       await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', logAgent, status, notes||'', statusBefore, status, parseInt(req.params.id)]);
     } catch(logErr) { console.error('Activity log error: ' + logErr.message); }
     res.json({ success: true });

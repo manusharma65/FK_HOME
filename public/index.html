@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r20d (r20c + FBA+FBM combined stock + fulfillment-aware diagnosis) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r21 (Kunal purged, product title search, AI critique → subtasks with dismiss-with-reason gating, Unknown-agents UI in Tasks) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -788,6 +788,12 @@ tbody tr:hover { background: var(--surface2); }
         <button id="amz-filter-dormant" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
         <button id="amz-filter-hidden" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('hidden')" title="Manually hidden products">👁 Hidden <span id="amz-hidden-count" style="font-size:10px;color:var(--text3);margin-left:3px"></span></button>
         <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+        <!-- r21: product title search — filters within the current bucket tab -->
+        <div style="margin-left:12px;display:flex;gap:6px;align-items:center">
+          <input id="amz-product-search" type="text" placeholder="Search title (e.g. pump set)" style="font-size:12px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;width:200px;font-family:inherit" onkeydown="if(event.key==='Enter'){event.preventDefault();applyAmzProductSearch()}">
+          <button class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="applyAmzProductSearch()">🔍 Search</button>
+          <button id="amz-search-clear" class="btn btn-ghost" style="font-size:12px;padding:5px 8px;display:none" onclick="clearAmzProductSearch()" title="Clear search">✕</button>
+        </div>
         <!-- r14b: Bulk AI critique trigger + status -->
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
           <span id="amz-bulk-status" style="font-size:11px;color:var(--text3)"></span>
@@ -874,7 +880,11 @@ tbody tr:hover { background: var(--surface2); }
         <div class="section-title">Campaign Tasks</div>
         <div class="section-sub">Daily tasks at 8am · Auto-archived after 3 working days · 7-day scaling window available from Escalation</div>
       </div>
-      <button class="btn btn-ghost" onclick="showPage('agent-performance')" style="font-size:13px">📊 Agent Performance</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <!-- r21: surfaces orphaned tasks + unknown agent prefixes for owner/manager -->
+        <button id="btn-unknown-agents" class="btn btn-ghost" onclick="showUnknownAgentsModal()" style="font-size:13px;display:none" title="Tasks assigned to agents who are not active users">⚠ Unknown agents</button>
+        <button class="btn btn-ghost" onclick="showPage('agent-performance')" style="font-size:13px">📊 Agent Performance</button>
+      </div>
     </div>
 
     <div class="metrics-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:20px">
@@ -2137,7 +2147,7 @@ async function loadAgentPerformance(forceRefresh) {
       : '<div style="font-size:12px;color:#aaa;margin-bottom:20px">✨ Fresh analysis · ' + new Date().toLocaleString('en-GB', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) + '</div>';
 
     // Parse agent sections from Claude response — split by agent name headings
-    const agents = ['Aryan', 'Satyam', 'Kunal'];
+    const agents = ['Aryan', 'Satyam'];
     const sections = [];
     let remaining = analysis;
 
@@ -2572,6 +2582,8 @@ function selectAgent(btnEl, agent) {
 
 // ── Load Tasks ────────────────────────────────────────────────────────────
 async function loadTasks() {
+  // r21: refresh unknown-agents button visibility + badge count alongside tasks
+  if (typeof updateUnknownAgentsBadge === 'function') updateUnknownAgentsBadge();
   try {
     const res = await fetch('/api/tasks');
     const data = await res.json();
@@ -3157,6 +3169,23 @@ function openTaskDetailModal(taskId) {
     );
   }
 
+  // r21: subtasks block — only shown if task has any subtasks. Lazy-loaded via
+  // renderTaskSubtasks(taskId) so we don't hammer /subtasks on every render.
+  const sc = t.subtask_counts || { open: 0, complete: 0, dismissed: 0, total: 0 };
+  if (sc.total > 0) {
+    const allDone = sc.open === 0;
+    const headerColour = allDone ? '#3B6D11' : '#854F0B';
+    sections.push(
+      '<div style="margin-top:14px;margin-bottom:14px;padding:14px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+          '<div style="font-size:13px;font-weight:600;color:' + headerColour + '">📋 Subtasks from AI critique — ' + (sc.complete + sc.dismissed) + ' / ' + sc.total + ' resolved</div>' +
+          (sc.open > 0 ? '<div style="font-size:11px;color:var(--text3)">(' + sc.open + ' still open — task cannot be marked complete yet)</div>' : '<div style="font-size:11px;color:#3B6D11;font-weight:600">✓ Ready to mark complete</div>') +
+        '</div>' +
+        '<div id="subtasks-' + t.id + '" data-loaded="0" style="font-size:13px"><button class="btn btn-ghost" style="font-size:12px" onclick="loadTaskSubtasks(' + t.id + ')">Show subtasks</button></div>' +
+      '</div>'
+    );
+  }
+
   // Action buttons — full bar based on status (mirrors the card logic).
   let actionButtons = '';
   if (t.status === 'complete' || t.status === 'dismissed' || t.status === 'archived') {
@@ -3311,11 +3340,31 @@ async function submitTaskModal(taskId, action) {
   }
 
   try {
-    await fetch('/api/tasks/' + taskId + '/status', {
+    const r = await fetch('/api/tasks/' + taskId + '/status', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
       body: JSON.stringify(body)
     });
+    // r21: surface subtasks_pending block clearly. Reload subtasks so agent can act.
+    if (r.status === 409) {
+      const j = await r.json();
+      if (j.error === 'subtasks_pending') {
+        alert(j.message || 'Cannot mark complete — subtasks still open. Tick or dismiss them first.');
+        await loadTasks();
+        // Auto-expand subtasks for this task so user can act
+        setTimeout(function(){
+          const container = document.getElementById('subtasks-' + taskId);
+          if (container && container.dataset.loaded !== '1') loadTaskSubtasks(taskId);
+        }, 200);
+        return;
+      }
+    }
+    if (!r.ok) {
+      let errMsg = 'unknown';
+      try { const j = await r.json(); errMsg = j.error || j.message || errMsg; } catch(_){}
+      alert('Error updating task: ' + errMsg);
+      return;
+    }
     await loadTasks();
   } catch(e) { alert('Error updating task: ' + e.message); }
 }
@@ -3665,6 +3714,33 @@ function updatePwStrength(inputId, indicatorId) {
 // ─── Amazon Products page (r9) ──────────────────────────────────────────────
 let amzProductsCache = null;
 let amzProductView = 'urgent'; // r20c: opens on Urgent so agents see fires first
+let amzProductSearchTerm = ''; // r21: active search term, '' = no filter
+
+// r21: keyword title search. Splits term into words; product matches if title
+// contains ALL words (case-insensitive). Filters against the current bucket
+// only — the server already returned the bucket-filtered list.
+function applyAmzProductSearch() {
+  const input = document.getElementById('amz-product-search');
+  if (!input) return;
+  amzProductSearchTerm = (input.value || '').trim().toLowerCase();
+  const clearBtn = document.getElementById('amz-search-clear');
+  if (clearBtn) clearBtn.style.display = amzProductSearchTerm ? '' : 'none';
+  if (amzProductsCache) renderAmazonProductsList(amzProductsCache);
+}
+function clearAmzProductSearch() {
+  const input = document.getElementById('amz-product-search');
+  if (input) input.value = '';
+  amzProductSearchTerm = '';
+  const clearBtn = document.getElementById('amz-search-clear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  if (amzProductsCache) renderAmazonProductsList(amzProductsCache);
+}
+function amzProductMatchesSearch(p) {
+  if (!amzProductSearchTerm) return true;
+  const haystack = (p.title || '').toLowerCase();
+  const words = amzProductSearchTerm.split(/\s+/).filter(Boolean);
+  return words.every(function(w) { return haystack.indexOf(w) !== -1; });
+}
 
 function setAmzProductView(view) {
   amzProductView = view;
@@ -3796,15 +3872,31 @@ function renderAmazonProductsList(data) {
   const el = document.getElementById('amz-products-list');
   const countEl = document.getElementById('amz-products-count');
   if (!el) return;
-  const products = data.products || [];
+  const allProducts = data.products || [];
+  // r21: apply title search filter (does nothing if amzProductSearchTerm is empty)
+  const products = allProducts.filter(amzProductMatchesSearch);
   const summary = data.summary || {};
   // r20c: bucket-aware count summary for the products header
   const urgentTxt = summary.urgent_count > 0 ? ' · ' + summary.urgent_count + ' urgent' : '';
   const underTxt = summary.underperforming_count > 0 ? ' · ' + summary.underperforming_count + ' underperforming' : '';
   const workingTxt = summary.working_count > 0 ? ' · ' + summary.working_count + ' working' : '';
   const baseCount = summary.total_parents_active != null ? summary.total_parents_active : (summary.total_parents || 0);
-  countEl.textContent = baseCount + ' active products' + urgentTxt + underTxt + workingTxt;
+  // r21: if a search filter is active, show "X of Y matching" instead of just totals
+  if (amzProductSearchTerm) {
+    countEl.textContent = products.length + ' of ' + allProducts.length + ' matching "' + amzProductSearchTerm + '"';
+  } else {
+    countEl.textContent = baseCount + ' active products' + urgentTxt + underTxt + workingTxt;
+  }
   if (products.length === 0) {
+    // r21: search-specific empty state takes priority
+    if (amzProductSearchTerm) {
+      el.innerHTML =
+        '<div style="padding:32px 24px;text-align:center">' +
+          '<div style="font-size:14px;color:var(--text2);margin-bottom:6px">No products match "<strong>' + escHtml(amzProductSearchTerm) + '</strong>" in the ' + escHtml(amzProductView) + ' tab.</div>' +
+          '<div style="font-size:12px;color:var(--text3)">Try the <strong>All</strong> tab, or <a href="#" onclick="clearAmzProductSearch();return false" style="color:var(--blue)">clear search</a>.</div>' +
+        '</div>';
+      return;
+    }
     // r20c: positive empty state for the Urgent tab specifically
     if (amzProductView === 'urgent') {
       el.innerHTML =
@@ -4630,6 +4722,31 @@ async function amzAssignTask(groupKey) {
   const p = cache ? cache.find(function(x){ return x.parent_sku === groupKey; }) : null;
   if (!p) return;
 
+  // r21: hard-block if no cached AI critique. Subtasks are seeded from critique
+  // bullets so without it the agent has no actionable list. Show a clear modal
+  // pointing them at the Run AI critique button.
+  if (!p.asin) {
+    alert('This product has no ASIN. Refresh the catalogue sync and try again.');
+    return;
+  }
+  try {
+    const cr = await fetch('/api/amazon/listing-critique?asin=' + encodeURIComponent(p.asin) + '&cachedOnly=1', { headers: getAuthHeaders() });
+    const cj = await cr.json();
+    const issues = cj && cj.critique && Array.isArray(cj.critique.issues) ? cj.critique.issues : [];
+    if (!cj || !cj.critique || issues.length === 0) {
+      alert(
+        'Run AI critique on this product before assigning as a task.\n\n' +
+        'Each issue from the critique becomes a subtask the agent must complete or dismiss-with-reason. ' +
+        'Without a critique, the agent would have nothing to action.\n\n' +
+        'Open the product → click "🤖 Run AI critique" → then assign as task.'
+      );
+      return;
+    }
+  } catch(e) {
+    alert('Could not check AI critique cache: ' + e.message);
+    return;
+  }
+
   // Pull agent list
   let agents = [];
   try {
@@ -4690,10 +4807,135 @@ async function submitAssignTask(groupKey) {
       body: JSON.stringify({ note: note, agent: agent })
     });
     const j = await r.json();
-    if (!r.ok || j.error) { alert('Task creation failed: ' + (j.error || 'unknown')); return; }
+    if (!r.ok || j.error) {
+      // r21: surface the no_critique block message clearly
+      const msg = j.message || j.error || 'unknown';
+      alert('Task creation failed: ' + msg);
+      return;
+    }
     closeAssignTaskModal();
-    alert('Task created and assigned to ' + j.agent + '. Visit the Tasks page to see it.');
+    const subCount = j.subtaskCount || 0;
+    alert(
+      'Task created and assigned to ' + j.agent + '.\n\n' +
+      subCount + ' subtask' + (subCount === 1 ? '' : 's') + ' added from the AI critique. ' +
+      'The agent must tick or dismiss each one before the task can be marked complete.\n\n' +
+      'Visit the Tasks page to see it.'
+    );
   } catch(e) { alert('Task creation failed: ' + e.message); }
+}
+
+// ─── r21: SUBTASKS ──────────────────────────────────────────────────────────
+// Subtasks are seeded from AI critique when a product card is assigned. Agent
+// can complete (toggleable strikethrough) or dismiss-with-reason (permanent
+// strikethrough + reason inline). They cannot be deleted. Card cannot move to
+// Completed until every subtask is in (complete|dismissed).
+
+async function loadTaskSubtasks(taskId) {
+  const container = document.getElementById('subtasks-' + taskId);
+  if (!container) return;
+  container.innerHTML = '<div style="color:var(--text3);font-size:12px">Loading subtasks…</div>';
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/subtasks', { headers: getAuthHeaders() });
+    const j = await r.json();
+    renderTaskSubtasks(taskId, j.subtasks || []);
+  } catch(e) {
+    container.innerHTML = '<div style="color:var(--red);font-size:12px">Could not load subtasks: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderTaskSubtasks(taskId, subtasks) {
+  const container = document.getElementById('subtasks-' + taskId);
+  if (!container) return;
+  container.dataset.loaded = '1';
+  if (!subtasks.length) {
+    container.innerHTML = '<div style="color:var(--text3);font-size:12px">No subtasks.</div>';
+    return;
+  }
+  const rows = subtasks.map(function(s) {
+    const isComplete = s.status === 'complete';
+    const isDismissed = s.status === 'dismissed';
+    const struck = isComplete || isDismissed;
+    const bodyStyle = struck ? 'text-decoration:line-through;color:var(--text3)' : 'color:var(--text)';
+    const statusBadge = isComplete
+      ? '<span style="font-size:10px;font-weight:600;color:#3B6D11;background:#EAF3DE;padding:2px 6px;border-radius:4px;margin-right:6px">✓ DONE</span>'
+      : isDismissed
+      ? '<span style="font-size:10px;font-weight:600;color:#854F0B;background:#FAEEDA;padding:2px 6px;border-radius:4px;margin-right:6px">⊘ DISMISSED</span>'
+      : '<span style="font-size:10px;font-weight:600;color:#791F1F;background:#FCEBEB;padding:2px 6px;border-radius:4px;margin-right:6px">OPEN</span>';
+    const dismissNote = isDismissed && s.dismiss_reason
+      ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;padding-left:24px;font-style:italic">Dismissed: ' + escHtml(s.dismiss_reason) + (s.dismissed_by ? ' — ' + escHtml(s.dismissed_by) : '') + '</div>'
+      : '';
+    const completedNote = isComplete && s.completed_by
+      ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;padding-left:24px;font-style:italic">Completed by ' + escHtml(s.completed_by) + '</div>'
+      : '';
+    let actions;
+    if (isComplete) {
+      actions = '<button class="btn btn-ghost" style="font-size:11px;padding:2px 8px" onclick="completeSubtask(' + taskId + ',' + s.id + ')" title="Untick — back to open">↩ Untick</button>';
+    } else if (isDismissed) {
+      actions = '<button class="btn btn-ghost" style="font-size:11px;padding:2px 8px" onclick="reopenSubtask(' + taskId + ',' + s.id + ')" title="Un-dismiss — back to open">↩ Un-dismiss</button>';
+    } else {
+      actions =
+        '<button class="btn btn-green" style="font-size:11px;padding:3px 10px" onclick="completeSubtask(' + taskId + ',' + s.id + ')">✓ Done</button>' +
+        '<button class="btn btn-ghost" style="font-size:11px;padding:3px 10px;margin-left:6px" onclick="dismissSubtask(' + taskId + ',' + s.id + ')">⊘ Dismiss</button>';
+    }
+    return (
+      '<div style="padding:10px 0;border-bottom:1px solid var(--border)">' +
+        '<div style="display:flex;align-items:flex-start;gap:10px">' +
+          '<div style="flex:1">' +
+            statusBadge +
+            '<span style="font-size:13px;line-height:1.5;' + bodyStyle + '">' + escHtml(s.body || '') + '</span>' +
+            dismissNote + completedNote +
+          '</div>' +
+          '<div style="white-space:nowrap;flex-shrink:0">' + actions + '</div>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+  container.innerHTML = rows;
+}
+
+async function completeSubtask(taskId, subtaskId) {
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/subtasks/' + subtaskId + '/complete', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders())
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Could not update subtask: ' + (j.error || 'unknown')); return; }
+    await loadTaskSubtasks(taskId);
+    // Refresh tasks list so header counter "X / Y resolved" updates too
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) { alert('Could not update subtask: ' + e.message); }
+}
+
+async function dismissSubtask(taskId, subtaskId) {
+  const reason = prompt('Why are you dismissing this subtask?\n\nThe subtask will stay visible (struck through) with your reason shown below it. Be specific — e.g. "Already covered by another task" or "Not applicable to this listing".');
+  if (reason === null) return; // cancel
+  if (!reason.trim()) { alert('A reason is required to dismiss.'); return; }
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/subtasks/' + subtaskId + '/dismiss', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ reason: reason.trim() })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Could not dismiss: ' + (j.error || 'unknown')); return; }
+    await loadTaskSubtasks(taskId);
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) { alert('Could not dismiss: ' + e.message); }
+}
+
+async function reopenSubtask(taskId, subtaskId) {
+  if (!confirm('Un-dismiss this subtask? It will go back to Open and need to be ticked or dismissed again.')) return;
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/subtasks/' + subtaskId + '/reopen', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders())
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Could not reopen: ' + (j.error || 'unknown')); return; }
+    await loadTaskSubtasks(taskId);
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) { alert('Could not reopen: ' + e.message); }
 }
 
 // r18: Reassign existing task — opens modal with agent dropdown.
@@ -4748,6 +4990,174 @@ async function submitReassignTask(taskId) {
     closeTaskDetailModal();
     if (typeof loadTasks === 'function') loadTasks();
   } catch(e) { alert('Reassign failed: ' + e.message); }
+}
+
+// ─── r21: UNKNOWN AGENTS MODAL ──────────────────────────────────────────────
+// Combines two views:
+//   • Orphaned tasks — open tasks assigned to agent names not in the active
+//     users table. Each row offers Reassign-to-current-agent or Archive.
+//   • Unknown campaign prefixes — agent prefixes appearing in campaign names
+//     in the last 14 days that don't match any active user. Heads-up so the
+//     owner can either onboard the agent or rename the campaigns.
+// Owner/manager only — the button visibility is gated in updateUnknownAgentsBadge().
+
+async function showUnknownAgentsModal() {
+  const existing = document.getElementById('unknown-agents-modal');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'unknown-agents-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML =
+    '<div style="background:var(--surface);width:100%;max-width:780px;max-height:85vh;overflow-y:auto;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);padding:22px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">' +
+        '<div>' +
+          '<div style="font-size:17px;font-weight:600">⚠ Unknown agents</div>' +
+          '<div style="font-size:12px;color:var(--text3);margin-top:4px">Tasks and campaigns referencing agent names that are not active users.</div>' +
+        '</div>' +
+        '<button class="btn btn-ghost" onclick="document.getElementById(&quot;unknown-agents-modal&quot;).remove()" style="font-size:13px">✕</button>' +
+      '</div>' +
+      '<div id="ua-orphaned-tasks" style="margin-bottom:18px"><div style="color:var(--text3);font-size:12px">Loading orphaned tasks…</div></div>' +
+      '<div id="ua-unknown-prefixes"><div style="color:var(--text3);font-size:12px">Loading unknown campaign prefixes…</div></div>' +
+    '</div>';
+  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  // Load both sections in parallel
+  loadUnknownOrphanedTasks();
+  loadUnknownCampaignPrefixes();
+}
+
+async function loadUnknownOrphanedTasks() {
+  const el = document.getElementById('ua-orphaned-tasks');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/tasks/orphaned', { headers: getAuthHeaders() });
+    if (r.status === 403) { el.innerHTML = '<div style="font-size:12px;color:var(--text3)">Only owners and managers can view orphaned tasks.</div>'; return; }
+    const j = await r.json();
+    const tasks = j.tasks || [];
+    const activeAgents = j.activeAgents || [];
+    if (!tasks.length) {
+      el.innerHTML =
+        '<div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:6px">📋 Orphaned tasks</div>' +
+        '<div style="font-size:12px;color:#3B6D11;background:#EAF3DE;padding:10px 14px;border-radius:6px">✓ No orphaned tasks — all open tasks are assigned to active agents.</div>';
+      return;
+    }
+    const reassignOpts = activeAgents.map(function(a){ return '<option value="' + escHtml(a) + '">' + escHtml(a) + '</option>'; }).join('');
+    const rows = tasks.map(function(t) {
+      const created = t.created_date ? new Date(t.created_date).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : '—';
+      return (
+        '<div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(t.campaign_name||'') + '">' + escHtml(t.campaign_name || '(no name)') + '</div>' +
+            '<div style="font-size:11px;color:var(--text3);margin-top:2px">' +
+              'Agent: <strong style="color:#791F1F">' + escHtml(t.agent_name || '(none)') + '</strong> · ' +
+              'Status: ' + escHtml(t.status) + ' · Created: ' + created +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0">' +
+            '<select id="ua-reassign-' + t.id + '" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:white">' +
+              '<option value="">Pick agent…</option>' + reassignOpts +
+            '</select>' +
+            '<button class="btn btn-primary" style="font-size:11px;padding:4px 10px" onclick="ua_reassignTask(' + t.id + ')">↪ Reassign</button>' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:4px 10px" onclick="ua_archiveTask(' + t.id + ')">🗄 Archive</button>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+    el.innerHTML =
+      '<div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:8px">📋 Orphaned tasks <span style="font-weight:400;color:var(--text3)">— ' + tasks.length + ' open task' + (tasks.length === 1 ? '' : 's') + ' assigned to inactive/unknown agents</span></div>' +
+      '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">' + rows + '</div>';
+  } catch(e) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--red)">Could not load orphaned tasks: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+async function ua_reassignTask(taskId) {
+  const sel = document.getElementById('ua-reassign-' + taskId);
+  if (!sel) return;
+  const agent = sel.value;
+  if (!agent) { alert('Pick an agent first.'); return; }
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/reassign', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ agent: agent })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Reassign failed: ' + (j.error || 'unknown')); return; }
+    loadUnknownOrphanedTasks();
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) { alert('Reassign failed: ' + e.message); }
+}
+
+async function ua_archiveTask(taskId) {
+  const reason = prompt('Why are you archiving this orphaned task?\n\n(e.g. "Agent left team — campaigns paused")');
+  if (reason === null) return;
+  try {
+    const r = await fetch('/api/tasks/' + taskId + '/archive', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ reason: reason || 'archived from unknown-agents view' })
+    });
+    if (!r.ok) { alert('Archive failed.'); return; }
+    loadUnknownOrphanedTasks();
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) { alert('Archive failed: ' + e.message); }
+}
+
+async function loadUnknownCampaignPrefixes() {
+  const el = document.getElementById('ua-unknown-prefixes');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/amazon/unknown-agents', { headers: getAuthHeaders() });
+    const j = await r.json();
+    const list = j.unknown || [];
+    if (!list.length) {
+      el.innerHTML =
+        '<div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:6px">🏷 Unknown campaign prefixes (last 14 days)</div>' +
+        '<div style="font-size:12px;color:#3B6D11;background:#EAF3DE;padding:10px 14px;border-radius:6px">✓ All agent prefixes in campaign names map to active users.</div>';
+      return;
+    }
+    const rows = list.map(function(u) {
+      return (
+        '<div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
+          '<div>' +
+            '<div style="font-size:13px;font-weight:600;color:var(--text)">' + escHtml(u.name) + '</div>' +
+            '<div style="font-size:11px;color:var(--text3);margin-top:2px">Appears in ' + u.campaignCount + ' campaign' + (u.campaignCount === 1 ? '' : 's') + '</div>' +
+          '</div>' +
+          '<div style="font-size:11px;color:var(--text3);font-style:italic">Onboard or rename campaigns in Amazon Ads</div>' +
+        '</div>'
+      );
+    }).join('');
+    el.innerHTML =
+      '<div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:8px">🏷 Unknown campaign prefixes <span style="font-weight:400;color:var(--text3)">— last 14 days</span></div>' +
+      '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">' + rows + '</div>';
+  } catch(e) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--red)">Could not load unknown agents: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+// Show the button + populate badge count if user is owner/manager and there's anything to act on.
+async function updateUnknownAgentsBadge() {
+  const btn = document.getElementById('btn-unknown-agents');
+  if (!btn) return;
+  const me = window._meCache || {};
+  const role = (me.role || '').toLowerCase();
+  const dept = (me.department || '').toLowerCase();
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  if (!isPriv) { btn.style.display = 'none'; return; }
+  try {
+    const r = await fetch('/api/tasks/orphaned', { headers: getAuthHeaders() });
+    if (!r.ok) { btn.style.display = ''; btn.textContent = '⚠ Unknown agents'; return; }
+    const j = await r.json();
+    const n = (j.tasks || []).length;
+    btn.style.display = '';
+    btn.textContent = n > 0 ? '⚠ Unknown agents (' + n + ')' : '⚠ Unknown agents';
+    if (n > 0) {
+      btn.style.background = '#FCEBEB';
+      btn.style.color = '#791F1F';
+      btn.style.borderColor = '#f5c2c2';
+    }
+  } catch(e) { btn.style.display = ''; }
 }
 
 // r18: Merge products modal — finds duplicate parent groups and lets owner merge them.
