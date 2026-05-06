@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r20b (r20 + parser fixes: pricing/inventory tolerate all SP-API response shapes; sales section "today" uses real London date with placeholder when orders not yet synced)
+// CampaignPulse — deploy marker 2026-05-06 r20c (backfill traffic with 4 min spacing to respect Amazon Reports quota)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3045,12 +3045,23 @@ app.post('/api/admin/backfill-traffic', async function(req, res) {
       d.setDate(d.getDate() - i);
       dates.push(d.toISOString().slice(0, 10));
     }
-    res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each report takes ~30-90s. Total ~' + Math.ceil(days * 1) + ' min.', dates: dates });
-    // Run sequentially in background — Amazon limits report concurrency
+    // r20c: Amazon's Reports API createReport quota is ~15/hour with tight burst
+    // throttling. Without spacing, fire-and-forget hits 429s after the first 4-5
+    // requests and the rest of the backfill is wasted. 4-minute spacing keeps us
+    // safely under the quota and lets each report finish processing before the
+    // next is queued. 30 days × 4 min ≈ 2 hours.
+    const SPACING_MS = 4 * 60 * 1000;
+    const minutes = Math.ceil((days * SPACING_MS) / 60000);
+    res.json({ ok: true, message: 'Backfill started for ' + days + ' days at 4 min spacing (Amazon throttle). Total ~' + minutes + ' min.', dates: dates });
+    // Run sequentially in background with throttle-respecting spacing
     (async function() {
       for (let i = 0; i < dates.length; i++) {
         try { await fetchSalesAndTrafficReport(dates[i]); }
         catch(e) { console.error('[admin] backfill ' + dates[i] + ': ' + e.message); }
+        // Don't sleep after the last one
+        if (i < dates.length - 1) {
+          await new Promise(function(r){ setTimeout(r, SPACING_MS); });
+        }
       }
       console.log('[admin] traffic backfill complete (' + days + ' days)');
     })();
