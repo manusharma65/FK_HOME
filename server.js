@@ -799,13 +799,21 @@ async function refreshAmazonPricingSignals(opts) {
         const p = priceAmount(o);
         if (p != null) candidatePrices.push(p);
       });
-      // De-dupe and pick the minimum, EXCLUDING our own price (it can leak in via Summary)
+      // De-dupe and pick the minimum, EXCLUDING our own price (it can leak in via Summary).
+      // r20b fix: if after excluding our price the pool is empty, that means we have
+      // no genuine competitor offers — return null, do NOT fall back to the pool that
+      // contains our own price (which would falsely report price_vs_lowest = 0).
       if (candidatePrices.length) {
-        const filtered = sig.your_price != null ?
-          candidatePrices.filter(function(p){ return Math.abs(p - sig.your_price) > 0.01; }) :
-          candidatePrices;
-        const pool = filtered.length ? filtered : candidatePrices;
-        sig.lowest_competitor_price = parseFloat(Math.min.apply(null, pool).toFixed(2));
+        if (sig.your_price != null) {
+          const filtered = candidatePrices.filter(function(p){ return Math.abs(p - sig.your_price) > 0.01; });
+          if (filtered.length) {
+            sig.lowest_competitor_price = parseFloat(Math.min.apply(null, filtered).toFixed(2));
+          }
+          // else: leave null — no real competitors, we are the only "new" offer
+        } else {
+          // We don't know our own price (rare) — take the minimum of whatever's there
+          sig.lowest_competitor_price = parseFloat(Math.min.apply(null, candidatePrices).toFixed(2));
+        }
       }
       if (sig.your_price != null && sig.lowest_competitor_price != null) {
         sig.price_vs_lowest = parseFloat((sig.your_price - sig.lowest_competitor_price).toFixed(2));
