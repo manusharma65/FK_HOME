@@ -1487,11 +1487,49 @@ function getAgentWebhook(agentName) {
   return null;
 }
 
+// r21: Agent name canonicalisation. Campaign prefixes and stored agent values
+// can drift (full names, lowercase, typos). All extraction goes through
+// canonicalAgent() so "Aryan", "aryan", "Aryan Tomar", "ARYAN TOMAR" all map
+// to "Aryan". Hardcoded for now — only two active agents. Move to a DB table
+// when the team grows or aliases multiply.
+const AGENT_ALIASES = {
+  // Aryan
+  'aryan': 'Aryan',
+  'aryan tomar': 'Aryan',
+  // Satyam
+  'satyam': 'Satyam'
+};
+function canonicalAgent(raw) {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  // Direct match (whole string)
+  if (AGENT_ALIASES[lower]) return AGENT_ALIASES[lower];
+  // Prefix match — "Aryan-something", "aryan_xyz", "Satyam tasks" etc.
+  // Iterate longest alias first so "aryan tomar" wins over "aryan".
+  const aliases = Object.keys(AGENT_ALIASES).sort(function(a, b){ return b.length - a.length; });
+  for (const alias of aliases) {
+    if (lower === alias) return AGENT_ALIASES[alias];
+    if (lower.indexOf(alias) === 0) {
+      // Make sure the alias is a whole word (followed by space, punctuation, end)
+      const next = lower.charAt(alias.length);
+      if (!next || /[\s\-_|@.,:;\/]/.test(next)) return AGENT_ALIASES[alias];
+    }
+  }
+  // Unknown — return original trimmed (caller decides how to bucket)
+  return trimmed;
+}
+
 function extractAgentFromCampaign(campaignName) {
   if (!campaignName) return null;
   const parts = campaignName.split(/[|@]/);
   const name = parts[0].trim();
-  return name.length > 0 && name.length < 30 ? name : null;
+  if (name.length === 0 || name.length >= 30) return null;
+  // r21: canonicalise. If it matches a known alias (incl. multi-word like
+  // "Aryan Tomar"), return the canonical form. Otherwise return raw so the
+  // unknown-agents UI can still surface it.
+  return canonicalAgent(name);
 }
 
 async function sendToAgent(agentName, message) {
@@ -1722,6 +1760,46 @@ async function initTasksTable() {
           }
         }
       } catch(e) { console.error('[r20d] Kunal cleanup error: ' + e.message); }
+
+      // r21: normalise duplicate agent names that split a single agent across
+      // multiple buckets in the dashboard. "Aryan Tomar" was found mixed with
+      // "Aryan" — always re-canonical to first name. Idempotent.
+      // Touches: amazon_products.owner_agent, campaign_tasks.agent_name,
+      // activity_log.agent_name, users.name. Bobby has already updated Settings
+      // so the users table change should usually be a no-op.
+      try {
+        const aliasUpdates = [
+          { wrong: 'Aryan Tomar',  correct: 'Aryan' },
+          { wrong: 'aryan tomar',  correct: 'Aryan' },
+          { wrong: 'Aryan tomar',  correct: 'Aryan' }
+        ];
+        const tablesAndCols = [
+          { table: 'amazon_products', col: 'owner_agent' },
+          { table: 'campaign_tasks',  col: 'agent_name' },
+          { table: 'activity_log',    col: 'agent_name' },
+          { table: 'users',           col: 'name' }
+        ];
+        let totals = {};
+        for (const { wrong, correct } of aliasUpdates) {
+          for (const { table, col } of tablesAndCols) {
+            try {
+              const r = await db.query('UPDATE ' + table + ' SET ' + col + '=$1 WHERE ' + col + '=$2', [correct, wrong]);
+              if (r.rowCount > 0) {
+                const k = table + '.' + col;
+                totals[k] = (totals[k] || 0) + r.rowCount;
+              }
+            } catch(tErr) {
+              // Some tables may not exist (e.g. users on first boot) — log + continue
+              if (!/does not exist/.test(tErr.message)) console.error('[r21] alias update ' + table + '.' + col + ' (' + wrong + '→' + correct + '): ' + tErr.message);
+            }
+          }
+        }
+        const totalRows = Object.values(totals).reduce(function(s, n){ return s + n; }, 0);
+        if (totalRows > 0) {
+          const breakdown = Object.keys(totals).map(function(k){ return k + '=' + totals[k]; }).join(', ');
+          console.log('[r21] agent alias normalisation: ' + totalRows + ' rows updated (' + breakdown + ')');
+        }
+      } catch(e) { console.error('[r21] agent alias normalisation error: ' + e.message); }
     } catch(e) { console.error('User init error: ' + e.message); }
     console.log('Auth tables ready');
 
@@ -2507,6 +2585,12 @@ app.get('/api/wasted-by-agent', async function(req, res) {
             const parsed = parseCampaignName(c.name || '');
             if (parsed && parsed.agent) agent = parsed.agent;
           } catch(e) {}
+        }
+        // r21: canonicalise — old snapshots can carry "Aryan Tomar" frozen in
+        // the JSON; we map it to "Aryan" at read time.
+        if (agent) {
+          const canon = canonicalAgent(agent);
+          if (canon) agent = canon;
         }
         if (!agent) agent = 'Unassigned';
         allAgents.add(agent);
@@ -4786,7 +4870,21 @@ async function deriveProductOwners() {
 // as the product hint. Agent is null but matching still works.
 function parseCampaignName(name) {
   if (!name) return { agent: null, productHint: '' };
-  const m = String(name).match(/^\s*([A-Za-z]{3,15})\s*[|@]\s*(.*)$/);
+  const str = String(name);
+  // r21: try alias map first — handles multi-word prefixes ("Aryan Tomar | x")
+  // and case variations ("aryan | x"). Fall back to the strict single-word
+  // regex if no alias matches, so genuinely unknown prefixes still surface
+  // in the unknown-agents UI.
+  const beforeSep = str.split(/[|@]/)[0].trim();
+  if (beforeSep) {
+    const canon = canonicalAgent(beforeSep);
+    if (canon && Object.values(AGENT_ALIASES).indexOf(canon) !== -1) {
+      const rest = str.split(/[|@]/).slice(1).join('|') || '';
+      const hint = rest.split(/[|@]/)[0].trim();
+      return { agent: canon, productHint: hint };
+    }
+  }
+  const m = str.match(/^\s*([A-Za-z]{3,15})\s*[|@]\s*(.*)$/);
   if (m) {
     const agent = m[1].trim();
     const rest = m[2] || '';
@@ -4794,7 +4892,7 @@ function parseCampaignName(name) {
     return { agent: agent, productHint: hint };
   }
   // No agent prefix — use the whole name as hint (split on first | if present, else whole string)
-  const fallback = String(name).split(/[|@]/)[0].trim();
+  const fallback = str.split(/[|@]/)[0].trim();
   return { agent: null, productHint: fallback };
 }
 
@@ -5078,6 +5176,10 @@ app.get('/api/amazon/unknown-agents', async function(req, res) {
       "SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE"
     );
     const knownNames = new Set(ur.rows.map(function(r){ return (r.name || '').toLowerCase(); }));
+    // r21: also seed every alias and canonical from AGENT_ALIASES so "Aryan Tomar"
+    // and "aryan" are never flagged as unknown even if a user record is missing.
+    Object.keys(AGENT_ALIASES).forEach(function(k){ knownNames.add(k); });
+    Object.values(AGENT_ALIASES).forEach(function(v){ knownNames.add(v.toLowerCase()); });
     // Recent campaign names from snapshots
     const sr = await db.query(
       "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days'"
@@ -5147,21 +5249,42 @@ app.get('/api/tasks/orphaned', async function(req, res) {
 // Returns sales per agent per day — used for the team-transparency panel that all
 // users (not just managers) can see. Each agent's numbers come from orders containing
 // products where amazon_products.owner_agent matches.
+//
+// r21 fix: previous version inflated agent totals by joining LEFT JOIN amazon_products
+// directly — every duplicate SKU sharing an ASIN multiplied the line item. Now we
+// collapse line items per (order_id, asin) first, then join to ONE owner_agent
+// per ASIN (using MAX(owner_agent) — assumes consistent owner across SKUs sharing
+// an ASIN; flagged in /api/admin/sales-gap-diagnosis if not).
 app.get('/api/amazon/sales-by-agent', async function(req, res) {
   if (!db) return res.json({ agents: [], days: [] });
   try {
     const days = Math.min(parseInt(req.query.days || '7'), 30);
     const r = await db.query(
-      "SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
-      "       COALESCE(p.owner_agent, 'Unassigned') AS agent, " +
-      "       SUM(i.item_price * i.quantity) AS gross, " +
-      "       SUM(i.quantity) AS units " +
-      "FROM amazon_orders o " +
-      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
-      "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-      "AND o.status NOT IN ('Cancelled','Canceled') " +
-      "GROUP BY day, agent ORDER BY day ASC, agent ASC"
+      "WITH unique_lines AS (" +
+      "  SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+      "         i.order_id, i.asin, " +
+      "         SUM(i.item_price * i.quantity) AS gross, " +
+      "         SUM(i.quantity) AS units " +
+      "  FROM amazon_orders o " +
+      "  JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "  WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "  AND o.status NOT IN ('Cancelled','Canceled') " +
+      "  GROUP BY day, i.order_id, i.asin" +
+      "), " +
+      "agent_for_asin AS (" +
+      "  SELECT asin, MAX(owner_agent) AS owner_agent " +
+      "  FROM amazon_products " +
+      "  WHERE asin IS NOT NULL " +
+      "  GROUP BY asin" +
+      ") " +
+      "SELECT ul.day, " +
+      "       COALESCE(a.owner_agent, 'Unassigned') AS agent, " +
+      "       SUM(ul.gross) AS gross, " +
+      "       SUM(ul.units) AS units " +
+      "FROM unique_lines ul " +
+      "LEFT JOIN agent_for_asin a ON a.asin = ul.asin " +
+      "GROUP BY ul.day, COALESCE(a.owner_agent, 'Unassigned') " +
+      "ORDER BY ul.day ASC, agent ASC"
     );
     const dayMap = {};
     const agentSet = new Set();
@@ -5197,18 +5320,34 @@ app.get('/api/amazon/sales-summary', async function(req, res) {
     let query;
     let params = [];
     if (agentFilter) {
-      // Sum only line items whose ASIN belongs to a product owned by this agent
-      query = "SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
-        "       SUM(i.item_price * i.quantity) AS gross, " +
-        "       COUNT(DISTINCT o.order_id) AS order_count, " +
-        "       SUM(i.quantity) AS units " +
-        "FROM amazon_orders o " +
-        "JOIN amazon_order_items i ON i.order_id = o.order_id " +
-        "JOIN amazon_products p ON p.asin = i.asin " +
-        "WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
-        "AND o.status NOT IN ('Cancelled','Canceled') " +
-        "AND p.owner_agent = $1 " +
-        "GROUP BY day ORDER BY day ASC";
+      // r21 fix: same duplicate-SKU inflation as sales-by-agent. Dedupe lines per
+      // (order_id, asin) before joining to amazon_products, then keep only ASINs
+      // owned by this agent.
+      query = "WITH unique_lines AS (" +
+        "  SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+        "         i.order_id, i.asin, " +
+        "         SUM(i.item_price * i.quantity) AS gross, " +
+        "         SUM(i.quantity) AS units " +
+        "  FROM amazon_orders o " +
+        "  JOIN amazon_order_items i ON i.order_id = o.order_id " +
+        "  WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+        "  AND o.status NOT IN ('Cancelled','Canceled') " +
+        "  GROUP BY day, i.order_id, i.asin" +
+        "), " +
+        "agent_for_asin AS (" +
+        "  SELECT asin, MAX(owner_agent) AS owner_agent " +
+        "  FROM amazon_products " +
+        "  WHERE asin IS NOT NULL " +
+        "  GROUP BY asin" +
+        ") " +
+        "SELECT ul.day, " +
+        "       SUM(ul.gross) AS gross, " +
+        "       COUNT(DISTINCT ul.order_id) AS order_count, " +
+        "       SUM(ul.units) AS units " +
+        "FROM unique_lines ul " +
+        "JOIN agent_for_asin a ON a.asin = ul.asin " +
+        "WHERE a.owner_agent = $1 " +
+        "GROUP BY ul.day ORDER BY ul.day ASC";
       params = [agentFilter];
     } else {
       // Manager view — full company numbers
@@ -5374,6 +5513,61 @@ app.get('/api/admin/sales-gap-diagnosis', async function(req, res) {
     );
     const delta = deltaRes.rows[0] || {};
 
+    // 8. r21 fix: duplicate-SKU detection. ASINs with multiple amazon_products rows
+    // multiply line items in the per-agent join. This is the real bug.
+    const dupSkuRes = await db.query(
+      "SELECT COUNT(*) AS asins_with_dups, " +
+      "       SUM(skus_per_asin - 1) AS extra_rows " +
+      "FROM (" +
+      "  SELECT asin, COUNT(*) AS skus_per_asin " +
+      "  FROM amazon_products " +
+      "  WHERE asin IS NOT NULL " +
+      "  GROUP BY asin HAVING COUNT(*) > 1" +
+      ") sub"
+    );
+    const dupSku = dupSkuRes.rows[0] || {};
+
+    // 9. Inconsistent owner_agent names — common cause: "Aryan" vs "Aryan Tomar"
+    const ownerNamesRes = await db.query(
+      "SELECT owner_agent, COUNT(*) AS skus FROM amazon_products " +
+      "WHERE owner_agent IS NOT NULL " +
+      "GROUP BY owner_agent ORDER BY owner_agent ASC"
+    );
+    const ownerNames = ownerNamesRes.rows.map(function(r){
+      return { agent: r.owner_agent, skus: parseInt(r.skus) };
+    });
+
+    // 10. The de-duplicated per-agent total — what the agent breakdown SHOULD be:
+    // collapse line items to one row per (order_id, asin) before joining to products.
+    const dedupedAgentRes = await db.query(
+      "WITH unique_lines AS (" +
+      "  SELECT i.order_id, i.asin, " +
+      "         SUM(i.item_price * i.quantity) AS gross, " +
+      "         SUM(i.quantity) AS units " +
+      "  FROM amazon_orders o " +
+      "  JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "  WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "  AND o.status NOT IN ('Cancelled','Canceled') " +
+      "  GROUP BY i.order_id, i.asin" +
+      "), " +
+      "agent_for_asin AS (" +
+      "  SELECT asin, MAX(owner_agent) AS owner_agent " +
+      "  FROM amazon_products " +
+      "  WHERE asin IS NOT NULL " +
+      "  GROUP BY asin" +
+      ") " +
+      "SELECT COALESCE(a.owner_agent, 'Unassigned') AS agent, " +
+      "       SUM(ul.gross) AS gross " +
+      "FROM unique_lines ul " +
+      "LEFT JOIN agent_for_asin a ON a.asin = ul.asin " +
+      "GROUP BY COALESCE(a.owner_agent, 'Unassigned') " +
+      "ORDER BY gross DESC"
+    );
+    const dedupedAgents = dedupedAgentRes.rows.map(function(r){
+      return { agent: r.agent, gross: parseFloat(parseFloat(r.gross || 0).toFixed(2)) };
+    });
+    const dedupedSum = dedupedAgents.reduce(function(s, a){ return s + a.gross; }, 0);
+
     const headlineGross = parseFloat(headline.gross || 0);
     const lineItemGross = parseFloat(lineItem.line_gross || 0);
     const totalGap = headlineGross - agentSum;
@@ -5418,6 +5612,21 @@ app.get('/api/admin/sales-gap-diagnosis', async function(req, res) {
         line_item_gross: parseFloat(lineItemGross.toFixed(2)),
         line_item_minus_agent_sum: parseFloat((lineItemGross - agentSum).toFixed(2)),
         line_item_minus_agent_sum_explanation: 'Should be ~0. If non-zero, the LEFT JOIN to amazon_products is dropping rows somehow (unlikely with LEFT but worth checking).'
+      },
+      // r21 root-cause additions
+      duplicate_sku_diagnosis: {
+        asins_with_multiple_skus: parseInt(dupSku.asins_with_dups || 0),
+        extra_join_rows: parseInt(dupSku.extra_rows || 0),
+        explanation: 'Each ASIN with >1 SKU rows in amazon_products causes the per-agent JOIN to multiply line items by the number of SKU rows. This is the primary cause of agent totals being LARGER than line-item totals. Fix: collapse line items to one row per (order_id, asin) before joining.'
+      },
+      owner_agent_names: {
+        list: ownerNames,
+        explanation: 'All distinct owner_agent values currently in amazon_products. Look for typos or duplicates like "Aryan" vs "Aryan Tomar" — these split a single agent across multiple buckets and need normalising.'
+      },
+      deduped_per_agent: {
+        gross_total: parseFloat(dedupedSum.toFixed(2)),
+        breakdown: dedupedAgents,
+        explanation: 'What the per-agent breakdown SHOULD show after collapsing duplicate-SKU joins. Compare to per_agent_sum.gross above. If this number is close to line_item_gross (' + parseFloat(lineItemGross.toFixed(2)) + '), the duplicate-SKU theory is confirmed.'
       }
     });
   } catch(e) {
