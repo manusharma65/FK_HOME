@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r20c (backfill traffic with 4 min spacing to respect Amazon Reports quota)
+// CampaignPulse — deploy marker 2026-05-06 r20c (clean card view + Urgent/Underperforming/Working buckets, campaign matcher removed (manual ASIN→campaign mapping coming later), Kunal soft-deleted with task reassignment to Bobby, AI critique drops live-page review scrape and uses conditional signal instructions)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1616,6 +1616,33 @@ async function initTasksTable() {
         const r = await db.query("UPDATE users SET role='owner' WHERE email='bobby@fksports.co.uk' AND role='manager'");
         if (r.rowCount > 0) console.log("Bobby promoted to role='owner'");
       } catch(e) { console.error('Owner role promotion error: ' + e.message); }
+
+      // r20c: Kunal cleanup — soft-delete his user account and reassign open
+      // tasks to Bobby. Idempotent — checks is_active before doing anything.
+      try {
+        const kunalRes = await db.query(
+          "SELECT id, name FROM users WHERE name='Kunal' AND COALESCE(is_active,TRUE)=TRUE"
+        );
+        if (kunalRes.rows.length > 0) {
+          // 1. Reassign open Kunal tasks to Bobby
+          const reassignRes = await db.query(
+            "UPDATE campaign_tasks SET agent_name='Bobby Singh' " +
+            "WHERE agent_name='Kunal' AND status NOT IN ('complete','dismissed','archived') " +
+            "RETURNING id"
+          );
+          // 2. Soft-delete Kunal
+          await db.query("UPDATE users SET is_active=FALSE WHERE name='Kunal'");
+          // 3. Activity log entry — survives forever
+          try {
+            await db.query(
+              "INSERT INTO activity_log (action, agent_name, campaign_id, details) " +
+              "VALUES ('user_removed', 'Bobby Singh', NULL, $1)",
+              ['Kunal soft-deleted (left team); ' + reassignRes.rowCount + ' open tasks reassigned to Bobby Singh']
+            );
+          } catch(_e) { /* activity_log shape may differ — ignore if it does */ }
+          console.log('[r20c] Kunal cleanup: soft-deleted user, reassigned ' + reassignRes.rowCount + ' open tasks to Bobby');
+        }
+      } catch(e) { console.error('[r20c] Kunal cleanup error: ' + e.message); }
     } catch(e) { console.error('User init error: ' + e.message); }
     console.log('Auth tables ready');
 
@@ -3120,7 +3147,11 @@ function computeAmazonDiagnosis(p) {
   // p has: parent, totalSales, totalUnits, adCoveragePct, advertisedChildren, totalChildren,
   //        campaignSpend, campaignSales, acos, campaignCount, autoCampaignsExist
   // r20: also receives `signals` — buy_box_pct_7d, stock_cover_days, reviews_*, price_vs_lowest, content_age_days
-  // Plus parent.buyable_count, parent.inactive_count
+  // r20c: returns priority + diagnosis + action + evidence (short subtitle for card pill).
+  //   Note: the campaign matcher was removed in r20c, so campaignSpend/campaignCount
+  //   are always 0 currently. The cases below that depend on those values are kept
+  //   for when manual ASIN→campaign mapping returns. For now, most products fall
+  //   through to listing/signal-based cases.
   const parent = p.parent;
   const inactiveCount = parent.inactive_count || 0;
   const buyableCount = parent.buyable_count || 0;
@@ -3134,6 +3165,7 @@ function computeAmazonDiagnosis(p) {
   if (sig.stock_cover_days != null && sig.stock_cover_days < 7 && hasSales) {
     return {
       priority: 1,
+      evidence: sig.stock_cover_days + 'd stock cover, selling ' + (sig.velocity_30d || 0).toFixed(1) + '/day',
       diagnosis: 'Only ' + sig.stock_cover_days + ' days of stock left at current sales rate (' + (sig.fulfillable_qty || 0) + ' units, ' + (sig.velocity_30d || 0).toFixed(1) + '/day)',
       action: 'Send replenishment to FBA now — stock-out imminent'
     };
@@ -3142,6 +3174,7 @@ function computeAmazonDiagnosis(p) {
   if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 50 && hasSales) {
     return {
       priority: 1,
+      evidence: 'Buy Box ' + sig.buy_box_pct_7d + '% (last 7d)',
       diagnosis: 'Buy Box only ' + sig.buy_box_pct_7d + '% over last 7 days — losing the offer to other sellers',
       action: 'Check pricing vs competitors and any account/health issues'
     };
@@ -3150,6 +3183,7 @@ function computeAmazonDiagnosis(p) {
   if (inactiveCount > 0 && buyableCount === 0) {
     return {
       priority: 1,
+      evidence: 'all variants inactive',
       diagnosis: 'All variants INACTIVE/SUSPENDED — listing not buyable on Amazon',
       action: 'Investigate suspension reason in Seller Central; relist'
     };
@@ -3157,6 +3191,7 @@ function computeAmazonDiagnosis(p) {
   if (inactiveCount >= 2 && p.totalChildren > 2) {
     return {
       priority: 1,
+      evidence: inactiveCount + ' of ' + p.totalChildren + ' variants suspended',
       diagnosis: inactiveCount + ' of ' + p.totalChildren + ' variants suspended/inactive',
       action: 'Review suspended ASINs in Seller Central and reinstate'
     };
@@ -3165,6 +3200,7 @@ function computeAmazonDiagnosis(p) {
   if (hasSpend && p.campaignSpend > 20 && !hasSales) {
     return {
       priority: 1,
+      evidence: '£' + p.campaignSpend.toFixed(0) + ' spend, zero attributed sales',
       diagnosis: 'Spending £' + p.campaignSpend.toFixed(2) + '/wk in ' + p.campaignCount + ' campaigns — zero sales',
       action: 'Pause campaigns or check listing for issues (image / price / reviews)'
     };
@@ -3173,6 +3209,7 @@ function computeAmazonDiagnosis(p) {
   if (hasSales && hasSpend && p.acos > ACOS_TARGET * 2) {
     return {
       priority: 1,
+      evidence: 'ACOS ' + p.acos + '% (target ' + ACOS_TARGET + '%)',
       diagnosis: 'ACOS ' + p.acos + '% — more than double target (' + ACOS_TARGET + '%) at £' + p.campaignSpend.toFixed(2) + ' spend',
       action: 'Reduce bids or add negative keywords; review search-term report'
     };
@@ -3183,6 +3220,7 @@ function computeAmazonDiagnosis(p) {
   if (hasSales && p.totalSales > 50 && !hasCampaigns) {
     return {
       priority: 2,
+      evidence: '£' + p.totalSales.toFixed(0) + ' organic, no ads',
       diagnosis: '£' + p.totalSales.toFixed(0) + ' organic sales, but no advertising at all',
       action: 'Launch a Sponsored Products campaign — already has organic demand'
     };
@@ -3191,6 +3229,7 @@ function computeAmazonDiagnosis(p) {
   if (p.totalChildren >= 3 && p.adCoveragePct < 40 && hasSales) {
     return {
       priority: 2,
+      evidence: p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised',
       diagnosis: 'Only ' + p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised (' + p.adCoveragePct + '% coverage)',
       action: 'Add remaining variants to existing campaigns (same parent ASIN target)'
     };
@@ -3199,6 +3238,7 @@ function computeAmazonDiagnosis(p) {
   if (hasSales && hasSpend && p.acos > ACOS_TARGET) {
     return {
       priority: 2,
+      evidence: 'ACOS ' + p.acos + '% above ' + ACOS_TARGET + '% target',
       diagnosis: 'ACOS ' + p.acos + '% — above ' + ACOS_TARGET + '% target on ' + p.campaignCount + ' campaigns',
       action: 'Tune bids on top-spending keywords; check search-term waste'
     };
@@ -3207,6 +3247,7 @@ function computeAmazonDiagnosis(p) {
   if (!parent.owner_agent && hasSales) {
     return {
       priority: 2,
+      evidence: 'no agent assigned',
       diagnosis: 'No agent assigned — sales not attributed in team breakdown',
       action: 'Assign an owner agent from the dropdown above'
     };
@@ -3215,6 +3256,7 @@ function computeAmazonDiagnosis(p) {
   if (!hasSales && !hasSpend && buyableCount > 0) {
     return {
       priority: 2,
+      evidence: 'buyable, no sales in 7 days',
       diagnosis: 'BUYABLE listing with no sales and no advertising in 7 days',
       action: 'Either launch test ads or de-prioritise the listing'
     };
@@ -3223,6 +3265,7 @@ function computeAmazonDiagnosis(p) {
   if (sig.stock_cover_days != null && sig.stock_cover_days < 30 && hasSales) {
     return {
       priority: 2,
+      evidence: sig.stock_cover_days + 'd stock cover',
       diagnosis: sig.stock_cover_days + ' days of stock at current sales rate (' + (sig.fulfillable_qty || 0) + ' units)',
       action: 'Plan replenishment to FBA — < 30 days cover'
     };
@@ -3231,6 +3274,7 @@ function computeAmazonDiagnosis(p) {
   if (sig.price_vs_lowest != null && sig.price_vs_lowest > 5 && hasSales) {
     return {
       priority: 2,
+      evidence: '£' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor',
       diagnosis: 'Priced £' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor (£' + (sig.your_price || 0).toFixed(2) + ' vs £' + (sig.lowest_competitor_price || 0).toFixed(2) + ')',
       action: 'Review pricing — likely losing Buy Box and conversions'
     };
@@ -3239,6 +3283,7 @@ function computeAmazonDiagnosis(p) {
   if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 80 && hasSales) {
     return {
       priority: 2,
+      evidence: 'Buy Box ' + sig.buy_box_pct_7d + '% (target 90%+)',
       diagnosis: 'Buy Box ' + sig.buy_box_pct_7d + '% over last 7 days (target 90%+)',
       action: 'Check pricing; ensure stock is sufficient and account health is green'
     };
@@ -3247,6 +3292,7 @@ function computeAmazonDiagnosis(p) {
   if (sig.content_age_days != null && sig.content_age_days > 90 && hasSales) {
     return {
       priority: 2,
+      evidence: 'content ' + sig.content_age_days + ' days old',
       diagnosis: 'Listing content not updated for ' + sig.content_age_days + ' days — Amazon SEO benefits from refresh',
       action: 'Refresh title keywords, bullets, and A+ content'
     };
@@ -3257,6 +3303,7 @@ function computeAmazonDiagnosis(p) {
   if (hasSales && hasSpend && p.acos <= ACOS_TARGET && p.campaignSpend > 10) {
     return {
       priority: 3,
+      evidence: 'ACOS ' + p.acos + '%, £' + p.totalSales.toFixed(0) + ' sales',
       diagnosis: 'ACOS ' + p.acos + '% (under ' + ACOS_TARGET + '% target) — £' + p.totalSales.toFixed(0) + ' sales, £' + p.campaignSpend.toFixed(0) + ' spend',
       action: 'Increase budget on top-performing campaigns'
     };
@@ -3264,6 +3311,7 @@ function computeAmazonDiagnosis(p) {
   if (hasSales && p.totalSales > 100 && p.adCoveragePct >= 80) {
     return {
       priority: 3,
+      evidence: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% coverage',
       diagnosis: '£' + p.totalSales.toFixed(0) + ' weekly sales with ' + p.adCoveragePct + '% ad coverage',
       action: 'Strong performer — consider Sponsored Brands or Sponsored Display tests'
     };
@@ -3273,12 +3321,14 @@ function computeAmazonDiagnosis(p) {
   if (hasSales) {
     return {
       priority: 4,
+      evidence: '£' + p.totalSales.toFixed(0) + ' sales',
       diagnosis: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% ad coverage',
       action: 'No immediate action required'
     };
   }
   return {
     priority: 4,
+    evidence: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ', no recent activity',
     diagnosis: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ' tracked, no recent activity',
     action: 'Monitor — no urgent action'
   };
@@ -3571,74 +3621,25 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
-    // 4. Match campaigns to parent groups via TF-IDF distinctiveness scoring (r17)
-    // Logic:
-    //   - Build IDF map across all parent product titles. A word appearing in many titles
-    //     is generic ("plate", "fitness", "machine") and gets low weight. A word in few
-    //     titles is distinctive ("vibration", "kettlebell", "trampoline") and gets high weight.
-    //   - For each campaign, compute weighted-overlap score with each candidate product.
-    //   - Pick the highest-scoring product, but only if it crosses a meaningful threshold.
-    //   - This stops "Weight Plates KT" from being picked as the best match for a Vibration
-    //     Plate product just because they share the generic word "plate".
-    const groupTitleKw = {};
-    Object.keys(parents).forEach(function(gk){ groupTitleKw[gk] = extractTitleKeywords(parents[gk].title || ''); });
-
-    // Build IDF — how many parent titles contain each word
-    const titleDocCount = Object.keys(groupTitleKw).length || 1;
-    const wordDocFreq = {};
-    Object.values(groupTitleKw).forEach(function(set){
-      set.forEach(function(kw){ wordDocFreq[kw] = (wordDocFreq[kw] || 0) + 1; });
-    });
-    // IDF = log(N / df). High value = rare/distinctive. Common words ≈ 0.
-    function idf(kw) {
-      const df = wordDocFreq[kw] || 0;
-      if (df === 0) return 1.5;  // word not in any title — still useful if it appears in product title later
-      return Math.log(titleDocCount / df);
-    }
-
-    // Weighted overlap score using IDF
-    function tfidfScore(hintKw, titleKw) {
-      let score = 0;
-      hintKw.forEach(function(kw){
-        if (titleKw.has(kw)) score += idf(kw);
-      });
-      return score;
-    }
-
+    // ─── r20c: Campaign matcher REMOVED ──────────────────────────────────────
+    // The TF-IDF + parseCampaignName + isCampaignMatch logic that joined campaigns
+    // to product groups is gone. Reasons:
+    //   - Campaign names in the catalog are inconsistent ("Vibration Plate Auto"
+    //     vs "Satyam | Vibration Plate" vs raw ASIN-targeted) and the matcher
+    //     produced too many false positives.
+    //   - Bobby is going to provide manual ASIN→campaign mapping in a future
+    //     revision instead.
+    // What this means for the API response:
+    //   - Each parent now returns camp_spend_7d=0, camp_count=0, campaigns=[]
+    //   - The diagnosis function still works — it has rule-based cases that
+    //     don't depend on per-product campaign attribution.
+    //   - The wasted-by-agent and ad-spend totals on the dashboard come from
+    //     /api/wasted-by-agent (server-side prefix parsing), not from this join.
+    // To revive: the original block lived between this comment and the next
+    // section header. It used parseCampaignName (still in this file at the
+    // bottom), extractTitleKeywords, isCampaignMatch, and an IDF table. Pull
+    // from r20b commit if needed.
     const groupCampaignStats = {};
-    const MATCH_THRESHOLD = 0.5;  // tuned: distinctive 1-word match (e.g. "vibration") scores ~1.5+; generic word matches score <0.5
-    recentCampaigns.forEach(function(c) {
-      const parsed = parseCampaignName(c.name || '');
-      const hintKw = extractTitleKeywords(parsed.productHint);
-      if (hintKw.size === 0) return;
-      let bestKey = null;
-      let bestScore = 0;
-      Object.keys(parents).forEach(function(gk) {
-        const titleKw = groupTitleKw[gk];
-        const score = tfidfScore(hintKw, titleKw);
-        if (score > bestScore) { bestScore = score; bestKey = gk; }
-      });
-      // Only accept the match if score is meaningful (above threshold).
-      // Generic-word-only matches (score ~0.2) are rejected.
-      if (!bestKey || bestScore < MATCH_THRESHOLD) return;
-      if (!groupCampaignStats[bestKey]) groupCampaignStats[bestKey] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
-      const s = groupCampaignStats[bestKey];
-      s.spend += parseFloat(c.spend || 0);
-      s.sales += parseFloat(c.sales || 0);
-      s.clicks += parseInt(c.clicks || 0);
-      s.impressions += parseInt(c.impressions || 0);
-      s.conversions += parseInt(c.conversions || 0);
-      s.count++;
-      // r14: track campaign details for display on cards
-      s.campaigns.push({
-        campaignId: c.campaignId,
-        name: c.name || '',
-        spend: parseFloat(c.spend || 0),
-        sales: parseFloat(c.sales || 0),
-        state: c.state || '',
-        targetingType: c.targetingType || ''
-      });
-    });
 
     // 5. Compute per-parent aggregates + diagnosis
     let allParents = Object.values(parents).map(function(parent) {
@@ -3730,6 +3731,19 @@ app.get('/api/amazon/products', async function(req, res) {
         autoCampaignsExist: autoCampaignsExist.value,
         signals: signals
       });
+      // r20c: derive bucket from priority for the new tab UI.
+      // 1 = urgent (red), 2 = underperforming (amber), 3+ = working (green).
+      // Coverage gaps are folded into underperforming (was a separate tab pre-r20c).
+      let bucket;
+      if (dx.priority === 1) bucket = 'urgent';
+      else if (dx.priority === 2) bucket = 'underperforming';
+      else bucket = 'working';
+      // Coverage gap absorption — if a buyable active product has < 100% ad
+      // coverage AND has sales, it's an underperformer regardless of priority.
+      const isActive = parent.buyable_count > 0 && parent.children.some(function(c){ return c.active_60d; });
+      if (isActive && (totalSales > 50) && adCoveragePct < 100 && bucket === 'working') {
+        bucket = 'underperforming';
+      }
       return Object.assign({}, parent, {
         asins: Array.from(parent.asins),
         total_sales_7d: parseFloat(totalSales.toFixed(2)),
@@ -3748,8 +3762,10 @@ app.get('/api/amazon/products', async function(req, res) {
         cost_per_conv: costPerConv != null ? parseFloat(costPerConv.toFixed(2)) : null,
         active_60d: activeRecent,
         priority: dx.priority,
+        bucket: bucket,
         diagnosis: dx.diagnosis,
         action: dx.action,
+        evidence: dx.evidence || null,  // r20c: short evidence line for card subtitle
         signals: signals
       });
     });
@@ -3767,23 +3783,32 @@ app.get('/api/amazon/products', async function(req, res) {
     });
 
     // r14: three-way view selector + r15: 'gaps' filter + r16: 'hidden' filter
+    // r20c: new bucket-based views — urgent / underperforming / working — plus
+    // 'all' / 'hidden' kept. Old 'active' / 'dormant' / 'gaps' stay for any older
+    // bookmarks but route to the new buckets.
     let returnList;
     if (view === 'dormant') returnList = dormantProducts;
     else if (view === 'all') returnList = visibleParents;
     else if (view === 'hidden') returnList = hiddenParents;
-    else if (view === 'gaps') {
-      // Coverage gap = active product where ad coverage < 100% OR (has sales but no campaigns at all)
-      returnList = activeProducts.filter(function(p) {
-        if (p.ad_coverage_pct < 100) return true;
-        if ((p.camp_count || 0) === 0 && (p.total_sales_7d || 0) > 0) return true;
-        return false;
-      });
-    }
-    else returnList = activeProducts;
+    else if (view === 'urgent') returnList = activeProducts.filter(function(p){ return p.bucket === 'urgent'; });
+    else if (view === 'underperforming' || view === 'gaps') returnList = activeProducts.filter(function(p){ return p.bucket === 'underperforming'; });
+    else if (view === 'working') returnList = activeProducts.filter(function(p){ return p.bucket === 'working'; });
+    else returnList = activeProducts;  // default 'active' = legacy alias
     returnList.sort(function(a, b) {
       if (a.priority !== b.priority) return a.priority - b.priority;
+      // Sort by waste-spend descending: highest spend with worst ACOS comes first.
+      // For zero-sales items, total spend itself is the waste signal.
+      const aWaste = (a.camp_spend_7d || 0) - (a.camp_sales_7d || 0) * 0;
+      const bWaste = (b.camp_spend_7d || 0) - (b.camp_sales_7d || 0) * 0;
+      if (Math.abs(aWaste - bWaste) > 0.5) return bWaste - aWaste;
       return b.total_sales_7d - a.total_sales_7d;
     });
+
+    // r20c: per-bucket counts in summary so tabs can show badges
+    const allActive = activeProducts;
+    const urgentCount = allActive.filter(function(p){ return p.bucket === 'urgent'; }).length;
+    const underCount = allActive.filter(function(p){ return p.bucket === 'underperforming'; }).length;
+    const workingCount = allActive.filter(function(p){ return p.bucket === 'working'; }).length;
 
     res.json({
       products: returnList,
@@ -3796,9 +3821,11 @@ app.get('/api/amazon/products', async function(req, res) {
         auto_campaigns_exist: autoCampaignsExist.value,
         advertised_asins_count: advertisedAsins.size,
         unassigned_count: returnList.filter(function(p){ return !p.owner_agent; }).length,
-        urgent_count: returnList.filter(function(p){ return p.priority === 1; }).length,
-        attention_count: returnList.filter(function(p){ return p.priority === 2; }).length,
-        scale_count: returnList.filter(function(p){ return p.priority === 3; }).length,
+        urgent_count: urgentCount,                         // r20c: bucket counts
+        underperforming_count: underCount,                  // r20c
+        working_count: workingCount,                        // r20c
+        attention_count: returnList.filter(function(p){ return p.priority === 2; }).length,  // legacy
+        scale_count: returnList.filter(function(p){ return p.priority === 3; }).length,      // legacy
         view: view
       }
     });
@@ -3935,14 +3962,36 @@ async function runListingCritique(asin, groupKey, modelId) {
         primaryTr ? primaryTr.buy_box_avg : 'nbb', primaryTr ? primaryTr.days : '0'
       ].join('|');
       signalsHash = require('crypto').createHash('md5').update(hashSrc).digest('hex').slice(0, 12);
-      signalsContext = '\n--- Operational signals (SP-API + Sales & Traffic Report) ---\n' +
-        'Buy Box win % (last 7 days): ' + (primaryTr && primaryTr.buy_box_avg != null ? parseFloat(primaryTr.buy_box_avg).toFixed(1) + '% (' + primaryTr.days + ' days of data)' : '— (no traffic data yet)') + '\n' +
-        'Your price: ' + (primarySig && primarySig.your_price != null ? '£' + parseFloat(primarySig.your_price).toFixed(2) : '—') + '\n' +
-        'Lowest competitor (new): ' + (primarySig && primarySig.lowest_competitor_price != null ? '£' + parseFloat(primarySig.lowest_competitor_price).toFixed(2) : '—') + '\n' +
-        'Price vs lowest competitor: ' + (primarySig && primarySig.price_vs_lowest != null ? (primarySig.price_vs_lowest >= 0 ? '+£' : '-£') + Math.abs(parseFloat(primarySig.price_vs_lowest)).toFixed(2) + ' (positive = we are more expensive)' : '—') + '\n' +
-        'Stock cover: ' + (familyStockCover != null ? familyStockCover + ' days (' + totalFulfill + ' units fulfillable, ' + totalVel.toFixed(1) + ' units/day velocity)' : '—') + '\n' +
-        'Reviews: ' + (totalReviewCount > 0 ? totalReviewCount + ' reviews, average ' + familyReviewAvg + '★' : '— (no review data)') + '\n' +
-        'Last content update: ' + (oldestContent ? oldestContent + ' (' + contentAge + ' days ago)' + (contentAge > 90 ? ' ⚠ STALE' : '') : '—') + '\n';
+      // r20c: build signals context line-by-line, OMITTING any signal that's null.
+      // This stops the prompt from instructing the model to reason about Buy Box
+      // (etc.) when we have no data — which previously led the model to invent
+      // numbers or make generic comments. Reviews dropped entirely (SP-API
+      // returns null for FK Sports' catalog and the live-page scrape gave the
+      // wrong number — 8000 instead of 700 because it was the variation rollup).
+      const lines = [];
+      if (primaryTr && primaryTr.buy_box_avg != null) {
+        lines.push('Buy Box win % (last 7 days): ' + parseFloat(primaryTr.buy_box_avg).toFixed(1) + '% (' + primaryTr.days + ' days of data)');
+      }
+      if (primarySig && primarySig.your_price != null) {
+        lines.push('Your price: £' + parseFloat(primarySig.your_price).toFixed(2));
+      }
+      if (primarySig && primarySig.lowest_competitor_price != null) {
+        lines.push('Lowest competitor (new): £' + parseFloat(primarySig.lowest_competitor_price).toFixed(2));
+        if (primarySig.price_vs_lowest != null) {
+          lines.push('Price vs lowest competitor: ' + (primarySig.price_vs_lowest >= 0 ? '+£' : '-£') + Math.abs(parseFloat(primarySig.price_vs_lowest)).toFixed(2) + ' (positive = we are more expensive)');
+        }
+      }
+      if (familyStockCover != null) {
+        lines.push('Stock cover: ' + familyStockCover + ' days (' + totalFulfill + ' units fulfillable, ' + totalVel.toFixed(1) + ' units/day velocity)');
+      }
+      if (oldestContent) {
+        lines.push('Last content update: ' + oldestContent + ' (' + contentAge + ' days ago)' + (contentAge > 90 ? ' STALE' : ''));
+      }
+      if (lines.length) {
+        signalsContext = '\n--- Operational signals (SP-API) ---\n' + lines.join('\n') + '\n';
+      } else {
+        signalsContext = '\n--- Operational signals (SP-API) ---\n(no signals available — assume nothing about Buy Box, stock, pricing, or reviews)\n';
+      }
     } catch(e) { console.error('[amz-critique] signals context error: ' + e.message); }
 
     // Try to fetch the live Amazon page (UK)
@@ -3958,11 +4007,14 @@ async function runListingCritique(asin, groupKey, modelId) {
       // Extract a useful slice (full page is huge — clip)
       const html = String(pageRes.data || '');
       // Pull title, bullets, A+ presence, price visibility
+      // r20c: live-page review count REMOVED — the regex was matching the
+      // variation-family rollup (e.g. 8,432 across all colours/sizes) rather
+      // than the current ASIN's count. Reviews now come ONLY from SP-API
+      // operational signals if available; otherwise treated as unknown.
       const titleMatch = html.match(/<span[^>]*id="productTitle"[^>]*>([\s\S]*?)<\/span>/);
       const bulletsMatch = html.match(/<div[^>]*id="feature-bullets"[\s\S]*?<\/div>/);
       const priceMatch = html.match(/class="a-offscreen"[^>]*>([£$€]?[\d,.]+)/);
       const aplusPresent = /aplus-3p-fixed-width|aplus-module/.test(html);
-      const reviewsMatch = html.match(/(\d[\d,]*) (?:global )?ratings/);
       const titleClean = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : '(not found)';
       const bulletsClean = bulletsMatch ? bulletsMatch[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1500) : '(not found)';
       livePageContext =
@@ -3970,8 +4022,7 @@ async function runListingCritique(asin, groupKey, modelId) {
         'Title on page: ' + titleClean.slice(0, 300) + '\n' +
         'Bullets: ' + bulletsClean.slice(0, 1200) + '\n' +
         'Price visible: ' + (priceMatch ? priceMatch[1] : '(not found)') + '\n' +
-        'A+ content present: ' + (aplusPresent ? 'YES' : 'NO') + '\n' +
-        'Review count: ' + (reviewsMatch ? reviewsMatch[1] : '(not found)') + '\n';
+        'A+ content present: ' + (aplusPresent ? 'YES' : 'NO') + '\n';
     } catch(e) {
       livePageContext = '\n--- Live Amazon page ---\n(could not fetch — Amazon may have blocked the request)\n';
     }
@@ -4034,29 +4085,38 @@ async function runListingCritique(asin, groupKey, modelId) {
       signalsContext,
       searchTermContext,
       '',
-      'TASK: review this listing and identify the highest-impact issues. Focus on Amazon-specific factors:',
-      '1. Title quality — keyword density (front-loaded important terms?), brand placement (FK Sports near front?), length (~150-200 chars optimal), no stuffing',
-      '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion',
-      '3. Image quality and count (Amazon allows up to 9 — are they used?)',
-      '4. A+ content — is it present? If not, that is a known conversion lift',
-      '5. Pricing concerns — multi-variant pricing spread, FBA vs FBM duplicates, PRICE VS LOWEST COMPETITOR (see Operational signals — if we are materially above the lowest "new" offer, this is likely the dominant Buy Box / conversion problem)',
-      '6. Ad performance — given the search-term data above, identify wasted-spend terms that should be added as negatives, and high-converting terms to amplify',
-      '7. Reviews — count and average rating from Operational signals. < 50 reviews or < 4.0★ is a known conversion drag; recommend Vine, follow-up emails, or quality fixes',
-      '8. BUY BOX — if Buy Box win % is below 80% over the last 7 days, that is a P1 conversion issue. Diagnose (price, stock, account health) and recommend',
-      '9. STOCK COVER — if stock cover days is < 30, replenishment is urgent; below 7 it is critical. If we run out, ranking damage compounds',
-      '10. CONTENT FRESHNESS — if Last content update is > 90 days ago, Amazon SEO benefits from a refresh of title/bullets/A+',
+      'TASK: figure out why this listing might not be selling well and identify the highest-impact fixes. Focus on what is visible from the live page and the operational signals that ARE provided.',
       '',
-      'Rank fixes by IMPACT. Higher-impact fixes first. Be specific — when search-term data or operational signals are available, NAME the actual values (e.g. "Buy Box at 42% — losing the offer", "priced £8 above competitor").',
+      'PRIMARY review areas (always do these):',
+      '1. Title quality — keyword density (front-loaded important terms?), brand placement, length (~150-200 chars optimal), no stuffing',
+      '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion, missing benefits',
+      '3. A+ content — is it present? If not, that is a known conversion lift',
+      '4. Image quality (qualitative observation only — note if hero image looks weak, lifestyle missing, etc. Do NOT invent image counts — Amazon page does not expose this reliably)',
+      '5. Ad performance — if search-term data is provided above, identify wasted-spend terms (high spend, low conversion) and high-converting terms to amplify. Skip this if no search-term data',
+      '',
+      'CONDITIONAL — only address these when the corresponding data is present in "Operational signals" above:',
+      '- Buy Box: if Buy Box win % is given AND below 80%, that is a P1 conversion issue. Diagnose and recommend.',
+      '- Pricing: if "Price vs lowest competitor" is given AND positive, recommend a price review.',
+      '- Stock cover: if stock cover days is given AND < 30, recommend FBA replenishment; < 7 is critical.',
+      '- Content freshness: if Last content update is given AND > 90 days, recommend refresh.',
+      '',
+      'CRITICAL RULES — read carefully:',
+      '- DO NOT estimate or guess review counts, ratings, Buy Box %, competitor prices, or any other numeric value. If a value is not in the Operational signals block above, treat it as UNKNOWN. Do not say "with X reviews" or "rated Y stars" unless that exact number is in the signals.',
+      '- DO NOT invent competitor names, ASINs, or prices.',
+      '- Image count, video presence, and review count are NOT reliably extractable from the page — do not state numeric facts about them.',
+      '- Be specific where you have data; be silent where you do not.',
+      '',
+      'Rank fixes by IMPACT. Higher-impact fixes first.',
       '',
       'Return ONLY valid JSON (no markdown fences, no preamble) in this shape:',
       '{',
-      '  "summary": "2-3 sentence overall assessment",',
+      '  "summary": "2-3 sentence overall assessment of why this listing may be underperforming",',
       '  "issues": [',
-      '    { "title": "Short heading", "severity": "high|medium|low", "problem": "What is wrong", "fix": "Specific action to take", "impact": "Estimated effect" }',
+      '    { "title": "Short heading", "severity": "high|medium|low", "problem": "What is wrong (qualitative or specific number from signals only)", "fix": "Specific action to take", "impact": "Estimated effect" }',
       '  ]',
       '}',
       '',
-      'Provide 3-7 issues. Be specific (avoid generic advice).'
+      'Provide 3-7 issues. Be specific (avoid generic advice). If the listing looks broadly fine, say so — fewer issues is acceptable.'
     ].join('\n');
 
     // Call Claude with the requested model

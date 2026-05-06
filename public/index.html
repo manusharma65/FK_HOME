@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r20b (r20 + parser fixes for pricing/inventory + sales section uses real London "today") -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r20c (clean cards + Urgent/Underperforming/Working buckets, campaign chips removed (matcher gone), modal campaigns table removed, AI critique fixed (no more wrong review numbers), Kunal cleanup) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -103,18 +103,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .metric-value { font-family: var(--display); font-size: 20px; font-weight: 700; color: var(--text); letter-spacing: -0.5px; }
 
 /* r12: Google-style product cards (ported from google.html) — Amazon variant */
-.amz-product-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 10px; display: flex; gap: 16px; align-items: flex-start; transition: all 0.15s; }
+.amz-product-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 16px 16px 14px; margin-bottom: 10px; display: flex; gap: 16px; align-items: flex-start; transition: all 0.15s; border-left-width: 4px; }
 .amz-product-card:hover { border-color: var(--border2); box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+/* r20c: bucket-coloured cards — option B (left border + faint tint) */
+.amz-product-card.bucket-urgent { border-left-color: #DC2626; background: #FEF7F7; }
+.amz-product-card.bucket-urgent:hover { background: #FEEFEF; }
+.amz-product-card.bucket-underperforming { border-left-color: #D97706; background: #FFFBF3; }
+.amz-product-card.bucket-underperforming:hover { background: #FFF6E8; }
+.amz-product-card.bucket-working { border-left-color: #65A30D; background: var(--surface); }
+.amz-product-card.bucket-working:hover { background: #F8FBF5; }
 .amz-product-img { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: var(--surface3); flex-shrink: 0; }
 .amz-product-img-placeholder { width: 72px; height: 72px; border-radius: 8px; background: var(--surface3); display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: 11px; flex-shrink: 0; }
 .amz-product-body { flex: 1; min-width: 0; }
 .amz-product-title { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.4; margin-bottom: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .amz-product-meta { font-size: 11px; color: var(--text3); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 .amz-priority-pill { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
-.amz-priority-1 { background: var(--red-light); color: var(--red); }
-.amz-priority-2 { background: var(--amber-light); color: var(--amber); }
-.amz-priority-3 { background: var(--green-light); color: var(--green); }
+.amz-priority-1, .amz-bucket-urgent { background: #FCEBEB; color: #791F1F; }
+.amz-priority-2, .amz-bucket-underperforming { background: #FAEEDA; color: #854F0B; }
+.amz-priority-3, .amz-bucket-working { background: #EAF3DE; color: #3B6D11; }
 .amz-priority-4 { background: var(--surface3); color: var(--text2); }
+.amz-tab-count { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.amz-evidence-line { font-size: 11px; color: var(--text2); margin-left: 6px; }
 .amz-product-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 12px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--surface3); font-family: var(--mono); }
 .amz-stat-item { display: flex; flex-direction: column; gap: 2px; }
 .amz-stat-label { font-size: 10px; color: var(--text3); text-transform: uppercase; font-family: inherit; letter-spacing: 0.05em; }
@@ -769,14 +778,15 @@ tbody tr:hover { background: var(--surface2); }
         <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">All products</div>
         <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
       </div>
-      <!-- r14: Active / Dormant / All / Coverage gaps tabs (mutually exclusive) — r15 adds gaps tab — r16 adds hidden -->
+      <!-- r20c: Urgent / Underperforming / Working buckets — replaces Active/Dormant/All/Gaps. Coverage gaps folded into Underperforming. -->
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
         <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
-        <button id="amz-filter-active" class="btn btn-primary" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('active')">Active products</button>
-        <button id="amz-filter-dormant" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
-        <button id="amz-filter-all" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
-        <button id="amz-filter-gaps" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('gaps')" title="Active products with ad coverage gaps">⚠ Coverage gaps</button>
-        <button id="amz-filter-hidden" class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('hidden')" title="Manually hidden products">👁 Hidden <span id="amz-hidden-count" style="font-size:10px;color:var(--text3);margin-left:3px"></span></button>
+        <button id="amz-filter-urgent" class="btn btn-primary amz-tab-btn amz-tab-urgent" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('urgent')">🔥 Urgent <span id="amz-count-urgent" class="amz-tab-count" style="background:#FCEBEB;color:#791F1F">0</span></button>
+        <button id="amz-filter-underperforming" class="btn btn-ghost amz-tab-btn amz-tab-under" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('underperforming')">⚠ Underperforming <span id="amz-count-underperforming" class="amz-tab-count" style="background:#FAEEDA;color:#854F0B">0</span></button>
+        <button id="amz-filter-working" class="btn btn-ghost amz-tab-btn amz-tab-working" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('working')">✓ Working <span id="amz-count-working" class="amz-tab-count" style="background:#EAF3DE;color:#3B6D11">0</span></button>
+        <button id="amz-filter-all" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
+        <button id="amz-filter-dormant" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
+        <button id="amz-filter-hidden" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('hidden')" title="Manually hidden products">👁 Hidden <span id="amz-hidden-count" style="font-size:10px;color:var(--text3);margin-left:3px"></span></button>
         <span id="amz-view-counter" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
         <!-- r14b: Bulk AI critique trigger + status -->
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
@@ -3654,15 +3664,15 @@ function updatePwStrength(inputId, indicatorId) {
 
 // ─── Amazon Products page (r9) ──────────────────────────────────────────────
 let amzProductsCache = null;
-let amzProductView = 'active'; // r14: 'active' | 'dormant' | 'all'
+let amzProductView = 'urgent'; // r20c: opens on Urgent so agents see fires first
 
 function setAmzProductView(view) {
   amzProductView = view;
-  // Update tab styles — five-way exclusive (r16 adds 'hidden')
-  ['active', 'dormant', 'all', 'gaps', 'hidden'].forEach(function(v) {
+  // r20c: six tabs — urgent / underperforming / working / all / dormant / hidden
+  ['urgent', 'underperforming', 'working', 'all', 'dormant', 'hidden'].forEach(function(v) {
     const btn = document.getElementById('amz-filter-' + v);
     if (!btn) return;
-    btn.className = (v === view) ? 'btn btn-primary' : 'btn btn-ghost';
+    btn.className = (v === view) ? 'btn btn-primary amz-tab-btn' : 'btn btn-ghost amz-tab-btn';
     btn.style.cssText = 'font-size:12px;padding:5px 10px';
   });
   loadAmazonProducts();
@@ -3685,12 +3695,19 @@ async function loadAmazonProducts() {
     if (counterEl && prodData.summary) {
       const s = prodData.summary;
       let label = '';
-      if (amzProductView === 'active') label = 'Showing ' + s.total_parents_active + ' active (of ' + (s.total_parents_active + s.total_parents_dormant) + ' total)';
+      // r20c: bucket-based counter labels
+      if (amzProductView === 'urgent') label = 'Showing ' + (s.urgent_count || 0) + ' urgent (of ' + (s.total_parents_active || 0) + ' active)';
+      else if (amzProductView === 'underperforming') label = 'Showing ' + (s.underperforming_count || 0) + ' underperforming (includes coverage gaps)';
+      else if (amzProductView === 'working') label = 'Showing ' + (s.working_count || 0) + ' working — performing OK';
       else if (amzProductView === 'dormant') label = 'Showing ' + s.total_parents_dormant + ' dormant (no recent sales / no buyable listings)';
-      else if (amzProductView === 'gaps') label = 'Showing ' + (prodData.products || []).length + ' products with ad coverage gaps';
       else if (amzProductView === 'hidden') label = 'Showing ' + (s.total_parents_hidden || 0) + ' hidden products';
       else label = 'Showing all ' + (s.total_parents_active + s.total_parents_dormant) + ' products';
       counterEl.textContent = label;
+      // r20c: update bucket count badges on the tab buttons
+      const setBadge = function(id, n) { const el = document.getElementById(id); if (el) el.textContent = n || 0; };
+      setBadge('amz-count-urgent', s.urgent_count);
+      setBadge('amz-count-underperforming', s.underperforming_count);
+      setBadge('amz-count-working', s.working_count);
       // r16: hidden tab badge
       const hiddenCountEl = document.getElementById('amz-hidden-count');
       if (hiddenCountEl) hiddenCountEl.textContent = s.total_parents_hidden ? '(' + s.total_parents_hidden + ')' : '';
@@ -3781,13 +3798,28 @@ function renderAmazonProductsList(data) {
   if (!el) return;
   const products = data.products || [];
   const summary = data.summary || {};
+  // r20c: bucket-aware count summary for the products header
   const urgentTxt = summary.urgent_count > 0 ? ' · ' + summary.urgent_count + ' urgent' : '';
-  const attentionTxt = summary.attention_count > 0 ? ' · ' + summary.attention_count + ' attention' : '';
-  const scaleTxt = summary.scale_count > 0 ? ' · ' + summary.scale_count + ' scale' : '';
+  const underTxt = summary.underperforming_count > 0 ? ' · ' + summary.underperforming_count + ' underperforming' : '';
+  const workingTxt = summary.working_count > 0 ? ' · ' + summary.working_count + ' working' : '';
   const baseCount = summary.total_parents_active != null ? summary.total_parents_active : (summary.total_parents || 0);
-  countEl.textContent = baseCount + ' products' + urgentTxt + attentionTxt + scaleTxt;
+  countEl.textContent = baseCount + ' active products' + urgentTxt + underTxt + workingTxt;
   if (products.length === 0) {
-    el.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">No products to show.</div>';
+    // r20c: positive empty state for the Urgent tab specifically
+    if (amzProductView === 'urgent') {
+      el.innerHTML =
+        '<div style="padding:48px 24px;text-align:center">' +
+          '<div style="font-size:48px;margin-bottom:8px">✓</div>' +
+          '<div style="font-size:16px;font-weight:600;color:#3B6D11;margin-bottom:6px">No urgent issues today, well done team</div>' +
+          '<div style="font-size:13px;color:var(--text3)">Switch to <strong>Underperforming</strong> or <strong>Working</strong> tab to see other products.</div>' +
+        '</div>';
+    } else if (amzProductView === 'underperforming') {
+      el.innerHTML = '<div style="padding:32px 24px;text-align:center;color:var(--text3);font-size:14px">No underperforming products. Everything is either urgent or working.</div>';
+    } else if (amzProductView === 'working') {
+      el.innerHTML = '<div style="padding:32px 24px;text-align:center;color:var(--text3);font-size:14px">No products in the Working bucket yet.</div>';
+    } else {
+      el.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px;text-align:center">No products to show.</div>';
+    }
     return;
   }
   // Determine if current user can edit owners
@@ -3807,13 +3839,25 @@ function amzPriorityLabel(p) {
   if (p === 3) return 'SCALE';
   return 'INFO';
 }
+// r20c: bucket pill — one of urgent / underperforming / working.
+// Bucket comes from the server (priority + coverage adjustment); we just render.
+function amzBucketLabel(b) {
+  if (b === 'urgent') return 'URGENT';
+  if (b === 'underperforming') return 'UNDERPERFORMING';
+  if (b === 'working') return 'WORKING';
+  return 'INFO';
+}
+function amzBucketClass(b) { return 'amz-bucket-' + (b || 'working'); }
 
 // Build a single Amazon product card (Google layout).
 function amzProductCard(p, idx, canEditOwner, agents) {
   const img = p.image_url ?
     ('<img class="amz-product-img" src="' + escHtml(p.image_url) + '" alt="" onerror="this.outerHTML=&quot;<div class=\\&quot;amz-product-img-placeholder\\&quot;>no image</div>&quot;">') :
     '<div class="amz-product-img-placeholder">no image</div>';
-  const pri = '<span class="amz-priority-pill ' + amzPriorityClass(p.priority) + '">' + amzPriorityLabel(p.priority) + '</span>';
+  // r20c: bucket pill + evidence subtitle replace the old priority pill
+  const bucket = p.bucket || (p.priority === 1 ? 'urgent' : (p.priority === 2 ? 'underperforming' : 'working'));
+  const pri = '<span class="amz-priority-pill ' + amzBucketClass(bucket) + '">' + amzBucketLabel(bucket) + '</span>';
+  const evidence = p.evidence ? '<span class="amz-evidence-line">' + escHtml(p.evidence) + '</span>' : '';
   // Variants summary (now ASIN-level after r13 rollup)
   const variantsBadge = (function() {
     if (p.standalone) return '<span style="font-size:11px;color:var(--text3)">' + p.total_children + (p.total_children === 1 ? ' ASIN' : ' ASINs') + '</span>';
@@ -3858,86 +3902,19 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       amzStat('ACOS', acos > 0 ? acos + '%' : '—', acosClass) +
       amzStat('Coverage', p.ad_coverage_pct + '%', coverageClass) +
     '</div>';
-  // r20: Operational signals — second row, compact. Each cell shows "—" when data missing.
-  const sig = p.signals || {};
-  function bbCell() {
-    if (sig.buy_box_pct_7d == null) {
-      // Not enough days yet — show the "Building (N/7d)" hint
-      const n = sig.buy_box_days || 0;
-      return amzStat('Buy Box 7d', n === 0 ? '—' : 'Building (' + n + '/7d)', 'muted');
-    }
-    const klass = sig.buy_box_pct_7d >= 90 ? 'good' : (sig.buy_box_pct_7d >= 70 ? 'warn' : 'bad');
-    const label = sig.buy_box_days < 7 ? 'Buy Box (' + sig.buy_box_days + '/7d)' : 'Buy Box 7d';
-    return amzStat(label, sig.buy_box_pct_7d + '%', klass);
-  }
-  function stockCell() {
-    if (sig.stock_cover_days == null) return amzStat('Stock cover', '—', 'muted');
-    if (sig.stock_cover_days >= 999) return amzStat('Stock cover', 'Plenty', 'muted');
-    const klass = sig.stock_cover_days < 7 ? 'bad' : (sig.stock_cover_days < 30 ? 'warn' : 'good');
-    return amzStat('Stock cover', sig.stock_cover_days + 'd', klass);
-  }
-  function reviewsCell() {
-    if (sig.reviews_count == null && sig.reviews_avg == null) return amzStat('Reviews', '—', 'muted');
-    const avgStr = sig.reviews_avg != null ? sig.reviews_avg.toFixed(1) + '★' : '—';
-    const cntStr = sig.reviews_count != null ? ' (' + sig.reviews_count + ')' : '';
-    const klass = sig.reviews_avg != null && sig.reviews_avg < 4 ? 'warn' : null;
-    return amzStat('Reviews', avgStr + cntStr, klass);
-  }
-  function priceCell() {
-    if (sig.price_vs_lowest == null) return amzStat('vs lowest', '—', 'muted');
-    const sign = sig.price_vs_lowest > 0 ? '+£' : '−£';
-    const klass = sig.price_vs_lowest > 5 ? 'bad' : (sig.price_vs_lowest > 0 ? 'warn' : 'good');
-    return amzStat('vs lowest', sign + Math.abs(sig.price_vs_lowest).toFixed(2), klass);
-  }
-  function contentCell() {
-    if (sig.content_age_days == null) return amzStat('Content age', '—', 'muted');
-    const klass = sig.content_age_days > 90 ? 'bad' : (sig.content_age_days > 60 ? 'warn' : 'good');
-    return amzStat('Content age', sig.content_age_days + 'd', klass);
-  }
-  const buyableCell = amzStat('Buyable', String(p.buyable_count || 0), p.buyable_count > 0 ? 'good' : 'bad');
-  const signalsRow =
-    '<div class="amz-product-stats" style="margin-top:6px">' +
-      bbCell() +
-      stockCell() +
-      reviewsCell() +
-      priceCell() +
-      contentCell() +
-      buyableCell +
-    '</div>';
+  // r20c: signalsRow REMOVED — Buy Box / Stock cover / Reviews / vs lowest /
+  // Content age tiles all dropped from the card. Buy Box and Content age moved
+  // to the modal (under a collapsed Operational signals block). Stock cover,
+  // Reviews, and vs lowest fully removed (unreliable for FK Sports' catalog).
   // Diagnosis + action
   const diagnosisLine = p.diagnosis ?
     '<div class="amz-diagnosis-line"><strong>' + escHtml(p.diagnosis) + '</strong></div>' : '';
   const actionLine = p.action ?
     '<div class="amz-action-line">→ ' + escHtml(p.action) + '</div>' : '';
-  // r15: campaign display — placed prominently between meta row and diagnosis
-  // 1 campaign: single labeled line
-  // 2+ campaigns: chip strip
-  // 0 campaigns + active product: warning banner
-  const campsArr = p.campaigns || [];
-  let campaignsRow = '';
-  if (campsArr.length === 1) {
-    const c = campsArr[0];
-    const isPaused = (c.state || '').toLowerCase() === 'paused';
-    const colour = isPaused ? 'var(--text3)' : 'var(--text2)';
-    const pausedTag = isPaused ? ' <span style="color:var(--text3);font-size:10px">(paused)</span>' : '';
-    campaignsRow = '<div style="margin-top:6px;font-size:12px;color:' + colour + '">' +
-      '<span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-right:6px">In campaign:</span>' +
-      '<span style="font-weight:500">' + escHtml(c.name) + '</span>' + pausedTag +
-    '</div>';
-  } else if (campsArr.length >= 2) {
-    const visible = campsArr.slice(0, 4);
-    const more = campsArr.length - visible.length;
-    const chips = visible.map(function(c) {
-      const isPaused = (c.state || '').toLowerCase() === 'paused';
-      const bg = isPaused ? 'var(--surface3)' : 'var(--surface2)';
-      const colour = isPaused ? 'var(--text3)' : 'var(--text2)';
-      return '<span style="display:inline-block;font-size:11px;color:' + colour + ';background:' + bg + ';padding:2px 8px;border-radius:99px;border:1px solid var(--border);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="' + escHtml(c.name) + (isPaused ? ' (paused)' : '') + '">' + escHtml(c.name) + '</span>';
-    }).join(' ');
-    const moreChip = more > 0 ? ' <span style="display:inline-block;font-size:11px;color:var(--text3);padding:2px 6px">+' + more + ' more</span>' : '';
-    campaignsRow = '<div style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;flex-shrink:0">In ' + campsArr.length + ' campaigns:</span>' + chips + moreChip + '</div>';
-  } else if (p.total_sales_7d > 0 || p.active_60d) {
-    campaignsRow = '<div style="margin-top:6px;font-size:11px;color:var(--amber)"><span style="font-weight:600">⚠ Not in any campaign</span></div>';
-  }
+  // r20c: campaignsRow REMOVED — campaign chips, single-campaign label, and
+  // "Not in any campaign" warning all stripped. The matcher was unreliable; the
+  // diagnosis line carries the agent-actionable info now. Bobby will re-do
+  // ASIN→campaign mapping with a manual approach later.
   // r16: Hide/Restore button — appears in card header
   const isHidden = amzProductView === 'hidden';
   const safeHideKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
@@ -3945,16 +3922,14 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     ? '<button onclick="event.stopPropagation();restoreAmzProduct(\'' + safeHideKey + '\')" class="btn btn-ghost" style="font-size:10px;padding:2px 8px;color:var(--green)" title="Restore this product to the main view">↺ Restore</button>'
     : '<button onclick="event.stopPropagation();hideAmzProduct(\'' + safeHideKey + '\')" class="btn btn-ghost" style="font-size:10px;padding:2px 8px;color:var(--text3)" title="Hide this product from the main view">🗙 Hide</button>';
 
-  return '<div class="amz-product-card" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer' + (isHidden ? ';opacity:0.7' : '') + '" onclick="openAmzProductModal(' + idx + ')">' +
+  return '<div class="amz-product-card bucket-' + bucket + '" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer' + (isHidden ? ';opacity:0.7' : '') + '" onclick="openAmzProductModal(' + idx + ')">' +
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
-      '<div class="amz-product-meta">' + pri + statusPill + variantsBadge + ownerControl + hideBtn + '</div>' +
-      campaignsRow +
+      '<div class="amz-product-meta">' + pri + evidence + statusPill + variantsBadge + ownerControl + hideBtn + '</div>' +
       diagnosisLine +
       actionLine +
       stats +
-      signalsRow +
       '<div style="margin-top:8px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>' +
     '</div>' +
   '</div>';
@@ -4085,37 +4060,10 @@ function buildAmzProductModalBody(p) {
       tile('Campaigns', String(p.camp_count || 0)),
     '</div>',
 
-    // r14: Campaigns this product is in
-    (function(){
-      const camps = p.campaigns || [];
-      if (camps.length === 0) return '';
-      const rows = camps.map(function(c) {
-        const isPaused = (c.state || '').toLowerCase() === 'paused';
-        const stateColor = isPaused ? 'var(--text3)' : 'var(--green)';
-        const stateLabel = isPaused ? 'Paused' : 'Enabled';
-        const targeting = (c.targetingType || '').toLowerCase() === 'auto' ? 'Auto' : 'Manual';
-        return '<tr style="border-top:1px solid var(--border)">' +
-          '<td style="padding:10px 12px;font-size:13px;font-weight:500;color:var(--text);max-width:380px">' + escHtml(c.name) + '</td>' +
-          '<td style="padding:10px 12px;font-size:11px;color:' + stateColor + ';font-weight:600">' + stateLabel + '</td>' +
-          '<td style="padding:10px 12px;font-size:11px;color:var(--text3)">' + targeting + '</td>' +
-          '<td style="padding:10px 12px;text-align:right;font-family:var(--mono);font-size:13px">£' + (c.spend || 0).toFixed(2) + '</td>' +
-          '<td style="padding:10px 12px;text-align:right;font-family:var(--mono);font-size:13px">£' + (c.sales || 0).toFixed(2) + '</td>' +
-        '</tr>';
-      }).join('');
-      return '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Campaigns targeting this product (' + camps.length + ')</div>' +
-        '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">' +
-          '<table style="width:100%;border-collapse:collapse">' +
-            '<thead><tr style="background:var(--surface2);color:var(--text3)">' +
-              '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Campaign name</th>' +
-              '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">State</th>' +
-              '<th style="text-align:left;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Type</th>' +
-              '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Spend 7d</th>' +
-              '<th style="text-align:right;padding:10px 12px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em">Sales 7d</th>' +
-            '</tr></thead>' +
-            '<tbody>' + rows + '</tbody>' +
-          '</table>' +
-        '</div>';
-    })(),
+    // r20c: Campaigns table REMOVED — the matcher was unreliable so this would
+    // always be empty. When manual ASIN→campaign mapping returns later, restore
+    // by putting back the camps.map() block from r20b.
+    '',
 
     // r20: Operational signals — Buy Box, Stock cover, Reviews, Price vs comp, Content age
     (function(){
@@ -4132,37 +4080,7 @@ function buildAmzProductModalBody(p) {
         cells.push(tile(label, sig.buy_box_pct_7d + '%', klass,
           'Featured Offer (Buy Box) win percentage averaged over the last 7 days. < 80% suggests pricing or stock issues; < 50% is critical.'));
       }
-      // Stock cover
-      if (sig.stock_cover_days == null) {
-        cells.push(tile('Stock cover', '—', 'muted', 'Days of fulfillable stock at the current 30-day sales velocity. Refreshed nightly via SP-API FBA Inventory.'));
-      } else if (sig.stock_cover_days >= 999) {
-        cells.push(tile('Stock cover', 'Plenty', 'muted', 'In stock but no recent sales — effectively unlimited cover.'));
-      } else {
-        const klass = sig.stock_cover_days < 7 ? 'bad' : (sig.stock_cover_days < 30 ? 'warn' : 'good');
-        const sub = (sig.fulfillable_qty != null ? sig.fulfillable_qty + ' units · ' : '') +
-                    (sig.velocity_30d != null ? sig.velocity_30d.toFixed(1) + '/day' : '');
-        cells.push(tile('Stock cover', sig.stock_cover_days + 'd', klass,
-          sub + ' — replenish to FBA when this drops below 30 days, urgent below 7.'));
-      }
-      // Reviews
-      if (sig.reviews_count == null && sig.reviews_avg == null) {
-        cells.push(tile('Reviews', '—', 'muted', 'Customer review count + average rating. SP-API does not return this for every ASIN; "—" is normal.'));
-      } else {
-        const avgStr = sig.reviews_avg != null ? sig.reviews_avg.toFixed(1) + '★' : '—';
-        const cntStr = sig.reviews_count != null ? sig.reviews_count + ' reviews' : '—';
-        const klass = sig.reviews_avg != null && sig.reviews_avg < 4 ? 'warn' : null;
-        cells.push(tile('Reviews', avgStr + ' (' + cntStr + ')', klass));
-      }
-      // Price vs lowest competitor
-      if (sig.price_vs_lowest == null) {
-        cells.push(tile('Price vs lowest', '—', 'muted', 'Your price minus the lowest "new" competitor offer. Pulled from SP-API Product Pricing — patchy data is normal.'));
-      } else {
-        const sign = sig.price_vs_lowest > 0 ? '+£' : '−£';
-        const klass = sig.price_vs_lowest > 5 ? 'bad' : (sig.price_vs_lowest > 0 ? 'warn' : 'good');
-        const sub = 'You: £' + (sig.your_price != null ? sig.your_price.toFixed(2) : '—') +
-                    ' · Lowest: £' + (sig.lowest_competitor_price != null ? sig.lowest_competitor_price.toFixed(2) : '—');
-        cells.push(tile('Price vs lowest', sign + Math.abs(sig.price_vs_lowest).toFixed(2), klass, sub));
-      }
+      // r20c: Stock cover, Reviews, Price vs lowest REMOVED from modal — see comment above
       // Content age
       if (sig.content_age_days == null) {
         cells.push(tile('Last content update', '—', 'muted', 'Last time the listing content was updated, from SP-API Listings.'));
@@ -4172,14 +4090,17 @@ function buildAmzProductModalBody(p) {
         cells.push(tile('Last content update', sig.content_age_days + ' days', klass,
           sub + (sig.content_age_days > 90 ? ' — refresh title, bullets, A+ content for SEO' : '')));
       }
-      return '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Operational signals (SP-API)</div>' +
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">' + cells.join('') + '</div>';
+      // r20c: collapse into <details> so it's tucked away. Open by default if Buy Box has data.
+      const isOpen = sig.buy_box_pct_7d != null || (sig.content_age_days != null && sig.content_age_days > 60);
+      return '<details ' + (isOpen ? 'open' : '') + ' style="margin:24px 0 0"><summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;padding:10px 0;list-style:none;user-select:none">▶ Operational signals (Buy Box + Content age)</summary>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:8px">' + cells.join('') + '</div>' +
+      '</details>';
     })(),
 
     // Listing health
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Listing health</div>',
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
-      tile('ASIN-targeted coverage', p.ad_coverage_pct + '%', coverageKlass, 'Percentage of this product\'s ASINs explicitly targeted by ad campaigns at the ASIN level. Keyword-targeted campaigns are not counted here, even if they advertise the product. 0% does not mean "no ads" — see the Campaigns table above.'),
+      tile('ASIN-targeted coverage', p.ad_coverage_pct + '%', coverageKlass, 'Percentage of this product\'s ASINs explicitly targeted by ad campaigns at the ASIN level. Keyword-targeted campaigns are not counted here, even if they advertise the product. 0% does not mean "no ads".'),
       tile('Buyable', String(p.buyable_count), p.buyable_count > 0 ? 'good' : 'bad'),
       tile('Inactive', String(p.inactive_count), p.inactive_count > 0 ? 'bad' : 'muted'),
       tile('Variant theme', p.variation_theme || '—', 'muted'),
