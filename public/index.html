@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26c (Campaign detail modal now has AI section: Haiku-then-Opus with feedback widget + Re-run-with-Opus button. Same pattern as Amazon product page) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26e (Campaign AI Opus button hidden for agents, shows lock indicator instead. Haiku unrestricted) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1779,18 +1779,58 @@ async function openCampDetailModal(campaignId) {
   }
 
   document.getElementById('camp-detail-body').innerHTML = buildCampDetailBody(camp, detail);
-  // r26c: kick off AI analysis (Haiku-then-Opus auto-escalate). Cached server-side.
-  loadCampaignAi(campaignId, false);
+  // r26d: don't auto-run AI. Check for a cached result and show it; otherwise show
+  // a manual "Run AI analysis" button. Result persists in DB so re-opening the
+  // modal shows the same analysis without re-running.
+  initCampaignAiSection(campaignId);
 }
 
-// r26c: Campaign AI loader. Default mode = let server pick model (Haiku then Opus).
-// forceOpus=true forces Opus (used by Re-run-with-Opus button).
-async function loadCampaignAi(campaignId, forceOpus) {
+// r26d: Initialise AI section on modal open. Checks cache (no API cost). If a
+// cached analysis exists, render it. Otherwise show the manual run button.
+async function initCampaignAiSection(campaignId) {
   const contentEl = document.getElementById('camp-ai-content');
   const buttonsEl = document.getElementById('camp-ai-buttons');
   const metaEl = document.getElementById('camp-ai-meta');
   if (!contentEl) return;
-  contentEl.innerHTML = '<div style="display:flex;align-items:center;gap:10px;color:var(--text3);font-size:13px"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div> ' + (forceOpus ? 'Re-running with Opus…' : 'Analysing campaign with Claude…') + '</div>';
+  contentEl.innerHTML = '<div style="color:var(--text3);font-size:13px">Checking for previous analysis…</div>';
+  if (buttonsEl) buttonsEl.innerHTML = '';
+  if (metaEl) metaEl.textContent = '';
+  try {
+    const r = await fetch('/api/campaign-analysis/' + encodeURIComponent(campaignId) + '?cached_only=1', { headers: getAuthHeaders() });
+    const j = await r.json();
+    if (j && j.analysis) {
+      // Cached hit — render result + correct buttons
+      renderCampaignAi(j, campaignId);
+    } else {
+      // No cache — show run button
+      showCampaignAiRunPrompt(campaignId);
+    }
+  } catch(e) {
+    showCampaignAiRunPrompt(campaignId);
+  }
+}
+
+function showCampaignAiRunPrompt(campaignId) {
+  const contentEl = document.getElementById('camp-ai-content');
+  const buttonsEl = document.getElementById('camp-ai-buttons');
+  const metaEl = document.getElementById('camp-ai-meta');
+  if (!contentEl) return;
+  contentEl.innerHTML =
+    '<div style="color:var(--text);font-size:13px;line-height:1.6">' +
+      '<strong>Campaign-specific Claude analysis</strong> — pulls live today + 14-day data, search-term wasters/converters, dismissed terms, and prior agent feedback. Returns root cause + recommended action + continue/pause verdict.<br>' +
+      '<span style="color:var(--text3)">Haiku runs first (~£0.01, 8-15s). Opus available afterwards if you need a deeper analysis. Result is saved and reappears next time you open this modal.</span>' +
+    '</div>';
+  if (buttonsEl) buttonsEl.innerHTML = '<button class="btn btn-primary" style="font-size:13px" onclick="runCampaignAi(\'' + escHtml(campaignId) + '\', false)">🤖 Run AI analysis</button>';
+  if (metaEl) metaEl.textContent = '';
+}
+
+// r26d: run AI fresh. forceOpus=true forces Opus (only allowed after Haiku has run).
+async function runCampaignAi(campaignId, forceOpus) {
+  const contentEl = document.getElementById('camp-ai-content');
+  const buttonsEl = document.getElementById('camp-ai-buttons');
+  const metaEl = document.getElementById('camp-ai-meta');
+  if (!contentEl) return;
+  contentEl.innerHTML = '<div style="display:flex;align-items:center;gap:10px;color:var(--text3);font-size:13px"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div> ' + (forceOpus ? 'Re-running with Opus (deeper analysis, 20-30s)…' : 'Analysing campaign with Haiku (8-15s)…') + '</div>';
   if (buttonsEl) buttonsEl.innerHTML = '';
   if (metaEl) metaEl.textContent = '';
   try {
@@ -1800,7 +1840,7 @@ async function loadCampaignAi(campaignId, forceOpus) {
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
     renderCampaignAi(j, campaignId);
   } catch(e) {
-    contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">AI failed: ' + escHtml(e.message) + ' <button class="btn btn-ghost" style="font-size:12px;margin-left:8px" onclick="loadCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Retry</button></div>';
+    contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">AI failed: ' + escHtml(e.message) + ' <button class="btn btn-ghost" style="font-size:12px;margin-left:8px" onclick="runCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Retry</button></div>';
   }
 }
 
@@ -1816,22 +1856,63 @@ function renderCampaignAi(j, campaignId) {
     (typeof renderAiFeedbackWidget === 'function' ? renderAiFeedbackWidget('amazon_campaign', String(campaignId)) : '');
   if (typeof loadAiFeedbackList === 'function') loadAiFeedbackList('amazon_campaign', String(campaignId));
 
-  // Model badge
-  if (metaEl && j.modelUsed) {
-    const m = String(j.modelUsed).toLowerCase();
-    const label = m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : (m.indexOf('sonnet') >= 0 ? 'Sonnet' : j.modelUsed));
-    metaEl.textContent = '· ' + label;
+  // Model badge + cached/fresh indicator
+  if (metaEl) {
+    const tags = [];
+    if (j.cached) {
+      const ts = j.generatedAt ? new Date(j.generatedAt) : null;
+      tags.push(ts ? 'Saved ' + relativeTime(ts) : 'Saved earlier');
+    } else {
+      tags.push('Fresh analysis');
+    }
+    if (j.modelUsed) {
+      const m = String(j.modelUsed).toLowerCase();
+      const label = m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : (m.indexOf('sonnet') >= 0 ? 'Sonnet' : j.modelUsed));
+      tags.push(label);
+    }
+    metaEl.textContent = '· ' + tags.join(' · ');
   }
 
-  // Buttons: Re-run with Opus (or Re-run with Haiku if Opus already used)
+  // r26d: Opus button is ONLY shown after Haiku has been run (i.e. after a cached
+  // result exists). If the current result is Opus, allow re-running Haiku.
+  // If the current result is Haiku, show the Opus button (deeper).
+  // r26e: Opus button is also gated on role — only owner+manager see it. Agents
+  // can re-run Haiku as many times as they want, but Opus is manager-only.
   if (buttonsEl) {
+    const me = window._meCache || {};
+    const role = (me.role || '').toLowerCase();
+    const isManager = role === 'owner' || role === 'manager' || (me.department || '').toLowerCase() === 'manager';
     const usedOpus = j.modelUsed && String(j.modelUsed).toLowerCase().indexOf('opus') >= 0;
     if (usedOpus) {
-      buttonsEl.innerHTML = '<button class="btn btn-ghost" style="font-size:12px" onclick="loadCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Re-run (Haiku)</button>';
+      // Opus already used — agent can re-run Haiku, manager can re-run Opus too
+      let btns = '<button class="btn btn-ghost" style="font-size:12px" onclick="runCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Re-run with Haiku</button>';
+      if (isManager) {
+        btns += ' <button class="btn btn-ghost" style="font-size:12px" onclick="runCampaignAi(\'' + escHtml(campaignId) + '\', true)">🧠 Re-run Opus</button>';
+      }
+      buttonsEl.innerHTML = btns;
     } else {
-      buttonsEl.innerHTML = '<button class="btn btn-primary" style="font-size:12px" onclick="loadCampaignAi(\'' + escHtml(campaignId) + '\', true)">🧠 Re-run with Opus (deeper)</button>';
+      // Haiku result currently shown
+      let btns = '<button class="btn btn-ghost" style="font-size:12px" onclick="runCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Re-run Haiku</button>';
+      if (isManager) {
+        btns += ' <button class="btn btn-primary" style="font-size:12px" onclick="runCampaignAi(\'' + escHtml(campaignId) + '\', true)">🧠 Re-run with Opus (deeper)</button>';
+      } else {
+        btns += ' <span style="font-size:11px;color:var(--text3);align-self:center">🔒 Manager can run deeper Opus analysis</span>';
+      }
+      buttonsEl.innerHTML = btns;
     }
   }
+}
+
+// r26d: small helper for "Saved 2h ago" type strings
+function relativeTime(date) {
+  const diffMs = Date.now() - date.getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + ' min ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.round(hrs / 24);
+  return days + 'd ago';
 }
 
 // Plain-English health summary built from the live campaign object.

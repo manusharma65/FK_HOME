@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r26c (FIX: owner PUT now handles asin: prefix groupKeys; ?model=opus param on campaign-analysis to force Opus)
+// CampaignPulse — deploy marker 2026-05-07 r26e (campaign-analysis Opus now gated to owner+manager — agents get 403, matches Amazon listing critique rule)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1565,6 +1565,23 @@ async function initDB() {
       );
       CREATE INDEX IF NOT EXISTS idx_gsc_daily_url_date ON gsc_daily(page_url, report_date DESC);
       CREATE INDEX IF NOT EXISTS idx_gsc_daily_date ON gsc_daily(report_date DESC);
+
+      -- r26d: campaign AI analysis cache. Stores the latest Haiku or Opus
+      -- analysis for each campaign. The campaign-analysis endpoint returns
+      -- the cached row instead of re-running, unless ?model=opus is passed
+      -- (which always runs Opus fresh and overwrites the cache).
+      CREATE TABLE IF NOT EXISTS campaign_ai_analysis (
+        campaign_id TEXT PRIMARY KEY,
+        model_used TEXT NOT NULL,
+        analysis_text TEXT NOT NULL,
+        total_spend NUMERIC(10,2),
+        total_sales NUMERIC(10,2),
+        acos_7d NUMERIC(6,2),
+        days_no_revenue INTEGER,
+        days_no_activity INTEGER,
+        generated_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_campaign_ai_generated ON campaign_ai_analysis(generated_at DESC);
     `);
 
     // r23: drop the old product snooze table (introduced r22, never deployed).
@@ -6933,6 +6950,70 @@ app.get('/api/campaign-analysis/:campaignId', async function(req, res) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'No API key' });
   try {
     const campaignId = req.params.campaignId;
+    // r26d: cache control. Three modes:
+    //   ?cached_only=1   → return cached row if any, else null. Never calls AI.
+    //   ?model=opus      → always run Opus fresh, overwrite cache. Skip Haiku.
+    //   (no params)      → if cache exists, return it. Else run Haiku, save, return.
+    const cachedOnly = String(req.query.cached_only || '') === '1';
+    const forceOpus = String(req.query.model || '').toLowerCase() === 'opus';
+
+    // r26e: Opus is restricted to owner+manager (matches the rule on Amazon
+    // listing critique and Google landing-page critique). Agents can run Haiku
+    // unlimited; Opus requires manager privilege for cost control.
+    if (forceOpus) {
+      const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+      const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+      const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+      if (!isPrivileged) {
+        return res.status(403).json({ error: 'Opus (deeper analysis) is restricted to managers and owner. Use Haiku instead.' });
+      }
+    }
+
+    // Cache lookup
+    let cachedRow = null;
+    try {
+      const cacheRes = await db.query(
+        "SELECT model_used, analysis_text, total_spend, total_sales, acos_7d, days_no_revenue, days_no_activity, generated_at " +
+        "FROM campaign_ai_analysis WHERE campaign_id = $1",
+        [String(campaignId)]
+      );
+      if (cacheRes.rows.length) cachedRow = cacheRes.rows[0];
+    } catch(e) { console.error('[r26d cache lookup] ' + e.message); }
+
+    // Mode 1: cached-only
+    if (cachedOnly) {
+      if (cachedRow) {
+        return res.json({
+          analysis: cachedRow.analysis_text,
+          modelUsed: cachedRow.model_used,
+          totalSpend: parseFloat(cachedRow.total_spend || 0),
+          totalSales: parseFloat(cachedRow.total_sales || 0),
+          acos7d: cachedRow.acos_7d != null ? parseFloat(cachedRow.acos_7d) : null,
+          daysNoRevenue: cachedRow.days_no_revenue,
+          daysNoActivity: cachedRow.days_no_activity,
+          cached: true,
+          generatedAt: cachedRow.generated_at
+        });
+      }
+      return res.json({ analysis: null, cached: false });
+    }
+
+    // Mode 2: default (no model param) — return cache if available, never re-run unless explicitly forced
+    if (!forceOpus && cachedRow) {
+      return res.json({
+        analysis: cachedRow.analysis_text,
+        modelUsed: cachedRow.model_used,
+        totalSpend: parseFloat(cachedRow.total_spend || 0),
+        totalSales: parseFloat(cachedRow.total_sales || 0),
+        acos7d: cachedRow.acos_7d != null ? parseFloat(cachedRow.acos_7d) : null,
+        daysNoRevenue: cachedRow.days_no_revenue,
+        daysNoActivity: cachedRow.days_no_activity,
+        cached: true,
+        generatedAt: cachedRow.generated_at
+      });
+    }
+
+    // Mode 3: cache miss (or forceOpus) — run AI fresh
     const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 14");
     let history = [];
     let liveMeta = null;
@@ -7062,11 +7143,20 @@ app.get('/api/campaign-analysis/:campaignId', async function(req, res) {
     lines.push('- British English. £ for money. Direct tone, no fluff. 60-100 words total.');
 
     const prompt = lines.join('\n');
-    // r26c: ?model=opus query param forces Opus directly (skip Haiku). Used by
-    // the "Re-run with Opus" button in the campaign detail modal.
-    const forceOpus = String(req.query.model || '').toLowerCase() === 'opus';
+    // r26c: forceOpus already determined at top of handler. Pass it through.
     const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400, min_useful_chars: 80, force_opus: forceOpus });
-    res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, acos7d: acos7d, daysNoRevenue, daysNoActivity });
+
+    // r26d: persist to cache (upsert). Re-runs replace the prior row.
+    try {
+      await db.query(
+        "INSERT INTO campaign_ai_analysis (campaign_id, model_used, analysis_text, total_spend, total_sales, acos_7d, days_no_revenue, days_no_activity, generated_at) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) " +
+        "ON CONFLICT (campaign_id) DO UPDATE SET model_used = EXCLUDED.model_used, analysis_text = EXCLUDED.analysis_text, total_spend = EXCLUDED.total_spend, total_sales = EXCLUDED.total_sales, acos_7d = EXCLUDED.acos_7d, days_no_revenue = EXCLUDED.days_no_revenue, days_no_activity = EXCLUDED.days_no_activity, generated_at = NOW()",
+        [String(campaignId), ai.modelUsed, ai.text, totalSpend.toFixed(2), totalSales.toFixed(2), acos7d != null ? acos7d.toFixed(2) : null, daysNoRevenue, daysNoActivity]
+      );
+    } catch(e) { console.error('[r26d cache save] ' + e.message); }
+
+    res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, acos7d: acos7d, daysNoRevenue, daysNoActivity, cached: false });
   } catch(e) { console.error('Campaign analysis error: ' + e.message); res.status(500).json({ error: e.message }); }
 });
 
