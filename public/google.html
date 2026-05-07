@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r25a (products search bar, dismiss button on product subrows inside campaigns) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r25b (Haiku→Opus AI cost switch, agent feedback widget, TACOS on product cards, Repeat Offenders tab) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -406,6 +406,8 @@ table.activity tr:last-child td { border-bottom: none; }
       <button class="btn btn-ghost task-filter" data-filter-status="discussion" onclick="setTaskFilter('status','discussion',this)">Discussion</button>
       <button class="btn btn-ghost task-filter" data-filter-status="complete" onclick="setTaskFilter('status','complete',this)">Complete</button>
       <button class="btn btn-ghost task-filter" data-filter-status="all" onclick="setTaskFilter('status','all',this)">All</button>
+      <!-- r25b: Repeat Offenders filter — campaigns/products that failed multiple times despite agent intervention -->
+      <button class="btn btn-ghost task-filter" data-filter-repeat="true" onclick="setTaskFilter('repeat','true',this)" title="Tasks for campaigns/products that have failed multiple times despite agent intervention">🔁 Repeat Offenders <span id="g-tab-repeat-count" style="background:#dc2626;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
       <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-left:14px">Agent</span>
       <button class="btn btn-ghost task-filter active" data-filter-agent="all" onclick="setTaskFilter('agent','all',this)">All</button>
       <button class="btn btn-ghost task-filter" data-filter-agent="Unassigned" onclick="setTaskFilter('agent','Unassigned',this)">Unassigned</button>
@@ -695,6 +697,79 @@ function typeBadge(t) {
   return '';
 }
 function escapeHtml(s) { return String(s || '').replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+// ─── r25b: AI feedback widget (matches Amazon side) ────────────────────────
+function renderAiFeedbackWidget(scope, targetId) {
+  const safeScope = String(scope).replace(/'/g, '');
+  const safeTarget = String(targetId || '').replace(/'/g, '');
+  if (!safeTarget) return '';
+  const wrapId = 'aifb-' + safeScope + '-' + safeTarget.replace(/[^a-zA-Z0-9]/g, '_');
+  return '<div id="' + wrapId + '" style="margin-top:18px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:10px">' +
+    '<div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">📝 Feedback for next AI run</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">Tell the AI what it got wrong, or add context it cannot see. Next analysis will read your last 5 notes.</div>' +
+    '<div data-aifb-list="1" style="margin-bottom:10px"></div>' +
+    '<textarea data-aifb-input="1" placeholder="e.g. The AI keeps recommending we lower bids, but the real issue is competitor pricing. Focus on that next time." style="width:100%;min-height:60px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;resize:vertical;box-sizing:border-box;background:var(--bg);color:var(--text)"></textarea>' +
+    '<div style="display:flex;justify-content:flex-end;margin-top:6px;gap:6px;align-items:center">' +
+      '<span data-aifb-status="1" style="font-size:11px;color:var(--text3)"></span>' +
+      '<button class="btn btn-primary" style="font-size:12px;padding:5px 12px" onclick="submitAiFeedback(\'' + safeScope + '\',\'' + safeTarget + '\',this)">Save feedback</button>' +
+    '</div>' +
+  '</div>';
+}
+
+async function loadAiFeedbackList(scope, targetId) {
+  const wrapId = 'aifb-' + String(scope) + '-' + String(targetId).replace(/[^a-zA-Z0-9]/g, '_');
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const list = wrap.querySelector('[data-aifb-list="1"]');
+  if (!list) return;
+  try {
+    const r = await authedFetch('/api/ai/feedback?scope=' + encodeURIComponent(scope) + '&targetId=' + encodeURIComponent(targetId));
+    const j = await r.json();
+    const rows = (j && j.feedback) || [];
+    if (!rows.length) {
+      list.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:italic">No feedback yet — be the first.</div>';
+      return;
+    }
+    list.innerHTML = rows.slice(0, 5).map(function(f) {
+      const dateStr = f.created_at ? new Date(f.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      return '<div style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;margin-bottom:4px">' +
+        '<div style="color:var(--text3);font-size:10px;margin-bottom:2px">' + escapeHtml(f.agent_name || '') + ' · ' + dateStr + '</div>' +
+        '<div style="white-space:pre-wrap">' + escapeHtml(f.feedback_text || '') + '</div>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="font-size:11px;color:var(--red)">Could not load feedback: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function submitAiFeedback(scope, targetId, btn) {
+  const wrapId = 'aifb-' + String(scope) + '-' + String(targetId).replace(/[^a-zA-Z0-9]/g, '_');
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const ta = wrap.querySelector('[data-aifb-input="1"]');
+  const status = wrap.querySelector('[data-aifb-status="1"]');
+  const text = (ta.value || '').trim();
+  if (!text) { if (status) status.textContent = 'Type something first.'; return; }
+  if (text.length > 2000) { if (status) status.textContent = 'Too long (max 2000 chars).'; return; }
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Saving...';
+  try {
+    const r = await authedFetch('/api/ai/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ scope: scope, targetId: targetId, feedback: text })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) { throw new Error(j.error || 'save failed'); }
+    ta.value = '';
+    if (status) status.textContent = '✓ Saved. Re-run AI to see it taken into account.';
+    loadAiFeedbackList(scope, targetId);
+    setTimeout(function(){ if (status) status.textContent = ''; }, 4000);
+  } catch(e) {
+    if (status) status.textContent = '✗ ' + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function sparklineHtml(daily) {
   if (!daily || !daily.length) return '';
@@ -1028,6 +1103,11 @@ function productCard(p) {
     + statRow('Ad spend', fmtCurrency(p.googleSpend))
     + statRow('Ad clicks', fmtNum(p.googleClicks))
     + statRow('ACOS', fmtPct(p.googleAcos))
+    // r25b: TACOS = ad spend / total Shopify revenue (truth, not just ad-attributed).
+    // Reads as muted when no spend or no revenue.
+    + statRow('TACOS', (p.revenue7d > 0 && p.googleSpend > 0)
+        ? (100 * p.googleSpend / p.revenue7d).toFixed(1) + '%'
+        : '—', !(p.revenue7d > 0 && p.googleSpend > 0))
     + statRow('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—')
     + (p.ga4Sessions != null ? statRow('Sessions 7d', fmtNum(p.ga4Sessions)) : '')
     + (p.ga4CartRate != null ? statRow('Cart rate', p.ga4CartRate + '%') : '')
@@ -1419,10 +1499,26 @@ function renderCampaignsPage() {
 // ─── Google Tasks page ───────────────────────────────────────────────────
 // Mirrors Amazon's task workflow but for Google. Self-allocate, 7-day cycle,
 // Day 7 forces decision (carry_on / archive / stop).
-const TASK_FILTERS = { status: 'active', agent: 'all', type: 'all' };
+const TASK_FILTERS = { status: 'active', agent: 'all', type: 'all', repeat: false };
 let LAST_TASKS_RESPONSE = null;
 
 function setTaskFilter(kind, value, btn) {
+  // r25b: 'repeat' is a toggle — clicking it sets all other status filters off
+  // and shows only repeat offenders. Clicking any other status filter clears it.
+  if (kind === 'repeat') {
+    TASK_FILTERS.repeat = (value === 'true' || value === true) ? true : false;
+    // Visually: highlight only this button, clear status buttons
+    document.querySelectorAll('.task-filter[data-filter-status]').forEach(function(b){ b.classList.remove('active'); });
+    document.querySelectorAll('.task-filter[data-filter-repeat]').forEach(function(b){ b.classList.remove('active'); });
+    if (btn) btn.classList.add('active');
+    loadGoogleTasks();
+    return;
+  }
+  // For other filter kinds (type/status/agent): if user clicks them, repeat is cleared
+  if (kind === 'status') {
+    TASK_FILTERS.repeat = false;
+    document.querySelectorAll('.task-filter[data-filter-repeat]').forEach(function(b){ b.classList.remove('active'); });
+  }
   TASK_FILTERS[kind] = value;
   document.querySelectorAll('.task-filter[data-filter-' + kind + ']').forEach(function(b){ b.classList.remove('active'); });
   if (btn) btn.classList.add('active');
@@ -1440,10 +1536,17 @@ async function loadGoogleTasks() {
     if (TASK_FILTERS.status) params.set('status', TASK_FILTERS.status);
     if (TASK_FILTERS.agent) params.set('agent', TASK_FILTERS.agent);
     if (TASK_FILTERS.type) params.set('type', TASK_FILTERS.type);
+    if (TASK_FILTERS.repeat) params.set('repeat', 'true'); // r25b
     const r = await authedFetch('/api/google/tasks?' + params.toString());
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Failed to load tasks');
     LAST_TASKS_RESPONSE = j;
+
+    // r25b: update repeat-offender badge from summary totals
+    const repeatBadge = document.getElementById('g-tab-repeat-count');
+    if (repeatBadge && j.summary && j.summary.totals) {
+      repeatBadge.textContent = j.summary.totals.repeat || 0;
+    }
 
     // Workload summary
     const summary = j.summary || { byAgent: {}, totals: {} };
@@ -1603,7 +1706,11 @@ function taskRow(t) {
 
   // Notes / closed callouts
   const noteStyle = isClosed ? 'text-decoration:line-through;color:#9ca3af' : '';
-  const callouts = []
+  // r25b: prominent repeat-offender callout
+  const repeatBanner = t.is_repeat_offender
+    ? '<div style="font-size:12px;margin-top:8px;padding:8px 12px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong style="color:#991b1b">🔁 REPEAT OFFENDER:</strong> Has failed ' + (t.failure_count || 2) + ' times in the last 14 days. Past fixes did not stick — needs a different approach.</div>'
+    : '';
+  const callouts = [repeatBanner]
     .concat(t.agent_notes ? ['<div style="font-size:12px;margin-top:8px;padding:8px 12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;' + noteStyle + '"><strong style="color:#92400e">Note:</strong> ' + escapeHtml(t.agent_notes) + '</div>'] : [])
     .concat(t.paused_reason ? ['<div style="font-size:12px;margin-top:6px;padding:8px 12px;background:#f3e8ff;border-left:3px solid #a855f7;border-radius:4px"><strong style="color:#6b21a8">⏸ Paused:</strong> ' + escapeHtml(t.paused_reason) + '</div>'] : [])
     .concat(t.dismissed_reason ? ['<div style="font-size:12px;margin-top:6px;padding:8px 12px;background:#fee2e2;border-left:3px solid #dc2626;border-radius:4px"><strong style="color:#991b1b">✕ Dismissed:</strong> ' + escapeHtml(t.dismissed_reason) + '</div>'] : [])
@@ -2496,7 +2603,11 @@ function renderLandingCritiqueInModal(j) {
     + (trustSignals ? '<div style="font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 8px">Trust signals</div>'
       + '<div style="font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escapeHtml(trustSignals) + '</div>' : '');
 
-  document.getElementById('big-modal-body').innerHTML = body;
+  // r25b: append feedback widget so agents can correct the AI on this product
+  const fbBody = body + renderAiFeedbackWidget('google_product', String(j.productId || ''));
+
+  document.getElementById('big-modal-body').innerHTML = fbBody;
+  if (j.productId) loadAiFeedbackList('google_product', String(j.productId));
 }
 
 // ─── Campaign AI ─────────────────────────────────────────────────────────
@@ -2527,7 +2638,11 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
   const lockBadge = document.getElementById('ai-lock-badge-campaign');
   if (!contentDiv) return;
 
-  contentDiv.textContent = j.analysis || '';
+  // r25b: render analysis text + feedback widget below
+  const analysisText = j.analysis || '';
+  contentDiv.innerHTML = '<div style="white-space:pre-wrap">' + escapeHtml(analysisText) + '</div>' +
+    renderAiFeedbackWidget('google_campaign', String(campaignId));
+  loadAiFeedbackList('google_campaign', String(campaignId));
 
   const locked = !!j.lockedForAgent;
   if (lockBadge) lockBadge.innerHTML = locked ? '· 🔒 locked for 24h' : '';
@@ -2546,7 +2661,11 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
     const tags = [];
     if (j.cached) tags.push('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago');
     else tags.push('Fresh analysis');
-    if (j.modelUsed) tags.push(j.modelUsed.indexOf('opus') >= 0 ? 'Opus' : 'Sonnet');
+    // r25b: model display now also handles Haiku
+    if (j.modelUsed) {
+      const m = j.modelUsed.toLowerCase();
+      tags.push(m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : 'Sonnet'));
+    }
     if (locked) tags.push('Locked for 24h');
     metaDiv.textContent = tags.join(' · ');
   }

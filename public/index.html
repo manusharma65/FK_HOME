@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r25a (agent filter on products page, SKU name shown inline in ASIN breakdown, budget exhaustion log persistence) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r25b (Aryan owner-edit fix, Haiku→Opus AI cost switch, agent feedback widget on AI analyses, TACOS stat on product cards, kettlebell coverage fix) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2303,8 +2303,13 @@ async function loadCampaignAnalysis(campaignId, containerId, btn) {
     const res = await fetch('/api/campaign-analysis/' + encodeURIComponent(campaignId));
     const data = await res.json();
     if (data.analysis) {
-      container.innerHTML = '<div style="font-weight:600;margin-bottom:6px;font-size:13px">🤖 Claude Analysis</div>' +
-        '<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">' + escHtml(data.analysis) + '</div>';
+      container.innerHTML = '<div style="font-weight:600;margin-bottom:6px;font-size:13px">🤖 Claude Analysis' +
+        (data.modelUsed ? ' <span style="font-size:11px;font-weight:400;color:var(--text3);margin-left:6px">(' + (data.modelUsed.indexOf('haiku') !== -1 ? 'Haiku' : 'Opus') + ')</span>' : '') +
+        '</div>' +
+        '<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">' + escHtml(data.analysis) + '</div>' +
+        renderAiFeedbackWidget('amazon_campaign', campaignId);
+      // r25b: load any existing feedback
+      loadAiFeedbackList('amazon_campaign', campaignId);
     } else {
       container.innerHTML = '<div style="color:#e53e3e">Analysis failed: ' + escHtml(data.error||'Unknown error') + '</div>';
     }
@@ -4518,6 +4523,11 @@ function amzProductCard(p, idx, canEditOwner, agents) {
   const acos = p.acos || 0;
   const acosClass = acos === 0 ? 'muted' : (acos > 40 ? 'bad' : (acos > 20 ? 'warn' : 'good'));
   const coverageClass = p.ad_coverage_pct === 100 ? 'good' : (p.ad_coverage_pct >= 50 ? 'warn' : 'bad');
+  // r25b: TACOS = total ad spend / TOTAL sales (Shopify truth, not just ad-attributed).
+  // Even one bad ACOS can be fine if TACOS is healthy (ads driving organic too).
+  const tacos = p.tacos_pct;
+  const tacosClass = tacos == null ? 'muted' : (tacos > 30 ? 'bad' : (tacos > 15 ? 'warn' : 'good'));
+  const tacosLabel = tacos == null ? '—' : tacos + '%';
   const stats =
     '<div class="amz-product-stats">' +
       amzStat('Sales 7d', '£' + (p.total_sales_7d || 0).toFixed(0)) +
@@ -4525,6 +4535,7 @@ function amzProductCard(p, idx, canEditOwner, agents) {
       amzStat('Ad spend', '£' + (p.camp_spend_7d || 0).toFixed(0), p.camp_spend_7d > 0 ? null : 'muted') +
       amzStat('Conversions', String(p.camp_conversions_7d || 0)) +
       amzStat('ACOS', acos > 0 ? acos + '%' : '—', acosClass) +
+      amzStat('TACOS', tacosLabel, tacosClass) +
       amzStat('Coverage', p.ad_coverage_pct + '%', coverageClass) +
     '</div>';
   // r20c: signalsRow REMOVED — Buy Box / Stock cover / Reviews / vs lowest /
@@ -5098,7 +5109,11 @@ function renderAmzCritiqueResult(j, asin, groupKey) {
     }).join('');
   }
   if (!html) html = '<div style="color:var(--text3);font-size:13px">Critique returned no actionable items.</div>';
+  // r25b: append agent feedback widget so agent can correct the AI
+  html += renderAiFeedbackWidget('amazon_product', groupKey || asin);
   contentEl.innerHTML = html;
+  // r25b: load existing feedback into the widget
+  loadAiFeedbackList('amazon_product', groupKey || asin);
   if (metaEl && j.cached_at) {
     const ageMs = Date.now() - new Date(j.cached_at).getTime();
     const ageMin = Math.floor(ageMs / 60000);
@@ -5426,8 +5441,10 @@ async function submitOwnerReassign(parentSku) {
   const newAgent = document.getElementById('amz-owner-reassign-select').value;
   if (!newAgent) { alert('Pick an agent.'); return; }
   try {
+    // r25b: was sending POST — server endpoint is PUT, so request silently 404'd
+    // and the change never persisted. Aryan reassignment was failing because of this.
     const r = await fetch('/api/amazon/products/' + encodeURIComponent(parentSku) + '/owner', {
-      method: 'POST',
+      method: 'PUT',
       headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
       body: JSON.stringify({ agent: newAgent })
     });
@@ -6368,6 +6385,82 @@ async function setProductOwner(groupKey, agent) {
       alert('Could not set owner: ' + (data.error || 'unknown error'));
     }
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ─── r25b: AI feedback widget ───────────────────────────────────────────────
+// Lightweight inline widget rendered below any AI analysis output.
+// Lets the agent type a correction/feedback that the next AI run will read.
+function renderAiFeedbackWidget(scope, targetId) {
+  const safeScope = String(scope).replace(/'/g, '');
+  const safeTarget = String(targetId || '').replace(/'/g, '');
+  if (!safeTarget) return '';
+  const wrapId = 'aifb-' + safeScope + '-' + safeTarget.replace(/[^a-zA-Z0-9]/g, '_');
+  return '<div id="' + wrapId + '" style="margin-top:18px;padding:14px;background:#f8fafc;border:1px solid var(--border);border-radius:10px">' +
+    '<div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">📝 Feedback for next AI run</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">Tell the AI what it got wrong, or add context it cannot see. Next analysis will read your last 5 notes.</div>' +
+    '<div data-aifb-list="1" style="margin-bottom:10px"></div>' +
+    '<textarea data-aifb-input="1" placeholder="e.g. The AI keeps recommending we lower bids, but the real issue is competitor pricing. Focus on that next time." style="width:100%;min-height:60px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;resize:vertical;box-sizing:border-box"></textarea>' +
+    '<div style="display:flex;justify-content:flex-end;margin-top:6px;gap:6px;align-items:center">' +
+      '<span data-aifb-status="1" style="font-size:11px;color:var(--text3)"></span>' +
+      '<button class="btn btn-primary" style="font-size:12px;padding:5px 12px" onclick="submitAiFeedback(\'' + safeScope + '\',\'' + safeTarget + '\',this)">Save feedback</button>' +
+    '</div>' +
+  '</div>';
+}
+
+async function loadAiFeedbackList(scope, targetId) {
+  const wrapId = 'aifb-' + String(scope) + '-' + String(targetId).replace(/[^a-zA-Z0-9]/g, '_');
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const list = wrap.querySelector('[data-aifb-list="1"]');
+  if (!list) return;
+  try {
+    const r = await fetch('/api/ai/feedback?scope=' + encodeURIComponent(scope) + '&targetId=' + encodeURIComponent(targetId), { headers: getAuthHeaders() });
+    const j = await r.json();
+    const rows = (j && j.feedback) || [];
+    if (!rows.length) {
+      list.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:italic">No feedback yet — be the first.</div>';
+      return;
+    }
+    list.innerHTML = rows.slice(0, 5).map(function(f) {
+      const dateStr = f.created_at ? new Date(f.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      return '<div style="font-size:12px;background:white;border:1px solid var(--border);border-radius:6px;padding:6px 10px;margin-bottom:4px">' +
+        '<div style="color:var(--text3);font-size:10px;margin-bottom:2px">' + escHtml(f.agent_name || '') + ' · ' + dateStr + '</div>' +
+        '<div style="white-space:pre-wrap">' + escHtml(f.feedback_text || '') + '</div>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="font-size:11px;color:var(--red)">Could not load feedback: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+async function submitAiFeedback(scope, targetId, btn) {
+  const wrapId = 'aifb-' + String(scope) + '-' + String(targetId).replace(/[^a-zA-Z0-9]/g, '_');
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const ta = wrap.querySelector('[data-aifb-input="1"]');
+  const status = wrap.querySelector('[data-aifb-status="1"]');
+  const text = (ta.value || '').trim();
+  if (!text) { if (status) status.textContent = 'Type something first.'; return; }
+  if (text.length > 2000) { if (status) status.textContent = 'Too long (max 2000 chars).'; return; }
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Saving...';
+  try {
+    const r = await fetch('/api/ai/feedback', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'}, getAuthHeaders()),
+      body: JSON.stringify({ scope: scope, targetId: targetId, feedback: text })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) { throw new Error(j.error || 'save failed'); }
+    ta.value = '';
+    if (status) status.textContent = '✓ Saved. Re-run AI to see it taken into account.';
+    loadAiFeedbackList(scope, targetId);
+    setTimeout(function(){ if (status) status.textContent = ''; }, 4000);
+  } catch(e) {
+    if (status) status.textContent = '✗ ' + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 init();

@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r25a (Amazon agent filter, Amazon SKU name inline, budget exhaustion log persists across restarts, Google products search bar, Google product-dismiss button)
+// CampaignPulse — deploy marker 2026-05-07 r25b (Aryan POST→PUT fix, Satyam-flip auto-derive removed from unmerge, Haiku→Opus AI cost switch on 4 endpoints, ai_feedback table + agent feedback loop, kettlebell coverage fix using ad_perf table, TACOS on product cards, Google repeat offenders tab)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1479,6 +1479,19 @@ async function initDB() {
         snooze_action TEXT  -- 'snooze' or 'dismiss' (30d=dismiss-ish but explicit)
       );
       CREATE INDEX IF NOT EXISTS idx_camp_snooze_until ON amazon_campaign_snooze(snoozed_until);
+
+      -- r25b: ai_feedback — agent corrections to AI analyses. The AI reads recent
+      -- feedback for a target before generating a new analysis, so subsequent runs
+      -- get progressively more accurate.
+      CREATE TABLE IF NOT EXISTS ai_feedback (
+        id SERIAL PRIMARY KEY,
+        scope TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        feedback_text TEXT NOT NULL,
+        agent_name TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_feedback_scope_target ON ai_feedback(scope, target_id, created_at DESC);
     `);
 
     // r23: drop the old product snooze table (introduced r22, never deployed).
@@ -2209,12 +2222,35 @@ async function createGoogleTask(taskRow) {
   }
 
   try {
+    // r25b: detect repeat offenders for Google — same pattern as Amazon. Key by
+    // (campaign_id + product_key) since Google tasks can be product-level OR
+    // campaign-level. If we already completed a task on this exact target in the
+    // last 14 days, this is a repeat — flag it and bump failure_count.
+    let isRepeatOffender = false;
+    let failureCount = 1;
+    try {
+      const repeatCheck = await db.query(
+        "SELECT id, failure_count FROM campaign_tasks " +
+        "WHERE campaign_id = $1 AND department = 'google' " +
+        "  AND COALESCE(product_key, '') = COALESCE($2, '') " +
+        "  AND status = 'complete' " +
+        "  AND last_resolved_date > NOW() - INTERVAL '14 days' " +
+        "ORDER BY last_resolved_date DESC LIMIT 1",
+        [String(taskRow.campaignId), taskRow.productKey || null]
+      );
+      if (repeatCheck.rows.length > 0) {
+        isRepeatOffender = true;
+        failureCount = (repeatCheck.rows[0].failure_count || 1) + 1;
+        console.log('[GTASK] REPEAT OFFENDER: ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') + ' (failure #' + failureCount + ')');
+      }
+    } catch(e) { console.error('[GTASK] repeat check error: ' + e.message); }
+
     await db.query(
       "INSERT INTO campaign_tasks " +
       "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
       " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
-      " task_type, priority, product_image_url) " +
-      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google',$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+      " task_type, priority, product_image_url, is_repeat_offender, failure_count) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google',$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
       [
         String(taskRow.campaignId),
         taskRow.campaignName,
@@ -2232,7 +2268,9 @@ async function createGoogleTask(taskRow) {
         taskRow.baselineImpressions || 0,
         taskRow.taskType || 'problem',
         taskRow.priority || 2,
-        productImageUrl
+        productImageUrl,
+        isRepeatOffender,
+        failureCount
       ]
     );
     return true;
@@ -2735,6 +2773,124 @@ app.get('/api/dashboard', async function(req, res) {
     hiddenCount: hiddenCampaignIds.size
   });
 });
+
+// r25b: Haiku-then-Opus AI helper. Tries Haiku first; if the response looks
+// thin/error-like, escalates to Opus. The whole thing is wrapped in a single
+// try/catch so callers don't need to handle it. Returns { text, modelUsed }.
+//
+// Why: Opus costs ~5x more than Haiku. For routine campaign/product analysis,
+// Haiku is good enough most of the time, and we save real money. We escalate
+// only when Haiku's output is suspiciously short or empty — meaning it likely
+// gave a generic answer that won't be useful.
+async function aiHaikuThenOpus(prompt, opts) {
+  opts = opts || {};
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('No ANTHROPIC_API_KEY');
+  const maxTokens = opts.max_tokens || 1000;
+  // Models — keep both pinned so behaviour is deterministic between deploys.
+  const HAIKU = 'claude-haiku-4-5-20251001';
+  const OPUS  = 'claude-opus-4-5-20251101';
+  // Min response length below which we consider Haiku's output "thin" and escalate.
+  const MIN_USEFUL_CHARS = opts.min_useful_chars || 80;
+  const headers = { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
+
+  // Try Haiku first
+  let haikuText = '';
+  let haikuOK = false;
+  try {
+    const r = await axios.post('https://api.anthropic.com/v1/messages',
+      { model: HAIKU, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] },
+      { headers: headers, timeout: 30000 }
+    );
+    haikuText = (r.data && r.data.content && r.data.content[0] && r.data.content[0].text) || '';
+    haikuOK = haikuText.trim().length >= MIN_USEFUL_CHARS;
+  } catch(e) {
+    console.error('[ai] Haiku call failed: ' + e.message + ' — escalating to Opus');
+  }
+  if (haikuOK) return { text: haikuText, modelUsed: HAIKU };
+
+  // Escalate to Opus
+  console.log('[ai] Escalating to Opus' + (haikuText ? ' (Haiku output was ' + haikuText.length + ' chars, below threshold ' + MIN_USEFUL_CHARS + ')' : ' (Haiku failed)'));
+  const r2 = await axios.post('https://api.anthropic.com/v1/messages',
+    { model: OPUS, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] },
+    { headers: headers, timeout: 60000 }
+  );
+  const opusText = (r2.data && r2.data.content && r2.data.content[0] && r2.data.content[0].text) || '';
+  return { text: opusText, modelUsed: OPUS };
+}
+
+// r25b: AI feedback storage helpers. Used by the 4 AI analysis endpoints to
+// (a) read recent agent feedback before sending to the model, and
+// (b) save new feedback when the agent submits a correction.
+const AI_FEEDBACK_VALID_SCOPES = ['amazon_product', 'amazon_campaign', 'google_product', 'google_campaign'];
+
+async function getAiFeedback(scope, targetId, limit) {
+  if (!db) return [];
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return [];
+  if (!targetId) return [];
+  try {
+    const r = await db.query(
+      "SELECT feedback_text, agent_name, created_at FROM ai_feedback " +
+      "WHERE scope = $1 AND target_id = $2 ORDER BY created_at DESC LIMIT $3",
+      [scope, String(targetId), limit || 5]
+    );
+    return r.rows;
+  } catch(e) {
+    console.error('[r25b] getAiFeedback error: ' + e.message);
+    return [];
+  }
+}
+
+// Build a prompt-ready feedback section. Empty string if no feedback.
+async function buildFeedbackPromptSection(scope, targetId) {
+  const rows = await getAiFeedback(scope, targetId, 5);
+  if (!rows.length) return '';
+  const lines = rows.map(function(r, i) {
+    const dateStr = r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : '';
+    const who = r.agent_name ? ' (by ' + r.agent_name + ')' : '';
+    return (i + 1) + '. [' + dateStr + who + '] ' + r.feedback_text;
+  });
+  return '\n\nAGENT FEEDBACK ON PREVIOUS ANALYSES (most recent first — TAKE THESE INTO ACCOUNT):\n' +
+    lines.join('\n') +
+    '\n\nWhen producing your analysis, address what the agent said. If they corrected a wrong assumption, acknowledge it. ' +
+    'If they said "the AI keeps recommending X but Y is the real issue", focus on Y. Do not repeat advice agents have already pushed back on.';
+}
+
+// POST /api/ai/feedback — save a new feedback entry. Body: { scope, targetId, feedback }
+app.post('/api/ai/feedback', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const scope = String((req.body && req.body.scope) || '').trim();
+  const targetId = String((req.body && req.body.targetId) || '').trim();
+  const feedback = String((req.body && req.body.feedback) || '').trim();
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return res.status(400).json({ error: 'invalid scope' });
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  if (!feedback) return res.status(400).json({ error: 'feedback text required' });
+  if (feedback.length > 2000) return res.status(400).json({ error: 'feedback too long (max 2000 chars)' });
+
+  const agent = (req.user && req.user.name) || 'unknown';
+  try {
+    const r = await db.query(
+      "INSERT INTO ai_feedback (scope, target_id, feedback_text, agent_name) VALUES ($1, $2, $3, $4) RETURNING id, created_at",
+      [scope, targetId, feedback, agent]
+    );
+    res.json({ ok: true, id: r.rows[0].id, created_at: r.rows[0].created_at });
+  } catch(e) {
+    console.error('[r25b] /api/ai/feedback error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/ai/feedback?scope=...&targetId=... — list feedback for a target
+app.get('/api/ai/feedback', async function(req, res) {
+  if (!db) return res.json({ feedback: [] });
+  const scope = String(req.query.scope || '').trim();
+  const targetId = String(req.query.targetId || '').trim();
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return res.status(400).json({ error: 'invalid scope' });
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  const rows = await getAiFeedback(scope, targetId, 20);
+  res.json({ feedback: rows });
+});
+
 
 app.post('/api/ai/analyse', async function(req, res) {
   try {
@@ -3573,9 +3729,11 @@ app.post('/api/admin/r24-unmerge-trampolines', async function(req, res) {
       );
     } catch(e) {}
 
-    // 4) Re-derive owners so campaign attachment is refreshed
-    let derive = null;
-    try { derive = await deriveProductOwners(); } catch(e) { derive = { error: e.message }; }
+    // r25b: previously called deriveProductOwners() here, which wiped manual-style
+    // ownership on any product with owner_manual=FALSE — silently reassigning many
+    // products to the most active agent (Satyam). Removed: the unmerge action does
+    // not change ownership semantics, so it should not retrigger auto-derive.
+    let derive = { ok: true, skipped: true, note: 'auto-derive intentionally skipped in r25b' };
 
     res.json({ ok: true, summary: summary, canonicalParent: canonicalParent, derive: derive });
   } catch(e) {
@@ -4103,6 +4261,24 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
+    // r25b: ALSO mark any ASIN with actual ad spend in last 7 days as "in a campaign".
+    // This catches auto-targeted campaigns where the ASIN isn't listed as a target
+    // but Amazon's ad report still shows spend on it. Without this, kettlebell-style
+    // products show "0 of N ASINs in ads" even when they're getting active ad spend
+    // from auto campaigns — and coverage shows 0% misleadingly.
+    try {
+      const adPerfRes = await db.query(
+        "SELECT DISTINCT asin FROM amazon_asin_ad_performance " +
+        "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' AND spend > 0"
+      );
+      adPerfRes.rows.forEach(function(r) {
+        if (r.asin && /^B[0-9A-Z]{9}$/.test(r.asin)) advertisedAsins.add(r.asin);
+      });
+    } catch(e) {
+      // Table may not exist on very old deployments — non-fatal
+      if (!/does not exist/.test(e.message)) console.error('[r25b] ad-perf coverage augment error: ' + e.message);
+    }
+
     // 3b. Recent campaigns (deduped) for spend/sales/ACOS aggregation
     const seenCamp = new Set();
     const recentCampaigns = [];
@@ -4416,6 +4592,11 @@ app.get('/api/amazon/products', async function(req, res) {
         camp_impressions_7d: cs.impressions,
         camp_conversions_7d: cs.conversions,
         camp_count: cs.count,
+        // r25b: TACOS = total ad spend / total sales (using Shopify truth, not just
+        // Amazon-attributed). Shows real cost-of-sales including organic sales
+        // benefiting from the ads. ACOS uses ad-attributed sales only — TACOS uses ALL
+        // sales, which is what tells you whether ads are economically worthwhile.
+        tacos_pct: (totalSales > 0 && cs.spend > 0) ? parseFloat((100 * cs.spend / totalSales).toFixed(1)) : null,
         campaigns: cs.campaigns || [],
         acos: acos,
         cost_per_conv: costPerConv != null ? parseFloat(costPerConv.toFixed(2)) : null,
@@ -4789,6 +4970,12 @@ async function runListingCritique(asin, groupKey, modelId) {
       }
     } catch(e) { console.error('[amz-critique] search-term context error: ' + e.message); }
 
+    // r25b: pull agent feedback for this product (keyed by parent_sku/groupKey)
+    let feedbackContext = '';
+    try {
+      feedbackContext = await buildFeedbackPromptSection('amazon_product', groupKey || asin);
+    } catch(e) { /* non-fatal */ }
+
     // Build the prompt — Amazon-specific
     const prompt = [
       'You are an Amazon Marketplace listing-optimisation expert reviewing an FK Sports product on Amazon UK.',
@@ -4804,6 +4991,7 @@ async function runListingCritique(asin, groupKey, modelId) {
       signalsContext,
       adPerfContext,
       searchTermContext,
+      feedbackContext,
       '',
       'TASK: figure out why this listing might not be selling well and identify the highest-impact fixes. Focus on what is visible from the live page and the operational signals that ARE provided.',
       '',
@@ -6496,9 +6684,13 @@ app.get('/api/campaign-analysis/:campaignId', async function(req, res) {
     const daysNoActivity = history.filter(function(d){ return parseInt(d.impressions||0) === 0; }).length;
     const dismissed = await db.query('SELECT search_term, reason FROM keyword_dismissals WHERE campaign ILIKE $1', ['%' + campaignId + '%']);
     const dismissedSection = dismissed.rows.length > 0 ? '\nDISMISSED KEYWORDS:\n' + dismissed.rows.map(function(d){ return d.search_term + ': ' + d.reason; }).join('\n') : '';
-    const prompt = 'You are an Amazon PPC expert analyzing a campaign for FK Sports UK (fitness equipment).\n\nCAMPAIGN ID: ' + campaignId + '\nLAST 14 DAYS:\n' + JSON.stringify(history, null, 2) + '\n\nSUMMARY:\n- Total spend: £' + totalSpend.toFixed(2) + '\n- Total revenue: £' + totalSales.toFixed(2) + '\n- Days with spend but zero revenue: ' + daysNoRevenue + '\n- Days with zero impressions: ' + daysNoActivity + dismissedSection + '\n\nProvide:\n1. Likely root cause\n2. One specific recommended action\n3. Worth continuing or pause?\n\nBe direct. No generic advice.';
-    const response = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 400, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
-    res.json({ analysis: response.data.content[0].text, totalSpend, totalSales, daysNoRevenue, daysNoActivity });
+    // r25b: include any agent feedback for this campaign so the AI takes it into account
+    const feedbackSection = await buildFeedbackPromptSection('amazon_campaign', campaignId);
+    const prompt = 'You are an Amazon PPC expert analyzing a campaign for FK Sports UK (fitness equipment).\n\nCAMPAIGN ID: ' + campaignId + '\nLAST 14 DAYS:\n' + JSON.stringify(history, null, 2) + '\n\nSUMMARY:\n- Total spend: £' + totalSpend.toFixed(2) + '\n- Total revenue: £' + totalSales.toFixed(2) + '\n- Days with spend but zero revenue: ' + daysNoRevenue + '\n- Days with zero impressions: ' + daysNoActivity + dismissedSection + feedbackSection + '\n\nProvide:\n1. Likely root cause\n2. One specific recommended action\n3. Worth continuing or pause?\n\nBe direct. No generic advice.';
+    // r25b: Haiku-then-Opus instead of Opus-only. Saves ~80% on cost for routine
+    // analyses while still escalating when output looks thin.
+    const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400 });
+    res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, daysNoRevenue, daysNoActivity });
   } catch(e) { console.error('Campaign analysis error: ' + e.message); res.status(500).json({ error: e.message }); }
 });
 
@@ -6692,6 +6884,7 @@ app.get('/api/google/tasks', async function(req, res) {
     const statusFilter = req.query.status || 'active';   // 'active' = not complete/archived
     const agentFilter = req.query.agent || 'all';
     const typeFilter = req.query.type || 'all';          // 'problem' | 'scale' | 'all'
+    const repeatFilter = req.query.repeat === 'true' || req.query.repeat === '1'; // r25b
 
     let where = "department='google'";
     const params = [];
@@ -6708,12 +6901,16 @@ app.get('/api/google/tasks', async function(req, res) {
       params.push(typeFilter);
       where += " AND COALESCE(task_type, 'problem')=$" + params.length;
     }
+    if (repeatFilter) {
+      where += " AND is_repeat_offender = TRUE";
+    }
     const r = await db.query(
       "SELECT id, campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, " +
       "       days_persisted, total_wasted, score, status, agent_notes, dismissed_reason, paused_reason, " +
       "       task_source, product_key, product_title, product_image_url, task_type, priority, " +
       "       baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
       "       day7_decision, day7_decision_at, day7_note, " +
+      "       is_repeat_offender, failure_count, " +
       "       created_date, updated_at, resolved_at, first_action_at " +
       "FROM campaign_tasks WHERE " + where + " ORDER BY priority ASC, score DESC, created_date DESC LIMIT 500",
       params
@@ -6744,13 +6941,13 @@ app.get('/api/google/tasks', async function(req, res) {
     });
 
     // Workload summary
-    const summary = { byAgent: {}, totals: { active: 0, day7: 0, unassigned: 0, completed: 0 } };
+    const summary = { byAgent: {}, totals: { active: 0, day7: 0, unassigned: 0, completed: 0, repeat: 0 } };
     GOOGLE_TASK_AGENTS.forEach(function(a){ summary.byAgent[a] = { open: 0, in_progress: 0, discussion: 0, day7: 0 }; });
     summary.byAgent['Unassigned'] = { open: 0, in_progress: 0, discussion: 0, day7: 0 };
 
     // Run a separate query for ALL tasks (not just filtered) to compute the workload summary
     const allRes = await db.query(
-      "SELECT agent_name, status, created_date, day7_decision FROM campaign_tasks WHERE department='google'"
+      "SELECT agent_name, status, created_date, day7_decision, is_repeat_offender FROM campaign_tasks WHERE department='google'"
     );
     allRes.rows.forEach(function(row) {
       const agent = row.agent_name || 'Unassigned';
@@ -6761,6 +6958,8 @@ app.get('/api/google/tasks', async function(req, res) {
       }
       summary.totals.active++;
       if (agent === 'Unassigned') summary.totals.unassigned++;
+      // r25b: count active repeat offenders for the badge
+      if (row.is_repeat_offender) summary.totals.repeat++;
       const created = row.created_date ? new Date(row.created_date).getTime() : now;
       const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
       if (daysOpen >= 7 && !row.day7_decision) {
@@ -10235,13 +10434,40 @@ ${includePageContent && productUrl ? '4. What you can see about the product page
 
 Be direct. Be specific. Quote the real numbers above. If the data is unclear, say so. No generic advice.`;
 
-    // Sonnet for routine analysis (faster, cheaper); Opus for deep dives where
-    // we've also fetched the page + PageSpeed (the harder reasoning task)
-    const model = includePageContent ? 'claude-opus-4-5-20251101' : 'claude-sonnet-4-5-20250929';
+    // r25b: append agent feedback for this product to the prompt
+    const gpTargetId = String(product.shopifyId || product.shopifyItemId || product.productId || '');
+    let promptWithFeedback = prompt;
+    if (gpTargetId) {
+      try {
+        const fb = await buildFeedbackPromptSection('google_product', gpTargetId);
+        if (fb) promptWithFeedback = prompt + fb;
+      } catch(e) { /* non-fatal */ }
+    }
+
+    // r25b: For routine (non-deep-dive) analysis, use Haiku-then-Opus to save cost.
+    // Deep dives (with page content + image) still go straight to Opus because they
+    // need vision + harder reasoning, and we use multimodal content blocks.
+    if (!includePageContent) {
+      try {
+        const ai = await aiHaikuThenOpus(promptWithFeedback, { max_tokens: 700 });
+        return res.json({
+          analysis: ai.text,
+          modelUsed: ai.modelUsed,
+          visionUsed: false,
+          pageFetched: false
+        });
+      } catch(e) {
+        console.error('Google AI analyse (light) error: ' + e.message);
+        return res.status(500).json({ error: e.message });
+      }
+    }
+
+    // Deep dive path (page content fetched) — stays on Opus, may include vision
+    const model = 'claude-opus-4-5-20251101';
 
     // For deep dive: also fetch the hero image and let Claude actually see it.
     const imageUrl = product.imageUrl || product.shopifyImageUrl;
-    let messageContent = [{ type: 'text', text: prompt }];
+    let messageContent = [{ type: 'text', text: promptWithFeedback }];
     let visionUsed = false;
     if (includePageContent && imageUrl) {
       try {
@@ -10268,7 +10494,7 @@ Be direct. Be specific. Quote the real numbers above. If the data is unclear, sa
                   data: base64
                 }
               },
-              { type: 'text', text: prompt + '\n\nThe attached image is the product\'s main photo as it appears on the Shopify page and in Google ads. In plain English, comment on the image quality: is it bright and clear, is the product easy to see, does it look professional, are there any obvious issues that might put off shoppers? Avoid jargon.' }
+              { type: 'text', text: promptWithFeedback + '\n\nThe attached image is the product\'s main photo as it appears on the Shopify page and in Google ads. In plain English, comment on the image quality: is it bright and clear, is the product easy to see, does it look professional, are there any obvious issues that might put off shoppers? Avoid jargon.' }
             ];
             visionUsed = true;
           }
@@ -10422,16 +10648,18 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       + '6. If this is Performance Max or Shopping, comment on whether the right products are in scope.\n\n'
       + 'Be direct, specific, named. Reference actual numbers. No generic advice.';
 
-    // Use Opus for campaign-level reasoning — it's the harder task
-    const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-5-20251101',
-      max_tokens: 1000,
-      messages: [{ role: 'user', content: prompt }]
-    }, {
-      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
-    });
+    // r25b: append agent feedback for this campaign
+    let promptWithFeedback = prompt;
+    try {
+      const fb = await buildFeedbackPromptSection('google_campaign', String(campaignId));
+      if (fb) promptWithFeedback = prompt + fb;
+    } catch(e) { /* non-fatal */ }
 
-    const analysisText = response.data.content[0].text;
+    // r25b: Haiku-then-Opus instead of Opus-only. Most campaign analyses are
+    // routine; Haiku handles them well. Only escalate when output is thin.
+    const ai = await aiHaikuThenOpus(promptWithFeedback, { max_tokens: 1000, min_useful_chars: 200 });
+    const analysisText = ai.text;
+    const modelUsedActual = ai.modelUsed;
 
     // Persist to 24h cache
     if (db) {
@@ -10440,7 +10668,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
           "INSERT INTO campaign_ai_cache (campaign_id, campaign_name, generated_at, analysis, model_used) " +
           "VALUES ($1, $2, NOW(), $3, $4) " +
           "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name=EXCLUDED.campaign_name, generated_at=NOW(), analysis=EXCLUDED.analysis, model_used=EXCLUDED.model_used",
-          [String(campaignId), campaignName, analysisText, 'claude-opus-4-5-20251101']
+          [String(campaignId), campaignName, analysisText, modelUsedActual]
         );
       } catch(e) { console.error('Campaign AI cache persist error: ' + e.message); }
     }
@@ -10450,7 +10678,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       campaignName: campaignName,
       campaignType: campaignType,
       productCount: allProducts.length,
-      modelUsed: 'claude-opus-4-5-20251101',
+      modelUsed: modelUsedActual,
       cached: false,
       lockedForAgent: !isManager
     });
