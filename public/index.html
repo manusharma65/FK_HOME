@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r25c (TACOS in modal with plain-English callout, All Campaigns badges fixed for zero-sale wasters and chronic ACOS, Refresh sales now button) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26a (Action Centre + Reassign-owner button removed from modal; inline dropdown on card is the only way) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -364,7 +364,14 @@ tbody tr:hover { background: var(--surface2); }
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 4h14M1 8h10M1 12h6"/></svg>
       All campaigns
     </button>
-    <button class="nav-item" onclick="showPage('ai',this)">
+    <!-- r26: Action Centre — replaces AI analysis + Underperforming + redundant badge logic -->
+    <button class="nav-item" onclick="showPage('action-centre',this)">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v14M1 8h14"/><circle cx="8" cy="8" r="6"/></svg>
+      Action Centre
+      <span class="nav-badge" id="ac-badge" style="display:none;background:var(--red)">0</span>
+    </button>
+    <!-- r26: AI analysis hidden — superseded by Action Centre. Kept for fallback during r25→r26 transition. -->
+    <button class="nav-item" onclick="showPage('ai',this)" style="display:none">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M6 8l1.5 1.5L10 6"/></svg>
       AI analysis
     </button>
@@ -389,7 +396,8 @@ tbody tr:hover { background: var(--surface2); }
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v5l3 3"/><circle cx="8" cy="8" r="6"/></svg>
       Daily history
     </button>
-    <button class="nav-item" onclick="showPage('stuck',this)">
+    <!-- r26: Underperforming hidden — superseded by Action Centre Fix Now / Look At tabs. -->
+    <button class="nav-item" onclick="showPage('stuck',this)" style="display:none">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v7M5 11l3 3 3-3"/><circle cx="8" cy="5" r="2"/></svg>
       Underperforming
       <span class="nav-badge" id="stuck-badge" style="display:none;background:var(--amber);color:#000">0</span>
@@ -594,6 +602,33 @@ tbody tr:hover { background: var(--surface2); }
         <tbody id="all-table"><tr><td colspan="14"><div class="loading"><div class="spinner"></div> Loading...</div></td></tr></tbody>
       </table></div>
     </div>
+  </div>
+
+  <!-- r26: ACTION CENTRE — replaces the "AI analysis" + "Underperforming" pages.
+       Three tabs: Fix now (P1) / Look at (P2) / Scale (P3). Items come from a single
+       /api/amazon/action-centre endpoint that scores and categorises everything. -->
+  <div class="page" id="page-action-centre">
+    <!-- Top metric strip -->
+    <div class="metrics-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px">
+      <div class="metric-card alert"><div class="metric-label">Fix now (P1)</div><div class="metric-value" id="ac-p1-count">—</div><div class="metric-delta delta-down" id="ac-p1-sub">Bleeding money or broken</div></div>
+      <div class="metric-card"><div class="metric-label">Look at (P2)</div><div class="metric-value" id="ac-p2-count">—</div><div class="metric-delta" id="ac-p2-sub">Borderline / watch list</div></div>
+      <div class="metric-card success"><div class="metric-label">Scale (P3)</div><div class="metric-value" id="ac-p3-count">—</div><div class="metric-delta delta-up" id="ac-p3-sub">Working — could grow</div></div>
+      <div class="metric-card"><div class="metric-label">Wasted £ (last 7d)</div><div class="metric-value" id="ac-wasted">—</div><div class="metric-delta delta-down">Spend with no sales</div></div>
+    </div>
+
+    <!-- Strategic insight banner — single AI paragraph at top of Fix Now -->
+    <div id="ac-insight" style="display:none;background:#fef3c7;border-left:4px solid #f59e0b;padding:14px 18px;border-radius:8px;margin-bottom:16px;font-size:14px;line-height:1.6"></div>
+
+    <!-- Tabs -->
+    <div class="tabs" style="margin-bottom:14px">
+      <button class="tab-btn active" id="ac-tab-fixnow" onclick="showActionCentreTab('fixnow',this)">🔴 Fix now <span class="tab-count" id="ac-fixnow-count">0</span></button>
+      <button class="tab-btn" id="ac-tab-lookat" onclick="showActionCentreTab('lookat',this)">🟠 Look at <span class="tab-count" id="ac-lookat-count">0</span></button>
+      <button class="tab-btn" id="ac-tab-scale" onclick="showActionCentreTab('scale',this)">🟢 Scale <span class="tab-count" id="ac-scale-count">0</span></button>
+      <div style="flex:1"></div>
+      <button class="btn btn-ghost" style="font-size:12px" onclick="loadActionCentre(true)" title="Refresh — pulls fresh from server">↻ Refresh</button>
+    </div>
+
+    <div id="ac-list"><div class="loading"><div class="spinner"></div> Loading Action Centre…</div></div>
   </div>
 
   <!-- AI ANALYSIS -->
@@ -1274,7 +1309,7 @@ function sortReport(col) {
   if (ind) ind.textContent = reportSortState.dir === -1 ? ' ↓' : ' ↑';
   renderReport();
 }
-const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
+const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', 'action-centre':'Action Centre', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showPage(name, btn) {
@@ -1286,6 +1321,7 @@ function showPage(name, btn) {
   // r22: persist last page so refresh lands back where the user was
   try { localStorage.setItem('cp_last_page', name); } catch(_) {}
   if (name === 'campaigns') renderAllCampaigns();
+  if (name === 'action-centre') loadActionCentre();
   if (name === 'report') renderReport();
   if (name === 'history') loadHistoryDates();
   if (name === 'stuck') loadStuckCampaigns();
@@ -4186,7 +4222,7 @@ async function init() {
   // (no token before this session) or invalid page name.
   try {
     const last = localStorage.getItem('cp_last_page');
-    const validPages = ['dashboard','campaigns','ai','keywords','report','activity','settings','tasks','agent-performance','stuck','history','users','my-settings','products'];
+    const validPages = ['dashboard','campaigns','action-centre','ai','keywords','report','activity','settings','tasks','agent-performance','stuck','history','users','my-settings','products'];
     if (last && validPages.indexOf(last) !== -1 && last !== 'dashboard') {
       // Find the matching nav button so it gets the active class
       const btn = document.querySelector('.nav-item[onclick*="showPage(\'' + last + '\'"]');
@@ -4875,12 +4911,11 @@ function buildAmzProductModalBody(p) {
       } else {
         buttons.push('<button class="btn btn-primary" onclick="amzAssignTask(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\')" style="font-size:13px">📋 Assign as task</button>');
       }
-      // r23: snooze moved from Products to Underperforming Campaigns. Products
+      // r26: snooze moved from Products to Underperforming Campaigns. Products
       // page no longer offers snooze (it's a campaign-level concept now).
-      // r21: owner reassign — owner+manager only
-      if (window._meCache && (((window._meCache.role||'').toLowerCase()==='owner') || ((window._meCache.role||'').toLowerCase()==='manager') || ((window._meCache.department||'').toLowerCase()==='manager'))) {
-        buttons.push('<button class="btn btn-ghost" onclick="showOwnerReassignModal(\'' + escHtml(p.parent_sku).replace(/'/g, "\\'") + '\',\'' + escHtml(p.owner_agent || '').replace(/'/g, "\\'") + '\')" style="font-size:13px">👤 Reassign owner</button>');
-      }
+      // r26: removed "Reassign owner" modal button — owner is now changed inline
+      // from the product card dropdown only. Avoids two competing UIs for the
+      // same action.
       if ((p.asins || [])[0]) buttons.push('<a class="btn btn-ghost" href="https://www.amazon.co.uk/dp/' + escHtml(p.asins[0]) + '" target="_blank">Open on Amazon →</a>');
       buttons.push('<a class="btn btn-ghost" href="https://sellercentral.amazon.co.uk/inventory" target="_blank">Open in Seller Central →</a>');
       return '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' + buttons.join('') + '</div>';
@@ -6535,6 +6570,236 @@ async function submitAiFeedback(scope, targetId, btn) {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+// ─── r26: Action Centre ────────────────────────────────────────────────────
+// Single page that combines what was AI analysis + Underperforming + redundant
+// All Campaigns badge logic. Three priority tabs (Fix now / Look at / Scale)
+// each showing rows with a plain-English problem + inline actions.
+
+let _acState = { fixnow: [], lookat: [], scale: [], insight: '', currentTab: 'fixnow', cached: false };
+
+async function loadActionCentre(force) {
+  const list = document.getElementById('ac-list');
+  if (!list) return;
+  if (!force && _acState.cached) {
+    // Re-render from cache (cheap)
+    renderActionCentreList(_acState.currentTab);
+    return;
+  }
+  list.innerHTML = '<div class="loading"><div class="spinner"></div> Loading Action Centre…</div>';
+  try {
+    const r = await fetch('/api/amazon/action-centre' + (force ? '?force=1' : ''), { headers: getAuthHeaders() });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed to load');
+    _acState.fixnow = j.fixnow || [];
+    _acState.lookat = j.lookat || [];
+    _acState.scale = j.scale || [];
+    _acState.insight = j.strategicInsight || '';
+    _acState.cached = true;
+
+    // Top-strip metrics
+    document.getElementById('ac-p1-count').textContent = _acState.fixnow.length;
+    document.getElementById('ac-p2-count').textContent = _acState.lookat.length;
+    document.getElementById('ac-p3-count').textContent = _acState.scale.length;
+    document.getElementById('ac-wasted').textContent = '£' + (j.totalWasted || 0).toFixed(0);
+
+    // Tab counts
+    document.getElementById('ac-fixnow-count').textContent = _acState.fixnow.length;
+    document.getElementById('ac-lookat-count').textContent = _acState.lookat.length;
+    document.getElementById('ac-scale-count').textContent = _acState.scale.length;
+
+    // Nav-side badge — fix now count
+    const navBadge = document.getElementById('ac-badge');
+    if (navBadge) {
+      if (_acState.fixnow.length > 0) {
+        navBadge.style.display = 'inline-flex';
+        navBadge.textContent = _acState.fixnow.length;
+      } else {
+        navBadge.style.display = 'none';
+      }
+    }
+
+    renderActionCentreList(_acState.currentTab);
+  } catch(e) {
+    list.innerHTML = '<div class="empty" style="padding:50px;color:var(--red)">Could not load: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function showActionCentreTab(tab, btnEl) {
+  _acState.currentTab = tab;
+  document.querySelectorAll('#page-action-centre .tab-btn').forEach(function(b){ b.classList.remove('active'); });
+  if (btnEl) btnEl.classList.add('active');
+  renderActionCentreList(tab);
+}
+
+function renderActionCentreList(tab) {
+  const list = document.getElementById('ac-list');
+  const insightEl = document.getElementById('ac-insight');
+  if (!list) return;
+  const items = _acState[tab] || [];
+
+  // Strategic insight banner — only on Fix Now tab
+  if (insightEl) {
+    if (tab === 'fixnow' && _acState.insight) {
+      insightEl.style.display = 'block';
+      insightEl.innerHTML = '<strong style="color:#92400e">Pattern across the account:</strong> ' + escHtml(_acState.insight);
+    } else {
+      insightEl.style.display = 'none';
+    }
+  }
+
+  if (!items.length) {
+    const msgs = {
+      fixnow: '✅ Nothing critical. Switch to "Look at" or "Scale" tabs.',
+      lookat: '✅ Nothing on the watch list right now.',
+      scale: 'No campaigns ready to scale. Check Fix now first.'
+    };
+    list.innerHTML = '<div class="empty" style="padding:60px 20px;text-align:center;color:var(--text3);font-size:14px">' + msgs[tab] + '</div>';
+    return;
+  }
+
+  list.innerHTML = items.map(renderAcRow).join('');
+}
+
+function renderAcRow(item) {
+  // item: { kind, severity, campaignId, campaignName, searchTerm, productKey,
+  //         problem, evidence, suggestion, actions[], spend7d, sales7d, wasted, score }
+  const sev = item.severity || 'p2';
+  const stripe = sev === 'p1' ? '#dc2626' : (sev === 'p2' ? '#f59e0b' : '#16a34a');
+  const bg = sev === 'p1' ? '#fef2f2' : (sev === 'p2' ? '#fffbeb' : '#f0fdf4');
+  const kindLabel = ({
+    out_of_budget: 'Out of budget',
+    wasted_spend: 'Wasted spend',
+    high_acos: 'High ACOS',
+    no_activity: 'No activity',
+    no_revenue: 'Spend, no revenue',
+    chronic_acos: 'Chronic high ACOS',
+    budget_low: 'Budget low',
+    scale: 'Scale candidate',
+    keyword_waste: 'Wasting search term',
+    keyword_convert: 'Converting term not exact'
+  })[item.kind] || item.kind;
+
+  const badge = '<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:' + stripe + ';background:white;padding:3px 8px;border-radius:4px;border:1px solid ' + stripe + '40">' + escHtml(kindLabel) + '</span>';
+
+  // Action buttons
+  const actions = (item.actions || []).map(function(a) {
+    const cls = a.style === 'primary' ? 'btn-primary' : 'btn-ghost';
+    const safe = (a.handler || '').replace(/'/g, "\\'");
+    return '<button class="btn ' + cls + '" style="font-size:12px;padding:6px 12px" onclick="' + safe + '">' + escHtml(a.label) + '</button>';
+  }).join(' ');
+
+  // AI per-row block (collapsed by default)
+  const aiId = 'ac-ai-' + (item.targetId || (item.kind + '-' + (item.campaignId || item.searchTerm || ''))).replace(/[^a-zA-Z0-9]/g, '_');
+  const aiButton = item.kind && (item.campaignId || item.productKey || item.searchTerm)
+    ? '<button class="btn btn-ghost" style="font-size:12px;padding:6px 12px" onclick="runAcAi(\'' + aiId + '\',\'' + (item.kind || '') + '\',\'' + escHtml(item.campaignId || '') + '\',\'' + escHtml(item.searchTerm || '') + '\',\'' + escHtml(item.productKey || '') + '\')">🤖 Diagnose</button>'
+    : '';
+
+  return '<div style="background:' + bg + ';border-left:4px solid ' + stripe + ';padding:14px 16px;border-radius:6px;margin-bottom:10px">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:280px">' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">' +
+          badge +
+          '<span style="font-weight:600;font-size:14px">' + escHtml(item.title || item.campaignName || item.searchTerm || '') + '</span>' +
+        '</div>' +
+        (item.problem ? '<div style="font-size:13px;color:var(--text2);line-height:1.5;margin-bottom:6px">' + escHtml(item.problem) + '</div>' : '') +
+        (item.evidence ? '<div style="font-size:12px;color:var(--text3);font-family:var(--mono)">' + escHtml(item.evidence) + '</div>' : '') +
+      '</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start">' + actions + ' ' + aiButton + '</div>' +
+    '</div>' +
+    '<div id="' + aiId + '" style="display:none;margin-top:10px"></div>' +
+  '</div>';
+}
+
+// AI runner per Action Centre row. Calls a route appropriate to the row kind.
+async function runAcAi(aiId, kind, campaignId, searchTerm, productKey) {
+  const target = document.getElementById(aiId);
+  if (!target) return;
+  target.style.display = 'block';
+  target.innerHTML = '<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:12px"><div class="spinner" style="display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:middle"></div> Claude is analysing…</div>';
+  try {
+    let endpoint, body, scope, targetId;
+    if (kind === 'keyword_waste' || kind === 'keyword_convert') {
+      // No dedicated endpoint yet — use campaign-analysis on the parent campaign
+      // when we know it. Otherwise generic short response.
+      if (campaignId) {
+        endpoint = '/api/campaign-analysis/' + encodeURIComponent(campaignId);
+        scope = 'amazon_campaign'; targetId = campaignId;
+      } else {
+        target.innerHTML = '<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:12px;font-size:13px;color:var(--text3)">No AI diagnosis for orphan keyword rows yet — open Keyword Intelligence for full analysis.</div>';
+        return;
+      }
+      const r = await fetch(endpoint, { headers: getAuthHeaders() });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error);
+      target.innerHTML = renderAcAiResult(j.analysis || '', j.modelUsed, scope, targetId);
+      loadAiFeedbackList(scope, targetId);
+    } else {
+      // Campaign-level
+      if (!campaignId) { target.innerHTML = '<div style="padding:12px;font-size:13px;color:var(--text3)">No campaign to analyse.</div>'; return; }
+      const r = await fetch('/api/campaign-analysis/' + encodeURIComponent(campaignId), { headers: getAuthHeaders() });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error);
+      scope = 'amazon_campaign'; targetId = campaignId;
+      target.innerHTML = renderAcAiResult(j.analysis || '', j.modelUsed, scope, targetId);
+      loadAiFeedbackList(scope, targetId);
+    }
+  } catch(e) {
+    target.innerHTML = '<div style="background:white;border:1px solid var(--red);border-radius:8px;padding:12px;color:var(--red);font-size:13px">Error: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderAcAiResult(text, modelUsed, scope, targetId) {
+  const modelLabel = modelUsed ? (modelUsed.indexOf('haiku') !== -1 ? 'Haiku' : 'Opus') : '';
+  return '<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:14px">' +
+    '<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🤖 Claude' + (modelLabel ? ' (' + modelLabel + ')' : '') + '</div>' +
+    '<div style="font-size:13px;line-height:1.6;white-space:pre-wrap">' + escHtml(text) + '</div>' +
+    renderAiFeedbackWidget(scope, targetId) +
+  '</div>';
+}
+
+// Action handlers — these are inlined in row buttons. Keep them small & safe.
+function acAddBudget(campaignId, amount) {
+  if (typeof openBudgetModal === 'function') { openBudgetModal(campaignId, amount); return; }
+  // Fallback — direct API call
+  if (!confirm('Add £' + amount + ' to this campaign?')) return;
+  fetch('/api/campaigns/' + encodeURIComponent(campaignId) + '/budget', {
+    method: 'POST',
+    headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+    body: JSON.stringify({ amount: amount })
+  }).then(function(r){ return r.json(); }).then(function(j){
+    if (j.success || j.ok) { alert('Budget added — campaign refreshed.'); loadActionCentre(true); }
+    else alert('Failed: ' + (j.error || 'unknown'));
+  });
+}
+
+function acSnoozeCampaign(campaignId, days) {
+  if (!confirm('Snooze this campaign for ' + days + ' days? It will be hidden from Action Centre until then.')) return;
+  fetch('/api/amazon/campaign-snooze', {
+    method: 'POST',
+    headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
+    body: JSON.stringify({ campaignId: campaignId, days: days })
+  }).then(function(r){ return r.json(); }).then(function(){
+    loadActionCentre(true);
+  }).catch(function(e){ alert('Snooze failed: ' + e.message); });
+}
+
+function acViewCampaign(campaignId) {
+  // Reuse the existing campaign modal from r24
+  if (typeof openCampaignModal === 'function') openCampaignModal(campaignId);
+  else if (typeof showCampaignDetail === 'function') showCampaignDetail(campaignId);
+  else { showPage('campaigns', document.querySelector('.nav-item[onclick*="campaigns"]')); }
+}
+
+function acAddNegative(searchTerm, campaign) {
+  if (typeof actionKeyword === 'function') { actionKeyword(searchTerm, campaign, 'negative'); return; }
+  alert('Open Keyword Intelligence to manage this term.');
+}
+
+function acAddExact(searchTerm, campaign) {
+  if (typeof actionKeyword === 'function') { actionKeyword(searchTerm, campaign, 'add_keyword'); return; }
+  alert('Open Keyword Intelligence to manage this term.');
 }
 
 init();

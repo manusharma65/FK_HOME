@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r25b (Haiku→Opus AI cost switch, agent feedback widget, TACOS on product cards, Repeat Offenders tab) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r26 (Google Search Console organic rank section in product modal) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -697,6 +697,55 @@ function typeBadge(t) {
   return '';
 }
 function escapeHtml(s) { return String(s || '').replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+// ─── r26: Google Search Console organic rank section ───────────────────────
+async function renderGscSection(shopifyUrl) {
+  const content = document.getElementById('gsc-content');
+  const totalsEl = document.getElementById('gsc-totals');
+  if (!content) return;
+  try {
+    const r = await authedFetch('/api/google/gsc/product-rank?url=' + encodeURIComponent(shopifyUrl));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed to load');
+    const rows = j.rows || [];
+    if (totalsEl && j.totals) {
+      totalsEl.textContent = '· ' + (j.totals.clicks || 0).toLocaleString() + ' clicks · ' + (j.totals.impressions || 0).toLocaleString() + ' impressions · ' + (j.totals.ctr || 0) + '% CTR';
+    }
+    if (!rows.length) {
+      content.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:8px 0">No Google search data yet for this page. Either GSC has not crawled it, or the cron has not run since deploy. Data appears after the 06:30 daily fetch.</div>';
+      return;
+    }
+    const html = '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
+      '<thead><tr style="border-bottom:1px solid var(--border);text-align:left">' +
+        '<th style="padding:6px 4px;font-size:11px;color:var(--text3);text-transform:uppercase;font-weight:500">Query</th>' +
+        '<th style="padding:6px 4px;font-size:11px;color:var(--text3);text-transform:uppercase;font-weight:500;text-align:right">Clicks</th>' +
+        '<th style="padding:6px 4px;font-size:11px;color:var(--text3);text-transform:uppercase;font-weight:500;text-align:right">Impr.</th>' +
+        '<th style="padding:6px 4px;font-size:11px;color:var(--text3);text-transform:uppercase;font-weight:500;text-align:right">Position</th>' +
+        '<th style="padding:6px 4px;font-size:11px;color:var(--text3);text-transform:uppercase;font-weight:500;text-align:right">vs prev</th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function(r) {
+        let trend = '<span style="color:var(--text3)">—</span>';
+        if (r.delta != null) {
+          // Positive delta = position number went DOWN = improved rank
+          if (r.delta > 0.5) trend = '<span style="color:#16a34a">↑ ' + r.delta.toFixed(1) + '</span>';
+          else if (r.delta < -0.5) trend = '<span style="color:#dc2626">↓ ' + Math.abs(r.delta).toFixed(1) + '</span>';
+          else trend = '<span style="color:var(--text3)">stable</span>';
+        }
+        const posClr = r.position <= 3 ? '#16a34a' : (r.position <= 10 ? '#0891b2' : (r.position <= 30 ? '#ea580c' : '#dc2626'));
+        return '<tr style="border-bottom:1px solid var(--border)">' +
+          '<td style="padding:6px 4px">' + escapeHtml(r.query) + '</td>' +
+          '<td style="padding:6px 4px;text-align:right">' + (r.clicks || 0) + '</td>' +
+          '<td style="padding:6px 4px;text-align:right">' + (r.impressions || 0).toLocaleString() + '</td>' +
+          '<td style="padding:6px 4px;text-align:right;color:' + posClr + ';font-weight:600">' + r.position.toFixed(1) + '</td>' +
+          '<td style="padding:6px 4px;text-align:right">' + trend + '</td>' +
+        '</tr>';
+      }).join('') +
+    '</tbody></table>';
+    content.innerHTML = html;
+  } catch(e) {
+    content.innerHTML = '<div style="color:var(--red);font-size:13px;padding:8px 0">Could not load: ' + escapeHtml(e.message) + '</div>';
+  }
+}
 
 // ─── r25b: AI feedback widget (matches Amazon side) ────────────────────────
 function renderAiFeedbackWidget(scope, targetId) {
@@ -2881,6 +2930,16 @@ function openProductDetailFromObj(p) {
       '<div id="lpc-meta-product" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>' +
     '</div>' +
 
+    // r26: GSC organic rank section. Shows top 10 queries this page ranks for over
+    // last 30 days, with current vs previous-period position to show trend.
+    '<div id="gsc-section-product" style="margin-top:18px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔎 Google organic rank <span id="gsc-totals" style="color:var(--text3);font-weight:500;font-size:12px;margin-left:6px"></span></div>' +
+        '<div style="font-size:11px;color:var(--text3)">Last 30 days · vs previous 30</div>' +
+      '</div>' +
+      '<div id="gsc-content" style="font-size:13px;line-height:1.6;color:var(--text)"><div style="color:var(--text3)">Loading…</div></div>' +
+    '</div>' +
+
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
     '<button class="btn btn-primary" onclick=\'assignToProduct(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\' style="font-size:13px">📋 Assign as task</button>' +
     (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
@@ -2892,6 +2951,8 @@ function openProductDetailFromObj(p) {
   renderRuleFrictionSection(p);
   // Initialise the AI section with either the cached result or the run buttons
   renderProductAiSection(p);
+  // r26: load GSC organic rank if we have a Shopify URL
+  if (p.shopifyUrl) renderGscSection(p.shopifyUrl);
 }
 
 // ─── Rule-based friction (free, instant, always visible) ──────────────────

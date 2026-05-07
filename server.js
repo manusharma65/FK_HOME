@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r25c (TACOS in product modal, badge logic fix for zero-sale wasters + chronic underperformers, manual refresh-sales-now button, orders cron uses LastUpdatedAfter for incremental sync)
+// CampaignPulse — deploy marker 2026-05-07 r26a (Action Centre + sharper AI + GSC + auto-owner-derive disabled — was overwriting manual owners every night)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -455,11 +455,12 @@ async function syncAmazonCatalogue() {
     try {
       await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '2 hours'");
     } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
-    // r11: re-derive owner_agent for newly synced products (manual overrides preserved)
-    try {
-      const dr = await deriveProductOwners();
-      if (dr.ok) console.log('[SP-API catalogue sync] Owner derive: ' + dr.rows_updated + ' rows across ' + dr.parents_scanned + ' parents');
-    } catch(e) { console.error('[SP-API catalogue sync] Owner derive failed: ' + e.message); }
+    // r26: removed automatic deriveProductOwners() call here. The TF-IDF matcher
+    // was reassigning products to the most active agent (Satyam) every night,
+    // overriding manual assignments on products where owner_manual=FALSE.
+    // Owners are now set MANUALLY ONLY via the inline dropdown on each product card.
+    // New products start as Unassigned until a manager picks them up — that's the
+    // correct semantics for an op who genuinely owns the product.
     return { ok: true, total: total, upserted: upserted, withParent: withParent, errors: errors, seconds: parseFloat(seconds) };
   } catch(e) {
     console.error('[SP-API catalogue sync] FAILED: ' + e.message);
@@ -1547,6 +1548,23 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_ai_feedback_scope_target ON ai_feedback(scope, target_id, created_at DESC);
+
+      -- r26: gsc_daily — Google Search Console daily-per-(page,query) data.
+      -- Pulled by daily cron at 06:00 London. Used on Google product modal to show
+      -- organic ranking trends. URL is the Shopify product URL.
+      CREATE TABLE IF NOT EXISTS gsc_daily (
+        report_date DATE NOT NULL,
+        page_url TEXT NOT NULL,
+        query TEXT NOT NULL,
+        clicks INTEGER DEFAULT 0,
+        impressions INTEGER DEFAULT 0,
+        ctr NUMERIC(6,4) DEFAULT 0,
+        position NUMERIC(7,2) DEFAULT 0,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (report_date, page_url, query)
+      );
+      CREATE INDEX IF NOT EXISTS idx_gsc_daily_url_date ON gsc_daily(page_url, report_date DESC);
+      CREATE INDEX IF NOT EXISTS idx_gsc_daily_date ON gsc_daily(report_date DESC);
     `);
 
     // r23: drop the old product snooze table (introduced r22, never deployed).
@@ -3606,6 +3624,81 @@ app.post('/api/amazon/refresh-sales-now', async function(req, res) {
   try {
     const result = await syncAmazonOrders(1); // today only
     res.json({ ok: true, syncedDays: 1, result: result, refreshedAt: new Date().toISOString() });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r25d: GET /api/amazon/sales-today-debug — diagnostic. Owner only.
+// Shows exactly what's in the DB for today vs what Seller Central would show.
+// Helps figure out where the £-gap comes from (Pending orders, zero-total rows,
+// timezone bucketing issues, refunded orders, etc).
+app.get('/api/amazon/sales-today-debug', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  if (!db) return res.status(500).json({ error: 'no-db' });
+  try {
+    // Today bounds in London time, expressed as UTC for the query
+    // (since purchase_date is stored without timezone, we treat it as UTC literal)
+    const now = new Date();
+    const ldnFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const todayLdn = ldnFmt.format(now); // YYYY-MM-DD in London
+
+    // Build day-start and day-end in London → convert to UTC ISO
+    // Easiest: use a temp Date with the London Y-M-D at 00:00 then offset by the
+    // current London UTC offset. But Postgres can do this directly with AT TIME ZONE.
+    // Approach: ask Postgres to give us today's range using London time.
+
+    // Status breakdown for orders whose London-day matches today
+    const breakdownRes = await db.query(
+      "SELECT status, COUNT(*) AS n, " +
+      "       SUM(CASE WHEN order_total IS NULL THEN 1 ELSE 0 END) AS null_total, " +
+      "       SUM(CASE WHEN order_total = 0 THEN 1 ELSE 0 END) AS zero_total, " +
+      "       SUM(COALESCE(order_total, 0)) AS gross " +
+      "FROM amazon_orders " +
+      "WHERE TO_CHAR((purchase_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1 " +
+      "GROUP BY status ORDER BY gross DESC NULLS LAST",
+      [todayLdn]
+    );
+
+    // Sum from line items as a sanity check (sums product price, no shipping/tax)
+    const itemsSumRes = await db.query(
+      "SELECT SUM(i.item_price * i.quantity) AS items_gross, COUNT(DISTINCT i.order_id) AS orders_with_items " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "WHERE TO_CHAR((o.purchase_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1 " +
+      "AND o.status NOT IN ('Cancelled','Canceled')",
+      [todayLdn]
+    );
+
+    // Same for the existing dashboard query (so we can confirm what the user sees)
+    const dashboardRes = await db.query(
+      "SELECT SUM(order_total) AS gross, COUNT(*) AS n " +
+      "FROM amazon_orders " +
+      "WHERE purchase_date >= NOW() - INTERVAL '1 days' " +
+      "AND status NOT IN ('Cancelled','Canceled') " +
+      "AND TO_CHAR(purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1",
+      [todayLdn]
+    );
+
+    // Last sync timestamp
+    let lastSync = null;
+    try {
+      const lr = await db.query("SELECT settings->>'last_orders_sync_at' AS hwm FROM app_settings WHERE id = 1");
+      if (lr.rows.length) lastSync = lr.rows[0].hwm;
+    } catch(e) {}
+
+    res.json({
+      today_london: todayLdn,
+      now_utc: now.toISOString(),
+      last_sync_hwm: lastSync,
+      orders_by_status: breakdownRes.rows,
+      total_from_order_total_field: breakdownRes.rows.reduce(function(s,r){ return s + parseFloat(r.gross || 0); }, 0).toFixed(2),
+      total_from_line_items_excludes_tax_shipping: parseFloat(itemsSumRes.rows[0].items_gross || 0).toFixed(2),
+      orders_with_items: parseInt(itemsSumRes.rows[0].orders_with_items || 0),
+      what_dashboard_query_returns: parseFloat(dashboardRes.rows[0].gross || 0).toFixed(2),
+      dashboard_order_count: parseInt(dashboardRes.rows[0].n || 0),
+      hint: 'If many orders show null_total or zero_total, those are Pending — Amazon does not provide their value yet. Compare totals: order_total field includes shipping+VAT, line_items does not.'
+    });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -6222,14 +6315,14 @@ app.post('/api/amazon/products/merge', async function(req, res) {
         [actor, actor + ' merged [' + sources.join(', ') + '] into ' + canonicalKey + ' (' + totalUpdated + ' rows)']
       );
     } catch(e) {}
-    // Re-derive owners so campaigns reattach correctly
-    const dr = await deriveProductOwners();
+    // r26: removed automatic deriveProductOwners() call. See catalogue-sync comment.
+    // Merging products no longer retriggers the TF-IDF reassignment.
     res.json({
       ok: true,
       canonical: canonicalKey,
       merged: sources,
       rows_updated: totalUpdated,
-      derive: dr
+      derive: { ok: true, skipped: true, note: 'auto-derive intentionally disabled in r26' }
     });
   } catch(e) {
     console.error('/api/amazon/products/merge error: ' + e.message);
@@ -6786,24 +6879,135 @@ app.get('/api/campaign-analysis/:campaignId', async function(req, res) {
     const campaignId = req.params.campaignId;
     const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 14");
     let history = [];
+    let liveMeta = null;
     snapshots.rows.forEach(function(snap) {
       const c = (snap.campaigns||[]).find(function(x){ return String(x.campaignId) === String(campaignId); });
-      if (c) history.push({ date: snap.snapshot_date, spend: c.spend||0, sales: c.sales||0, acos: c.acos||0, impressions: c.impressions||0, clicks: c.clicks||0 });
+      if (c) {
+        if (!liveMeta) liveMeta = { name: c.name, agent: c.agent || '', portfolio: c.portfolio || '', targetingType: c.targetingType || '', dailyBudget: c.dailyBudget || 0 };
+        history.push({ date: snap.snapshot_date, spend: parseFloat(c.spend||0), sales: parseFloat(c.sales||0), acos: parseFloat(c.acos||0), impressions: parseInt(c.impressions||0), clicks: parseInt(c.clicks||0) });
+      }
     });
     if (!history.length) return res.json({ analysis: 'No historical data found for this campaign.' });
+
     const totalSpend = history.reduce(function(s,d){ return s+parseFloat(d.spend||0); }, 0);
     const totalSales = history.reduce(function(s,d){ return s+parseFloat(d.sales||0); }, 0);
-    const daysNoRevenue = history.filter(function(d){ return parseFloat(d.sales||0) === 0 && parseFloat(d.spend||0) > 0; }).length;
-    const daysNoActivity = history.filter(function(d){ return parseInt(d.impressions||0) === 0; }).length;
-    const dismissed = await db.query('SELECT search_term, reason FROM keyword_dismissals WHERE campaign ILIKE $1', ['%' + campaignId + '%']);
-    const dismissedSection = dismissed.rows.length > 0 ? '\nDISMISSED KEYWORDS:\n' + dismissed.rows.map(function(d){ return d.search_term + ': ' + d.reason; }).join('\n') : '';
-    // r25b: include any agent feedback for this campaign so the AI takes it into account
+    const acos7d = totalSales > 0 ? (100 * totalSpend / totalSales) : null;
+    const daysNoRevenue = history.filter(function(d){ return d.sales === 0 && d.spend > 0; }).length;
+    const daysNoActivity = history.filter(function(d){ return d.impressions === 0; }).length;
+    const totalClicks = history.reduce(function(s,d){ return s + d.clicks; }, 0);
+    const totalImpressions = history.reduce(function(s,d){ return s + d.impressions; }, 0);
+    const ctr = totalImpressions > 0 ? (100 * totalClicks / totalImpressions) : 0;
+
+    // Live (today) numbers if available — pulled from in-memory state
+    const liveToday = (state.campaigns || []).find(function(c){ return String(c.campaignId) === String(campaignId); });
+
+    // Search-term level data for THIS campaign — wasted vs converting
+    let waste = [], converting = [];
+    try {
+      const ks = (typeof keywordState !== 'undefined') ? keywordState : null;
+      if (ks && Array.isArray(ks.data)) {
+        const rel = ks.data.filter(function(r){ return r.campaignName && (liveMeta && liveMeta.name) && r.campaignName === liveMeta.name; });
+        waste = rel.filter(function(r){ return parseFloat(r.cost||0) > 1 && parseInt(r.purchases14d||0) === 0; })
+                   .sort(function(a,b){ return parseFloat(b.cost||0) - parseFloat(a.cost||0); }).slice(0, 8);
+        converting = rel.filter(function(r){ return parseInt(r.purchases14d||0) > 0; })
+                        .sort(function(a,b){ return parseFloat(b.sales14d||0) - parseFloat(a.sales14d||0); }).slice(0, 6);
+      }
+    } catch(e) {}
+
+    const dismissed = await db.query('SELECT search_term, reason FROM keyword_dismissals WHERE campaign ILIKE $1 LIMIT 30', ['%' + campaignId + '%']);
     const feedbackSection = await buildFeedbackPromptSection('amazon_campaign', campaignId);
-    const prompt = 'You are an Amazon PPC expert analyzing a campaign for FK Sports UK (fitness equipment).\n\nCAMPAIGN ID: ' + campaignId + '\nLAST 14 DAYS:\n' + JSON.stringify(history, null, 2) + '\n\nSUMMARY:\n- Total spend: £' + totalSpend.toFixed(2) + '\n- Total revenue: £' + totalSales.toFixed(2) + '\n- Days with spend but zero revenue: ' + daysNoRevenue + '\n- Days with zero impressions: ' + daysNoActivity + dismissedSection + feedbackSection + '\n\nProvide:\n1. Likely root cause\n2. One specific recommended action\n3. Worth continuing or pause?\n\nBe direct. No generic advice.';
-    // r25b: Haiku-then-Opus instead of Opus-only. Saves ~80% on cost for routine
-    // analyses while still escalating when output looks thin.
-    const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400 });
-    res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, daysNoRevenue, daysNoActivity });
+
+    // ── r26: rebuilt Amazon-specific prompt. Forces evidence; bans generic advice ──
+    const lines = [];
+    lines.push('You are an Amazon PPC expert analysing ONE campaign for FK Sports UK (sports + fitness equipment seller, Amazon UK marketplace).');
+    lines.push('');
+    lines.push('═══ CAMPAIGN ═══');
+    lines.push('Name: ' + (liveMeta ? liveMeta.name : '(unknown)'));
+    lines.push('Targeting: ' + (liveMeta && liveMeta.targetingType ? liveMeta.targetingType.toUpperCase() : 'unknown'));
+    lines.push('Owner agent: ' + (liveMeta && liveMeta.agent ? liveMeta.agent : 'unassigned'));
+    lines.push('Portfolio: ' + (liveMeta && liveMeta.portfolio ? liveMeta.portfolio : '—'));
+    lines.push('Daily budget: £' + (liveMeta && liveMeta.dailyBudget ? parseFloat(liveMeta.dailyBudget).toFixed(2) : '?'));
+    lines.push('');
+    lines.push('═══ TODAY (live) ═══');
+    if (liveToday) {
+      lines.push('Spend: £' + parseFloat(liveToday.spend || 0).toFixed(2) + ' / £' + parseFloat(liveToday.dailyBudget || 0).toFixed(2));
+      lines.push('Sales: £' + parseFloat(liveToday.sales || 0).toFixed(2));
+      lines.push('Today ACOS: ' + parseFloat(liveToday.acos || 0).toFixed(1) + '%');
+      lines.push('Budget used: ' + parseFloat(liveToday.budgetPct || 0).toFixed(0) + '%');
+      lines.push('Out of budget: ' + (liveToday.budgetRemaining <= 0.01 && liveToday.dailyBudget > 0 ? 'YES' : 'no'));
+    } else {
+      lines.push('(no live data — campaign not in current sync)');
+    }
+    lines.push('');
+    lines.push('═══ LAST 14 DAYS ═══');
+    lines.push('Total spend: £' + totalSpend.toFixed(2));
+    lines.push('Total ad-attributed sales: £' + totalSales.toFixed(2));
+    lines.push('14d ACOS: ' + (acos7d != null ? acos7d.toFixed(1) + '%' : 'N/A (no sales)'));
+    lines.push('14d CTR: ' + ctr.toFixed(2) + '%');
+    lines.push('Days with spend & zero sales: ' + daysNoRevenue + ' / ' + history.length);
+    lines.push('Days with zero impressions: ' + daysNoActivity + ' / ' + history.length);
+    lines.push('');
+    lines.push('Daily breakdown (newest first):');
+    history.slice(0, 7).forEach(function(d){
+      lines.push('  ' + d.date + ': £' + d.spend.toFixed(2) + ' spend / £' + d.sales.toFixed(2) + ' sales / ACOS ' + d.acos.toFixed(1) + '% / ' + d.impressions + ' impr / ' + d.clicks + ' clicks');
+    });
+    lines.push('');
+
+    if (waste.length > 0) {
+      lines.push('═══ WASTED SEARCH TERMS (this campaign, last 7 days, zero conversions) ═══');
+      waste.forEach(function(w){
+        lines.push('  "' + w.searchTerm + '" → £' + parseFloat(w.cost||0).toFixed(2) + ', ' + (w.clicks||0) + ' clicks, 0 purchases (' + (w.matchType||'') + ')');
+      });
+      lines.push('');
+    }
+    if (converting.length > 0) {
+      lines.push('═══ CONVERTING SEARCH TERMS (this campaign, last 7 days) ═══');
+      converting.forEach(function(c){
+        lines.push('  "' + c.searchTerm + '" → ' + (c.purchases14d||0) + ' purchases, £' + parseFloat(c.sales14d||0).toFixed(2) + ' sales (' + (c.matchType||'') + ' match)');
+      });
+      lines.push('');
+    }
+    if (dismissed.rows.length > 0) {
+      lines.push('═══ ALREADY DISMISSED / ACTIONED (do NOT recommend these) ═══');
+      dismissed.rows.slice(0, 15).forEach(function(d){
+        lines.push('  "' + d.search_term + '" — ' + (d.reason || 'previously actioned'));
+      });
+      lines.push('');
+    }
+    if (feedbackSection) {
+      lines.push(feedbackSection);
+      lines.push('');
+    }
+
+    lines.push('═══ TASK ═══');
+    lines.push('Answer in this exact format. Be specific. Quote real numbers from above.');
+    lines.push('');
+    lines.push('1. ROOT CAUSE (one sentence): What is the single biggest reason this campaign is in trouble (or doing well)? Name a specific number or term.');
+    lines.push('');
+    lines.push('2. RECOMMENDED ACTION (one sentence + a £ or term): Tell the agent the ONE thing to do. Be concrete.');
+    lines.push('   - For wasted-spend campaigns: name 2-3 search terms to negate (from the wasted list above).');
+    lines.push('   - For high-ACOS auto campaigns: recommend bid reduction by % AND say which terms to negate.');
+    lines.push('   - For high-ACOS manual campaigns: recommend bid changes on specific keywords or pause.');
+    lines.push('   - For low-spend / no-activity campaigns: bid is too low, raise by 25-50% or pause.');
+    lines.push('   - For scaling candidates: increase daily budget by £X (suggest a specific number based on current daily budget).');
+    lines.push('');
+    lines.push('3. CONTINUE OR PAUSE: Continue / Continue with changes / Pause. One word + 1 sentence reason.');
+    lines.push('');
+    lines.push('═══ RULES ═══');
+    lines.push('- Cite real numbers from the data above. NEVER invent.');
+    lines.push('- For an AUTO campaign with high ACOS, the fix is almost always negative keywords (from the wasted list). Recommend specific terms by name.');
+    lines.push('- For a MANUAL campaign with high ACOS, the fix is bid reduction or pausing specific keywords.');
+    lines.push('- DO NOT recommend things already in the dismissed list.');
+    lines.push('- DO NOT use generic phrases: "monitor closely", "optimise targeting", "review performance", "consider adjusting", "improve conversion", "review keywords".');
+    lines.push('- DO NOT recommend listing edits, A+ content, or anything outside the campaign itself.');
+    lines.push('- DO NOT recommend re-running the AI or contacting Amazon support.');
+    lines.push('- If agent feedback says "we already tried X", recommend something different.');
+    lines.push('- If the data is genuinely thin (< 3 days, < £5 spend), say so. Do not invent diagnoses.');
+    lines.push('- British English. £ for money. Direct tone, no fluff. 60-100 words total.');
+
+    const prompt = lines.join('\n');
+    const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400, min_useful_chars: 80 });
+    res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, acos7d: acos7d, daysNoRevenue, daysNoActivity });
   } catch(e) { console.error('Campaign analysis error: ' + e.message); res.status(500).json({ error: e.message }); }
 });
 
@@ -6847,6 +7051,352 @@ app.get('/api/stuck-campaigns', async function(req, res) {
     noRevenue.sort(function(a,b){ return parseFloat(b.totalWastedSpend) - parseFloat(a.totalWastedSpend); });
     res.json({ noActivity, noRevenue, daysOfData: snapshots.length });
   } catch(e) { console.error('Stuck campaigns error: ' + e.message); res.json({ noActivity: [], noRevenue: [], error: e.message }); }
+});
+
+// ─── r26: Action Centre — unified P1/P2/P3 view ──────────────────────────────
+// Replaces the old /api/ai/analyse + /api/stuck-campaigns + All Campaigns badges.
+// Returns categorised, scored items in three buckets so the UI can show a single
+// list of "what to do today" instead of forcing the agent to bounce between pages.
+//
+// Scoring rules (P1 = fix now, P2 = look at, P3 = scale, in priority order):
+//   P1 — out_of_budget (if dailyBudget > 0 and remaining ≤ £0.01)
+//   P1 — no_revenue (3+ days spend with no sales in last 7d)
+//   P1 — wasted_spend (today: spend > £5 AND sales = 0)
+//   P1 — chronic_acos (7d ACOS > 40% on £20+ spend)
+//   P1 — keyword_waste — search term: 7d spend > £10 with 0 conversions, joined to its campaign
+//   P1 — no_activity (3+ days zero impressions)
+//   P2 — high_acos (today ACOS 25-40% with spend > £5, but not chronic)
+//   P2 — budget_low (≥80% used today, not exhausted)
+//   P3 — scale (low ACOS < 15% on £20+ 7d spend, headroom in budget)
+//   P3 — keyword_convert — converting search term not yet exact-match (purchases > 0, not exact)
+//
+// Snoozed items are excluded. Each row returns enough data for the front-end
+// to render the row + actions without another fetch.
+let _acCacheMs = 0;
+let _acCachePayload = null;
+const AC_CACHE_TTL = 5 * 60 * 1000;  // 5 min — cheap to recompute, no AI in default path
+
+app.get('/api/amazon/action-centre', async function(req, res) {
+  if (!db) return res.json({ fixnow: [], lookat: [], scale: [] });
+  const force = req.query.force === '1' || req.query.force === 'true';
+  // Cache the data computation, but always re-include strategic insight from cache too.
+  if (!force && _acCachePayload && (Date.now() - _acCacheMs) < AC_CACHE_TTL) {
+    return res.json(_acCachePayload);
+  }
+
+  try {
+    // ── 1. Snoozed campaigns: skip these entirely ──────────────────────────
+    const snoozedSet = new Set();
+    try {
+      await db.query("DELETE FROM amazon_campaign_snooze WHERE snoozed_until <= NOW()");
+      const sRes = await db.query("SELECT campaign_id FROM amazon_campaign_snooze WHERE snoozed_until > NOW()");
+      sRes.rows.forEach(function(r){ snoozedSet.add(String(r.campaign_id)); });
+    } catch(e) {}
+
+    // ── 2. Live campaign list with today's metrics — from in-memory state ───
+    const liveCampaigns = (state.campaigns || []).filter(function(c){
+      return !snoozedSet.has(String(c.campaignId));
+    });
+
+    // ── 3. 7-day per-campaign aggregates from daily_snapshots ──────────────
+    const snapsRes = await db.query(
+      "SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days' ORDER BY snapshot_date DESC"
+    );
+    const sevenDay = {}; // campaignId -> { spend, sales, days:[{date,spend,sales,acos,impressions}], name, agent }
+    snapsRes.rows.forEach(function(snap) {
+      (snap.campaigns || []).forEach(function(c) {
+        if (!c.campaignId) return;
+        const id = String(c.campaignId);
+        if (!sevenDay[id]) sevenDay[id] = { spend: 0, sales: 0, days: [], name: c.name, agent: c.agent || '', portfolio: c.portfolio || '', targetingType: c.targetingType || '' };
+        sevenDay[id].spend += parseFloat(c.spend || 0);
+        sevenDay[id].sales += parseFloat(c.sales || 0);
+        sevenDay[id].days.push({ date: snap.snapshot_date, spend: parseFloat(c.spend || 0), sales: parseFloat(c.sales || 0), acos: parseFloat(c.acos || 0), impressions: parseInt(c.impressions || 0) });
+      });
+    });
+
+    // ── 4. Build P1/P2/P3 items ─────────────────────────────────────────────
+    const fixnow = [], lookat = [], scale = [];
+    let totalWasted = 0;
+
+    liveCampaigns.forEach(function(c) {
+      const id = String(c.campaignId);
+      const sd = sevenDay[id] || { spend: 0, sales: 0, days: [] };
+      const acos7d = sd.sales > 0 ? +((100 * sd.spend / sd.sales).toFixed(1)) : null;
+      const todaySpend = parseFloat(c.spend || 0);
+      const todaySales = parseFloat(c.sales || 0);
+      const todayAcos = parseFloat(c.acos || 0);
+      const dailyBudget = parseFloat(c.dailyBudget || 0);
+      const budgetPct = parseFloat(c.budgetPct || 0);
+      const budgetRemaining = parseFloat(c.budgetRemaining || 0);
+
+      // Check rules in priority order; assign FIRST match only (don't double-list)
+      let placed = false;
+      const baseRow = {
+        campaignId: id,
+        campaignName: c.name,
+        targetId: id,
+        title: c.name,
+        spend7d: +sd.spend.toFixed(2),
+        sales7d: +sd.sales.toFixed(2),
+        acos7d: acos7d,
+        agent: sd.agent || c.agent || '',
+        targetingType: c.targetingType || sd.targetingType || ''
+      };
+      const viewBtn = { label: 'View', handler: 'acViewCampaign(\'' + id + '\')', style: 'ghost' };
+      const snoozeBtn = { label: 'Snooze 7d', handler: 'acSnoozeCampaign(\'' + id + '\', 7)', style: 'ghost' };
+
+      // P1 — out of budget
+      if (!placed && dailyBudget > 0 && budgetRemaining <= 0.01) {
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'out_of_budget', severity: 'p1',
+          problem: 'Out of budget. Spent £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' today and stopped serving.',
+          evidence: 'Today: spend £' + todaySpend.toFixed(2) + ' · sales £' + todaySales.toFixed(2) + ' · ACOS ' + (todayAcos || 0).toFixed(1) + '%',
+          actions: [
+            { label: 'Add £20', handler: 'acAddBudget(\'' + id + '\', 20)', style: 'primary' },
+            { label: 'Add £50', handler: 'acAddBudget(\'' + id + '\', 50)', style: 'ghost' },
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P1 — chronic high ACOS (7-day, sustained, real spend)
+      if (!placed && acos7d != null && acos7d > 40 && sd.spend > 20) {
+        const wastedAmount = sd.spend - sd.sales * 0.12; // crude — cost above target ACOS
+        totalWasted += Math.max(0, wastedAmount > 0 ? wastedAmount : 0);
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'chronic_acos', severity: 'p1',
+          problem: 'ACOS at ' + acos7d.toFixed(0) + '% over the last 7 days on £' + sd.spend.toFixed(0) + ' spend. Sustained underperformance.',
+          evidence: '7d: spend £' + sd.spend.toFixed(2) + ' · sales £' + sd.sales.toFixed(2) + ' · ACOS ' + acos7d.toFixed(1) + '%',
+          actions: [
+            { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+            snoozeBtn,
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P1 — wasted spend today (zero sales)
+      if (!placed && todaySpend > 5 && todaySales <= 0) {
+        totalWasted += todaySpend;
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'wasted_spend', severity: 'p1',
+          problem: 'Spent £' + todaySpend.toFixed(2) + ' today with zero sales. ' + (sd.spend > 0 ? 'On track for a wasted day.' : ''),
+          evidence: 'Today: £' + todaySpend.toFixed(2) + ' spend, 0 sales · 7d total: £' + sd.spend.toFixed(2) + ' / £' + sd.sales.toFixed(2),
+          actions: [ snoozeBtn, viewBtn ]
+        }));
+        placed = true;
+      }
+
+      // P1 — no revenue 3+ days (from snapshots)
+      if (!placed && sd.days.length >= 3) {
+        const last7 = sd.days.slice(0, Math.min(7, sd.days.length));
+        const spendDays = last7.filter(function(d){ return d.spend > 0; });
+        if (spendDays.length >= 3 && last7.every(function(d){ return d.spend === 0 || d.sales === 0; })) {
+          const totalSpend = last7.reduce(function(s,d){ return s + d.spend; }, 0);
+          totalWasted += totalSpend;
+          fixnow.push(Object.assign({}, baseRow, {
+            kind: 'no_revenue', severity: 'p1',
+            problem: 'Spending budget for ' + spendDays.length + ' of last 7 days with no revenue. £' + totalSpend.toFixed(2) + ' wasted.',
+            evidence: '7d: £' + totalSpend.toFixed(2) + ' spend · £0 attributed sales · ' + spendDays.length + ' days with spend',
+            actions: [
+              { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+              snoozeBtn,
+              viewBtn
+            ]
+          }));
+          placed = true;
+        }
+      }
+
+      // P1 — no activity 3+ days
+      if (!placed && sd.days.length >= 3) {
+        const last3 = sd.days.slice(0, 3);
+        if (last3.every(function(d){ return d.impressions === 0; })) {
+          fixnow.push(Object.assign({}, baseRow, {
+            kind: 'no_activity', severity: 'p1',
+            problem: 'Zero impressions for 3+ days. Either bids are too low to show, or targeting is exhausted.',
+            evidence: 'Last 3 days: 0 impressions on £' + dailyBudget.toFixed(0) + ' daily budget',
+            actions: [
+              { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+              snoozeBtn,
+              viewBtn
+            ]
+          }));
+          placed = true;
+        }
+      }
+
+      // P2 — today ACOS high (not yet chronic)
+      if (!placed && todayAcos > 25 && todayAcos <= 40 && todaySpend > 5) {
+        lookat.push(Object.assign({}, baseRow, {
+          kind: 'high_acos', severity: 'p2',
+          problem: 'ACOS ' + todayAcos.toFixed(1) + '% today on £' + todaySpend.toFixed(2) + ' spend. Above target — watch.',
+          evidence: 'Today: ACOS ' + todayAcos.toFixed(1) + '% · 7d ACOS: ' + (acos7d != null ? acos7d.toFixed(1) + '%' : 'no data'),
+          actions: [ snoozeBtn, viewBtn ]
+        }));
+        placed = true;
+      }
+
+      // P2 — budget low
+      if (!placed && budgetPct >= 80 && budgetPct < 100 && dailyBudget > 0) {
+        lookat.push(Object.assign({}, baseRow, {
+          kind: 'budget_low', severity: 'p2',
+          problem: 'Used ' + budgetPct.toFixed(0) + '% of today\'s £' + dailyBudget.toFixed(2) + ' budget. Likely to exhaust before evening.',
+          evidence: 'Today: £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' · ACOS ' + todayAcos.toFixed(1) + '%',
+          actions: [
+            { label: 'Add £10', handler: 'acAddBudget(\'' + id + '\', 10)', style: 'primary' },
+            { label: 'Add £25', handler: 'acAddBudget(\'' + id + '\', 25)', style: 'ghost' },
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P3 — scale candidate
+      if (!placed && acos7d != null && acos7d <= 15 && sd.spend > 20 && budgetPct < 90) {
+        scale.push(Object.assign({}, baseRow, {
+          kind: 'scale', severity: 'p3',
+          problem: 'Healthy ACOS ' + acos7d.toFixed(1) + '% on £' + sd.spend.toFixed(0) + ' over 7 days. Room to grow.',
+          evidence: '7d: £' + sd.spend.toFixed(2) + ' spend · £' + sd.sales.toFixed(2) + ' sales · today ' + budgetPct.toFixed(0) + '% budget used',
+          actions: [
+            { label: '+25% budget', handler: 'acAddBudget(\'' + id + '\', ' + Math.max(5, Math.round(dailyBudget * 0.25)) + ')', style: 'primary' },
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+    });
+
+    // ── 5. Keyword Intelligence rows: wasted terms (P1) and converting non-exact (P3) ──
+    let keywordWasteCount = 0;
+    try {
+      // Wasted terms — high spend, zero conversions, last 7d
+      // We pull from the in-memory keywordState which holds the most recent search-term report.
+      const ks = (typeof keywordState !== 'undefined') ? keywordState : null;
+      if (ks && Array.isArray(ks.data)) {
+        const top = ks.data
+          .filter(function(r){ return parseFloat(r.cost || 0) > 10 && parseInt(r.purchases14d || 0) === 0; })
+          .sort(function(a,b){ return parseFloat(b.cost || 0) - parseFloat(a.cost || 0); })
+          .slice(0, 12);
+        top.forEach(function(t) {
+          const term = t.searchTerm || '';
+          const camp = t.campaignName || '';
+          const safeTerm = term.replace(/'/g, "\\'");
+          const safeCamp = camp.replace(/'/g, "\\'");
+          fixnow.push({
+            kind: 'keyword_waste', severity: 'p1',
+            title: term,
+            campaignName: camp,
+            problem: 'Search term "' + term + '" has cost £' + parseFloat(t.cost || 0).toFixed(2) + ' over 7 days with zero purchases. Add as negative.',
+            evidence: 'Term: "' + term + '" · spend £' + parseFloat(t.cost||0).toFixed(2) + ' · ' + (t.clicks||0) + ' clicks · 0 purchases · in: ' + camp,
+            actions: [
+              { label: 'Add as negative', handler: "acAddNegative('" + safeTerm + "','" + safeCamp + "')", style: 'primary' },
+              { label: 'Dismiss', handler: "acAddNegative('" + safeTerm + "','" + safeCamp + "')", style: 'ghost' }
+            ]
+          });
+          totalWasted += parseFloat(t.cost || 0);
+          keywordWasteCount++;
+        });
+
+        // Converting terms not exact-match — P3
+        const conv = ks.data
+          .filter(function(r){ return parseInt(r.purchases14d || 0) > 0 && (r.matchType || '').toLowerCase() !== 'exact'; })
+          .sort(function(a,b){ return parseFloat(b.sales14d || 0) - parseFloat(a.sales14d || 0); })
+          .slice(0, 8);
+        conv.forEach(function(t) {
+          const term = t.searchTerm || '';
+          const camp = t.campaignName || '';
+          const safeTerm = term.replace(/'/g, "\\'");
+          const safeCamp = camp.replace(/'/g, "\\'");
+          scale.push({
+            kind: 'keyword_convert', severity: 'p3',
+            title: term,
+            campaignName: camp,
+            problem: 'Term "' + term + '" produced ' + (t.purchases14d || 0) + ' purchases on ' + (t.matchType || 'broad') + ' match. Convert to exact for better control.',
+            evidence: 'Term: "' + term + '" · ' + (t.purchases14d || 0) + ' purchases · £' + parseFloat(t.sales14d||0).toFixed(2) + ' sales · ' + (t.matchType || 'broad') + ' match · in: ' + camp,
+            actions: [
+              { label: 'Add as exact', handler: "acAddExact('" + safeTerm + "','" + safeCamp + "')", style: 'primary' }
+            ]
+          });
+        });
+      }
+    } catch(e) { console.error('[r26 action-centre] keyword pull error: ' + e.message); }
+
+    // ── 6. Sort each bucket by score (a crude heuristic — wasted £ then 7d spend) ──
+    function sortByImpact(a, b) {
+      const ax = (a.spend7d || 0) + (a.kind === 'out_of_budget' ? 1000 : 0);
+      const bx = (b.spend7d || 0) + (b.kind === 'out_of_budget' ? 1000 : 0);
+      return bx - ax;
+    }
+    fixnow.sort(sortByImpact);
+    lookat.sort(sortByImpact);
+    scale.sort(function(a, b){ return (b.spend7d || 0) - (a.spend7d || 0); });
+
+    // ── 7. Strategic insight — re-use the existing AI helper (cached short-text) ──
+    let strategicInsight = '';
+    try {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (apiKey && fixnow.length > 0) {
+        const summary = {
+          totalCampaigns: liveCampaigns.length,
+          fixNowCount: fixnow.length,
+          totalWasted: totalWasted.toFixed(0),
+          topProblems: fixnow.slice(0, 5).map(function(r){ return r.kind + ': ' + r.title; })
+        };
+        const prompt = 'You are an Amazon PPC expert reviewing FK Sports UK (fitness equipment seller). ' +
+          'Account-level summary across last 7 days:\n' + JSON.stringify(summary, null, 2) + '\n\n' +
+          'In ONE sentence (max 25 words), describe the SINGLE biggest pattern across the account that the team should know about today. ' +
+          'Be specific — name a problem type, a campaign type (auto vs manual), or a £ figure. ' +
+          'No generic advice ("monitor your campaigns"). If nothing notable, say so plainly.';
+        const aiRes = await aiHaikuThenOpus(prompt, { max_tokens: 100, min_useful_chars: 30 });
+        strategicInsight = (aiRes.text || '').trim();
+      }
+    } catch(e) { console.error('[r26 action-centre] insight error: ' + e.message); }
+
+    const payload = {
+      fixnow: fixnow,
+      lookat: lookat,
+      scale: scale,
+      strategicInsight: strategicInsight,
+      totalWasted: +totalWasted.toFixed(2),
+      keywordWasteCount: keywordWasteCount,
+      generatedAt: new Date().toISOString()
+    };
+    _acCachePayload = payload;
+    _acCacheMs = Date.now();
+    res.json(payload);
+  } catch(e) {
+    console.error('[r26 action-centre] error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r26: campaign-snooze endpoint — used by Action Centre row buttons.
+// Manager+owner only (matches existing r23 snooze style).
+app.post('/api/amazon/campaign-snooze', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(role) !== -1 || dept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Manager+ only' });
+  const campaignId = String((req.body && req.body.campaignId) || '');
+  const days = Math.max(1, Math.min(30, parseInt((req.body && req.body.days) || 7)));
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  try {
+    const until = new Date(Date.now() + days * 86400000);
+    const actor = (req.user && req.user.name) || 'unknown';
+    await db.query(
+      "INSERT INTO amazon_campaign_snooze (campaign_id, snoozed_until, snoozed_by, snooze_reason, snooze_action) " +
+      "VALUES ($1, $2, $3, $4, 'snooze') " +
+      "ON CONFLICT (campaign_id) DO UPDATE SET snoozed_until=EXCLUDED.snoozed_until, snoozed_by=EXCLUDED.snoozed_by, snoozed_at=NOW()",
+      [campaignId, until, actor, 'Action Centre snooze ' + days + 'd']
+    );
+    // Bust the AC cache so the row disappears immediately
+    _acCachePayload = null;
+    res.json({ ok: true, snoozedUntil: until.toISOString() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/snapshots/:date', async function(req, res) {
@@ -8057,6 +8607,10 @@ function aggregateGoogleMetrics(rows) {
 
 const GA4_OAUTH_SCOPE = 'https://www.googleapis.com/auth/analytics.readonly';
 const GA4_OAUTH_PURPOSE = 'ga4';
+// r26: Search Console scope. Added alongside GA4 because it uses the same
+// Google OAuth client. Re-consent is required once after this deploy.
+const GSC_OAUTH_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+const COMBINED_OAUTH_SCOPES = GA4_OAUTH_SCOPE + ' ' + GSC_OAUTH_SCOPE;
 
 function getOauthRedirectUri(req) {
   // Prefer DASHBOARD_URL env var (so prod always uses prod redirect, even when
@@ -8115,7 +8669,7 @@ app.get('/api/google/oauth/start', function(req, res) {
     'client_id=' + encodeURIComponent(clientId) +
     '&redirect_uri=' + encodeURIComponent(redirect) +
     '&response_type=code' +
-    '&scope=' + encodeURIComponent(GA4_OAUTH_SCOPE) +
+    '&scope=' + encodeURIComponent(COMBINED_OAUTH_SCOPES) +
     '&access_type=offline' +
     '&prompt=consent' +
     '&include_granted_scopes=true';
@@ -8185,6 +8739,156 @@ app.get('/api/google/oauth/callback', async function(req, res) {
 });
 
 // Get a fresh GA4 access token using the stored refresh token
+// r26: Fetch Google Search Console data — top queries per page for FK Sports.
+// Uses the same Google OAuth token as GA4 (combined scopes). Pulls yesterday's
+// data (GSC has 2-3 day lag but yesterday is usually available).
+//
+// We pull at ROW level (date × page × query) because we want to see
+// rank trend per (page, query). API returns up to 25,000 rows per request.
+async function fetchGscData(daysBack) {
+  if (!db) throw new Error('No DB');
+  daysBack = daysBack || 3; // by default, refresh last 3 days (covers GSC's reporting lag)
+  const propertyUrl = process.env.GSC_PROPERTY_URL || 'https://fksports.co.uk';
+
+  let token;
+  try {
+    token = await getGa4AccessToken();
+  } catch(e) {
+    console.error('[r26 gsc] no access token: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+
+  const today = new Date();
+  const startDate = new Date(today.getTime() - daysBack * 86400000).toISOString().slice(0, 10);
+  const endDate = new Date(today.getTime() - 1 * 86400000).toISOString().slice(0, 10); // yesterday
+  let totalRows = 0, errors = 0;
+
+  try {
+    const url = 'https://searchconsole.googleapis.com/webmasters/v3/sites/' + encodeURIComponent(propertyUrl) + '/searchAnalytics/query';
+    let startRow = 0;
+    const rowLimit = 5000;
+    let keepGoing = true;
+    while (keepGoing) {
+      const reqBody = {
+        startDate: startDate,
+        endDate: endDate,
+        dimensions: ['date', 'page', 'query'],
+        rowLimit: rowLimit,
+        startRow: startRow
+      };
+      const r = await axios.post(url, reqBody, {
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        timeout: 30000
+      });
+      const rows = (r.data && r.data.rows) || [];
+      if (!rows.length) break;
+      // Upsert each row
+      for (const row of rows) {
+        try {
+          const [date, pageUrl, query] = row.keys;
+          await db.query(
+            "INSERT INTO gsc_daily (report_date, page_url, query, clicks, impressions, ctr, position, fetched_at) " +
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) " +
+            "ON CONFLICT (report_date, page_url, query) DO UPDATE SET " +
+            "clicks = EXCLUDED.clicks, impressions = EXCLUDED.impressions, ctr = EXCLUDED.ctr, position = EXCLUDED.position, fetched_at = NOW()",
+            [date, pageUrl, query, parseInt(row.clicks || 0), parseInt(row.impressions || 0), parseFloat(row.ctr || 0), parseFloat(row.position || 0)]
+          );
+          totalRows++;
+        } catch(e) { errors++; console.error('[r26 gsc] upsert error: ' + e.message); }
+      }
+      if (rows.length < rowLimit) keepGoing = false;
+      else startRow += rowLimit;
+      if (startRow >= 25000) keepGoing = false; // safety cap
+    }
+    console.log('[r26 gsc] fetched ' + totalRows + ' rows (' + startDate + ' to ' + endDate + '), ' + errors + ' errors');
+    return { ok: true, rows: totalRows, errors: errors, dateRange: { start: startDate, end: endDate } };
+  } catch(e) {
+    const status = e.response && e.response.status;
+    if (status === 403) {
+      console.error('[r26 gsc] 403 — likely missing scope. User must reconnect via /api/google/oauth/start to grant Search Console permission.');
+      return { ok: false, error: '403 — reconnect Google for Search Console scope' };
+    }
+    console.error('[r26 gsc] fetch error: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// r26: GET /api/google/gsc/product-rank?url=... — return top 10 queries for a page
+// over the last 30 days, with current vs previous-period position.
+app.get('/api/google/gsc/product-rank', async function(req, res) {
+  if (!db) return res.json({ rows: [] });
+  const url = String(req.query.url || '').trim();
+  if (!url) return res.status(400).json({ error: 'url required' });
+  try {
+    // Last 30 days, top 10 queries by clicks
+    const r = await db.query(
+      "WITH recent AS (" +
+      "  SELECT query, " +
+      "         SUM(clicks) AS clicks_30d, " +
+      "         SUM(impressions) AS impr_30d, " +
+      "         AVG(position) AS avg_pos_30d " +
+      "  FROM gsc_daily " +
+      "  WHERE page_url = $1 AND report_date >= CURRENT_DATE - INTERVAL '30 days' " +
+      "  GROUP BY query " +
+      "  HAVING SUM(impressions) >= 5 " +
+      "  ORDER BY SUM(clicks) DESC, SUM(impressions) DESC " +
+      "  LIMIT 10" +
+      "), prev AS (" +
+      "  SELECT query, AVG(position) AS avg_pos_prev " +
+      "  FROM gsc_daily " +
+      "  WHERE page_url = $1 AND report_date >= CURRENT_DATE - INTERVAL '60 days' AND report_date < CURRENT_DATE - INTERVAL '30 days' " +
+      "  GROUP BY query" +
+      ") " +
+      "SELECT r.query, r.clicks_30d, r.impr_30d, r.avg_pos_30d, p.avg_pos_prev " +
+      "FROM recent r LEFT JOIN prev p ON p.query = r.query " +
+      "ORDER BY r.clicks_30d DESC, r.impr_30d DESC",
+      [url]
+    );
+    const rows = r.rows.map(function(row) {
+      const cur = parseFloat(row.avg_pos_30d || 0);
+      const prev = row.avg_pos_prev != null ? parseFloat(row.avg_pos_prev) : null;
+      const delta = (prev != null && cur > 0) ? +((prev - cur).toFixed(1)) : null; // positive = improved (lower number = better rank)
+      return {
+        query: row.query,
+        clicks: parseInt(row.clicks_30d || 0),
+        impressions: parseInt(row.impr_30d || 0),
+        position: +cur.toFixed(1),
+        previousPosition: prev != null ? +prev.toFixed(1) : null,
+        delta: delta
+      };
+    });
+    // Total clicks/impressions across all queries (not just top 10)
+    const totalRes = await db.query(
+      "SELECT SUM(clicks) AS clicks, SUM(impressions) AS impr, AVG(ctr) AS ctr " +
+      "FROM gsc_daily WHERE page_url = $1 AND report_date >= CURRENT_DATE - INTERVAL '30 days'",
+      [url]
+    );
+    const tr = totalRes.rows[0] || {};
+    res.json({
+      url: url,
+      rows: rows,
+      totals: {
+        clicks: parseInt(tr.clicks || 0),
+        impressions: parseInt(tr.impr || 0),
+        ctr: tr.ctr != null ? +(parseFloat(tr.ctr) * 100).toFixed(1) : 0
+      }
+    });
+  } catch(e) {
+    console.error('[r26 gsc] product-rank error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r26: POST /api/google/gsc/refresh-now — manager+owner manual refresh
+app.post('/api/google/gsc/refresh-now', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(role) !== -1 || dept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Manager+ only' });
+  const result = await fetchGscData(7);
+  res.json(result);
+});
+
 async function getGa4AccessToken() {
   if (!db) throw new Error('No DB — cannot read OAuth tokens');
   const r = await db.query("SELECT * FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
@@ -9287,6 +9991,11 @@ cron.schedule('*/' + interval + ' * * * *', function() { syncCampaigns(); });
 cron.schedule('0 */2 * * *', function() { syncShopifyProducts().catch(function(e){ console.error('Shopify cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
 // GA4 funnel data — refresh once a day at 7am UK time (after midnight UTC data settles)
 cron.schedule('0 7 * * *', function() { fetchGa4ProductMetrics().catch(function(e){ console.error('GA4 cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
+
+// r26: GSC daily fetch — 06:30 London. Pulls last 3 days (covers GSC's 2-day reporting lag).
+cron.schedule('30 6 * * *', function() {
+  fetchGscData(3).catch(function(e){ console.error('GSC cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
 
 const PORT = process.env.PORT || 3000;
 // ─────────────────────────────────────────────────────────────────────────
