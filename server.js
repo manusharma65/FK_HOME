@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r26a (Action Centre + sharper AI + GSC + auto-owner-derive disabled — was overwriting manual owners every night)
+// CampaignPulse — deploy marker 2026-05-07 r26b (PUT /owner endpoint logging + canonicalAgent + RETURNING — to diagnose owner-switching-back)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -6185,12 +6185,18 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
   if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
   try {
     const groupKey = req.params.groupKey;
-    const agent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
+    const rawAgent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
+    // r26b: canonicalise via the same alias map the rest of the system uses,
+    // so "Aryan" / "aryan" / "Aryan Kumar" all collapse to the same canonical name.
+    const agent = rawAgent ? (typeof canonicalAgent === 'function' ? (canonicalAgent(rawAgent) || rawAgent) : rawAgent) : null;
+    console.log('[r26b owner-PUT] groupKey=' + groupKey + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
     const r = await db.query(
       "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
-      "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2))",
+      "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)) " +
+      "RETURNING sku, owner_agent, owner_manual",
       [agent, groupKey]
     );
+    console.log('[r26b owner-PUT] rows updated: ' + r.rowCount + ', sample: ' + JSON.stringify(r.rows.slice(0, 3)));
     // Audit log
     try {
       const actor = (req.user && req.user.name) || 'System';
@@ -6199,8 +6205,11 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
         [actor, actor + ' set owner of ' + groupKey + ' to ' + (agent || 'Unassigned')]
       );
     } catch(e) {}
-    res.json({ success: true, rows_updated: r.rowCount, group: groupKey, owner: agent });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, rows_updated: r.rowCount, group: groupKey, owner: agent, persisted: r.rows });
+  } catch(e) {
+    console.error('[r26b owner-PUT] error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // r18: GET /api/amazon/merge-candidates — suggest groups of parents that should likely be merged.

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26a (Action Centre + Reassign-owner button removed from modal; inline dropdown on card is the only way) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26b (Action Centre rows fully clickable for campaigns; owner-update optimistic cache + better PUT logging) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -6480,6 +6480,13 @@ function amzScrollToUnassigned() {
 
 // Called when manager picks an agent from a product's owner dropdown
 async function setProductOwner(groupKey, agent) {
+  // r26b: optimistic update — change the cached value immediately so the
+  // dropdown doesn't visually snap back if the re-fetch is slow.
+  if (amzProductsCache && Array.isArray(amzProductsCache.products)) {
+    amzProductsCache.products.forEach(function(p) {
+      if (p.parent_sku === groupKey) p.owner_agent = agent || null;
+    });
+  }
   try {
     const res = await fetch('/api/amazon/products/' + encodeURIComponent(groupKey) + '/owner', {
       method: 'PUT',
@@ -6487,13 +6494,27 @@ async function setProductOwner(groupKey, agent) {
       body: JSON.stringify({ agent: agent || null })
     });
     const data = await res.json();
+    console.log('[r26b setProductOwner] response:', data);
     if (data.success) {
-      // Refresh products page silently
+      // r26b: server's response includes the persisted owner from DB. Use that
+      // as truth — it's what the server confirms is now in DB.
+      const confirmedOwner = data.owner != null ? data.owner : (agent || null);
+      if (amzProductsCache && Array.isArray(amzProductsCache.products)) {
+        amzProductsCache.products.forEach(function(p) {
+          if (p.parent_sku === groupKey) p.owner_agent = confirmedOwner;
+        });
+      }
+      // Refresh products page from server (as a sanity check — should match cache now)
       if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
     } else {
       alert('Could not set owner: ' + (data.error || 'unknown error'));
+      // Revert optimistic change by reloading from server
+      if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
     }
-  } catch(e) { alert('Error: ' + e.message); }
+  } catch(e) {
+    alert('Error: ' + e.message);
+    if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
+  }
 }
 
 // ─── r25b: AI feedback widget ───────────────────────────────────────────────
@@ -6683,20 +6704,28 @@ function renderAcRow(item) {
 
   const badge = '<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:' + stripe + ';background:white;padding:3px 8px;border-radius:4px;border:1px solid ' + stripe + '40">' + escHtml(kindLabel) + '</span>';
 
-  // Action buttons
+  // Action buttons — stopPropagation so click on a button doesn't also bubble up to the row
   const actions = (item.actions || []).map(function(a) {
     const cls = a.style === 'primary' ? 'btn-primary' : 'btn-ghost';
     const safe = (a.handler || '').replace(/'/g, "\\'");
-    return '<button class="btn ' + cls + '" style="font-size:12px;padding:6px 12px" onclick="' + safe + '">' + escHtml(a.label) + '</button>';
+    return '<button class="btn ' + cls + '" style="font-size:12px;padding:6px 12px" onclick="event.stopPropagation();' + safe + '">' + escHtml(a.label) + '</button>';
   }).join(' ');
 
   // AI per-row block (collapsed by default)
   const aiId = 'ac-ai-' + (item.targetId || (item.kind + '-' + (item.campaignId || item.searchTerm || ''))).replace(/[^a-zA-Z0-9]/g, '_');
   const aiButton = item.kind && (item.campaignId || item.productKey || item.searchTerm)
-    ? '<button class="btn btn-ghost" style="font-size:12px;padding:6px 12px" onclick="runAcAi(\'' + aiId + '\',\'' + (item.kind || '') + '\',\'' + escHtml(item.campaignId || '') + '\',\'' + escHtml(item.searchTerm || '') + '\',\'' + escHtml(item.productKey || '') + '\')">🤖 Diagnose</button>'
+    ? '<button class="btn btn-ghost" style="font-size:12px;padding:6px 12px" onclick="event.stopPropagation();runAcAi(\'' + aiId + '\',\'' + (item.kind || '') + '\',\'' + escHtml(item.campaignId || '') + '\',\'' + escHtml(item.searchTerm || '') + '\',\'' + escHtml(item.productKey || '') + '\')">🤖 Diagnose</button>'
     : '';
 
-  return '<div style="background:' + bg + ';border-left:4px solid ' + stripe + ';padding:14px 16px;border-radius:6px;margin-bottom:10px">' +
+  // r26b: campaign rows are fully clickable → opens existing campaign detail modal.
+  // Search-term rows (keyword_waste / keyword_convert) don't map to a single campaign,
+  // so they stay non-clickable on the body — only buttons act.
+  const isCampaignRow = !!(item.campaignId && item.kind !== 'keyword_waste' && item.kind !== 'keyword_convert');
+  const rowOnClick = isCampaignRow ? ' onclick="acViewCampaign(\'' + escHtml(item.campaignId) + '\')" ' : '';
+  const cursor = isCampaignRow ? 'cursor:pointer;' : '';
+  const hint = isCampaignRow ? '<div style="font-size:11px;color:var(--text3);margin-top:6px">Click row for full campaign view →</div>' : '';
+
+  return '<div' + rowOnClick + 'style="' + cursor + 'background:' + bg + ';border-left:4px solid ' + stripe + ';padding:14px 16px;border-radius:6px;margin-bottom:10px">' +
     '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">' +
       '<div style="flex:1;min-width:280px">' +
         '<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">' +
@@ -6705,10 +6734,11 @@ function renderAcRow(item) {
         '</div>' +
         (item.problem ? '<div style="font-size:13px;color:var(--text2);line-height:1.5;margin-bottom:6px">' + escHtml(item.problem) + '</div>' : '') +
         (item.evidence ? '<div style="font-size:12px;color:var(--text3);font-family:var(--mono)">' + escHtml(item.evidence) + '</div>' : '') +
+        hint +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start">' + actions + ' ' + aiButton + '</div>' +
     '</div>' +
-    '<div id="' + aiId + '" style="display:none;margin-top:10px"></div>' +
+    '<div id="' + aiId + '" style="display:none;margin-top:10px" onclick="event.stopPropagation()"></div>' +
   '</div>';
 }
 
@@ -6786,10 +6816,13 @@ function acSnoozeCampaign(campaignId, days) {
 }
 
 function acViewCampaign(campaignId) {
-  // Reuse the existing campaign modal from r24
-  if (typeof openCampaignModal === 'function') openCampaignModal(campaignId);
-  else if (typeof showCampaignDetail === 'function') showCampaignDetail(campaignId);
-  else { showPage('campaigns', document.querySelector('.nav-item[onclick*="campaigns"]')); }
+  // r26b: use openCampDetailModal — the existing modal from r24 with sparklines,
+  // ASIN breakdown, recent tasks etc. Was calling non-existent functions before.
+  if (typeof openCampDetailModal === 'function') {
+    openCampDetailModal(campaignId);
+  } else {
+    showPage('campaigns', document.querySelector('.nav-item[onclick*="campaigns"]'));
+  }
 }
 
 function acAddNegative(searchTerm, campaign) {

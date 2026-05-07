@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r26 (Google Search Console organic rank section in product modal) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r26b (GSC moved up next to Google Ads; feedback widget restored on inline product critique; dynamic model name) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2894,6 +2894,17 @@ function openProductDetailFromObj(p) {
     stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
     '</div>' +
 
+    // r26b: GSC organic rank section moved here, sits next to Google Ads stats.
+    // Shows top 10 queries this page ranks for over last 30 days, with current vs
+    // previous-period position to show trend.
+    '<div id="gsc-section-product" style="margin-top:18px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔎 Google organic rank <span id="gsc-totals" style="color:var(--text3);font-weight:500;font-size:12px;margin-left:6px"></span></div>' +
+        '<div style="font-size:11px;color:var(--text3)">Last 30 days · vs previous 30</div>' +
+      '</div>' +
+      '<div id="gsc-content" style="font-size:13px;line-height:1.6;color:var(--text)"><div style="color:var(--text3)">Loading…</div></div>' +
+    '</div>' +
+
     (p.ga4Sessions != null ? '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Funnel (GA4 last 7 complete days)</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
     stat('Sessions', fmtNum(p.ga4Sessions), 'sessions') +
@@ -2928,16 +2939,6 @@ function openProductDetailFromObj(p) {
       '</div>' +
       '<div id="lpc-content-product" style="font-size:14px;line-height:1.6;color:var(--text)"></div>' +
       '<div id="lpc-meta-product" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>' +
-    '</div>' +
-
-    // r26: GSC organic rank section. Shows top 10 queries this page ranks for over
-    // last 30 days, with current vs previous-period position to show trend.
-    '<div id="gsc-section-product" style="margin-top:18px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">' +
-        '<div style="font-size:14px;font-weight:700;color:var(--text)">🔎 Google organic rank <span id="gsc-totals" style="color:var(--text3);font-weight:500;font-size:12px;margin-left:6px"></span></div>' +
-        '<div style="font-size:11px;color:var(--text3)">Last 30 days · vs previous 30</div>' +
-      '</div>' +
-      '<div id="gsc-content" style="font-size:13px;line-height:1.6;color:var(--text)"><div style="color:var(--text3)">Loading…</div></div>' +
     '</div>' +
 
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
@@ -3168,7 +3169,14 @@ function renderCritiqueInlineInProductModal(j, productId) {
     + (adCoherence ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Ad-vs-page coherence</div>'
         + '<div style="font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escapeHtml(adCoherence) + '</div>' : '')
     + (trustSignals ? '<div style="font-size:12px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px">Trust signals</div>'
-        + '<div style="font-size:13px;color:var(--text2);line-height:1.6">' + escapeHtml(trustSignals) + '</div>' : '');
+        + '<div style="font-size:13px;color:var(--text2);line-height:1.6">' + escapeHtml(trustSignals) + '</div>' : '')
+    // r26b: feedback widget restored. Was already present on the standalone
+    // landing-critique modal and on Google campaign AI — was missing only on this
+    // inline-in-product-modal render (different function).
+    + renderAiFeedbackWidget('google_product', String(productId));
+
+  // r26b: load existing feedback after innerHTML is set (it'll find the list element)
+  loadAiFeedbackList('google_product', String(productId));
 
   // Lock state — only managers can re-analyse if cache <24h
   const locked = !!j.lockedForAgent;
@@ -3192,8 +3200,15 @@ function renderCritiqueInlineInProductModal(j, productId) {
     buttonsDiv.innerHTML = btns;
   }
   if (metaDiv) {
+    // r26b: model name now dynamic — was hardcoded "Opus 4.7" which made all
+    // analyses look like Opus even when Haiku ran.
     const ageNote = j.cached ? ('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago') : 'Fresh analysis';
-    metaDiv.textContent = ageNote + ' · Opus 4.7' + (locked ? ' · Locked for 24h' : '') + (j.partial ? ' · ⚠ Partial' : '');
+    let modelLabel = 'Opus';
+    if (j.modelUsed) {
+      const m = String(j.modelUsed).toLowerCase();
+      modelLabel = m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : (m.indexOf('sonnet') >= 0 ? 'Sonnet' : j.modelUsed));
+    }
+    metaDiv.textContent = ageNote + ' · ' + modelLabel + (locked ? ' · Locked for 24h' : '') + (j.partial ? ' · ⚠ Partial' : '');
   }
 }
 
