@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-06 r23 (campaign snooze 1d/3d/7d/30d, Tasks renamed, all-campaigns modal, traffic snapshots fix, audit cleanup) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r25a (agent filter on products page, SKU name shown inline in ASIN breakdown, budget exhaustion log persistence) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -794,6 +794,13 @@ tbody tr:hover { background: var(--surface2); }
           <button class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="applyAmzProductSearch()">🔍 Search</button>
           <button id="amz-search-clear" class="btn btn-ghost" style="font-size:12px;padding:5px 8px;display:none" onclick="clearAmzProductSearch()" title="Clear search">✕</button>
         </div>
+        <!-- r25a: agent filter — filters product list by owner_agent within the current bucket tab -->
+        <div style="margin-left:8px;display:flex;gap:6px;align-items:center">
+          <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">Agent</label>
+          <select id="amz-agent-filter" onchange="applyAmzAgentFilter()" style="font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;background:var(--surface);color:var(--text);min-width:130px">
+            <option value="">All agents</option>
+          </select>
+        </div>
         <!-- r14b: Bulk AI critique trigger + status -->
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
           <span id="amz-bulk-status" style="font-size:11px;color:var(--text3)"></span>
@@ -813,6 +820,20 @@ tbody tr:hover { background: var(--surface2); }
         <button class="btn btn-ghost" onclick="closeAmzProductModal()" style="font-size:18px;padding:4px 12px">×</button>
       </div>
       <div id="amz-product-modal-body" style="padding:24px"></div>
+    </div>
+  </div>
+
+  <!-- r24: Campaign detail modal — opened from All Campaigns row click -->
+  <div id="camp-detail-modal" onclick="if(event.target===this)closeCampDetailModal()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.65);z-index:1100;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--surface);width:100%;max-width:900px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);margin-top:30px;margin-bottom:30px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);border-radius:14px 14px 0 0;z-index:1">
+        <div style="min-width:0;flex:1">
+          <div id="camp-detail-title" style="font-size:17px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Campaign detail</div>
+          <div id="camp-detail-subtitle" style="font-size:12px;color:var(--text3);margin-top:2px"></div>
+        </div>
+        <button class="btn btn-ghost" onclick="closeCampDetailModal()" style="font-size:18px;padding:4px 12px;margin-left:12px">×</button>
+      </div>
+      <div id="camp-detail-body" style="padding:22px 24px"></div>
     </div>
   </div>
 
@@ -1559,7 +1580,13 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     const hideBtnHtml = ' <button class="btn btn-ghost" style="font-size:11px;padding:2px 6px;color:var(--text3)" onclick="hideCampaign(\'' + c.campaignId + '\',\'' + escName + '\')" title="Hide this campaign from the dashboard">🗙</button>';
     action = action + hideBtnHtml;
     const typeBadge = isAuto ? '<span class="badge badge-blue" style="font-size:10px">Auto</span>' : '<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>';
-    return `<tr>
+    // r24: rows on the All Campaigns table open a detail modal on click. Click handler
+    // ignores clicks that originate inside a button/anchor/input so existing inline
+    // action buttons (Add budget, Hide, etc.) keep working unchanged.
+    const rowAttr = (tableId === 'all-table')
+      ? ' data-camp-id="' + escHtml(String(c.campaignId)) + '" onclick="onAllCampaignRowClick(event, this)" style="cursor:pointer"'
+      : '';
+    return `<tr${rowAttr}>
       <td><div class="camp-name">${escHtml(c.name)}</div><div class="camp-meta">${c.campaignId}</div></td>
       <td><div class="camp-name">${escHtml(c.portfolio||'—')}</div><div class="camp-meta">${escHtml(c.agent||'')}</div></td>
       ${tableId === 'all-table' ? '<td>' + typeBadge + '</td>' : ''}
@@ -1648,6 +1675,216 @@ function sortCamps(col) {
   const indicator = document.getElementById('sort-' + col);
   if (indicator) indicator.textContent = sortState.dir === -1 ? ' ↓' : ' ↑';
   renderAllCampaigns();
+}
+
+// ── r24: Campaign detail modal (All Campaigns row click) ──────────────────
+// Opens a popup with: plain-English health summary, 7-day mini-chart, top ASINs
+// in this campaign (from r22 ad-perf data), recent tasks, and quick action
+// buttons that route to existing functions (Add Budget, Snooze, Hide, Create Task).
+function onAllCampaignRowClick(event, rowEl) {
+  // Ignore clicks that originated inside a control — buttons, links, inputs, selects.
+  // Also ignore clicks inside an .ag wrapper (action group) for safety.
+  let t = event.target;
+  while (t && t !== rowEl) {
+    const tag = (t.tagName || '').toLowerCase();
+    if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') return;
+    if (t.classList && t.classList.contains('ag')) return;
+    t = t.parentNode;
+  }
+  const cid = rowEl.getAttribute('data-camp-id');
+  if (!cid) return;
+  openCampDetailModal(cid);
+}
+
+function closeCampDetailModal() {
+  const m = document.getElementById('camp-detail-modal');
+  if (m) m.style.display = 'none';
+}
+
+async function openCampDetailModal(campaignId) {
+  const camp = allCampaigns.find(function(c){ return String(c.campaignId) === String(campaignId); });
+  if (!camp) { alert('Campaign not found in current view.'); return; }
+
+  // Header
+  document.getElementById('camp-detail-title').textContent = camp.name || campaignId;
+  const subBits = [];
+  if (camp.portfolio) subBits.push(escHtml(camp.portfolio));
+  if (camp.agent) subBits.push(escHtml(camp.agent));
+  subBits.push((camp.targetingType || 'manual') === 'auto' ? 'Auto' : 'Manual');
+  subBits.push('ID ' + campaignId);
+  document.getElementById('camp-detail-subtitle').innerHTML = subBits.join(' · ');
+
+  // Show modal with loading state
+  document.getElementById('camp-detail-body').innerHTML =
+    '<div style="padding:30px 0;text-align:center;color:var(--text3);font-size:13px">Loading details…</div>';
+  document.getElementById('camp-detail-modal').style.display = 'flex';
+
+  // Fetch detail data
+  let detail = { history: [], topAsins: [], recentTasks: [] };
+  try {
+    const r = await fetch('/api/amazon/campaign-detail/' + encodeURIComponent(campaignId), { headers: getAuthHeaders() });
+    if (r.ok) detail = await r.json();
+  } catch(e) {
+    console.error('campaign-detail fetch failed:', e);
+  }
+
+  document.getElementById('camp-detail-body').innerHTML = buildCampDetailBody(camp, detail);
+}
+
+// Plain-English health summary built from the live campaign object.
+// Mirrors the same flagging logic the table uses, in a sentence form.
+function campDetailHealthSummary(c) {
+  const outOfBudget = c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
+  const budgetLow = c.budgetPct >= 80 && !outOfBudget;
+  const acosHigh = c.acos > 35 && c.spend > 5;
+  const noSales = (c.spend > 5) && (!c.sales || c.sales <= 0);
+
+  const lines = [];
+  if (outOfBudget) {
+    lines.push({ tone: 'red', icon: '🛑', text: 'Out of budget — daily £' + c.dailyBudget + ' is fully spent. Ads have stopped showing for the rest of today.' });
+  } else if (budgetLow) {
+    lines.push({ tone: 'amber', icon: '⚠️', text: 'Budget low — ' + Math.round(c.budgetPct) + '% of daily £' + c.dailyBudget + ' used. Likely to run out before evening.' });
+  }
+  if (acosHigh) {
+    lines.push({ tone: 'red', icon: '📉', text: 'ACOS is ' + c.acos + '% — every £1 of sales costs £' + (c.acos / 100).toFixed(2) + ' in ads. Bids or keywords likely too aggressive.' });
+  }
+  if (noSales) {
+    lines.push({ tone: 'red', icon: '💸', text: 'Spent £' + c.spend + ' today with no sales recorded. Wasted spend if it continues.' });
+  }
+  if (lines.length === 0) {
+    if (c.spend > 0 && c.sales > 0) {
+      lines.push({ tone: 'green', icon: '✅', text: 'Healthy — spent £' + c.spend + ', made £' + c.sales + ' sales (ACOS ' + (c.acos || 0) + '%). No alerts firing.' });
+    } else if (c.spend === 0 && c.impressions === 0) {
+      lines.push({ tone: 'grey', icon: '💤', text: 'No activity today — zero impressions, zero spend. Either paused, brand new, or budget never spent.' });
+    } else {
+      lines.push({ tone: 'grey', icon: 'ℹ️', text: 'No alerts firing. Spend £' + (c.spend || 0) + ', sales £' + (c.sales || 0) + '.' });
+    }
+  }
+  return lines;
+}
+
+// Tiny inline SVG sparkline — keeps modal load light, no chart library needed.
+function campDetailSparkline(history, key, colorVar) {
+  const vals = history.map(function(h){ return parseFloat(h[key]) || 0; });
+  if (!vals.length) return '<div style="font-size:12px;color:var(--text3)">No history</div>';
+  const max = Math.max.apply(null, vals.concat([0.01]));
+  const w = 280, h = 50, pad = 2;
+  const stepX = vals.length > 1 ? (w - 2*pad) / (vals.length - 1) : 0;
+  const pts = vals.map(function(v, i) {
+    const x = pad + i * stepX;
+    const y = h - pad - ((v / max) * (h - 2*pad));
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+  const lastVal = vals[vals.length - 1];
+  return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">' +
+    '<polyline points="' + pts + '" fill="none" stroke="var(' + colorVar + ')" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+    '<circle cx="' + (pad + (vals.length - 1) * stepX).toFixed(1) + '" cy="' + (h - pad - ((lastVal / max) * (h - 2*pad))).toFixed(1) + '" r="3" fill="var(' + colorVar + ')"/>' +
+  '</svg>';
+}
+
+function buildCampDetailBody(camp, detail) {
+  const summary = campDetailHealthSummary(camp);
+  const summaryHtml = summary.map(function(line) {
+    const bg = line.tone === 'red' ? '#FEF2F2' : line.tone === 'amber' ? '#FFFBEB' : line.tone === 'green' ? '#F0FDF4' : '#F9FAFB';
+    const bd = line.tone === 'red' ? '#FCA5A5' : line.tone === 'amber' ? '#FCD34D' : line.tone === 'green' ? '#86EFAC' : '#E5E7EB';
+    return '<div style="background:' + bg + ';border:1px solid ' + bd + ';border-radius:8px;padding:10px 14px;margin-bottom:6px;display:flex;gap:10px;align-items:flex-start">' +
+      '<div style="font-size:18px;line-height:1">' + line.icon + '</div>' +
+      '<div style="font-size:13px;line-height:1.4;color:var(--text)">' + escHtml(line.text) + '</div>' +
+    '</div>';
+  }).join('');
+
+  // 7-day chart block — three sparklines side by side
+  const hist = detail.history || [];
+  const totalSpend = hist.reduce(function(a, h){ return a + (parseFloat(h.spend)||0); }, 0).toFixed(2);
+  const totalSales = hist.reduce(function(a, h){ return a + (parseFloat(h.sales)||0); }, 0).toFixed(2);
+  const periodAcos = totalSales > 0 ? (100 * totalSpend / totalSales).toFixed(1) : null;
+  const chartBlock = hist.length === 0
+    ? '<div style="font-size:12px;color:var(--text3);padding:10px 0">No 7-day history available yet.</div>'
+    : (
+      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">' +
+        '<div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">Spend (7d total £' + totalSpend + ')</div>' + campDetailSparkline(hist, 'spend', '--red') + '</div>' +
+        '<div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">Sales (7d total £' + totalSales + ')</div>' + campDetailSparkline(hist, 'sales', '--green') + '</div>' +
+        '<div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">ACOS (period ' + (periodAcos !== null ? periodAcos + '%' : '—') + ')</div>' + campDetailSparkline(hist.map(function(h){ return { acos: h.acos || 0 }; }), 'acos', '--amber') + '</div>' +
+      '</div>'
+    );
+
+  // Top ASINs in this campaign
+  const asins = detail.topAsins || [];
+  let asinBlock;
+  if (asins.length === 0) {
+    asinBlock = '<div style="font-size:12px;color:var(--text3);padding:10px 0">No per-ASIN ad performance data yet for this campaign (last 7 days). Data populates after the 04:30 daily cron runs.</div>';
+  } else {
+    asinBlock = '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">' +
+      '<thead><tr style="text-align:left;color:var(--text3);font-weight:500">' +
+        '<th style="padding:6px 8px;border-bottom:1px solid var(--border)">ASIN</th>' +
+        '<th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right">Spend</th>' +
+        '<th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right">Sales</th>' +
+        '<th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right">ACOS</th>' +
+        '<th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right">Clicks</th>' +
+        '<th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right">Units</th>' +
+      '</tr></thead><tbody>' +
+      asins.map(function(a) {
+        const acosTxt = a.acos !== null ? a.acos + '%' : '—';
+        const acosColor = a.acos === null ? 'var(--text3)' : (a.acos > 50 ? 'var(--red)' : (a.acos > 35 ? 'var(--amber)' : 'var(--text)'));
+        const wasted = (a.sales === 0 && a.spend > 0);
+        return '<tr' + (wasted ? ' style="background:#FEF7F7"' : '') + '>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border)" class="mono">' + escHtml(a.asin) + (a.title ? '<div style="font-size:10px;color:var(--text3);font-family:inherit">' + escHtml((a.title||'').slice(0,60)) + '</div>' : '') + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right" class="mono">£' + a.spend.toFixed(2) + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right" class="mono">£' + a.sales.toFixed(2) + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;color:' + acosColor + '" class="mono">' + acosTxt + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right" class="mono">' + a.clicks + '</td>' +
+          '<td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right" class="mono">' + a.units + '</td>' +
+        '</tr>';
+      }).join('') +
+      '</tbody></table></div>';
+  }
+
+  // Recent tasks
+  const tasks = detail.recentTasks || [];
+  let tasksBlock;
+  if (tasks.length === 0) {
+    tasksBlock = '<div style="font-size:12px;color:var(--text3);padding:10px 0">No tasks created on this campaign in the last 30 days.</div>';
+  } else {
+    tasksBlock = '<div style="display:flex;flex-direction:column;gap:6px">' +
+      tasks.map(function(t) {
+        const dateStr = t.created_date ? new Date(t.created_date).toLocaleDateString('en-GB', { day:'2-digit', month:'short' }) : '—';
+        const stColor = t.status === 'completed' ? 'var(--green)' : (t.status === 'in_progress' ? 'var(--amber)' : (t.status === 'archived' ? 'var(--text3)' : 'var(--blue)'));
+        return '<div style="display:flex;gap:10px;align-items:center;padding:6px 10px;background:var(--surface2);border-radius:6px;font-size:12px">' +
+          '<span style="color:var(--text3);min-width:48px">' + dateStr + '</span>' +
+          '<span style="font-weight:500;min-width:70px">' + escHtml(t.agent || 'Unassigned') + '</span>' +
+          '<span style="color:' + stColor + ';font-weight:500;min-width:90px">' + escHtml(t.status || '—') + '</span>' +
+          '<span style="color:var(--text2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(t.problem_type || '') + (t.problem_detail ? ' — ' + escHtml(t.problem_detail.slice(0,80)) : '') + '</span>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  }
+
+  // Action buttons — route to existing functions to avoid duplicating logic.
+  // showSnoozeModal/showStuckModal expect a button element with data-cid/data-cname,
+  // so the buttons we render below carry those attributes and pass `this`.
+  const cid = String(camp.campaignId);
+  const cidAttr = escHtml(cid);
+  const cnameAttr = escHtml(camp.name || '');
+  const escName = escHtml(camp.name).replace(/'/g, "\\'");
+  const actionBlock =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">' +
+      '<button class="btn btn-green" style="font-size:13px" data-cid="' + cidAttr + '" onclick="closeCampDetailModal();approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">💰 Add budget</button>' +
+      '<button class="btn btn-amber" style="font-size:13px" data-cid="' + cidAttr + '" data-cname="' + cnameAttr + '" onclick="(function(b){closeCampDetailModal();showStuckModal(b,\'pause\');})(this)">⏸ Pause</button>' +
+      '<button class="btn btn-ghost" style="font-size:13px" data-cid="' + cidAttr + '" data-cname="' + cnameAttr + '" onclick="(function(b){closeCampDetailModal();showSnoozeModal(b);})(this)">💤 Snooze</button>' +
+      '<button class="btn btn-ghost" style="font-size:13px;color:var(--text3)" onclick="closeCampDetailModal();hideCampaign(\'' + cid + '\',\'' + escName + '\')">🗙 Hide</button>' +
+    '</div>';
+
+  // Section heading style helper
+  function h(label) {
+    return '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin:18px 0 8px">' + label + '</div>';
+  }
+
+  return '' +
+    h('Health summary') + summaryHtml +
+    h('Last 7 days') + chartBlock +
+    h('Top products in this campaign (7d)') + asinBlock +
+    h('Recent tasks (30d)') + tasksBlock +
+    h('Actions') + actionBlock;
 }
 
 // ── Budget approval ────────────────────────────────────────────────────────
@@ -3975,6 +4212,7 @@ function updatePwStrength(inputId, indicatorId) {
 let amzProductsCache = null;
 let amzProductView = 'urgent'; // r20c: opens on Urgent so agents see fires first
 let amzProductSearchTerm = ''; // r21: active search term, '' = no filter
+let amzAgentFilter = '';       // r25a: active agent filter, '' = all agents
 
 // r21: keyword title search. Splits term into words; product matches if title
 // contains ALL words (case-insensitive). Filters against the current bucket
@@ -4000,6 +4238,33 @@ function amzProductMatchesSearch(p) {
   const haystack = (p.title || '').toLowerCase();
   const words = amzProductSearchTerm.split(/\s+/).filter(Boolean);
   return words.every(function(w) { return haystack.indexOf(w) !== -1; });
+}
+
+// r25a: agent filter — match products whose owner_agent equals the selected agent.
+// Empty filter (= "All agents") returns true for everything.
+function applyAmzAgentFilter() {
+  const sel = document.getElementById('amz-agent-filter');
+  if (!sel) return;
+  amzAgentFilter = sel.value || '';
+  if (amzProductsCache) renderAmazonProductsList(amzProductsCache);
+}
+function amzProductMatchesAgent(p) {
+  if (!amzAgentFilter) return true;
+  const owner = (p.owner_agent || '').trim();
+  if (amzAgentFilter === '__unassigned') return !owner;
+  return owner === amzAgentFilter;
+}
+// Populate the agent dropdown from the loaded agents list. Idempotent — only fills
+// if currently empty (so the user's selection isn't wiped on re-render).
+function populateAmzAgentFilter() {
+  const sel = document.getElementById('amz-agent-filter');
+  if (!sel) return;
+  if (sel.options.length > 1) return; // already populated
+  const agents = (amzAgentsList || []).slice().sort();
+  let html = '<option value="">All agents</option>';
+  agents.forEach(function(a){ html += '<option value="' + escHtml(a) + '">' + escHtml(a) + '</option>'; });
+  html += '<option value="__unassigned">— Unassigned —</option>';
+  sel.innerHTML = html;
 }
 
 function setAmzProductView(view) {
@@ -4135,7 +4400,10 @@ function renderAmazonProductsList(data) {
   const allProducts = data.products || [];
   // r21: apply title search filter (does nothing if amzProductSearchTerm is empty)
   // r23: product-level snooze removed; snooze is on Underperforming Campaigns now.
-  const products = allProducts.filter(amzProductMatchesSearch);
+  // r25a: also apply agent filter
+  const products = allProducts.filter(amzProductMatchesSearch).filter(amzProductMatchesAgent);
+  // r25a: ensure dropdown is populated with current agents list
+  populateAmzAgentFilter();
   const summary = data.summary || {};
   // r20c: bucket-aware count summary for the products header
   const urgentTxt = summary.urgent_count > 0 ? ' · ' + summary.urgent_count + ' urgent' : '';
@@ -4143,8 +4411,12 @@ function renderAmazonProductsList(data) {
   const workingTxt = summary.working_count > 0 ? ' · ' + summary.working_count + ' working' : '';
   const baseCount = summary.total_parents_active != null ? summary.total_parents_active : (summary.total_parents || 0);
   // r21: if a search filter is active, show "X of Y matching" instead of just totals
-  if (amzProductSearchTerm) {
-    countEl.textContent = products.length + ' of ' + allProducts.length + ' matching "' + amzProductSearchTerm + '"';
+  // r25a: also reflect agent filter in the counter
+  const filterBits = [];
+  if (amzProductSearchTerm) filterBits.push('matching "' + amzProductSearchTerm + '"');
+  if (amzAgentFilter) filterBits.push(amzAgentFilter === '__unassigned' ? 'unassigned' : 'agent: ' + amzAgentFilter);
+  if (filterBits.length) {
+    countEl.textContent = products.length + ' of ' + allProducts.length + ' (' + filterBits.join(' · ') + ')';
   } else {
     countEl.textContent = baseCount + ' active products' + urgentTxt + underTxt + workingTxt;
   }
@@ -4280,7 +4552,10 @@ function amzProductCard(p, idx, canEditOwner, agents) {
     ? '<button onclick="event.stopPropagation();restoreAmzProduct(\'' + safeHideKey + '\')" class="btn btn-ghost" style="font-size:10px;padding:2px 8px;color:var(--green)" title="Restore this product to the main view">↺ Restore</button>'
     : '<button onclick="event.stopPropagation();hideAmzProduct(\'' + safeHideKey + '\')" class="btn btn-ghost" style="font-size:10px;padding:2px 8px;color:var(--text3)" title="Hide this product from the main view">🗙 Hide</button>';
 
-  return '<div class="amz-product-card bucket-' + bucket + '" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer' + (isHidden ? ';opacity:0.7' : '') + '" onclick="openAmzProductModal(' + idx + ')">' +
+  // r24: pass parent_sku (stable key) instead of filtered-list index. The filtered
+  // index broke when search was active — index 0 in the filtered list != index 0
+  // in the full unfiltered cache, so clicking a search result opened the wrong product.
+  return '<div class="amz-product-card bucket-' + bucket + '" data-amz-owner="' + escHtml(ownerValue) + '" style="cursor:pointer' + (isHidden ? ';opacity:0.7' : '') + '" onclick="openAmzProductModal(\'' + safeHideKey + '\')">' +
     img +
     '<div class="amz-product-body">' +
       '<div class="amz-product-title">' + escHtml(p.title || p.parent_sku) + '</div>' +
@@ -4301,10 +4576,20 @@ function amzStat(label, value, klass) {
 // Opens the full Amazon product detail view — Google-style modal with sections:
 // header, sales, daily revenue, ads, listing health, friction check, AI critique.
 
-function openAmzProductModal(idx) {
+function openAmzProductModal(key) {
+  // r24: lookup by parent_sku (stable) instead of array index, so search filter
+  // doesn't open the wrong product. Backwards-compatible: if a number is passed,
+  // treat it as the legacy index for safety during the deploy window.
   const cache = amzProductsCache && amzProductsCache.products;
-  if (!cache || !cache[idx]) return;
-  const p = cache[idx];
+  if (!cache) return;
+  let p = null;
+  if (typeof key === 'number') {
+    p = cache[key];
+  } else {
+    const k = String(key);
+    p = cache.find(function(x){ return String(x.parent_sku) === k; }) || null;
+  }
+  if (!p) return;
   document.getElementById('amz-product-modal-title').textContent = p.title || p.parent_sku;
   document.getElementById('amz-product-modal-body').innerHTML = buildAmzProductModalBody(p);
   document.getElementById('amz-product-modal').style.display = 'flex';
@@ -4485,9 +4770,17 @@ function buildAmzProductModalBody(p) {
           '<tbody>',
           (p.children || []).map(function(c) {
             const skuList = (c.skus || []).join(', ');
-            const skuLabel = c.sku_count > 1 ? c.sku_count + ' SKUs' : '1 SKU';
-            // r14: SKU pill — slightly bigger, clearer colour, still subdued
-            const skuPill = '<span style="display:inline-block;font-size:11px;font-weight:500;color:var(--text2);background:var(--surface3);padding:3px 8px;border-radius:99px" title="' + escHtml(skuList) + '">' + skuLabel + '</span>';
+            // r25a: show SKU names inline (was a "1 SKU"/"2 SKUs" pill — title-only on hover).
+            // For 1 SKU: show the name plain. For multiple: show count + comma-separated names,
+            // truncated visually but still selectable. Hover still shows the full list.
+            let skuPill;
+            if (!skuList) {
+              skuPill = '<span style="font-size:11px;color:var(--text3)">—</span>';
+            } else if ((c.sku_count || 1) === 1) {
+              skuPill = '<span style="display:inline-block;font-size:11px;font-weight:500;color:var(--text2);background:var(--surface3);padding:3px 8px;border-radius:6px;font-family:var(--mono);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="' + escHtml(skuList) + '">' + escHtml(skuList) + '</span>';
+            } else {
+              skuPill = '<span style="display:inline-block;font-size:11px;font-weight:500;color:var(--text2);background:var(--surface3);padding:3px 8px;border-radius:6px;font-family:var(--mono);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="' + escHtml(skuList) + '"><strong>' + c.sku_count + ' ·</strong> ' + escHtml(skuList) + '</span>';
+            }
             return '<tr style="border-top:1px solid var(--border)">' +
               '<td style="padding:10px 12px;font-family:var(--mono);font-weight:600">' + escHtml(c.asin) + '</td>' +
               '<td style="padding:10px 12px">' + skuPill + '</td>' +

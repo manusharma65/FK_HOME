@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-04 r7b (timeline system: working days, day strip, not-started warning, milestone countdown) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r25a (products search bar, dismiss button on product subrows inside campaigns) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -517,6 +517,21 @@ let archiveData = null;
 let currentUser = null;
 let currentView = 'shopify';
 let currentFilter = 'all';
+let googleProductSearchTerm = ''; // r25a: title search filter on Google products page
+
+// r25a: read input value, persist in module state, re-render
+function applyGoogleProductSearch() {
+  const inp = document.getElementById('google-product-search');
+  if (!inp) return;
+  googleProductSearchTerm = (inp.value || '').trim();
+  renderShopifyView();
+}
+function clearGoogleProductSearch() {
+  googleProductSearchTerm = '';
+  const inp = document.getElementById('google-product-search');
+  if (inp) inp.value = '';
+  renderShopifyView();
+}
 let campaignTab = 'active'; // 'active' | 'dismissed' | 'archived'
 
 // AI result cache — per browser session.
@@ -663,13 +678,6 @@ setTimeout(function(){ updateDataFreshnessBanner(); }, 1500);
 // ─── Format helpers ──────────────────────────────────────────────────────
 function fmtCurrency(n) { if (n == null) return '—'; n = Number(n); return '£' + n.toLocaleString('en-GB', {minimumFractionDigits: n < 100 ? 2 : 0, maximumFractionDigits: 2}); }
 function fmtNum(n) { if (n == null) return '—'; return Number(n).toLocaleString('en-GB'); }
-
-// r7b: a task is "decided/closed" when its lifecycle has ended — no point showing
-// "Not started" on something that's already been resolved one way or another.
-function isClosedDecided(t) {
-  const s = t && t.status;
-  return s === 'complete' || s === 'archived' || s === 'dismissed' || s === 'paused';
-}
 function fmtPct(n) { if (n == null || n === 0) return '—'; return Number(n).toFixed(1) + '%'; }
 
 function priorityClass(p) { return 'priority-' + (p || 4); }
@@ -1074,9 +1082,25 @@ function renderShopifyView() {
     { id: 'quiet', label: '● Listed but quiet', count: counts.quiet },
     { id: 'notpromoted', label: '● Not yet promoted', count: counts.notpromoted },
   ];
-  document.getElementById('filter-row').innerHTML = filters.map(function(f){
+  // r25a: search bar alongside filter chips. Filters by title within the current chip.
+  const searchVal = (typeof googleProductSearchTerm === 'string' && googleProductSearchTerm) ? googleProductSearchTerm : '';
+  const clearStyle = searchVal ? '' : 'display:none';
+  const searchHtml =
+    '<div style="display:inline-flex;gap:6px;align-items:center;margin-left:auto">' +
+      '<input id="google-product-search" type="text" value="' + escapeHtml(searchVal) + '" placeholder="Search title..." ' +
+      'style="font-size:12px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;width:200px;font-family:inherit;background:var(--bg2);color:var(--text)" ' +
+      'onkeydown="if(event.key===\'Enter\'){event.preventDefault();applyGoogleProductSearch()}">' +
+      '<button class="btn btn-ghost" style="font-size:12px;padding:5px 10px" onclick="applyGoogleProductSearch()">🔍</button>' +
+      '<button class="btn btn-ghost" style="font-size:12px;padding:5px 8px;' + clearStyle + '" onclick="clearGoogleProductSearch()" title="Clear search" id="google-search-clear">✕</button>' +
+    '</div>';
+  const filterRowEl = document.getElementById('filter-row');
+  filterRowEl.style.display = 'flex';
+  filterRowEl.style.alignItems = 'center';
+  filterRowEl.style.flexWrap = 'wrap';
+  filterRowEl.style.gap = '6px';
+  filterRowEl.innerHTML = filters.map(function(f){
     return '<button class="filter-chip ' + (currentFilter === f.id ? 'active' : '') + '" onclick="setFilter(\'' + f.id + '\', this)">' + f.label + ' <span class="count">' + f.count + '</span></button>';
-  }).join('');
+  }).join('') + searchHtml;
 
   let filtered = all;
   if (currentFilter === 'urgent') filtered = all.filter(function(p){ return p.priority === 1; });
@@ -1085,9 +1109,20 @@ function renderShopifyView() {
   else if (currentFilter === 'quiet') filtered = all.filter(function(p){ return p.adStatus === 'listed_quiet'; });
   else if (currentFilter === 'notpromoted') filtered = all.filter(function(p){ return p.adStatus === 'not_promoted' && p.status === 'active'; });
 
+  // r25a: apply title search on top of the chip filter
+  if (googleProductSearchTerm) {
+    const words = googleProductSearchTerm.toLowerCase().split(/\s+/).filter(Boolean);
+    filtered = filtered.filter(function(p) {
+      const hay = (p.title || '').toLowerCase();
+      return words.every(function(w){ return hay.indexOf(w) !== -1; });
+    });
+  }
+
   document.getElementById('products-content').innerHTML = filtered.length
     ? filtered.map(productCard).join('')
-    : '<div class="empty-state">No products match this filter.</div>';
+    : (googleProductSearchTerm
+        ? '<div class="empty-state">No products match "<strong>' + escapeHtml(googleProductSearchTerm) + '</strong>". <a href="#" onclick="clearGoogleProductSearch();return false" style="color:var(--blue)">Clear search</a></div>'
+        : '<div class="empty-state">No products match this filter.</div>');
 }
 
 function renderGoogleView() {
@@ -1199,7 +1234,8 @@ function productSubrow(p) {
     + statRow('Cost/conv', p.costPerConv ? fmtCurrency(p.costPerConv) : '—')
     + '</div>'
     + '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-primary" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();openProductDetailFromCampaignRow(' + payload + ')\'>🪄 Open &amp; analyse</button>'
-    + '<button class="btn btn-ghost" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();assignToProduct(' + payload + ')\' title="Create task assigned to agent">📋 Assign</button></div>'
+    + '<button class="btn btn-ghost" style="font-size:11px;padding:5px 12px" onclick=\'event.stopPropagation();assignToProduct(' + payload + ')\' title="Create task assigned to agent">📋 Assign</button>'
+    + '<button class="btn btn-ghost" style="font-size:11px;padding:5px 12px;color:var(--text3)" onclick=\'event.stopPropagation();dismissCampaignProduct(' + payload + ')\' title="Mark this product as not needing work — moves to Dismissed tab in Tasks">🗙 Dismiss</button></div>'
     + '</div>'
     + '</div>';
 }
@@ -1436,14 +1472,7 @@ async function loadGoogleTasks() {
       return;
     }
 
-    // r7b: count tasks not yet started (no first_action, working day 1+)
-    // and surface them at the top of the list.
-    const notStartedCount = tasks.filter(function(t){ return t.not_started_warning && !isClosedDecided(t); }).length;
-    const notStartedBanner = notStartedCount > 0
-      ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#991b1b;font-weight:600">⚠️ ' + notStartedCount + ' task' + (notStartedCount === 1 ? '' : 's') + ' not started — agent has not logged a first action</div>'
-      : '';
-
-    listDiv.innerHTML = notStartedBanner + tasks.map(taskRow).join('');
+    listDiv.innerHTML = tasks.map(taskRow).join('');
   } catch (e) {
     listDiv.innerHTML = '<div class="empty-state" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
   }
@@ -1475,15 +1504,7 @@ function taskRow(t) {
   const bAcos = Number(t.baseline_acos) || 0;
   const bImpr = Number(t.baseline_impressions) || 0;
 
-  // r7b: prefer working-days-open from server (Sundays excluded). Fall back to
-  // calendar daysOpen for backwards compat with older API responses.
-  const wdo = (t.working_days_open !== undefined) ? t.working_days_open : (t.daysOpen != null ? t.daysOpen : 0);
-  const days = wdo;
-  const stage = t.task_stage || (wdo >= 7 ? 'decide' : (wdo >= 4 ? 'discuss' : 'open'));
-  const milestoneLabel = t.next_milestone_label || '';
-  const notStarted = !!t.not_started_warning && !isClosedDecided(t);
-  // Note: legacy atDay7 / atDay4 still set by server using working-day arithmetic so
-  // the card-stripe logic below keeps working without changes.
+  const days = t.daysOpen != null ? t.daysOpen : 0;
   const isProductTask = (t.problem_type && t.problem_type.indexOf('product_') === 0) || !!t.product_key;
   const isScale = t.task_type === 'scale' || t.problem_type === 'scale_opportunity';
   const status = t.status || 'open';
@@ -1530,9 +1551,7 @@ function taskRow(t) {
   const dayProgressBar = '<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
     + '<div style="display:flex;gap:2px;flex:1;max-width:140px">' + dayBars + '</div>'
     + '<span style="font-size:11px;color:' + (t.atDay7 ? '#dc2626' : '#6b7280') + ';font-weight:700;font-family:var(--mono);white-space:nowrap">DAY ' + days + '/7' + (t.atDay7 ? ' ⚠' : '') + '</span>'
-    + (notStarted ? '<span style="font-size:10px;color:#991b1b;background:#fee2e2;border:1px solid #fca5a5;padding:2px 7px;border-radius:99px;font-weight:600;white-space:nowrap">⚠ Not started</span>' : '')
-    + '</div>'
-    + (milestoneLabel ? '<div style="font-size:10.5px;color:' + (stage === 'decide' || stage === 'overdue' ? '#dc2626' : (stage === 'discuss' ? '#92400e' : '#6b7280')) + ';margin-top:4px;font-weight:600">' + (milestoneLabel.indexOf('1 working day') === 0 ? '⏰ ' : '') + milestoneLabel + '</div>' : '');
+    + '</div>';
 
   // Status pill — strong colours, white text on coloured background
   const statusColours = {
@@ -2231,6 +2250,54 @@ function assignToProduct(p) {
     productTitle: productTitle
   });
 }
+
+// r25a: Dismiss a product within a campaign — creates a task pre-set to status='dismissed'
+// so it appears in the existing Dismissed tab and follows the auto-archive rule.
+async function dismissCampaignProduct(p) {
+  if (!p) return;
+  // Resolve campaign — same logic as assignToProduct
+  let campaignId = p.campaignId || null;
+  let campaignName = p.campaignName || p.googleCampaignName || '';
+  let campaignType = p.campaignType || '';
+  if (!campaignId && Array.isArray(p.campaignsAdvertisedIn) && p.campaignsAdvertisedIn.length) {
+    campaignId = p.campaignsAdvertisedIn[0].campaignId || null;
+    campaignName = campaignName || p.campaignsAdvertisedIn[0].campaignName || '';
+    campaignType = campaignType || p.campaignsAdvertisedIn[0].campaignType || '';
+  }
+  if (!campaignId) { alert('Cannot dismiss — no campaign found for this product.'); return; }
+
+  const productKey = p.shopifyItemId || p.productId || (p.shopifyId ? String(campaignId) + '__' + p.shopifyId : null);
+  const productTitle = p.title || p.shopifyTitle || p.displayName || p.productName || p.name || '(unknown product)';
+  if (!productKey) { alert('Cannot dismiss — no product key.'); return; }
+
+  const reason = prompt('Why are you dismissing this product? (e.g. "Seasonal item, expected", "Already paused", "Not for this season")\n\nA short reason is required.');
+  if (reason === null) return; // user cancelled
+  const trimmed = (reason || '').trim();
+  if (!trimmed) { alert('A reason is required.'); return; }
+
+  try {
+    const r = await authedFetch('/api/google/tasks/dismiss-product', {
+      method: 'POST',
+      body: JSON.stringify({
+        campaignId: String(campaignId),
+        campaignName: campaignName,
+        campaignType: campaignType,
+        productKey: productKey,
+        productTitle: productTitle,
+        reason: trimmed
+      })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.success) { alert('Dismiss failed: ' + (j.error || 'unknown')); return; }
+    alert('Product dismissed. It will appear under the Dismissed tab in Tasks until auto-archived.');
+    // Soft-reload campaigns view so the dismissed indication shows up
+    if (typeof refreshAll === 'function') refreshAll();
+    else if (typeof renderCampaignsPage === 'function') renderCampaignsPage();
+  } catch(e) {
+    alert('Dismiss failed: ' + e.message);
+  }
+}
+
 
 // Open product modal from a Shopify product ID (used by task-card click handler)
 function openProductDetailFromShopifyId(shopifyId) {

@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-06 r23 (snooze moved to underperforming campaigns 1d/3d/7d/30d, "Work on it" replaced, Tasks rename, all-campaigns modal, traffic snapshots diagnostic, audit cleanup)
+// CampaignPulse — deploy marker 2026-05-07 r25a (Amazon agent filter, Amazon SKU name inline, budget exhaustion log persists across restarts, Google products search bar, Google product-dismiss button)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3522,6 +3522,113 @@ app.post('/api/admin/traffic-diagnose', async function(req, res) {
   }
 });
 
+// ─── r24: ONE-SHOT ADMIN ACTIONS ───────────────────────────────────────────
+// Two endpoints below are intended to be called once each, then stay dormant.
+// They will be removed in r25 (audit cleanup).
+
+// r24: POST /api/admin/r24-unmerge-trampolines — unmerge the 9 outdoor trampoline
+// ASINs Bobby flagged. Splits 5 ASINs back into standalones (parent_sku=NULL),
+// and groups the remaining 4 ASINs as one family (canonical parent_sku=B0FFH4WX84).
+// Owner-only. Safe to call more than once (idempotent — operations are absolute,
+// not relative).
+app.post('/api/admin/r24-unmerge-trampolines', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  if (!db) return res.status(500).json({ error: 'No DB' });
+
+  // ASINs to make standalone (parent_sku = NULL)
+  const standaloneAsins = ['B0DSC9QSNF', 'B0DS8VWLT9', 'B0DS8WYML2', 'B0DSJJ3NQV', 'B0DS8X2VLM'];
+  // ASINs to group as one family (parent_sku = canonicalParent)
+  const familyAsins = ['B0FFH4WX84', 'B0FFH614FH', 'B0FFH6FRK9', 'B0FFH9JTPJ'];
+  const canonicalParent = 'B0FFH4WX84'; // first of the family — used as the group key
+
+  try {
+    const summary = { standalone: [], family: [], notFound: [] };
+
+    // 1) Split standalones — set parent_sku = NULL on every SKU mapped to these ASINs
+    for (const asin of standaloneAsins) {
+      const r = await db.query(
+        'UPDATE amazon_products SET parent_sku = NULL WHERE asin = $1 RETURNING sku',
+        [asin]
+      );
+      if (r.rowCount === 0) summary.notFound.push(asin);
+      else summary.standalone.push({ asin: asin, skus: r.rows.map(function(x){ return x.sku; }) });
+    }
+
+    // 2) Group family — set parent_sku = canonicalParent on every SKU mapped to these ASINs
+    for (const asin of familyAsins) {
+      const r = await db.query(
+        'UPDATE amazon_products SET parent_sku = $1 WHERE asin = $2 RETURNING sku',
+        [canonicalParent, asin]
+      );
+      if (r.rowCount === 0) summary.notFound.push(asin);
+      else summary.family.push({ asin: asin, skus: r.rows.map(function(x){ return x.sku; }) });
+    }
+
+    // 3) Audit log
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'r24_unmerge_trampolines',$2)",
+        [actor, 'r24 trampoline unmerge: ' + standaloneAsins.length + ' standalones, ' + familyAsins.length + '-family under ' + canonicalParent]
+      );
+    } catch(e) {}
+
+    // 4) Re-derive owners so campaign attachment is refreshed
+    let derive = null;
+    try { derive = await deriveProductOwners(); } catch(e) { derive = { error: e.message }; }
+
+    res.json({ ok: true, summary: summary, canonicalParent: canonicalParent, derive: derive });
+  } catch(e) {
+    console.error('/api/admin/r24-unmerge-trampolines error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r24: POST /api/admin/r24-wipe-google-tasks — wipe ALL Google tasks (every status).
+// Cascades to task_subtasks via FK ON DELETE CASCADE. Use this once to clean up
+// duplicates so tomorrow's 9am cron creates a fresh, clean task list.
+// Owner-only. Will refuse if invoked outside the maintenance window flag.
+app.post('/api/admin/r24-wipe-google-tasks', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  if (!db) return res.status(500).json({ error: 'No DB' });
+
+  // Safety: require explicit confirm=YES_WIPE in body to avoid accidental hits.
+  const confirm = (req.body && req.body.confirm) || '';
+  if (confirm !== 'YES_WIPE') {
+    return res.status(400).json({ error: 'Pass {"confirm":"YES_WIPE"} in body to proceed.' });
+  }
+
+  try {
+    // Count first so we can report what was wiped
+    const countRow = await db.query(
+      "SELECT COUNT(*)::int AS c FROM campaign_tasks WHERE department = 'google'"
+    );
+    const before = countRow.rows[0].c;
+
+    // Delete — task_subtasks rows cascade away automatically
+    const del = await db.query("DELETE FROM campaign_tasks WHERE department = 'google'");
+
+    // Audit log
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, department) VALUES ('','',$1,$1,'r24_wipe_google_tasks',$2,'google')",
+        [actor, 'r24 wipe: deleted ' + (del.rowCount || 0) + ' Google tasks (was ' + before + ')']
+      );
+    } catch(e) {}
+
+    res.json({
+      ok: true,
+      tasks_before: before,
+      tasks_deleted: del.rowCount || 0,
+      message: 'Google tasks wiped. The 9am cron tomorrow (London time) will create fresh tasks based on current campaign data.'
+    });
+  } catch(e) {
+    console.error('/api/admin/r24-wipe-google-tasks error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
 // Reports come back async, so this is fire-and-forget. Owner+manager only.
 app.post('/api/admin/backfill-traffic', async function(req, res) {
@@ -5847,6 +5954,119 @@ app.get('/api/amazon/agents', async function(req, res) {
   }
 });
 
+// r24: GET /api/amazon/campaign-detail/:campaignId — power the All Campaigns row
+// modal. Returns 7-day spend/sales/ACOS history (from daily_snapshots), top ASINs
+// inside the campaign by spend (from amazon_asin_ad_performance, last 7 days),
+// recent tasks (from campaign_tasks). Plain-English health summary computed
+// client-side from the live campaign object — server just feeds the data.
+app.get('/api/amazon/campaign-detail/:campaignId', async function(req, res) {
+  if (!db) return res.json({ history: [], topAsins: [], recentTasks: [] });
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  try {
+    // 1) 7-day history from daily_snapshots — extract this campaign's row from each day
+    const histRows = await db.query(
+      "SELECT snapshot_date, campaigns FROM daily_snapshots " +
+      "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days' " +
+      "ORDER BY snapshot_date ASC"
+    );
+    const history = [];
+    histRows.rows.forEach(function(row) {
+      const camps = Array.isArray(row.campaigns) ? row.campaigns : [];
+      const found = camps.find(function(c){ return String(c.campaignId) === campaignId; });
+      if (found) {
+        const spend = parseFloat(found.spend || 0);
+        const sales = parseFloat(found.sales || 0);
+        const acos = sales > 0 ? +(100 * spend / sales).toFixed(1) : null;
+        history.push({
+          date: row.snapshot_date,
+          spend: +spend.toFixed(2),
+          sales: +sales.toFixed(2),
+          acos: acos,
+          impressions: parseInt(found.impressions || 0),
+          clicks: parseInt(found.clicks || 0)
+        });
+      } else {
+        // Day exists but campaign not in snapshot — record gap so the chart isn't misleading
+        history.push({ date: row.snapshot_date, spend: 0, sales: 0, acos: null, impressions: 0, clicks: 0, missing: true });
+      }
+    });
+
+    // 2) Top ASINs in this campaign — last 7 days from amazon_asin_ad_performance
+    let topAsins = [];
+    try {
+      const asinRows = await db.query(
+        "SELECT a.asin, " +
+        "       SUM(a.spend)::numeric AS spend, " +
+        "       SUM(a.sales)::numeric AS sales, " +
+        "       SUM(a.clicks)::int AS clicks, " +
+        "       SUM(a.impressions)::int AS impressions, " +
+        "       SUM(a.units)::int AS units, " +
+        "       MAX(p.title) AS title, " +
+        "       MAX(p.image_url) AS image_url " +
+        "FROM amazon_asin_ad_performance a " +
+        "LEFT JOIN amazon_products p ON p.asin = a.asin " +
+        "WHERE a.campaign_id = $1 AND a.report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+        "GROUP BY a.asin " +
+        "ORDER BY spend DESC " +
+        "LIMIT 8",
+        [campaignId]
+      );
+      topAsins = asinRows.rows.map(function(r) {
+        const sp = parseFloat(r.spend || 0);
+        const sa = parseFloat(r.sales || 0);
+        return {
+          asin: r.asin,
+          title: r.title || null,
+          image_url: r.image_url || null,
+          spend: +sp.toFixed(2),
+          sales: +sa.toFixed(2),
+          acos: sa > 0 ? +(100 * sp / sa).toFixed(1) : null,
+          clicks: r.clicks || 0,
+          impressions: r.impressions || 0,
+          units: r.units || 0
+        };
+      });
+    } catch(e) {
+      // r22 table may not exist on very old deployments — non-fatal
+      if (!/does not exist/.test(e.message)) console.error('[r24] top-asins lookup: ' + e.message);
+    }
+
+    // 3) Recent tasks on this campaign — last 30 days, any status
+    const taskRows = await db.query(
+      "SELECT id, agent_name, status, problem_type, problem_detail, created_date, task_stage " +
+      "FROM campaign_tasks " +
+      "WHERE campaign_id = $1 " +
+      "  AND department = 'amazon' " +
+      "  AND created_date >= CURRENT_DATE - INTERVAL '30 days' " +
+      "ORDER BY created_date DESC " +
+      "LIMIT 10",
+      [campaignId]
+    );
+    const recentTasks = taskRows.rows.map(function(r) {
+      return {
+        id: r.id,
+        agent: r.agent_name,
+        status: r.status,
+        problem_type: r.problem_type,
+        problem_detail: r.problem_detail,
+        created_date: r.created_date,
+        task_stage: r.task_stage
+      };
+    });
+
+    res.json({
+      campaignId: campaignId,
+      history: history,
+      topAsins: topAsins,
+      recentTasks: recentTasks
+    });
+  } catch(e) {
+    console.error('/api/amazon/campaign-detail error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // r18: GET /api/amazon/unknown-agents — surface agent prefixes appearing in campaign names
 // that don't match any existing user. Lets the owner spot when a new agent shows up
 // in the data and prompt them to create a user account.
@@ -6822,6 +7042,89 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   }
 });
 
+// r25a: dismiss a product within a campaign — creates a campaign_tasks row
+// with status='dismissed' so it appears in the existing Dismissed tab and
+// follows the existing auto-archive rule. No new table needed.
+app.post('/api/google/tasks/dismiss-product', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  await ensureGoogleTaskColumns();
+
+  const { campaignId, campaignName, campaignType, productKey, productTitle, reason } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!productKey) return res.status(400).json({ error: 'productKey required' });
+  if (!reason || !reason.trim()) return res.status(400).json({ error: 'A reason is required when dismissing a product' });
+
+  const u = req.user || {};
+  const actor = u.name || u.username || 'unknown';
+
+  // Pull baseline metrics from current googleState if available
+  let baselineSpend = 0, baselineSales = 0, baselineAcos = 0, baselineImpressions = 0;
+  let resolvedCampaignName = campaignName || '';
+  let resolvedCampaignType = campaignType || '';
+  let resolvedProductTitle = productTitle || null;
+  let productImageUrl = null;
+
+  const productRow = (googleState.products || []).find(function(p){
+    const pk = p.shopifyItemId || p.productId || (p.adGroupId ? String(p.campaignId) + '_' + p.adGroupId : null);
+    return String(pk) === String(productKey);
+  });
+  if (productRow) {
+    baselineSpend = productRow.spend || 0;
+    baselineSales = productRow.sales || 0;
+    baselineAcos = baselineSales > 0 ? (baselineSpend / baselineSales) * 100 : 0;
+    baselineImpressions = productRow.impressions || 0;
+    resolvedCampaignName = resolvedCampaignName || productRow.campaignName;
+    resolvedCampaignType = resolvedCampaignType || productRow.campaignType;
+    resolvedProductTitle = resolvedProductTitle || productRow.name || productRow.productName;
+  }
+  // Best-effort image lookup from shopify (same as manual-create)
+  const parts = String(productKey).split('_');
+  const shopifyId = parts.length >= 3 ? parts[2] : null;
+  if (shopifyId) {
+    const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === shopifyId; });
+    if (sp && sp.imageUrl) productImageUrl = sp.imageUrl;
+  }
+
+  try {
+    // Insert directly with status='dismissed'. resolved_at set so day7 timer doesn't trigger.
+    const r = await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      " task_type, priority, product_image_url, status, resolved_at, agent_notes) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,'manual','google',$8,$9,$10,$11,$12,$13,'problem',3,$14,'dismissed',NOW(),$15) RETURNING id",
+      [
+        String(campaignId),
+        resolvedCampaignName || '(unnamed campaign)',
+        actor,
+        resolvedCampaignType || '',
+        'product_dismissed',
+        reason.trim(),
+        Math.max(1, Math.round(baselineSpend)),
+        productKey,
+        resolvedProductTitle,
+        baselineSpend,
+        baselineSales,
+        baselineAcos,
+        baselineImpressions,
+        productImageUrl,
+        'Dismissed by ' + actor + ': ' + reason.trim()
+      ]
+    );
+    const newId = r.rows[0] && r.rows[0].id;
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'product_dismissed',$5,'','dismissed',$6,'google')",
+        [String(campaignId), resolvedCampaignName || '', actor, actor, 'Product dismissed: ' + (resolvedProductTitle || productKey) + ' — ' + reason.trim(), newId]
+      );
+    } catch(e) { console.error('[GTASK] dismiss-product log error: ' + e.message); }
+    res.json({ success: true, id: newId });
+  } catch (e) {
+    console.error('[GTASK] dismiss-product error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Day 7 decision endpoint — mandatory carry_on / archive / stop with note
 app.post('/api/google/tasks/:id/day7-decision', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
@@ -6929,6 +7232,19 @@ app.post('/api/campaigns/:id/budget', async function(req, res) {
     await updateBudget(id, newBudget);
     const log = state.exhaustionLog.find(function(e) { return e.campaign === campaign.name && e.action === 'Pending'; });
     if (log) { log.added = '+£' + amount; log.action = 'Budget added'; log.resolvedAt = new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'}); if (log.time) { const outParts = log.time.split(':'); const resParts = log.resolvedAt.split(':'); const gapMins = (parseInt(resParts[0]) * 60 + parseInt(resParts[1])) - (parseInt(outParts[0]) * 60 + parseInt(outParts[1])); log.gap = gapMins > 0 ? gapMins + ' min' : '< 1 min'; } }
+    // r25a: write the updated exhaustion log to today's snapshot so the change
+    // survives restarts AND an agent approving in a later session sees the
+    // "Budget added" status persist on the report. Was previously only updating
+    // the in-memory state.exhaustionLog, which got wiped on every redeploy.
+    if (db && log) {
+      try {
+        const todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+        await db.query(
+          "UPDATE daily_snapshots SET exhaustion_log = $1 WHERE snapshot_date = $2",
+          [JSON.stringify(state.exhaustionLog), todayStr]
+        );
+      } catch(persistErr) { console.error('[r25a] exhaustionLog persist error: ' + persistErr.message); }
+    }
     if (db) { try { await db.query('UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW() WHERE campaign_id=$3 AND status IN ($4,$5) AND task_source=$6', ['complete', 'Budget +£' + amount + ' added', String(id), 'open', 'in_progress', 'alert']); } catch(e) { console.error('Auto-close task error: ' + e.message); } }
     const approvalAgent = extractAgentFromCampaign(campaign.name) || '';
     const approvalMsg = ['✅ Budget added', campaign.name, '+£' + amount + ' added. New budget: £' + newBudget.toFixed(2)].join('\n');
@@ -9735,6 +10051,25 @@ app.listen(PORT, '0.0.0.0', async function() {
       }
     } catch(e) {
       console.error('[GOOGLE-STATE] hydrate error: ' + e.message);
+    }
+
+    // r25a: hydrate state.exhaustionLog from today's daily_snapshots row.
+    // Without this, server restarts wipe in-memory Pending entries — so when an
+    // agent later approves budget, the find() in /api/budget/:id can't match and
+    // the row stays "Pending" forever in the report. Hydrating today's log fixes
+    // that. We only load TODAY's row (older Pending entries are already lost).
+    try {
+      const todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+      const r = await db.query("SELECT exhaustion_log FROM daily_snapshots WHERE snapshot_date = $1", [todayStr]);
+      if (r.rows.length && Array.isArray(r.rows[0].exhaustion_log)) {
+        state.exhaustionLog = r.rows[0].exhaustion_log;
+        const pendingCount = state.exhaustionLog.filter(function(e){ return e.action === 'Pending'; }).length;
+        console.log('[r25a] hydrated exhaustionLog: ' + state.exhaustionLog.length + ' entries (' + pendingCount + ' pending)');
+      } else {
+        console.log('[r25a] no exhaustionLog in today\u2019s snapshot — starting empty');
+      }
+    } catch(e) {
+      console.error('[r25a] exhaustionLog hydrate error: ' + e.message);
     }
   }
   setTimeout(function() {
