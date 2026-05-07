@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26b (Action Centre rows fully clickable for campaigns; owner-update optimistic cache + better PUT logging) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26c (Campaign detail modal now has AI section: Haiku-then-Opus with feedback widget + Re-run-with-Opus button. Same pattern as Amazon product page) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1779,6 +1779,59 @@ async function openCampDetailModal(campaignId) {
   }
 
   document.getElementById('camp-detail-body').innerHTML = buildCampDetailBody(camp, detail);
+  // r26c: kick off AI analysis (Haiku-then-Opus auto-escalate). Cached server-side.
+  loadCampaignAi(campaignId, false);
+}
+
+// r26c: Campaign AI loader. Default mode = let server pick model (Haiku then Opus).
+// forceOpus=true forces Opus (used by Re-run-with-Opus button).
+async function loadCampaignAi(campaignId, forceOpus) {
+  const contentEl = document.getElementById('camp-ai-content');
+  const buttonsEl = document.getElementById('camp-ai-buttons');
+  const metaEl = document.getElementById('camp-ai-meta');
+  if (!contentEl) return;
+  contentEl.innerHTML = '<div style="display:flex;align-items:center;gap:10px;color:var(--text3);font-size:13px"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div> ' + (forceOpus ? 'Re-running with Opus…' : 'Analysing campaign with Claude…') + '</div>';
+  if (buttonsEl) buttonsEl.innerHTML = '';
+  if (metaEl) metaEl.textContent = '';
+  try {
+    const url = '/api/campaign-analysis/' + encodeURIComponent(campaignId) + (forceOpus ? '?model=opus' : '');
+    const r = await fetch(url, { headers: getAuthHeaders() });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    renderCampaignAi(j, campaignId);
+  } catch(e) {
+    contentEl.innerHTML = '<div style="color:var(--red);font-size:13px">AI failed: ' + escHtml(e.message) + ' <button class="btn btn-ghost" style="font-size:12px;margin-left:8px" onclick="loadCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Retry</button></div>';
+  }
+}
+
+function renderCampaignAi(j, campaignId) {
+  const contentEl = document.getElementById('camp-ai-content');
+  const buttonsEl = document.getElementById('camp-ai-buttons');
+  const metaEl = document.getElementById('camp-ai-meta');
+  if (!contentEl) return;
+
+  const analysisText = j.analysis || '';
+  // Render analysis + feedback widget below
+  contentEl.innerHTML = '<div style="white-space:pre-wrap;color:var(--text);font-size:13px;line-height:1.6">' + escHtml(analysisText) + '</div>' +
+    (typeof renderAiFeedbackWidget === 'function' ? renderAiFeedbackWidget('amazon_campaign', String(campaignId)) : '');
+  if (typeof loadAiFeedbackList === 'function') loadAiFeedbackList('amazon_campaign', String(campaignId));
+
+  // Model badge
+  if (metaEl && j.modelUsed) {
+    const m = String(j.modelUsed).toLowerCase();
+    const label = m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : (m.indexOf('sonnet') >= 0 ? 'Sonnet' : j.modelUsed));
+    metaEl.textContent = '· ' + label;
+  }
+
+  // Buttons: Re-run with Opus (or Re-run with Haiku if Opus already used)
+  if (buttonsEl) {
+    const usedOpus = j.modelUsed && String(j.modelUsed).toLowerCase().indexOf('opus') >= 0;
+    if (usedOpus) {
+      buttonsEl.innerHTML = '<button class="btn btn-ghost" style="font-size:12px" onclick="loadCampaignAi(\'' + escHtml(campaignId) + '\', false)">↻ Re-run (Haiku)</button>';
+    } else {
+      buttonsEl.innerHTML = '<button class="btn btn-primary" style="font-size:12px" onclick="loadCampaignAi(\'' + escHtml(campaignId) + '\', true)">🧠 Re-run with Opus (deeper)</button>';
+    }
+  }
 }
 
 // Plain-English health summary built from the live campaign object.
@@ -1929,7 +1982,21 @@ function buildCampDetailBody(camp, detail) {
     return '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin:18px 0 8px">' + label + '</div>';
   }
 
+  // r26c: AI section — runs the sharpened campaign-analysis prompt with feedback
+  // loop and Re-run-with-Opus button. Mirrors the pattern from Amazon product
+  // listing critique. Lives at the top of the modal so the agent sees the AI
+  // recommendation before scrolling through metrics.
+  const aiSectionHtml =
+    '<div id="camp-ai-section" style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:14px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text)">🤖 AI analysis <span id="camp-ai-meta" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:8px"></span></div>' +
+        '<div id="camp-ai-buttons" style="display:flex;gap:6px;flex-wrap:wrap"></div>' +
+      '</div>' +
+      '<div id="camp-ai-content" style="font-size:13px;line-height:1.6;color:var(--text)"><div style="color:var(--text3)">Loading analysis…</div></div>' +
+    '</div>';
+
   return '' +
+    aiSectionHtml +
     h('Health summary') + summaryHtml +
     h('Last 7 days') + chartBlock +
     h('Top products in this campaign (7d)') + asinBlock +

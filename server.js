@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r26b (PUT /owner endpoint logging + canonicalAgent + RETURNING — to diagnose owner-switching-back)
+// CampaignPulse — deploy marker 2026-05-07 r26c (FIX: owner PUT now handles asin: prefix groupKeys; ?model=opus param on campaign-analysis to force Opus)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2899,6 +2899,18 @@ async function aiHaikuThenOpus(prompt, opts) {
   const MIN_USEFUL_CHARS = opts.min_useful_chars || 80;
   const headers = { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
 
+  // r26c: force_opus skips Haiku entirely. Used when the agent re-runs an
+  // analysis explicitly because Haiku's first answer wasn't good enough.
+  if (opts.force_opus) {
+    console.log('[ai] force_opus=true → calling Opus directly');
+    const r3 = await axios.post('https://api.anthropic.com/v1/messages',
+      { model: OPUS, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] },
+      { headers: headers, timeout: 60000 }
+    );
+    const opusText3 = (r3.data && r3.data.content && r3.data.content[0] && r3.data.content[0].text) || '';
+    return { text: opusText3, modelUsed: OPUS };
+  }
+
   // Try Haiku first
   let haikuText = '';
   let haikuOK = false;
@@ -5733,10 +5745,20 @@ app.post('/api/amazon/products/:parentSku/owner', async function(req, res) {
   try {
     // Canonicalise the agent name before storing
     const canonical = newAgent.toLowerCase() === 'unassigned' ? null : (canonicalAgent(newAgent) || newAgent);
-    const r = await db.query(
-      "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2) RETURNING sku",
-      [canonical, parentSku]
-    );
+    // r26c: handle asin: prefix the same way as PUT endpoint
+    let r;
+    if (parentSku.indexOf('asin:') === 0) {
+      const asin = parentSku.substring(5);
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE WHERE asin=$2 RETURNING sku",
+        [canonical, asin]
+      );
+    } else {
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2) RETURNING sku",
+        [canonical, parentSku]
+      );
+    }
     // Audit-log it
     try {
       await db.query(
@@ -6189,14 +6211,39 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
     // r26b: canonicalise via the same alias map the rest of the system uses,
     // so "Aryan" / "aryan" / "Aryan Kumar" all collapse to the same canonical name.
     const agent = rawAgent ? (typeof canonicalAgent === 'function' ? (canonicalAgent(rawAgent) || rawAgent) : rawAgent) : null;
-    console.log('[r26b owner-PUT] groupKey=' + groupKey + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
-    const r = await db.query(
-      "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
-      "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)) " +
-      "RETURNING sku, owner_agent, owner_manual",
-      [agent, groupKey]
-    );
-    console.log('[r26b owner-PUT] rows updated: ' + r.rowCount + ', sample: ' + JSON.stringify(r.rows.slice(0, 3)));
+
+    // r26c: groupKey can take three forms (matching the products endpoint at line 4539):
+    //   - "asin:B00R2K8SZ0"  → standalone product, no parent_sku, only one ASIN
+    //   - "<parent_sku>"     → variant family with shared parent
+    //   - "<sku>"            → standalone product whose own SKU is the groupKey
+    // The previous WHERE clause only handled forms 2 and 3 — form 1 silently matched
+    // zero rows so the PUT looked like it succeeded but DB was unchanged.
+    let r;
+    if (groupKey.indexOf('asin:') === 0) {
+      const asin = groupKey.substring(5);
+      console.log('[r26c owner-PUT] asin-form key, asin=' + asin + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
+        "WHERE asin=$2 " +
+        "RETURNING sku, asin, owner_agent, owner_manual",
+        [agent, asin]
+      );
+    } else {
+      console.log('[r26c owner-PUT] sku/parent-form key=' + groupKey + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
+        "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)) " +
+        "RETURNING sku, asin, owner_agent, owner_manual",
+        [agent, groupKey]
+      );
+    }
+    console.log('[r26c owner-PUT] rows updated: ' + r.rowCount + ', sample: ' + JSON.stringify(r.rows.slice(0, 3)));
+
+    if (r.rowCount === 0) {
+      console.warn('[r26c owner-PUT] WARNING — zero rows matched for groupKey=' + groupKey);
+      return res.status(404).json({ success: false, error: 'No products matched groupKey=' + groupKey, rows_updated: 0 });
+    }
+
     // Audit log
     try {
       const actor = (req.user && req.user.name) || 'System';
@@ -6207,7 +6254,7 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
     } catch(e) {}
     res.json({ success: true, rows_updated: r.rowCount, group: groupKey, owner: agent, persisted: r.rows });
   } catch(e) {
-    console.error('[r26b owner-PUT] error: ' + e.message);
+    console.error('[r26c owner-PUT] error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -7015,7 +7062,10 @@ app.get('/api/campaign-analysis/:campaignId', async function(req, res) {
     lines.push('- British English. £ for money. Direct tone, no fluff. 60-100 words total.');
 
     const prompt = lines.join('\n');
-    const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400, min_useful_chars: 80 });
+    // r26c: ?model=opus query param forces Opus directly (skip Haiku). Used by
+    // the "Re-run with Opus" button in the campaign detail modal.
+    const forceOpus = String(req.query.model || '').toLowerCase() === 'opus';
+    const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400, min_useful_chars: 80, force_opus: forceOpus });
     res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, acos7d: acos7d, daysNoRevenue, daysNoActivity });
   } catch(e) { console.error('Campaign analysis error: ' + e.message); res.status(500).json({ error: e.message }); }
 });
