@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r25b (Aryan owner-edit fix, Haiku→Opus AI cost switch, agent feedback widget on AI analyses, TACOS stat on product cards, kettlebell coverage fix) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r25c (TACOS in modal with plain-English callout, All Campaigns badges fixed for zero-sale wasters and chronic ACOS, Refresh sales now button) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -485,7 +485,10 @@ tbody tr:hover { background: var(--surface2); }
             <div style="font-size:11px;color:#27500A;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;margin-bottom:4px">Amazon sales — today</div>
             <div style="font-size:28px;font-weight:700;color:#173404" id="amz-sales-today-value">£0<span style="font-size:14px;color:#3B6D11;font-weight:400;margin-left:8px" id="amz-sales-today-sub">· loading</span></div>
           </div>
-          <button class="btn btn-ghost" style="font-size:12px;padding:8px 14px" onclick="showAmzTop5(null)">View today's top 5 →</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost" style="font-size:12px;padding:8px 14px" onclick="refreshSalesNow(this)" id="amz-refresh-sales-btn" title="Pull today's orders from Amazon now (manager+ only). Otherwise updates at 06:00 and 14:00 daily.">↻ Refresh sales now</button>
+            <button class="btn btn-ghost" style="font-size:12px;padding:8px 14px" onclick="showAmzTop5(null)">View today's top 5 →</button>
+          </div>
         </div>
       </div>
       <div style="padding:14px 20px">
@@ -1559,14 +1562,25 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     const outOfBudget = c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
     const budgetLow = c.budgetPct >= 80 && !outOfBudget;
     const acosHigh = c.acos > 35 && c.spend > 5;
+    // r25c: catch the silent waster — spend > 0 but zero sales today (no ACOS to fire on).
+    // This is the most common false-positive on the previous "Healthy" logic.
+    const wasted = !outOfBudget && (c.spend > 5) && (!c.sales || c.sales <= 0);
+    // r25c: chronic underperformer — uses 7-day ACOS if backend provides it (acos7d).
+    // Falls back to today's ACOS only if 7d not available.
+    const acos7d = (c.acos7d != null) ? c.acos7d : null;
+    const chronicAcos = acos7d != null && acos7d > 40 && (c.spend7d || 0) > 20;
     const isAuto = c.targetingType === 'auto';
     const budgetColor = outOfBudget ? 'color:var(--red);font-weight:600' : budgetLow ? 'color:var(--amber);font-weight:500' : '';
     const acosClass = c.acos > 35 ? 'acos-high' : c.acos > 25 ? 'acos-warn' : c.acos > 0 ? 'acos-ok' : '';
     const progColor = outOfBudget ? 'var(--red)' : budgetLow ? 'var(--amber)' : 'var(--green)';
     const noData = c.spend === null;
     let statusBadge = '<span class="badge badge-green"><span class="dot" style="background:var(--green)"></span>Healthy</span>';
+    // r25c: priority order — out-of-budget > wasted > acos high > chronic > budget low > healthy.
+    // "Wasted" beats "ACOS high" because zero sales is the bigger red flag.
     if (outOfBudget) statusBadge = '<span class="badge badge-red"><span class="dot" style="background:var(--red)"></span>Out of budget</span>';
+    else if (wasted) statusBadge = '<span class="badge badge-red" title="Spent £' + (c.spend || 0).toFixed(2) + ' today with no sales"><span class="dot" style="background:var(--red)"></span>Wasted spend</span>';
     else if (acosHigh) statusBadge = '<span class="badge badge-red"><span class="dot" style="background:var(--red)"></span>ACOS high</span>';
+    else if (chronicAcos) statusBadge = '<span class="badge badge-amber" title="7-day ACOS ' + acos7d.toFixed(0) + '% on £' + (c.spend7d || 0).toFixed(0) + ' spend"><span class="dot" style="background:var(--amber)"></span>Underperforming</span>';
     else if (budgetLow) statusBadge = '<span class="badge badge-amber"><span class="dot" style="background:var(--amber)"></span>Budget low</span>';
     let action = '<button class="btn btn-ghost" style="font-size:12px">View</button>';
     if (showAction) {
@@ -4159,6 +4173,13 @@ async function init() {
     const navUsers = document.getElementById('nav-users');
     if (navUsers) navUsers.style.display = 'flex';
   }
+  // r25c: hide refresh-sales button for agents — server enforces, this is just UX
+  const isManagerLevel = role === 'manager' || role === 'owner' ||
+    (currentUser && (currentUser.department || '').toLowerCase() === 'manager');
+  if (!isManagerLevel) {
+    const refreshBtn = document.getElementById('amz-refresh-sales-btn');
+    if (refreshBtn) refreshBtn.style.display = 'none';
+  }
   try { await fetchData(); } catch(e) { console.error('Init error:', e); setTimeout(init, 3000); }
   loadSettings();
   // r22: restore last visited page on refresh. Skip if this is a fresh login
@@ -4703,13 +4724,34 @@ function buildAmzProductModalBody(p) {
     // Amazon Ads section
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Amazon Ads (last 7 days)</div>',
     (wastedToday > 0 ? '<div style="font-size:13px;color:#dc2626;font-weight:700;margin:-4px 0 10px">⚠ Wasted £' + wastedToday.toFixed(2) + ' over the last 7 days — no sales attributed.</div>' : ''),
+    // r25c: highlight TACOS in plain English at the top of this section.
+    // TACOS = ad spend ÷ TOTAL sales (not just ad-attributed). Tells you what
+    // fraction of every sale you're losing to ads.
+    (function(){
+      if (p.tacos_pct == null) return '';
+      const t = p.tacos_pct;
+      const tone = t > 30 ? '#dc2626' : (t > 15 ? '#b45309' : '#15803d');
+      const bg   = t > 30 ? '#fef2f2' : (t > 15 ? '#fffbeb' : '#f0fdf4');
+      const verdict = t > 30
+        ? 'high — ads are eating ' + t + '% of every £1 of sales (target ≤ 15%).'
+        : (t > 15 ? 'borderline — ads cost ' + t + '% of total sales.' : 'healthy — ads only cost ' + t + '% of total sales.');
+      return '<div style="background:' + bg + ';border-left:3px solid ' + tone + ';padding:10px 14px;border-radius:4px;margin-bottom:10px;font-size:13px">' +
+        '<strong style="color:' + tone + '">TACOS ' + t + '%</strong> — ' + verdict +
+        ' <span style="color:var(--text3);font-size:11px">(£' + (p.camp_spend_7d || 0).toFixed(2) + ' ad spend ÷ £' + (p.total_sales_7d || 0).toFixed(2) + ' total sales)</span>' +
+      '</div>';
+    })(),
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
       tile('Ad spend', '£' + (p.camp_spend_7d || 0).toFixed(2), p.camp_spend_7d > 0 ? null : 'muted'),
       tile('Ad sales', '£' + (p.camp_sales_7d || 0).toFixed(2)),
       tile('Impressions', (p.camp_impressions_7d || 0).toLocaleString('en-GB')),
       tile('Clicks', (p.camp_clicks_7d || 0).toLocaleString('en-GB')),
       tile('Conversions', String(p.camp_conversions_7d || 0)),
-      tile('ACOS', acos > 0 ? acos + '%' : '—', acosKlass),
+      tile('ACOS', acos > 0 ? acos + '%' : '—', acosKlass,
+        'ACOS = ad spend ÷ ad-attributed sales. Tells you the cost of sales DRIVEN by ads. High ACOS means ads are inefficient at producing direct sales.'),
+      // r25c: TACOS tile alongside ACOS — total ad cost across all sales
+      tile('TACOS', p.tacos_pct != null ? p.tacos_pct + '%' : '—',
+        p.tacos_pct == null ? 'muted' : (p.tacos_pct > 30 ? 'bad' : (p.tacos_pct > 15 ? 'warn' : 'good')),
+        'TACOS = ad spend ÷ TOTAL sales (Shopify/Amazon truth, not just ad-attributed). The real cost of advertising as a fraction of all sales — what actually hits your margin. Target ≤ 15%.'),
       tile('Cost/conv', p.cost_per_conv != null ? '£' + p.cost_per_conv.toFixed(2) : '—'),
       tile('Campaigns', String(p.camp_count || 0)),
     '</div>',
@@ -6131,6 +6173,38 @@ async function loadAmazonSalesSection() {
   } catch(e) {
     section.style.display = 'none';
     console.error('loadAmazonSalesSection error:', e);
+  }
+}
+
+// r25c: manual refresh sales button. Calls /api/amazon/refresh-sales-now which
+// syncs today's orders only (~30s). Reloads the sales panel on success.
+async function refreshSalesNow(btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '↻ Refreshing... (~30s)';
+  try {
+    const r = await fetch('/api/amazon/refresh-sales-now', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders())
+    });
+    const j = await r.json();
+    if (r.status === 429) {
+      btn.textContent = '⏱ ' + (j.error || 'Wait a bit');
+      setTimeout(function(){ btn.textContent = originalText; btn.disabled = false; }, 4000);
+      return;
+    }
+    if (!r.ok || !j.ok) {
+      btn.textContent = '✗ ' + (j.error || 'Failed');
+      setTimeout(function(){ btn.textContent = originalText; btn.disabled = false; }, 4000);
+      return;
+    }
+    // Reload the sales section to reflect fresh data
+    if (typeof loadAmazonSalesSection === 'function') loadAmazonSalesSection();
+    btn.textContent = '✓ Updated · ' + (j.result && j.result.upserted ? j.result.upserted + ' orders' : 'done');
+    setTimeout(function(){ btn.textContent = originalText; btn.disabled = false; }, 4000);
+  } catch(e) {
+    btn.textContent = '✗ Error';
+    setTimeout(function(){ btn.textContent = originalText; btn.disabled = false; }, 4000);
   }
 }
 

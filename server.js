@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r25b (Aryan POST→PUT fix, Satyam-flip auto-derive removed from unmerge, Haiku→Opus AI cost switch on 4 endpoints, ai_feedback table + agent feedback loop, kettlebell coverage fix using ad_perf table, TACOS on product cards, Google repeat offenders tab)
+// CampaignPulse — deploy marker 2026-05-07 r25c (TACOS in product modal, badge logic fix for zero-sale wasters + chronic underperformers, manual refresh-sales-now button, orders cron uses LastUpdatedAfter for incremental sync)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -470,16 +470,23 @@ async function syncAmazonCatalogue() {
 // ── Sync recent orders from SP-API into amazon_orders ───────────────────────
 // Uses /orders/v0/orders. Pulls orders updated in the last N days (default 7).
 // We pull both orders and their line items so we can attribute revenue per SKU.
-async function syncAmazonOrders(daysBack) {
+async function syncAmazonOrders(daysBack, opts) {
   if (!db) return { ok: false, error: 'no-db' };
   if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
   // r17: default 9 days (was 7) so the boundary day at the start of the window
   // is fully captured. London-aligned sales display needs a full 24h per day.
   daysBack = daysBack || 9;
+  opts = opts || {};
+  // r25c: optional LastUpdatedAfter mode. When provided (ISO timestamp), uses
+  // SP-API's LastUpdatedAfter param so we only refetch orders that have been
+  // CREATED OR UPDATED since that point. Reduces typical cron load by ~85%.
+  // Caller is responsible for tracking the high-water-mark timestamp; we update
+  // app_settings.last_orders_sync_at on success so the next call can pick it up.
+  const lastUpdatedAfter = opts.lastUpdatedAfter || null;
   const startedAt = Date.now();
-  let total = 0, upserted = 0, errors = 0, itemsUpserted = 0;
+  let total = 0, upserted = 0, errors = 0, itemsUpserted = 0, itemsSkipped = 0;
   try {
-    // SP-API requires CreatedAfter in ISO 8601 — and at least 2 minutes in the past
+    // SP-API requires CreatedAfter / LastUpdatedAfter in ISO 8601 — and at least 2 minutes in the past
     const after = new Date(Date.now() - daysBack * 86400000).toISOString();
     let nextToken = null;
     let pageNum = 0;
@@ -487,9 +494,15 @@ async function syncAmazonOrders(daysBack) {
       pageNum++;
       const params = new URLSearchParams({
         MarketplaceIds: SP_API_MARKETPLACE_ID,
-        CreatedAfter: after,
         MaxResultsPerPage: '50'
       });
+      if (lastUpdatedAfter) {
+        // Incremental mode — only orders changed since the last successful run
+        params.set('LastUpdatedAfter', lastUpdatedAfter);
+      } else {
+        // Full mode (manual button or first-ever run) — last N days
+        params.set('CreatedAfter', after);
+      }
       if (nextToken) params.set('NextToken', nextToken);
       const data = await spApiGet('/orders/v0/orders?' + params.toString());
       const orders = (data && data.payload && data.payload.Orders) || [];
@@ -502,6 +515,33 @@ async function syncAmazonOrders(daysBack) {
           const orderTotal = o.OrderTotal && o.OrderTotal.Amount ? parseFloat(o.OrderTotal.Amount) : 0;
           const currency = o.OrderTotal && o.OrderTotal.CurrencyCode ? o.OrderTotal.CurrencyCode : 'GBP';
           const numItems = parseInt(o.NumberOfItemsShipped || 0) + parseInt(o.NumberOfItemsUnshipped || 0);
+
+          // r25c: skip-line-items optimisation. If the order is already in our DB
+          // AND its LastUpdateDate hasn't changed AND we already have items for it,
+          // we don't need to refetch line items — they don't change after pickup.
+          let needItemsFetch = true;
+          if (!opts.forceItemsRefetch) {
+            try {
+              const existing = await db.query(
+                "SELECT 1 FROM amazon_order_items WHERE order_id = $1 LIMIT 1",
+                [orderId]
+              );
+              const oLastUpdate = o.LastUpdateDate ? new Date(o.LastUpdateDate).getTime() : 0;
+              if (existing.rows.length > 0) {
+                // We already have items. Only refetch if order shows recent updates
+                // (status change, refund, etc.) — otherwise skip the API call.
+                const lastLoadedRes = await db.query(
+                  "SELECT EXTRACT(EPOCH FROM last_synced_at) * 1000 AS ts FROM amazon_orders WHERE order_id = $1",
+                  [orderId]
+                );
+                const lastLoadedMs = lastLoadedRes.rows.length ? parseFloat(lastLoadedRes.rows[0].ts) : 0;
+                if (oLastUpdate > 0 && lastLoadedMs > 0 && oLastUpdate <= lastLoadedMs) {
+                  needItemsFetch = false;
+                }
+              }
+            } catch(e) { /* fall through — fetch items anyway */ }
+          }
+
           await db.query(
             'INSERT INTO amazon_orders (order_id, purchase_date, status, order_total, currency, num_items, last_synced_at, raw_order) ' +
             'VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7) ' +
@@ -509,6 +549,9 @@ async function syncAmazonOrders(daysBack) {
             [orderId, purchaseDate, orderStatus, orderTotal, currency, numItems, JSON.stringify(o)]
           );
           upserted++;
+
+          if (!needItemsFetch) { itemsSkipped++; continue; }
+
           // Pull line items — separate API call per order
           try {
             const itemsData = await spApiGet('/orders/v0/orders/' + encodeURIComponent(orderId) + '/orderItems');
@@ -533,8 +576,20 @@ async function syncAmazonOrders(daysBack) {
       if (pageNum >= 100) { console.log('[SP-API orders sync] Hit page cap (100), stopping'); break; }
     } while (nextToken);
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.log('[SP-API orders sync] Done in ' + seconds + 's: ' + total + ' orders pulled, ' + upserted + ' upserted, ' + itemsUpserted + ' items, ' + errors + ' errors');
-    return { ok: true, total: total, upserted: upserted, itemsUpserted: itemsUpserted, errors: errors, seconds: parseFloat(seconds) };
+    console.log('[SP-API orders sync] Done in ' + seconds + 's: ' + total + ' orders, ' + upserted + ' upserted, ' + itemsUpserted + ' items fetched, ' + itemsSkipped + ' items skipped (already current), ' + errors + ' errors' + (lastUpdatedAfter ? ' [incremental from ' + lastUpdatedAfter + ']' : ' [full ' + daysBack + 'd]'));
+
+    // r25c: persist high-water-mark for the next incremental run.
+    // Backed off 60s from now to be safe against clock skew / very recent updates.
+    // Stored inside the existing app_settings.settings JSONB blob (id=1).
+    try {
+      const hwm = new Date(Date.now() - 60000).toISOString();
+      await db.query(
+        "UPDATE app_settings SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{last_orders_sync_at}', to_jsonb($1::text)), updated_at = NOW() WHERE id = 1",
+        [hwm]
+      );
+    } catch(e) { /* non-fatal */ }
+
+    return { ok: true, total: total, upserted: upserted, itemsUpserted: itemsUpserted, itemsSkipped: itemsSkipped, errors: errors, seconds: parseFloat(seconds), mode: lastUpdatedAfter ? 'incremental' : 'full' };
   } catch(e) {
     console.error('[SP-API orders sync] FAILED: ' + e.message);
     return { ok: false, error: e.message };
@@ -2750,6 +2805,38 @@ app.get('/api/dashboard', async function(req, res) {
   }
   const allCampaigns = state.campaigns;
   const campaigns = allCampaigns.filter(function(c){ return !hiddenCampaignIds.has(String(c.campaignId)); });
+
+  // r25c: enrich each campaign with 7-day ACOS + spend so the front-end can
+  // flag chronic underperformers (single-day ACOS doesn't catch sustained waste).
+  if (db) {
+    try {
+      const snapRes = await db.query(
+        "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
+      );
+      const totals = {}; // campaignId -> { spend, sales }
+      snapRes.rows.forEach(function(snap) {
+        (snap.campaigns || []).forEach(function(sc) {
+          if (!sc.campaignId) return;
+          const id = String(sc.campaignId);
+          if (!totals[id]) totals[id] = { spend: 0, sales: 0 };
+          totals[id].spend += parseFloat(sc.spend || 0);
+          totals[id].sales += parseFloat(sc.sales || 0);
+        });
+      });
+      campaigns.forEach(function(c) {
+        const t = totals[String(c.campaignId)];
+        if (t) {
+          c.spend7d = +t.spend.toFixed(2);
+          c.sales7d = +t.sales.toFixed(2);
+          c.acos7d = t.sales > 0 ? +((100 * t.spend / t.sales).toFixed(1)) : null;
+        }
+      });
+    } catch(e) {
+      // Non-fatal — chronic-underperformer badge just won't fire
+      if (!/does not exist/.test(e.message)) console.error('[r25c] 7d enrich error: ' + e.message);
+    }
+  }
+
   const totalRevenue = campaigns.reduce(function(s, c) { return s + (c.sales || 0); }, 0);
   const totalSpend = campaigns.reduce(function(s, c) { return s + (c.spend || 0); }, 0);
   const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend / totalRevenue) * 1000) / 10 : 0;
@@ -3496,6 +3583,32 @@ app.post('/api/admin/sp-api/sync-orders', async function(req, res) {
   const daysBack = parseInt((req.body && req.body.daysBack) || 7);
   const result = await syncAmazonOrders(daysBack);
   res.json(result);
+});
+
+// r25c: POST /api/amazon/refresh-sales-now — manager+owner accessible.
+// Pulls only TODAY's orders (1 day window) so it's fast (~30s) and quota-light.
+// Used by the dashboard "Refresh sales" button so the team isn't waiting for
+// the next 06:00/14:00 cron when they want fresh numbers.
+app.post('/api/amazon/refresh-sales-now', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(role) !== -1 || dept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  // Light rate-limit: don't allow more than once every 30s per process. Stops
+  // accidental rapid-fire clicks from burning quota.
+  const now = Date.now();
+  if (global._lastRefreshSalesAt && (now - global._lastRefreshSalesAt) < 30000) {
+    const waitSec = Math.ceil((30000 - (now - global._lastRefreshSalesAt)) / 1000);
+    return res.status(429).json({ error: 'Recently refreshed — wait ' + waitSec + 's' });
+  }
+  global._lastRefreshSalesAt = now;
+  try {
+    const result = await syncAmazonOrders(1); // today only
+    res.json({ ok: true, syncedDays: 1, result: result, refreshedAt: new Date().toISOString() });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /api/admin/sp-api/raw?path=/path — diagnostic passthrough.
@@ -9050,11 +9163,28 @@ cron.schedule('30 2 * * *', function() {
 }, { timezone: 'Europe/London' });
 
 // Orders sync: twice a day — 06:00 (covers overnight) and 14:00 (covers morning).
-// Both runs cover last 7 days (idempotent upsert), enough for 7-day team meetings.
-// Reduced from every 4 hours to save SP-API quota and server CPU.
-cron.schedule('0 6,14 * * *', function() {
+// r25c: now uses LastUpdatedAfter to fetch only changed orders since the last run.
+// First run after deploy falls back to a 7-day window (when no HWM is stored).
+// Combined with the line-items skip optimisation, typical run is ~30 calls vs ~155 before.
+cron.schedule('0 6,14 * * *', async function() {
   if (!spApiConfigured()) return;
-  syncAmazonOrders(7).catch(function(e){ console.error('SP-API orders cron: ' + e.message); });
+  let lastUpdatedAfter = null;
+  try {
+    if (db) {
+      const r = await db.query("SELECT settings->>'last_orders_sync_at' AS hwm FROM app_settings WHERE id = 1");
+      if (r.rows.length && r.rows[0].hwm) lastUpdatedAfter = r.rows[0].hwm;
+    }
+  } catch(e) { /* fall back to full mode */ }
+  // Safety: if HWM is older than 24h (server downtime), do a full 7d sync anyway
+  if (lastUpdatedAfter) {
+    const hwmAge = Date.now() - new Date(lastUpdatedAfter).getTime();
+    if (hwmAge > 24 * 3600 * 1000) {
+      console.log('[r25c orders cron] HWM is ' + Math.round(hwmAge/3600000) + 'h old — falling back to full 7d sync');
+      lastUpdatedAfter = null;
+    }
+  }
+  syncAmazonOrders(7, lastUpdatedAfter ? { lastUpdatedAfter: lastUpdatedAfter } : null)
+    .catch(function(e){ console.error('SP-API orders cron: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 // r20: Pricing signals refresh — 03:30 London. Runs after catalogue sync (02:30)
