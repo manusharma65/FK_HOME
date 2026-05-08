@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29b (Bugfix: defensive try/catch around live campaign metrics block — modal opens even if metrics block throws. Note: cached critiques from before r29 deploy were generated with Opus prompt — those will show "Opus" in cached UI until 24h cache expires or manager force-refreshes.)
+// CampaignPulse — deploy marker 2026-05-08 r29c (Bugfix: restored taskDetailEscHandler function — was lost in earlier edit, killing Google task modal. Also: history endpoint now returns empty array on errors instead of 500 so frontend doesn't break.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -8238,14 +8238,20 @@ app.post('/api/google/tasks/:id/status', async function(req, res) {
 app.get('/api/google/tasks/:id/history', async function(req, res) {
   if (!db) return res.json({ history: [] });
   try {
+    // r29c: defensive — task_id might not exist as a column on older rows or older deploys.
+    // Try the standard query first; if it fails due to missing column, fall back to empty.
+    const taskIdNum = parseInt(req.params.id, 10);
+    if (!Number.isFinite(taskIdNum)) return res.json({ history: [] });
     const r = await db.query(
       "SELECT id, action, notes, status_before, status_after, agent_name, actor_name, created_at " +
       "FROM activity_log WHERE department='google' AND task_id=$1 ORDER BY created_at ASC",
-      [parseInt(req.params.id)]
+      [taskIdNum]
     );
     res.json({ history: r.rows });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[GTASK history] ' + e.message);
+    // Don't 500 on the front-end — return empty history so the modal can still open
+    res.json({ history: [], _error: e.message });
   }
 });
 

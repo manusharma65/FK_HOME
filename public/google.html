@@ -2766,6 +2766,12 @@ function closeTaskDetail() {
   CURRENT_OPEN_TASK_ID = null;
 }
 
+// r29c: restored — handler for Esc key to close the task detail modal.
+// Was lost in a previous str_replace.
+function taskDetailEscHandler(e) {
+  if (e.key === 'Escape') closeTaskDetail();
+}
+
 // ─── Reassign modal — manager moves a task between agents ─────────────────
 function showReassignModal(taskId) {
   const task = (LAST_TASKS_RESPONSE && LAST_TASKS_RESPONSE.tasks || []).find(function(t){ return t.id === taskId; });
