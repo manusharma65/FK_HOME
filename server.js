@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29i (Defensive: archive endpoint returns empty array on errors instead of 500. Diagnostic: when cachedOnly returns 404, server logs the productId being looked up + 5 most recent cache rows so we can see exact mismatch in Railway logs.)
+// CampaignPulse — deploy marker 2026-05-08 r29j (Migration fix: dedicated ensureCriticalColumns() runs at boot with each ALTER TABLE in its own try/catch. Adds missing landing_page_critiques.model_used (cause of vanishing critique — saves were silently failing) and google_campaign_archive.state (cause of /archive 500). Also drops legacy unique constraint on campaign_tasks(campaign_id, created_date) idempotently.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1589,6 +1589,8 @@ async function initDB() {
     try { await db.query("DROP TABLE IF EXISTS amazon_product_snooze"); } catch(e) {}
     console.log('Database connected and tables ready');
     await initTasksTable();
+    // r29j: critical columns migrations — runs every boot, idempotent
+    await ensureCriticalColumns();
   } catch(e) {
     console.error('DB init error: ' + e.message);
     db = null;
@@ -2198,6 +2200,48 @@ async function initTasksTable() {
     } catch(e) { console.error('Agent name fix error: ' + e.message); }
   } catch(e) {
     console.error('Tasks table error: ' + e.message);
+  }
+}
+
+// r29j: bulletproof migrations. Each ALTER TABLE runs in its own try/catch so
+// one failure doesn't block subsequent migrations. Idempotent — safe to run on
+// every boot. This catches the case where the main initTasksTable function
+// errors midway and skips the rest of the schema sync.
+async function ensureCriticalColumns() {
+  if (!db) return;
+  const migrations = [
+    // r28: model tracking on landing_page_critiques (added later, missed in some deploys)
+    ["landing_page_critiques.model_used", "ALTER TABLE landing_page_critiques ADD COLUMN IF NOT EXISTS model_used TEXT"],
+    // archive table state column (added later, missed in some deploys)
+    ["google_campaign_archive.state", "ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'"],
+    ["google_campaign_archive.department", "ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'google'"],
+    // campaign_tasks columns frequently re-checked
+    ["campaign_tasks.product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
+    ["campaign_tasks.product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
+    ["campaign_tasks.department", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'"],
+    ["campaign_tasks.failure_count", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 1"],
+    ["campaign_tasks.last_resolved_date", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS last_resolved_date TIMESTAMP"],
+    ["campaign_tasks.is_repeat_offender", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE"],
+    ["campaign_tasks.resolution_note", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS resolution_note TEXT"],
+    ["campaign_tasks.priority", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 2"],
+    ["campaign_tasks.product_image_url", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_image_url TEXT"],
+    // Drop the legacy unique constraint that blocks multiple tasks per campaign per day
+    ["drop legacy unique constraint", "ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key"]
+  ];
+  let okCount = 0;
+  let failedList = [];
+  for (const [label, sql] of migrations) {
+    try {
+      await db.query(sql);
+      okCount++;
+    } catch(e) {
+      failedList.push(label + ': ' + e.message);
+    }
+  }
+  console.log('[r29j MIGRATIONS] ' + okCount + '/' + migrations.length + ' applied successfully');
+  if (failedList.length) {
+    console.error('[r29j MIGRATIONS] ' + failedList.length + ' failed:');
+    failedList.forEach(function(f){ console.error('  · ' + f); });
   }
 }
 
