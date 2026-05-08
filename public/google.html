@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29 (View campaign navigates to Campaigns page + scrolls + expands + return-to-task button. Opus earned by agents after submitting feedback.) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29a (Live campaign metrics on task card — 6 stats; campaigns sorted by urgency with colour bar + summary line; Opus visible to all (server gates); bigger return-to-task button) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1500,6 +1500,34 @@ function campaignBlock(c) {
   const urgent = c.urgentCount > 0 ? '<span class="priority-pill priority-1">' + c.urgentCount + ' urgent</span>' : '';
   const nameEsc = escapeHtml(c.campaignName).replace(/'/g, "&#39;");
 
+  // r29a: urgency colour bar + summary line
+  const urgencyLevel = _campaignUrgency(c);
+  const urgencyColours = { 3: '#dc2626', 2: '#f59e0b', 1: '#16a34a', 0: '#9ca3af' };
+  const urgencyBar = '<div style="position:absolute;left:0;top:0;bottom:0;width:4px;background:' + (urgencyColours[urgencyLevel] || '#e5e7eb') + ';border-radius:12px 0 0 12px"></div>';
+
+  // Plain-English summary — what's going on with this campaign in 1 line
+  let summaryLine = '';
+  const spend = Number(c.totalSpend) || 0;
+  const sales = Number(c.totalSales) || 0;
+  const wasted = Number(c.wastedSpend) || 0;
+  const acos = sales > 0 ? (spend / sales) * 100 : null;
+  if (urgencyLevel === 3) {
+    if (spend > 30 && sales === 0) summaryLine = '🔴 £' + spend.toFixed(0) + ' spent in 7 days, zero sales — investigate now';
+    else if (acos !== null && acos > 40) summaryLine = '🔴 ACOS ' + acos.toFixed(0) + '% — losing money on every sale';
+    else if (wasted > 20) summaryLine = '🔴 £' + wasted.toFixed(0) + ' wasted on dead products in 7 days';
+    else summaryLine = '🔴 Needs urgent action';
+  } else if (urgencyLevel === 2) {
+    if (acos !== null && acos > 25) summaryLine = '🟡 ACOS ' + acos.toFixed(0) + '% — over target, watch';
+    else if (wasted > 5) summaryLine = '🟡 £' + wasted.toFixed(0) + ' wasted in 7 days — minor concern';
+    else if (spend > 10 && sales === 0) summaryLine = '🟡 £' + spend.toFixed(0) + ' spent, no sales yet';
+    else summaryLine = '🟡 Watch';
+  } else if (urgencyLevel === 1 && spend > 0) {
+    summaryLine = '🟢 Healthy — ACOS ' + (acos !== null ? acos.toFixed(0) + '%' : '—') + ', £' + sales.toFixed(0) + ' sales';
+  }
+  const summaryHtml = summaryLine
+    ? '<div style="font-size:12px;color:var(--text2);margin-top:3px;font-weight:500">' + summaryLine + '</div>'
+    : '';
+
   // Dismiss pill — shown for any campaign that's been flagged by an agent
   let dismissPill = '';
   if (c.dismissed) {
@@ -1523,10 +1551,12 @@ function campaignBlock(c) {
   // Assign button — manager creates a manual task on this campaign
   const assignBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();assignToCampaign(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Create a task and assign to Rahul or Anuj">📋 Assign</button>';
 
-  return '<div class="campaign-row' + (c.dismissed ? ' is-dismissed' : '') + '" id="camp-' + c.campaignId + '">'
+  return '<div class="campaign-row' + (c.dismissed ? ' is-dismissed' : '') + '" id="camp-' + c.campaignId + '" style="position:relative">'
+    + urgencyBar
     + '<div class="campaign-header">'
     + '<div onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer;flex:1">'
     + '<div class="campaign-name">' + escapeHtml(c.campaignName) + ' ' + typeBadge(c.campaignType) + ' <span class="campaign-task-badge" data-campaign-id="' + c.campaignId + '" style="display:none;font-size:11px;color:var(--text2);font-weight:500;font-family:var(--mono);margin-left:6px"></span></div>'
+    + summaryHtml
     + '<div class="campaign-meta">' + c.productCount + ' rows ' + urgent + '</div>'
     + dismissPill
     + '</div>'
@@ -1772,10 +1802,41 @@ function renderCampaignsPage() {
     } else {
       document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
     }
+    // r29a: sort by urgency before rendering. Red campaigns first, then amber, then green.
+    // Within each band, keep original order (which is already by spend or score).
+    campaignsToShow = campaignsToShow.slice().sort(function(a, b){
+      return _campaignUrgency(b) - _campaignUrgency(a);
+    });
     document.getElementById('campaigns-list').innerHTML = tabsHtml + filterBanner + campaignsToShow.map(campaignBlock).join('');
     // After render, lazily populate friction badges (one cheap GET, no AI)
     setTimeout(populateFrictionBadges, 50);
   }
+}
+
+// r29a: urgency score for a campaign card. Higher = more urgent. Used for sort + colour bar.
+// 3 = red (urgent action needed)
+// 2 = amber (watch)
+// 1 = green (healthy)
+// 0 = dismissed/inactive
+function _campaignUrgency(c) {
+  if (c.dismissed) return 0;
+  const spend = Number(c.totalSpend) || 0;
+  const sales = Number(c.totalSales) || 0;
+  const wasted = Number(c.wastedSpend) || 0;
+  const acos = sales > 0 ? (spend / sales) * 100 : null;
+
+  // RED — needs urgent action
+  if (wasted > 20) return 3;                        // £20+ wasted in 7d
+  if (spend > 30 && sales === 0) return 3;          // £30+ spent, zero sales
+  if (acos !== null && acos > 40) return 3;         // ACOS over 40%
+
+  // AMBER — watch
+  if (wasted > 5) return 2;
+  if (acos !== null && acos > 25) return 2;
+  if (spend > 10 && sales === 0) return 2;          // some spend, no sales (smaller threshold)
+
+  // GREEN — healthy
+  return 1;
 }
 
 // ─── Google Tasks page ───────────────────────────────────────────────────
@@ -2390,12 +2451,11 @@ async function openTaskDetail(taskId) {
         + '<div style="font-size:14px;color:#111;line-height:1.6">' + escapeHtml(task.problem_detail || '') + '</div>'
       + '</div>'
 
-      // r28: link to live campaign data instead of stale baseline-at-creation metrics.
-      // Click opens the campaign AI modal as overlay (single source of truth).
+      // r29a: live campaign metrics shown directly on the task card. Agent scans
+      // the numbers, decides if they need to dive into the full campaign view.
+      // Pulls from advertisedData (already in browser memory — no extra fetch).
       + (task.campaign_id
-        ? '<div style="margin-bottom:18px"><button class="btn btn-ghost" onclick="event.stopPropagation();openCampaignFromTask(\'' + task.campaign_id + '\',\'' + escapeHtml(task.campaign_name || '').replace(/\'/g, '&#39;') + '\')" style="font-size:13px;border:1px solid var(--border);background:white">📊 View live campaign data &amp; AI analysis →</button>'
-          + '<div style="font-size:11px;color:#6b7280;margin-top:6px">Spend, sales, ACOS, TACOS, AI verdict — all on the campaign card. No duplicate data here.</div>'
-          + '</div>'
+        ? _renderTaskCampaignMetricsBlock(task)
         : '')
 
       + closedCallouts
@@ -2422,7 +2482,66 @@ async function openTaskDetail(taskId) {
   loadGoogleTaskSubtasks(taskId);
 }
 
-function taskDetailEscHandler(e) { if (e.key === 'Escape') closeTaskDetail(); }
+// r29a: render live campaign metrics inside a Google task card. Pulls from
+// advertisedData (already in memory — no fetch). Shows 6 stats: spend, sales,
+// conv, ACOS, TACOS, cost/conv. Click opens full campaign view.
+function _renderTaskCampaignMetricsBlock(task) {
+  const cid = String(task.campaign_id);
+  const camp = ((advertisedData && advertisedData.campaigns) || []).find(function(c){ return String(c.campaignId) === cid; });
+
+  // Compute TACOS the same way as elsewhere — campaign spend / total Shopify revenue 7d
+  let tacos = '—';
+  if (camp && advertisedData && advertisedData.totalShopify7d != null && advertisedData.totalShopify7d > 0) {
+    tacos = ((Number(camp.totalSpend) || 0) / advertisedData.totalShopify7d * 100).toFixed(1) + '%';
+  }
+
+  const escName = escapeHtml(task.campaign_name || '').replace(/'/g, '&#39;');
+  const viewBtn = '<button class="btn btn-primary" onclick="event.stopPropagation();openCampaignFromTask(\'' + task.campaign_id + '\',\'' + escName + '\')" style="font-size:13px;padding:8px 16px">📊 View full campaign →</button>';
+
+  if (!camp) {
+    return '<div style="margin-bottom:18px;padding:14px 16px;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;font-size:13px">'
+      + '<strong>Campaign data unavailable</strong> — the campaign isn\'t in the current Google Ads sync. ' + viewBtn
+      + '</div>';
+  }
+
+  const spend = Number(camp.totalSpend) || 0;
+  const sales = Number(camp.totalSales) || 0;
+  const conv = Number(camp.totalConv) || Number(camp.totalConversions) || 0;
+  const acos = sales > 0 ? (spend / sales * 100).toFixed(0) + '%' : '—';
+  const costPerConv = conv > 0 ? '£' + (spend / conv).toFixed(2) : '—';
+
+  // Urgency colour — same rule as the campaign list
+  const urgencyLevel = (typeof _campaignUrgency === 'function') ? _campaignUrgency(camp) : 1;
+  const urgencyColours = { 3: '#dc2626', 2: '#f59e0b', 1: '#16a34a', 0: '#9ca3af' };
+  const stripe = urgencyColours[urgencyLevel] || '#9ca3af';
+
+  function stat(label, value, valueColour) {
+    return '<div style="text-align:center;padding:6px 4px">' +
+      '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:3px">' + label + '</div>' +
+      '<div style="font-size:14px;font-weight:700;color:' + (valueColour || '#111') + '">' + value + '</div>' +
+    '</div>';
+  }
+
+  const wastedColour = (Number(camp.wastedSpend) || 0) > 5 ? '#dc2626' : '#111';
+
+  return '<div style="margin-bottom:18px;border-left:4px solid ' + stripe + ';background:#fafafa;border-radius:0 8px 8px 0;padding:12px 16px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">'
+      + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Campaign live data (last 7 days)</div>'
+      + viewBtn
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;background:white;border-radius:6px;padding:8px 4px">'
+      + stat('Spend', '£' + spend.toFixed(0))
+      + stat('Sales', '£' + sales.toFixed(0))
+      + stat('Conv', conv)
+      + stat('ACOS', acos, urgencyLevel === 3 ? '#dc2626' : '#111')
+      + stat('TACOS', tacos)
+      + stat('Cost/conv', costPerConv)
+    + '</div>'
+    + ((Number(camp.wastedSpend) || 0) > 5
+        ? '<div style="font-size:12px;color:#dc2626;margin-top:8px;font-weight:600">⚠ £' + Number(camp.wastedSpend).toFixed(0) + ' wasted on dead products in 7 days</div>'
+        : '')
+  + '</div>';
+}
 
 // r28: Open the existing campaign analysis modal from a task card. The campaign
 // modal shows live data + AI verdict — single source of truth, no duplication.
@@ -2468,26 +2587,54 @@ function openCampaignFromTask(campaignId, campaignName) {
 // Campaigns page from a task. Appears top-right, click → goes back to Tasks page
 // and reopens the specific task.
 function _showReturnToTaskButton(taskId) {
-  // Remove any existing instance first
+  // r29a: bigger, more visible. Bottom-left so it doesn't hide behind nav.
+  // White-on-blue. Includes task ID label so it's obviously a "back to task X" thing.
   const existing = document.getElementById('return-to-task-btn');
   if (existing) existing.remove();
   if (!taskId) return;
 
   const btn = document.createElement('button');
   btn.id = 'return-to-task-btn';
-  btn.style.cssText = 'position:fixed;top:80px;right:20px;z-index:1500;padding:10px 18px;background:#1f2937;color:white;border:none;border-radius:24px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,0.25);transition:all 0.2s;font-family:inherit';
-  btn.textContent = '← Return to task';
+  btn.style.cssText =
+    'position:fixed;bottom:24px;left:24px;z-index:9999;' +
+    'padding:14px 22px;background:#2563eb;color:white;border:none;border-radius:30px;' +
+    'font-size:15px;font-weight:700;cursor:pointer;' +
+    'box-shadow:0 10px 40px rgba(37,99,235,0.4);' +
+    'transition:all 0.2s;font-family:inherit;display:flex;align-items:center;gap:8px;' +
+    'animation:returnPulse 2s ease-in-out infinite';
+  btn.innerHTML = '← Return to task #' + taskId;
+
   btn.onclick = function() {
     btn.remove();
     const taskNavBtn = document.querySelector('.nav-item[onclick*="showPage(\'tasks\'"]');
     showPage('tasks', taskNavBtn);
-    // After tasks page renders, reopen the task detail
     setTimeout(function() {
       if (typeof openTaskDetail === 'function') openTaskDetail(taskId);
     }, 200);
   };
-  btn.onmouseover = function() { btn.style.background = '#111827'; btn.style.transform = 'translateY(-1px)'; };
-  btn.onmouseout = function() { btn.style.background = '#1f2937'; btn.style.transform = 'translateY(0)'; };
+  btn.onmouseover = function() {
+    btn.style.background = '#1d4ed8';
+    btn.style.transform = 'translateY(-2px) scale(1.02)';
+    btn.style.boxShadow = '0 14px 50px rgba(37,99,235,0.55)';
+  };
+  btn.onmouseout = function() {
+    btn.style.background = '#2563eb';
+    btn.style.transform = 'translateY(0) scale(1)';
+    btn.style.boxShadow = '0 10px 40px rgba(37,99,235,0.4)';
+  };
+
+  // Add pulse animation if not already present
+  if (!document.getElementById('return-pulse-style')) {
+    const styleEl = document.createElement('style');
+    styleEl.id = 'return-pulse-style';
+    styleEl.textContent =
+      '@keyframes returnPulse {' +
+        '0%, 100% { box-shadow: 0 10px 40px rgba(37,99,235,0.4); }' +
+        '50% { box-shadow: 0 10px 40px rgba(37,99,235,0.7), 0 0 0 8px rgba(37,99,235,0.15); }' +
+      '}';
+    document.head.appendChild(styleEl);
+  }
+
   document.body.appendChild(btn);
 }
 
@@ -3140,19 +3287,21 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
   if (lockBadge) lockBadge.innerHTML = locked ? '· 🔒 locked for 24h' : '';
 
   if (buttonsDiv) {
-    // r28: dual-model re-run buttons (Haiku/Opus). Manager can override 24h lock.
+    // r29a: show BOTH buttons to all users. Server enforces gating (agents need
+    // ≥1 feedback row to unlock Opus; manager unrestricted). Server returns
+    // friendly 403 with unlock instruction if blocked.
     const me = window.currentUser || {};
     const role = (me.role || '').toLowerCase();
     const dept = (me.department || '').toLowerCase();
     const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
     const escName = String(campaignName).replace(/'/g, "&#39;");
     const haikuBtn = '<button class="btn btn-primary" onclick="runCampaignAi(\'' + campaignId + '\',\'' + escName + '\', true, \'haiku\')" style="font-size:13px">↻ Re-analyse (Haiku)</button>';
-    const opusBtn = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + escName + '\', true, \'opus\')" style="font-size:13px;border:1px solid var(--border)">↻ Re-analyse (Opus — deep)</button>';
+    const opusBtn = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + escName + '\', true, \'opus\')" style="font-size:13px;border:1px solid var(--border)" title="Deep analysis. Agents: unlocks after submitting feedback on Haiku output.">↻ Re-analyse (Opus — deep)</button>';
     let btns = '';
     if (!locked || isPriv) {
-      btns = haikuBtn + (isPriv ? ' ' + opusBtn : ' <span style="font-size:11px;color:var(--text3);align-self:center">🔒 Manager can run Opus</span>');
+      btns = haikuBtn + ' ' + opusBtn;
     } else {
-      btns = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">🔒 Manager can re-analyse</span>';
+      btns = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">🔒 Manager can re-analyse (24h lock)</span>';
     }
     buttonsDiv.innerHTML = btns;
   }
@@ -3513,7 +3662,7 @@ async function renderProductAiSection(p) {
     // No cached analysis — show prompt to run
     contentDiv.innerHTML = '<div style="color:var(--text);font-size:13px;line-height:1.6">'
       + '<strong>Run an AI critique of this product page.</strong> Analyses title, images, copy, keywords on page, trust signals, ad-vs-page coherence.<br><br>'
-      + '<span style="color:var(--text3)">Haiku: fast (~10s), £0.01. Opus: deeper (~25s), £0.05–0.10 — manager only. Cached 24h either way.</span>'
+      + '<span style="color:var(--text3)">Haiku: fast (~10s), £0.01. Opus: deeper (~25s), £0.05–0.10. Cached 24h either way.</span>'
       + '</div>';
     buttonsDiv.innerHTML = _gpcRunButtonsHtml(productId, false);
   } catch(e) {
@@ -3522,18 +3671,14 @@ async function renderProductAiSection(p) {
   }
 }
 
-// r28: build run-buttons HTML — Haiku always; Opus restricted to managers.
+// r29a: build run-buttons HTML — show BOTH Haiku and Opus to all users.
+// Server enforces the gating (agents need feedback to unlock Opus).
+// Front-end just always shows both — server returns friendly 403 if blocked.
 // reanalyse=true switches button text to "Re-analyse" instead of "Run".
 function _gpcRunButtonsHtml(productId, reanalyse) {
-  const me = window.currentUser || {};
-  const role = (me.role || '').toLowerCase();
-  const dept = (me.department || '').toLowerCase();
-  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
   const verb = reanalyse ? '↻ Re-analyse' : '🔍 Run';
   const haikuBtn = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\',\'haiku\')" style="font-size:13px">' + verb + ' (Haiku)</button>';
-  const opusBtn = isPriv
-    ? '<button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\',\'opus\')" style="font-size:13px;border:1px solid var(--border)">' + verb + ' (Opus — deep)</button>'
-    : '<span style="font-size:11px;color:var(--text3);align-self:center">🔒 Manager can run Opus (deeper)</span>';
+  const opusBtn = '<button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\',\'opus\')" style="font-size:13px;border:1px solid var(--border)" title="Deep analysis. Agents: unlocks after submitting feedback on Haiku output.">' + verb + ' (Opus — deep)</button>';
   return haikuBtn + ' ' + opusBtn;
 }
 

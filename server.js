@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29 (Hard cap repeat offenders at 2 — 3rd failure → Stuck surface, no new task. Note-aware deferral if previous agent said "wait". AI-enhanced repeat task description (one-shot Haiku, reads previous note). Data-scope fix on product critique — keywords filtered to this product's ad groups only. Stronger feedback Q&A — must answer agent's questions. Opus earned by agents after submitting feedback. Daily LPC cron skips if cached.)
+// CampaignPulse — deploy marker 2026-05-08 r29a (Live campaign metrics on task cards (Amazon + Google) — 6 stats: spend/sales/conv/ACOS/TACOS/cost-per-conv. Bigger return-to-task button (bottom-left, blue, pulsing). Opus visible to all (server enforces gating). Campaign list sorted by urgency with colour bar + plain-English summary line.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');

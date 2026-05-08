@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29 (Repeat offender hard cap, AI-enhanced repeat task descriptions, View campaign → return-to-task button) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29a (Live campaign metrics on task card — 6 stats; bigger return-to-task button) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3701,15 +3701,10 @@ function openTaskDetailModal(taskId) {
   sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Problem:</strong> ' + escHtml(t.problem_detail || '—') + '</div>');
   sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Score:</strong> ' + (t.score || 0) + ' pts · <strong>Working days open:</strong> ' + wdo + ' · <strong>Stage:</strong> ' + stage + '</div>');
 
-  // r28: link to live campaign data instead of carrying baseline metrics on the task.
-  // Click opens the existing campaign detail modal as overlay. Single source of truth.
+  // r29a: live Amazon campaign metrics on the task card. Agent scans first,
+  // dives into full campaign view only if needed.
   if (t.campaign_id) {
-    sections.push(
-      '<div style="margin-bottom:14px">' +
-        '<button class="btn btn-ghost" style="font-size:13px;border:1px solid var(--border);background:white" onclick="event.stopPropagation();openCampaignFromAmzTask(\'' + t.campaign_id + '\',\'' + (t.campaign_name || '').replace(/[\'"]/g, '') + '\')">📊 View live campaign data &amp; AI →</button>' +
-        '<div style="font-size:11px;color:var(--text3);margin-top:6px">Spend, sales, ACOS, TACOS — all on the campaign card. No duplicate data here.</div>' +
-      '</div>'
-    );
+    sections.push(_renderAmzTaskCampaignMetricsBlock(t));
   }
   if (t.first_action_at) {
     sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>First action:</strong> ' + new Date(t.first_action_at).toLocaleString('en-GB') + '</div>');
@@ -3857,14 +3852,22 @@ function openCampaignFromAmzTask(campaignId, campaignName) {
 
 // r29: floating "← Return to task" for Amazon — same UX as Google
 function _amzShowReturnToTaskButton(taskId) {
+  // r29a: bigger, more visible. Bottom-left, blue, pulsing.
   const existing = document.getElementById('amz-return-to-task-btn');
   if (existing) existing.remove();
   if (!taskId) return;
 
   const btn = document.createElement('button');
   btn.id = 'amz-return-to-task-btn';
-  btn.style.cssText = 'position:fixed;top:80px;right:20px;z-index:1500;padding:10px 18px;background:#1f2937;color:white;border:none;border-radius:24px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,0.25);transition:all 0.2s;font-family:inherit';
-  btn.textContent = '← Return to task';
+  btn.style.cssText =
+    'position:fixed;bottom:24px;left:24px;z-index:9999;' +
+    'padding:14px 22px;background:#2563eb;color:white;border:none;border-radius:30px;' +
+    'font-size:15px;font-weight:700;cursor:pointer;' +
+    'box-shadow:0 10px 40px rgba(37,99,235,0.4);' +
+    'transition:all 0.2s;font-family:inherit;display:flex;align-items:center;gap:8px;' +
+    'animation:amzReturnPulse 2s ease-in-out infinite';
+  btn.innerHTML = '← Return to task #' + taskId;
+
   btn.onclick = function() {
     btn.remove();
     if (typeof closeCampDetailModal === 'function') closeCampDetailModal();
@@ -3872,9 +3875,84 @@ function _amzShowReturnToTaskButton(taskId) {
       if (typeof openTaskDetailModal === 'function') openTaskDetailModal(taskId);
     }, 100);
   };
-  btn.onmouseover = function() { btn.style.background = '#111827'; btn.style.transform = 'translateY(-1px)'; };
-  btn.onmouseout = function() { btn.style.background = '#1f2937'; btn.style.transform = 'translateY(0)'; };
+  btn.onmouseover = function() {
+    btn.style.background = '#1d4ed8';
+    btn.style.transform = 'translateY(-2px) scale(1.02)';
+  };
+  btn.onmouseout = function() {
+    btn.style.background = '#2563eb';
+    btn.style.transform = 'translateY(0) scale(1)';
+  };
+
+  if (!document.getElementById('amz-return-pulse-style')) {
+    const styleEl = document.createElement('style');
+    styleEl.id = 'amz-return-pulse-style';
+    styleEl.textContent =
+      '@keyframes amzReturnPulse {' +
+        '0%, 100% { box-shadow: 0 10px 40px rgba(37,99,235,0.4); }' +
+        '50% { box-shadow: 0 10px 40px rgba(37,99,235,0.7), 0 0 0 8px rgba(37,99,235,0.15); }' +
+      '}';
+    document.head.appendChild(styleEl);
+  }
+
   document.body.appendChild(btn);
+}
+
+// r29a: render live Amazon campaign metrics inside a task card. 6 stats:
+// spend, sales, conv (orders), ACOS, TACOS (approx), Cost/conv. Click opens full campaign.
+function _renderAmzTaskCampaignMetricsBlock(t) {
+  const cid = String(t.campaign_id);
+  const camp = (Array.isArray(allCampaigns) ? allCampaigns : []).find(function(c){ return String(c.campaignId || c.id) === cid; });
+  const escName = (t.campaign_name || '').replace(/[\'"]/g, '');
+  const viewBtn = '<button class="btn btn-primary" style="font-size:13px;padding:8px 16px" onclick="event.stopPropagation();openCampaignFromAmzTask(\'' + t.campaign_id + '\',\'' + escName + '\')">📊 View full campaign →</button>';
+
+  if (!camp) {
+    return '<div style="margin-bottom:14px;padding:14px 16px;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;font-size:13px">'
+      + '<strong>Campaign data not in current sync</strong> — ' + viewBtn
+      + '</div>';
+  }
+
+  const spend = Number(camp.spend) || 0;
+  const sales = Number(camp.sales) || 0;
+  const orders = Number(camp.orders) || Number(camp.conversions) || 0;
+  const acos = sales > 0 ? (spend / sales * 100).toFixed(0) + '%' : '—';
+  const costPerConv = orders > 0 ? '£' + (spend / orders).toFixed(2) : '—';
+
+  // TACOS: campaign spend / total store sales 7d. We have store-level totals via amzProductsCache.summary.
+  let tacos = '—';
+  try {
+    const totalStoreRev = (amzProductsCache && amzProductsCache.summary && Number(amzProductsCache.summary.total_revenue_7d)) || 0;
+    if (totalStoreRev > 0) tacos = ((spend / totalStoreRev) * 100).toFixed(1) + '%';
+  } catch(_) {}
+
+  // Urgency stripe
+  const acosNum = sales > 0 ? (spend / sales * 100) : null;
+  let stripe = '#16a34a';
+  if (spend > 30 && sales === 0) stripe = '#dc2626';
+  else if (acosNum !== null && acosNum > 40) stripe = '#dc2626';
+  else if (acosNum !== null && acosNum > 25) stripe = '#f59e0b';
+
+  function stat(label, value, valueColour) {
+    return '<div style="text-align:center;padding:6px 4px">' +
+      '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:3px">' + label + '</div>' +
+      '<div style="font-size:14px;font-weight:700;color:' + (valueColour || '#111') + '">' + value + '</div>' +
+    '</div>';
+  }
+
+  return '<div style="margin-bottom:14px;border-left:4px solid ' + stripe + ';background:#fafafa;border-radius:0 8px 8px 0;padding:12px 16px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">'
+      + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Campaign live data (last 7 days)</div>'
+      + viewBtn
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;background:white;border-radius:6px;padding:8px 4px">'
+      + stat('Spend', '£' + spend.toFixed(0))
+      + stat('Sales', '£' + sales.toFixed(0))
+      + stat('Orders', orders)
+      + stat('ACOS', acos, stripe === '#dc2626' ? '#dc2626' : '#111')
+      + stat('TACOS', tacos)
+      + stat('Cost/order', costPerConv)
+    + '</div>'
+  + '</div>';
 }
 
 // ── Toggle Task Detail Panel (legacy — kept so existing inline elements still resolve) ──
