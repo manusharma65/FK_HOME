@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29a (Live campaign metrics on task cards (Amazon + Google) — 6 stats: spend/sales/conv/ACOS/TACOS/cost-per-conv. Bigger return-to-task button (bottom-left, blue, pulsing). Opus visible to all (server enforces gating). Campaign list sorted by urgency with colour bar + plain-English summary line.)
+// CampaignPulse — deploy marker 2026-05-08 r29b (Bugfix: defensive try/catch around live campaign metrics block — modal opens even if metrics block throws. Note: cached critiques from before r29 deploy were generated with Opus prompt — those will show "Opus" in cached UI until 24h cache expires or manager force-refreshes.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29a (Live campaign metrics on task card — 6 stats; campaigns sorted by urgency with colour bar + summary line; Opus visible to all (server gates); bigger return-to-task button) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29b (Bugfix: try/catch around metrics block — modal opens even if the metrics render throws.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2454,8 +2454,15 @@ async function openTaskDetail(taskId) {
       // r29a: live campaign metrics shown directly on the task card. Agent scans
       // the numbers, decides if they need to dive into the full campaign view.
       // Pulls from advertisedData (already in browser memory — no extra fetch).
+      // r29b: defensively try/catch — if metrics block throws, we still render the rest of the modal.
       + (task.campaign_id
-        ? _renderTaskCampaignMetricsBlock(task)
+        ? (function(){
+            try { return _renderTaskCampaignMetricsBlock(task); }
+            catch(e) {
+              console.error('[r29b] metrics block render failed:', e);
+              return '<div style="margin-bottom:18px;padding:10px 12px;background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;font-size:12px;color:#92400e">Could not render live campaign metrics. <button class="btn btn-ghost" style="font-size:12px;margin-left:8px" onclick="event.stopPropagation();openCampaignFromTask(\'' + task.campaign_id + '\',\'' + escapeHtml(task.campaign_name || '').replace(/\'/g, '&#39;') + '\')">📊 View campaign →</button></div>';
+            }
+          })()
         : '')
 
       + closedCallouts
