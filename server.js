@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29g (Fix: AI critique vanishing after modal close+reopen. Cause: when cachedOnly=true, server was checking shopifyState BEFORE cache, returning 404 if Shopify sync had evicted the product (which happens for low-traffic items). Now: cachedOnly looks up cache directly by productId, returns it if exists. Cache is source of truth for "what was AI'd before"; live Shopify state only needed for fresh runs.)
+// CampaignPulse — deploy marker 2026-05-08 r29i (Defensive: archive endpoint returns empty array on errors instead of 500. Diagnostic: when cachedOnly returns 404, server logs the productId being looked up + 5 most recent cache rows so we can see exact mismatch in Railway logs.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -9762,7 +9762,11 @@ app.get('/api/google/archive', async function(req, res) {
     const archived = r.rows.filter(function(x){ return (x.state || 'archived') === 'archived'; });
     res.json({ dismissed: dismissed, archived: archived });
   } catch(e) {
-    res.status(500).json({ error: e.message });
+    // r29i: don't 500 on table/column issues — return empty so the front-end keeps working.
+    // Frequently this fires when a column was added in a later release and the live DB
+    // is missing it; the dismissed/archived tabs just show empty until manual migration.
+    console.error('[GET /api/google/archive] ' + e.message);
+    res.json({ dismissed: [], archived: [], _error: e.message });
   }
 });
 
@@ -11408,6 +11412,7 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
     // Without this, reopening a product modal after sync churn returns 404 even when
     // a perfectly good critique row exists in landing_page_critiques.
     if (cachedOnly) {
+      console.log('[LPC cachedOnly] lookup productId="' + productId + '"');
       const cached = await getCachedCritique(productId);
       if (cached) {
         const u0 = req.user || {};
@@ -11415,6 +11420,13 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
         cached.lockedForAgent = !isManager0;
         return res.json(cached);
       }
+      // r29i: log nearby product_ids in cache so we can see if there's a near-match
+      // (e.g. format difference like leading "gid://" or "_" vs ":")
+      try {
+        const nearby = await db.query("SELECT product_id, generated_at FROM landing_page_critiques ORDER BY generated_at DESC LIMIT 5");
+        console.log('[LPC cachedOnly] MISS for "' + productId + '". Recent cache rows:');
+        nearby.rows.forEach(function(row){ console.log('  · "' + row.product_id + '" (' + row.generated_at + ')'); });
+      } catch(_) {}
       return res.status(404).json({ error: 'No cached analysis', cached: false });
     }
 
