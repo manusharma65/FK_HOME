@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r28 (Task detail modal: View campaign link replaces baseline metrics — single source of truth) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29 (Repeat offender hard cap, AI-enhanced repeat task descriptions, View campaign → return-to-task button) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3623,6 +3623,8 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
 // including both the rich problem/score/notes details and the full action
 // button bar (Working on it, Mark complete, Pause, Dismiss, Reassign, etc.).
 function openTaskDetailModal(taskId) {
+  // r29: track which task is open so View campaign can return here
+  window.CURRENT_OPEN_AMZ_TASK_ID = taskId;
   const modal = document.getElementById('task-detail-modal');
   const titleEl = document.getElementById('task-detail-modal-title');
   const metaEl = document.getElementById('task-detail-modal-meta');
@@ -3830,17 +3832,49 @@ function openTaskDetailModal(taskId) {
 function closeTaskDetailModal() {
   const modal = document.getElementById('task-detail-modal');
   if (modal) modal.style.display = 'none';
+  // r29: clear the tracker — but only if not transitioning to campaign view
+  // (openCampaignFromAmzTask reads it BEFORE closing). Leave for ~200ms safety.
+  setTimeout(function() { window.CURRENT_OPEN_AMZ_TASK_ID = null; }, 200);
 }
 
 // r28: open campaign detail modal from a task. Closes task modal first, then
 // opens campaign — single source of truth for campaign metrics.
 function openCampaignFromAmzTask(campaignId, campaignName) {
+  // r29: keep the modal flow (Amazon has a proper campaign detail modal already)
+  // but capture the source task so we can show "Return to task" inside the modal.
+  const sourceTaskId = window.CURRENT_OPEN_AMZ_TASK_ID || null;
   closeTaskDetailModal();
   setTimeout(function() {
     if (typeof openCampDetailModal === 'function') {
       openCampDetailModal(campaignId);
+      // Add return button to the campaign detail modal after it renders
+      if (sourceTaskId) {
+        setTimeout(function() { _amzShowReturnToTaskButton(sourceTaskId); }, 150);
+      }
     }
   }, 50);
+}
+
+// r29: floating "← Return to task" for Amazon — same UX as Google
+function _amzShowReturnToTaskButton(taskId) {
+  const existing = document.getElementById('amz-return-to-task-btn');
+  if (existing) existing.remove();
+  if (!taskId) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'amz-return-to-task-btn';
+  btn.style.cssText = 'position:fixed;top:80px;right:20px;z-index:1500;padding:10px 18px;background:#1f2937;color:white;border:none;border-radius:24px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,0.25);transition:all 0.2s;font-family:inherit';
+  btn.textContent = '← Return to task';
+  btn.onclick = function() {
+    btn.remove();
+    if (typeof closeCampDetailModal === 'function') closeCampDetailModal();
+    setTimeout(function() {
+      if (typeof openTaskDetailModal === 'function') openTaskDetailModal(taskId);
+    }, 100);
+  };
+  btn.onmouseover = function() { btn.style.background = '#111827'; btn.style.transform = 'translateY(-1px)'; };
+  btn.onmouseout = function() { btn.style.background = '#1f2937'; btn.style.transform = 'translateY(0)'; };
+  document.body.appendChild(btn);
 }
 
 // ── Toggle Task Detail Panel (legacy — kept so existing inline elements still resolve) ──

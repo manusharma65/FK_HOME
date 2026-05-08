@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r28 (Sharper AI prompts: feedback-aware (anti-repeat, answer-questions), product critique focuses on title/images/keywords/copy/trust/CTA, campaign analysis 150-word capped focuses on budget/bid/ACOS/TACOS/keywords/negatives. Haiku/Opus split on Google product + campaign critiques (manager-only Opus). model_used persisted to DB.)
+// CampaignPulse — deploy marker 2026-05-08 r29 (Hard cap repeat offenders at 2 — 3rd failure → Stuck surface, no new task. Note-aware deferral if previous agent said "wait". AI-enhanced repeat task description (one-shot Haiku, reads previous note). Data-scope fix on product critique — keywords filtered to this product's ad groups only. Stronger feedback Q&A — must answer agent's questions. Opus earned by agents after submitting feedback. Daily LPC cron skips if cached.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1755,6 +1755,37 @@ async function initTasksTable() {
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 1`);
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS last_resolved_date TIMESTAMP`);
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE`);
+
+    // r29: stuck_campaigns — surfaces campaigns/products that have failed the same
+    // rule 3+ times. Auto-task creation STOPS for these (no more clutter on Repeat
+    // Offenders tab). Manager reviews the stuck list and decides on structural change.
+    // Cleared when manager resolves manually OR when the underlying rule no longer trips.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS stuck_campaigns (
+          id SERIAL PRIMARY KEY,
+          campaign_id TEXT NOT NULL,
+          product_key TEXT,
+          campaign_name TEXT,
+          product_title TEXT,
+          department TEXT NOT NULL,
+          problem_type TEXT,
+          failure_count INTEGER DEFAULT 3,
+          first_seen_at TIMESTAMP DEFAULT NOW(),
+          last_seen_at TIMESTAMP DEFAULT NOW(),
+          last_resolved_note TEXT,
+          last_problem_detail TEXT,
+          status TEXT DEFAULT 'open',
+          resolved_by TEXT,
+          resolved_at TIMESTAMP,
+          resolution TEXT
+        )
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_stuck_active ON stuck_campaigns(status, department)");
+      await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_stuck_target ON stuck_campaigns(campaign_id, COALESCE(product_key,''), department) WHERE status = 'open'");
+      console.log('[r29] stuck_campaigns table ready');
+    } catch(e) { console.error('[r29] stuck_campaigns init: ' + e.message); }
+
     // r14: Fix created_date default to use London time (was UTC, causing tasks created late London evening to show as next day)
     try { await db.query(`ALTER TABLE campaign_tasks ALTER COLUMN created_date SET DEFAULT ((NOW() AT TIME ZONE 'Europe/London')::DATE)`); } catch(e) {}
     // r14: One-shot fix for tasks where created_date is in the past but the row was actually created today (London time).
@@ -2296,15 +2327,151 @@ function scoreGoogleTask(spend, sales, problemType) {
   return Math.round((spend - sales * target / 100) * 100) / 100;
 }
 
+// r29: helper — does the previous resolution note say "wait" or describe an
+// action that needs time to play out? If so we defer the new task. Heuristic only.
+function previousNoteSaysWait(note) {
+  if (!note) return false;
+  const n = String(note).toLowerCase();
+  return /\b(wait|monitor|monitoring|7 days|7d|ten days|2 weeks|two weeks|let it run|see if|after another week|give it time|pending)\b/.test(n);
+}
+
+// r29: parse most recent resolved task on this target. Returns { failureCount,
+// previousNote, previousResolvedAt, previousProblemDetail } or null if none.
+async function getPreviousTaskContext(department, campaignId, productKey) {
+  if (!db) return null;
+  try {
+    const r = await db.query(
+      "SELECT id, failure_count, resolution_note, last_resolved_date, problem_detail " +
+      "FROM campaign_tasks " +
+      "WHERE department = $1 AND campaign_id = $2 " +
+      "  AND COALESCE(product_key, '') = COALESCE($3, '') " +
+      "  AND status = 'complete' " +
+      "  AND last_resolved_date > NOW() - INTERVAL '30 days' " +
+      "ORDER BY last_resolved_date DESC LIMIT 1",
+      [department, String(campaignId), productKey || null]
+    );
+    if (!r.rows.length) return null;
+    const row = r.rows[0];
+    return {
+      failureCount: row.failure_count || 1,
+      previousNote: row.resolution_note || '',
+      previousResolvedAt: row.last_resolved_date,
+      previousProblemDetail: row.problem_detail || ''
+    };
+  } catch(e) {
+    console.error('[r29 prev-task-context] ' + e.message);
+    return null;
+  }
+}
+
+// r29: mark a target as stuck — manager review surface. Idempotent (UPSERT).
+async function markStuck(department, campaignId, productKey, payload) {
+  if (!db) return;
+  try {
+    await db.query(
+      "INSERT INTO stuck_campaigns " +
+      "(campaign_id, product_key, campaign_name, product_title, department, problem_type, failure_count, last_problem_detail, last_resolved_note, last_seen_at) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) " +
+      "ON CONFLICT (campaign_id, COALESCE(product_key,''), department) WHERE status = 'open' " +
+      "DO UPDATE SET last_seen_at=NOW(), failure_count=stuck_campaigns.failure_count + 1, " +
+      "  last_problem_detail=EXCLUDED.last_problem_detail, last_resolved_note=EXCLUDED.last_resolved_note",
+      [
+        String(campaignId), productKey || null, payload.campaignName || '', payload.productTitle || null,
+        department, payload.problemType || null, payload.failureCount || 3,
+        payload.problemDetail || null, payload.previousNote || null
+      ]
+    );
+    console.log('[r29 STUCK] ' + department + ' ' + campaignId + (productKey ? ' / ' + productKey : '') + ' — flagged for manager review');
+  } catch(e) {
+    console.error('[r29 markStuck] ' + e.message);
+  }
+}
+
+// r29: AI-enhanced task description for repeat offenders only. One-shot at task
+// creation. Uses Haiku (fast, cheap). Output replaces the rule-generated
+// problem_detail with a sharper version that reads previous notes.
+// IMPORTANT: this runs ONCE at task creation, never again on viewing the task.
+async function aiEnhanceRepeatTaskDescription(department, taskRow, prevContext) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || !prevContext || !prevContext.previousNote) return null;
+
+  const prompt =
+    "You are writing a sharper task description for a Google Ads / Amazon Ads agent. This is the SECOND time this exact target has tripped the same rule. The agent's previous attempt did not resolve it.\n\n" +
+    "═══ TARGET ═══\n" +
+    "Department: " + department + "\n" +
+    "Campaign: " + (taskRow.campaignName || '?') + "\n" +
+    (taskRow.productTitle ? "Product: " + taskRow.productTitle + "\n" : "") +
+    "Problem type: " + (taskRow.problemType || '?') + "\n\n" +
+    "═══ CURRENT RULE-GENERATED DETAIL ═══\n" + (taskRow.problemDetail || '(none)') + "\n\n" +
+    "═══ PREVIOUS TASK ═══\n" +
+    "Previous problem: " + (prevContext.previousProblemDetail || '(no detail)') + "\n" +
+    "Agent's resolution note from previous task: \"" + (prevContext.previousNote || '(empty)') + "\"\n" +
+    "Resolved on: " + (prevContext.previousResolvedAt || '?') + "\n\n" +
+    "═══ YOUR JOB ═══\n" +
+    "Write a 2-3 sentence sharper task description for this REPEAT failure that:\n" +
+    "1. References what the agent already tried (from their note)\n" +
+    "2. Suggests a DIFFERENT angle to investigate this time (structural change, not the same fix)\n" +
+    "3. Is specific and verifiable — name the campaign element, the keyword, the page, etc.\n\n" +
+    "Return ONLY the description text, no preamble, no quotes, no markdown. Maximum 60 words.";
+
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 30000
+    });
+    const text = aiResp.data.content[0].text.trim();
+    return text || null;
+  } catch(e) {
+    console.error('[r29 ai-enhance-repeat] ' + e.message);
+    return null;
+  }
+}
+
 async function createGoogleTask(taskRow) {
   if (!db) return false;
   const exists = await googleTaskAlreadyExistsToday(taskRow.campaignId, taskRow.problemType, taskRow.productKey);
   if (exists) return false;
 
+  // r29: read previous task context BEFORE deciding whether to create
+  const prevCtx = await getPreviousTaskContext('google', taskRow.campaignId, taskRow.productKey);
+  let isRepeatOffender = false;
+  let failureCount = 1;
+
+  if (prevCtx) {
+    failureCount = prevCtx.failureCount + 1;
+
+    // r29 hard cap: 3rd or later failure → no new task, raise to Stuck
+    if (failureCount >= 3) {
+      await markStuck('google', taskRow.campaignId, taskRow.productKey, {
+        campaignName: taskRow.campaignName,
+        productTitle: taskRow.productTitle,
+        problemType: taskRow.problemType,
+        failureCount: failureCount,
+        problemDetail: taskRow.problemDetail,
+        previousNote: prevCtx.previousNote
+      });
+      return false;
+    }
+
+    // r29 note-aware deferral: if previous agent note says "wait" / "monitor", and the
+    // resolution was within the last 7 days, skip this new task
+    const daysSince = (Date.now() - new Date(prevCtx.previousResolvedAt).getTime()) / 86400000;
+    if (previousNoteSaysWait(prevCtx.previousNote) && daysSince < 7) {
+      console.log('[r29 GTASK defer] ' + taskRow.campaignName + ' — previous note says wait, only ' + daysSince.toFixed(1) + 'd ago. Skipping.');
+      return false;
+    }
+
+    isRepeatOffender = true;
+    console.log('[GTASK] REPEAT OFFENDER: ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') + ' (failure #' + failureCount + ')');
+  }
+
   // Try to enrich with Shopify product image URL (for product-level tasks)
   let productImageUrl = null;
   if (taskRow.productKey) {
-    // productKey may be 'shopifyItemId' (e.g. xxx_xxx_<shopifyId>_xxx) or a custom id
     const parts = String(taskRow.productKey).split('_');
     const possibleShopifyId = parts.length >= 3 ? parts[2] : null;
     if (possibleShopifyId) {
@@ -2313,30 +2480,22 @@ async function createGoogleTask(taskRow) {
     }
   }
 
-  try {
-    // r25b: detect repeat offenders for Google — same pattern as Amazon. Key by
-    // (campaign_id + product_key) since Google tasks can be product-level OR
-    // campaign-level. If we already completed a task on this exact target in the
-    // last 14 days, this is a repeat — flag it and bump failure_count.
-    let isRepeatOffender = false;
-    let failureCount = 1;
-    try {
-      const repeatCheck = await db.query(
-        "SELECT id, failure_count FROM campaign_tasks " +
-        "WHERE campaign_id = $1 AND department = 'google' " +
-        "  AND COALESCE(product_key, '') = COALESCE($2, '') " +
-        "  AND status = 'complete' " +
-        "  AND last_resolved_date > NOW() - INTERVAL '14 days' " +
-        "ORDER BY last_resolved_date DESC LIMIT 1",
-        [String(taskRow.campaignId), taskRow.productKey || null]
-      );
-      if (repeatCheck.rows.length > 0) {
-        isRepeatOffender = true;
-        failureCount = (repeatCheck.rows[0].failure_count || 1) + 1;
-        console.log('[GTASK] REPEAT OFFENDER: ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') + ' (failure #' + failureCount + ')');
-      }
-    } catch(e) { console.error('[GTASK] repeat check error: ' + e.message); }
+  // r29: for repeat offenders, run AI ONCE to generate a sharper description
+  // that reads the previous agent note. Replaces rule-text. Falls back to original.
+  let finalProblemDetail = taskRow.problemDetail;
+  if (isRepeatOffender && prevCtx) {
+    const aiText = await aiEnhanceRepeatTaskDescription('google', taskRow, prevCtx);
+    if (aiText) {
+      finalProblemDetail = '🔁 Repeat (failure #' + failureCount + '). ' + aiText +
+        '\n\n— Previous agent note: "' + (prevCtx.previousNote || '').slice(0, 200) + '"';
+    } else {
+      // fallback: still prepend agent note context
+      finalProblemDetail = '🔁 Repeat (failure #' + failureCount + '). ' + taskRow.problemDetail +
+        '\n\n— Previous agent note: "' + (prevCtx.previousNote || '').slice(0, 200) + '"';
+    }
+  }
 
+  try {
     await db.query(
       "INSERT INTO campaign_tasks " +
       "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
@@ -2349,7 +2508,7 @@ async function createGoogleTask(taskRow) {
         'Unassigned',
         taskRow.campaignType || '',
         taskRow.problemType,
-        taskRow.problemDetail,
+        finalProblemDetail,
         Math.max(1, Math.round(taskRow.score)),
         'auto',
         taskRow.productKey || null,
@@ -2698,19 +2857,59 @@ async function runDailyTaskScheduler() {
           }
         }
 
+        // r29: hard-cap + note-aware repeat detection (same logic as Google)
+        const prevCtxAmz = await getPreviousTaskContext('amazon', String(c.campaignId), null);
         let isRepeatOffender = false;
         let failureCount = 1;
-        try {
-          const repeatCheck = await db.query(
-            "SELECT id, failure_count FROM campaign_tasks WHERE campaign_id=$1 AND status='complete' AND last_resolved_date > NOW() - INTERVAL '14 days' ORDER BY last_resolved_date DESC LIMIT 1",
-            [String(c.campaignId)]
-          );
-          if (repeatCheck.rows.length > 0) { isRepeatOffender = true; failureCount = (repeatCheck.rows[0].failure_count || 1) + 1; console.log('REPEAT OFFENDER detected: ' + c.name + ' (failure #' + failureCount + ')'); }
-        } catch(e) { console.error('Repeat check error: ' + e.message); }
+
+        if (prevCtxAmz) {
+          failureCount = prevCtxAmz.failureCount + 1;
+
+          // r29 hard cap: 3rd or later failure → no new task, raise to Stuck
+          if (failureCount >= 3) {
+            await markStuck('amazon', String(c.campaignId), null, {
+              campaignName: c.name,
+              productTitle: null,
+              problemType: item.problemType,
+              failureCount: failureCount,
+              problemDetail: item.problemDetail,
+              previousNote: prevCtxAmz.previousNote
+            });
+            continue;
+          }
+
+          // r29 note-aware deferral
+          const daysSinceAmz = (Date.now() - new Date(prevCtxAmz.previousResolvedAt).getTime()) / 86400000;
+          if (previousNoteSaysWait(prevCtxAmz.previousNote) && daysSinceAmz < 7) {
+            console.log('[r29 AMZ defer] ' + c.name + ' — previous note says wait, only ' + daysSinceAmz.toFixed(1) + 'd ago. Skipping.');
+            continue;
+          }
+
+          isRepeatOffender = true;
+          console.log('[REPEAT OFFENDER] ' + c.name + ' (failure #' + failureCount + ')');
+        }
+
+        // r29: AI-enhance repeat-offender problem_detail (one-shot, Haiku)
+        let finalProblemDetailAmz = item.problemDetail;
+        if (isRepeatOffender && prevCtxAmz) {
+          const aiText = await aiEnhanceRepeatTaskDescription('amazon', {
+            campaignName: c.name,
+            productTitle: null,
+            problemType: item.problemType,
+            problemDetail: item.problemDetail
+          }, prevCtxAmz);
+          if (aiText) {
+            finalProblemDetailAmz = '🔁 Repeat (failure #' + failureCount + '). ' + aiText +
+              '\n\n— Previous agent note: "' + (prevCtxAmz.previousNote || '').slice(0, 200) + '"';
+          } else {
+            finalProblemDetailAmz = '🔁 Repeat (failure #' + failureCount + '). ' + item.problemDetail +
+              '\n\n— Previous agent note: "' + (prevCtxAmz.previousNote || '').slice(0, 200) + '"';
+          }
+        }
 
         await db.query(
           'INSERT INTO campaign_tasks (campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, days_persisted, total_wasted, score, task_source, is_repeat_offender, failure_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
-          [String(c.campaignId), c.name, agentName, c.portfolio||'', item.problemType, item.problemDetail, daysPersisted, parseFloat(item.scoring.totalSpend), item.score, 'daily', isRepeatOffender, failureCount]
+          [String(c.campaignId), c.name, agentName, c.portfolio||'', item.problemType, finalProblemDetailAmz, daysPersisted, parseFloat(item.scoring.totalSpend), item.score, 'daily', isRepeatOffender, failureCount]
         );
 
         try {
@@ -2734,9 +2933,59 @@ async function runDailyTaskScheduler() {
   } catch(e) { console.error('Task scheduler error: ' + e.message); }
 }
 
-// ── API Routes ────────────────────────────────────────────────────────────
+// r29: stuck campaigns API — manager review surface for items that have failed 3+ times
+//
+// GET /api/stuck-campaigns?department=amazon|google — list open stuck items
+// POST /api/stuck-campaigns/:id/resolve — manager marks resolved with a note
+app.get('/api/stuck-campaigns', async function(req, res) {
+  if (!db) return res.json({ items: [] });
+  const dept = String(req.query.department || '').toLowerCase();
+  try {
+    const params = [];
+    let where = "WHERE status = 'open'";
+    if (dept === 'amazon' || dept === 'google') {
+      params.push(dept);
+      where += " AND department = $1";
+    }
+    const r = await db.query(
+      "SELECT id, campaign_id, product_key, campaign_name, product_title, department, " +
+      "       problem_type, failure_count, first_seen_at, last_seen_at, " +
+      "       last_resolved_note, last_problem_detail " +
+      "FROM stuck_campaigns " + where + " " +
+      "ORDER BY failure_count DESC, last_seen_at DESC LIMIT 100",
+      params
+    );
+    res.json({ items: r.rows });
+  } catch(e) {
+    console.error('[r29 stuck list] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
-// r7c — Wasted spend per agent: today + 7-day sparkline.
+app.post('/api/stuck-campaigns/:id/resolve', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = parseInt(req.params.id, 10);
+  const resolution = String((req.body && req.body.resolution) || '').trim();
+  if (!resolution) return res.status(400).json({ error: 'Resolution note required' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  if (role !== 'owner' && role !== 'manager' && dept !== 'manager') {
+    return res.status(403).json({ error: 'Manager-only action' });
+  }
+  const actor = (req.user && (req.user.name || req.user.username)) || 'manager';
+  try {
+    await db.query(
+      "UPDATE stuck_campaigns SET status='resolved', resolved_by=$1, resolved_at=NOW(), resolution=$2 WHERE id=$3",
+      [actor, resolution, id]
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[r29 stuck resolve] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // "Wasted" follows the same definition used elsewhere in this app:
 //   spend > 0 AND (sales === 0 || sales === null)
 // Reads from daily_snapshots (the same source as the existing dashboard waste totals).
@@ -2987,18 +3236,18 @@ async function buildFeedbackPromptSection(scope, targetId) {
     return (i + 1) + '. [' + dateStr + who + '] ' + r.feedback_text;
   });
   // r28: Promote feedback to a prominent block at the END of the prompt with
-  // explicit anti-repeat instruction. Recency-listed (newest first). The aim is
-  // for the model to give a *different* answer that addresses what the agent
-  // said — not a polite re-statement of the same generic advice.
+  // explicit anti-repeat instruction.
+  // r29: HARD RULE — if agent asked a question, answer it directly in your output.
   return '\n\n═══ AGENT FEEDBACK ON PREVIOUS ANALYSES — MUST READ ═══\n' +
     'These are messages the same agents have left after seeing your previous analysis on this exact target. Most recent first.\n\n' +
     lines.join('\n') +
-    '\n\n═══ HOW TO USE THE FEEDBACK ═══\n' +
-    '1. If the agent already TRIED something (e.g. "we already negated X" / "we lowered the bid by 30%"), do NOT recommend that thing again. Recommend something different.\n' +
-    '2. If the agent ASKED A QUESTION (e.g. "why is this not showing in shopping?"), give a direct answer to that question in your output. Do not ignore it.\n' +
-    '3. If the agent CONTRADICTED the AI (e.g. "the title is fine, our reviews are the problem"), accept their domain knowledge and pivot. Do not repeat the contradicted point.\n' +
-    '4. Your output must be SUBSTANTIVELY different from what was clearly given before. If the data has not changed, focus on a different angle the previous analysis missed.\n' +
-    '5. If you have nothing new to say after considering the feedback, say so plainly: "Based on the feedback, my previous analysis was correct — try X next." Do not pad.';
+    '\n\n═══ HOW TO USE THE FEEDBACK — HARD RULES ═══\n' +
+    '1. **ANSWER EVERY QUESTION.** If the agent asked a question (e.g. "where did you get the info that 2.5kg is out of stock?", "why doesn\'t this campaign show in shopping?"), your output MUST contain a direct answer to that question, beginning with "Answering your question: ...". If you can\'t answer because you lack the data, say so plainly: "Answering your question: I can\'t verify that from the data I have — your domain knowledge is correct, removing that point."\n' +
+    '2. **DO NOT REPEAT.** If the agent already TRIED something (e.g. "we already negated X" / "we lowered the bid by 30%"), do NOT recommend that thing again.\n' +
+    '3. **ACCEPT CORRECTIONS.** If the agent CONTRADICTED a fact you stated (e.g. "you said 2.5kg out of stock but it\'s in stock"), accept the correction. Do not repeat the wrong fact. Apologise briefly: "Correction accepted — [thing] was wrong in my previous analysis."\n' +
+    '4. **PIVOT.** If the agent said "the title is fine, our reviews are the problem", focus your new output on the reviews angle. Do not waste words defending the title.\n' +
+    '5. **NO OVERLAP.** Your output must be SUBSTANTIVELY different from what was given before. If the data is identical and the agent has corrected most points, focus on a NEW angle the previous analysis missed (e.g. mobile UX, page speed, image dimensions, schema markup).\n' +
+    '6. **NO PADDING.** If you have nothing new to say after considering all the feedback, say so plainly in 2 lines: "Based on your feedback, my previous analysis was largely wrong. The remaining issue worth investigating is X." Do not invent issues to look thorough.';
 }
 
 // POST /api/ai/feedback — save a new feedback entry. Body: { scope, targetId, feedback }
@@ -10677,11 +10926,28 @@ function buildLandingPageDossier(shopifyProduct) {
   });
   const adAgg = aggregateGoogleMetrics(adRows);
 
-  // Search keywords driving traffic to ad groups whose product groups include this product
-  const adGroupNames = {};
-  adRows.forEach(function(r){ if (r.adGroupName) adGroupNames[r.adGroupName] = true; });
+  // r29: BUGFIX — search keywords must be SCOPED to this product. Previously this
+  // pulled keywords from every campaign across the account, leading the AI to
+  // suggest negating keywords (e.g. "weight plates") that have no relation to the
+  // trampoline page being analysed. Fix: only include keywords from ad groups
+  // that this product is actually in, OR campaigns this product runs in.
+  const myAdGroups = {};
+  const myCampaigns = {};
+  adRows.forEach(function(r) {
+    if (r.adGroupId) myAdGroups[String(r.adGroupId)] = true;
+    if (r.adGroupName) myAdGroups[r.adGroupName] = true;
+    if (r.campaignId) myCampaigns[String(r.campaignId)] = true;
+  });
   const searchKeywords = (googleState.products || [])
-    .filter(function(gp){ return gp.itemType === 'keyword' && (gp.spend > 0 || gp.impressions > 0); })
+    .filter(function(gp){
+      if (gp.itemType !== 'keyword') return false;
+      if (!(gp.spend > 0 || gp.impressions > 0)) return false;
+      // Match by ad group ID, ad group name, or fall back to campaign ID
+      const inMyAdGroup = (gp.adGroupId && myAdGroups[String(gp.adGroupId)]) ||
+                         (gp.adGroupName && myAdGroups[gp.adGroupName]);
+      const inMyCampaign = gp.campaignId && myCampaigns[String(gp.campaignId)];
+      return inMyAdGroup || inMyCampaign;
+    })
     .slice(0, 20)
     .map(function(gp){ return { keyword: gp.name, spend: gp.spend, sales: gp.sales, clicks: gp.clicks, conversions: gp.conversions }; });
 
@@ -10789,7 +11055,7 @@ function buildCritiquePrompt(dossier, pageSummary) {
     '    { "priority": "P1|P2|P3", "issue": "Short title naming a specific page element (Title / Images / Description / Reviews / Add to Cart / Page Speed / etc.)", "evidence": "Why this is a problem in everyday language. Quote actual page text or specific numbers.", "category": "title|images|keywords|copy|reviews|trust|price|cta|mobile|ad-coherence|other" }',
     '  ],',
     '  "actions": [',
-    '    { "rank": 1, "action": "What to do this week. Specific. E.g. \\"Add 3 lifestyle images showing the bench in a home gym setup.\\"", "expectedImpact": "Plain words. E.g. \\"More people likely to add to cart on phone.\\"", "effort": "low|medium|high" }',
+    '    { "rank": 1, "action": "MUST be a verifiable, specific action. NAME the element to change. NAMING the campaign / keyword / image-position / heading. BAD: \\"Improve the title\\". GOOD: \\"Change page title from \'PRO 8FT TRAMPOLINE\' to \'PRO 8FT INDOOR-OUTDOOR TRAMPOLINE WITH SAFETY NET\' to capture more search variants\\". Or: \\"Add 3 lifestyle images: 1) child jumping in garden, 2) close-up of safety pad stitching, 3) instruction sheet on a kitchen table.\\"", "expectedImpact": "Plain words, e.g. \\"More phone-shoppers likely to add to cart.\\"", "effort": "low|medium|high" }',
     '  ],',
     '  "adVsPageCoherence": "Plain English: does what the ad promised match what the visitor sees? Be specific. Quote the search keyword and what is actually on the page.",',
     '  "trustSignals": "What customer trust signals are present (reviews count, free returns, badges) and what is missing.",',
@@ -11112,11 +11378,20 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
         return res.status(404).json({ error: 'No cached analysis', cached: false });
       }
     }
-    // r28: model selection — agents get Haiku by default, manager can request Opus.
+    // r29: model selection — agents start with Haiku. Opus is "earned" — agent must
+    // have submitted ≥1 feedback row on this target first. Manager unrestricted.
     let modelChoice = 'haiku';
     if (req.body && req.body.model === 'opus') {
       if (!isManager) {
-        return res.status(403).json({ error: 'Opus (deep analysis) is restricted to managers and owner. Use Haiku instead.' });
+        // Check feedback count
+        let fbCount = 0;
+        try {
+          const fr = await db.query("SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope='google_product' AND target_id=$1", [productId]);
+          fbCount = fr.rows[0] ? fr.rows[0].c : 0;
+        } catch(_) {}
+        if (fbCount < 1) {
+          return res.status(403).json({ error: 'Opus (deep analysis) is unlocked after you submit feedback on the Haiku output. Run Haiku first, write what you think is wrong with the analysis, then Opus becomes available.' });
+        }
       }
       modelChoice = 'opus';
     }
@@ -11280,16 +11555,27 @@ app.post('/api/google/landing-page-critique-batch', async function(req, res) {
 });
 
 // Daily cron: 03:30 London time
+// r29: skip products that already have a fresh cached critique (within LPC_CACHE_HOURS).
+// Saves ~£0.50/day on speculative AI runs that nobody opened. Agents force-refresh manually.
 cron.schedule('30 3 * * *', async function() {
   console.log('LPC nightly batch starting');
   try {
     const top = pickTopUnderperformers(10);
-    let ok = 0, err = 0;
+    let ok = 0, err = 0, skipped = 0;
     for (const c of top) {
-      try { await runCritiqueForProduct(c.shopifyProduct, c.score); ok++; }
+      try {
+        // r29: cache-check first. If a fresh critique already exists, skip the AI call.
+        const cached = await getCachedCritique(String(c.shopifyProduct.id));
+        if (cached) {
+          skipped++;
+          continue;
+        }
+        await runCritiqueForProduct(c.shopifyProduct, c.score);
+        ok++;
+      }
       catch (e) { err++; console.error('LPC cron item error: ' + e.message); }
     }
-    console.log('LPC nightly batch done — ' + ok + ' analysed, ' + err + ' errors');
+    console.log('LPC nightly batch done — ' + ok + ' analysed, ' + skipped + ' skipped (cached), ' + err + ' errors');
   } catch(e) {
     console.error('LPC nightly batch top-level error: ' + e.message);
   }
@@ -11636,10 +11922,19 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
   const u = req.user || {};
   const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
 
-  // r28: model selection — Haiku default, Opus manager-only
+  // r29: model selection — Haiku default. Opus is "earned" — agents need ≥1 feedback row first.
   let modelChoice = 'haiku';
   if (req.body && req.body.model === 'opus') {
-    if (!isManager) return res.status(403).json({ error: 'Opus (deep analysis) is restricted to managers and owner. Use Haiku instead.' });
+    if (!isManager) {
+      let fbCount = 0;
+      try {
+        const fr = await db.query("SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope='google_campaign' AND target_id=$1", [String(campaignId)]);
+        fbCount = fr.rows[0] ? fr.rows[0].c : 0;
+      } catch(_) {}
+      if (fbCount < 1) {
+        return res.status(403).json({ error: 'Opus is unlocked after you submit feedback on the Haiku output. Run Haiku first, leave feedback, then Opus becomes available.' });
+      }
+    }
     modelChoice = 'opus';
   }
 

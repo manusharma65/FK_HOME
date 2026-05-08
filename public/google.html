@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r28 (Haiku/Opus dual buttons on product + campaign AI; subtask preview removed from create-task modal; View campaign link on task detail; TACOS in product modal stats grid) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29 (View campaign navigates to Campaigns page + scrolls + expands + return-to-task button. Opus earned by agents after submitting feedback.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2429,13 +2429,66 @@ function taskDetailEscHandler(e) { if (e.key === 'Escape') closeTaskDetail(); }
 // Closes the task detail first so the campaign modal isn't behind it; once the
 // campaign modal closes, user is back on the Tasks page (not on the task detail).
 function openCampaignFromTask(campaignId, campaignName) {
+  // r29: navigate to Campaigns page, scroll to + expand the specific campaign,
+  // then drop a "Return to task" floating button at top so agent can come back.
+  const taskId = window.CURRENT_OPEN_TASK_ID || null;
   closeTaskDetail();
-  // Slight delay so the close animation completes before the new modal opens
-  setTimeout(function() {
-    if (typeof aiAnalyseCampaign === 'function') {
-      aiAnalyseCampaign(campaignId, campaignName);
+  // Switch to campaigns page programmatically. Find the nav button so it goes active.
+  const navBtn = document.querySelector('.nav-item[onclick*="showPage(\'campaigns\'"]');
+  showPage('campaigns', navBtn);
+
+  // Wait for campaigns to render, then scroll to the target campaign + expand it
+  const findAndExpand = function(attempts) {
+    const el = document.getElementById('camp-' + campaignId);
+    if (el) {
+      el.classList.add('expanded');
+      // Briefly highlight so the agent knows this is the one
+      el.style.transition = 'background 0.5s ease';
+      const oldBg = el.style.background;
+      el.style.background = '#fef3c7';
+      setTimeout(function(){ el.style.background = oldBg; }, 1800);
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      // Show the return-to-task floating button
+      _showReturnToTaskButton(taskId);
+      return;
     }
-  }, 50);
+    if (attempts < 30) {
+      setTimeout(function(){ findAndExpand(attempts + 1); }, 100);
+    } else {
+      console.warn('[r29] Could not find campaign card camp-' + campaignId + ' after 3s');
+      // Still show the back button so agent isn't stranded
+      _showReturnToTaskButton(taskId);
+    }
+  };
+  setTimeout(function(){ findAndExpand(0); }, 50);
+}
+
+// r29: floating "← Return to task" button shown when the agent navigated to
+// Campaigns page from a task. Appears top-right, click → goes back to Tasks page
+// and reopens the specific task.
+function _showReturnToTaskButton(taskId) {
+  // Remove any existing instance first
+  const existing = document.getElementById('return-to-task-btn');
+  if (existing) existing.remove();
+  if (!taskId) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'return-to-task-btn';
+  btn.style.cssText = 'position:fixed;top:80px;right:20px;z-index:1500;padding:10px 18px;background:#1f2937;color:white;border:none;border-radius:24px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,0.25);transition:all 0.2s;font-family:inherit';
+  btn.textContent = '← Return to task';
+  btn.onclick = function() {
+    btn.remove();
+    const taskNavBtn = document.querySelector('.nav-item[onclick*="showPage(\'tasks\'"]');
+    showPage('tasks', taskNavBtn);
+    // After tasks page renders, reopen the task detail
+    setTimeout(function() {
+      if (typeof openTaskDetail === 'function') openTaskDetail(taskId);
+    }, 200);
+  };
+  btn.onmouseover = function() { btn.style.background = '#111827'; btn.style.transform = 'translateY(-1px)'; };
+  btn.onmouseout = function() { btn.style.background = '#1f2937'; btn.style.transform = 'translateY(0)'; };
+  document.body.appendChild(btn);
 }
 
 // ─── r27: Google subtasks render + actions ──────────────────────────────────
@@ -3343,7 +3396,9 @@ function openProductDetailFromObj(p) {
     '</div>' +
 
     '<div style="margin-top:20px;display:flex;gap:8px;flex-wrap:wrap">' +
-    '<button class="btn btn-primary" onclick=\'assignToProduct(' + JSON.stringify(p).replace(/'/g, "&#39;") + ')\' style="font-size:13px">📋 Assign as task</button>' +
+    // r28a: removed redundant "📋 Assign as task" button — task creation now lives
+    // exclusively under the AI section (gated on Run AI + submit feedback). This avoids
+    // duplicate buttons doing similar things.
     (p.shopifyUrl ? '<a class="btn btn-ghost" href="' + p.shopifyUrl + '" target="_blank">Open in Shopify</a>' : '') +
     '</div>';
 
