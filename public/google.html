@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29b (Bugfix: try/catch around metrics block — modal opens even if the metrics render throws.) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29c (Diagnostic: openTaskDetail logs and surfaces errors so we can see what's actually failing) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2296,22 +2296,36 @@ function showDay7Modal(taskId) {
 let CURRENT_OPEN_TASK_ID = null;
 
 async function openTaskDetail(taskId) {
-  CURRENT_OPEN_TASK_ID = taskId;
-  // Find the task in our last list response
-  const task = (LAST_TASKS_RESPONSE && LAST_TASKS_RESPONSE.tasks || []).find(function(t){ return t.id === taskId; });
-  if (!task) {
-    alert('Task not found in current list. Try refreshing.');
-    return;
-  }
-
-  // Fetch action history
-  let history = [];
+  // r29c: defensive logging — if anything below throws, we want a visible error in console + alert
+  console.log('[openTaskDetail] called with taskId =', taskId);
   try {
-    const r = await authedFetch('/api/google/tasks/' + taskId + '/history');
-    const j = await r.json();
-    history = j.history || [];
-  } catch(_) {}
+    CURRENT_OPEN_TASK_ID = taskId;
+    // Find the task in our last list response
+    const task = (LAST_TASKS_RESPONSE && LAST_TASKS_RESPONSE.tasks || []).find(function(t){ return t.id === taskId; });
+    if (!task) {
+      alert('Task not found in current list. Try refreshing.');
+      return;
+    }
+    console.log('[openTaskDetail] task found, fetching history…');
 
+    // Fetch action history
+    let history = [];
+    try {
+      const r = await authedFetch('/api/google/tasks/' + taskId + '/history');
+      const j = await r.json();
+      history = j.history || [];
+    } catch(historyErr) {
+      console.warn('[openTaskDetail] history fetch failed:', historyErr);
+    }
+    console.log('[openTaskDetail] history loaded, building modal…');
+    return _openTaskDetailRender(task, taskId, history);
+  } catch(err) {
+    console.error('[openTaskDetail] FAILED:', err);
+    alert('Task detail failed to open: ' + (err && err.message ? err.message : 'unknown error') + '\n\nOpen dev tools → Console for full error.');
+  }
+}
+
+function _openTaskDetailRender(task, taskId, history) {
   const existing = document.getElementById('task-detail-overlay');
   if (existing) existing.remove();
 
