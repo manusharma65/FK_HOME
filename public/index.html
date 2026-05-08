@@ -5284,14 +5284,14 @@ async function renderAmzCritiqueSection(p) {
     return;
   }
   const safeKey = escHtml(p.parent_sku).replace(/'/g, "\\'");
-  // r15: Opus deep-dive only visible to owner + managers
   const me = window._meCache || {};
   const myRole = (me.role || '').toLowerCase();
   const myDept = (me.department || '').toLowerCase();
   const canDeepDive = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
-  const opusBtnHtml = canDeepDive
-    ? ' <button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>'
-    : '';
+  // r29e: show Opus to everyone — server enforces gating (agents need feedback to unlock).
+  // canDeepDive kept for compat but no longer hides the button.
+  const opusBtnHtml =
+    ' <button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="Deep dive with Claude Opus. Agents: unlocks after submitting feedback on Haiku output.">🔬 Deep dive (Opus)</button>';
   const runBtnHtml =
     '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" title="Fast analysis with Claude Haiku (~£0.01)">🔍 Run critique (Haiku)</button>' +
     opusBtnHtml;
@@ -5486,9 +5486,10 @@ function renderAmzCritiqueResult(j, asin, groupKey) {
     const myDept = (me.department || '').toLowerCase();
     const canDeepDive = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
     let buttons = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" style="font-size:12px">↻ Re-analyse (Haiku)</button>';
-    // Only show Opus button if (a) current critique is Haiku AND (b) user can deep-dive
-    if (cachedModel !== 'opus' && canDeepDive) {
-      buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="More thorough analysis with Claude Opus (~£0.05-0.10)">🔬 Deep dive (Opus)</button>';
+    // r29e: Opus button shown to everyone if current cache isn't already Opus.
+    // Server gates: agents need ≥1 feedback to actually run it.
+    if (cachedModel !== 'opus') {
+      buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="Deep dive. Agents: submit feedback on the Haiku output to unlock.">🔬 Deep dive (Opus)</button>';
     }
     buttonsEl.innerHTML = buttons;
   }

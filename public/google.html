@@ -1021,17 +1021,42 @@ async function submitCreateTaskFromAi(scope, targetId) {
     feedbackTargetId: String(targetId)
   };
 
-  // For product tasks, derive the campaignId from product card if available
+  // For product tasks, derive the campaignId. Try multiple sources because the
+  // critique-result object doesn't always carry the campaign association.
+  // r29e: also fall back to allProductsData cache (the page-level product list)
+  // which DOES have campaignsAdvertisedIn for every product.
   if (!isCampaign) {
-    // The product modal may have campaignsAdvertisedIn[0]
+    // 1) Try ctx.productData.campaignsAdvertisedIn (rare — only on full product object)
     const j = ctx.productData || {};
-    const camps = j.campaignsAdvertisedIn || [];
-    if (!body.campaignId && camps.length > 0) {
+    let camps = j.campaignsAdvertisedIn || [];
+
+    // 2) Fall back to allProductsData lookup by productId
+    if ((!camps || !camps.length) && Array.isArray(window.allProductsData ? window.allProductsData.products : null)) {
+      const pid = String(targetId);
+      const fullProduct = window.allProductsData.products.find(function(p){ return String(p.id) === pid || String(p.shopifyId) === pid; });
+      if (fullProduct && Array.isArray(fullProduct.campaignsAdvertisedIn)) {
+        camps = fullProduct.campaignsAdvertisedIn;
+      }
+    }
+    // 3) Same fallback against the global allProductsData (no window prefix needed
+    //    if it's a top-level let)
+    if ((!camps || !camps.length) && typeof allProductsData !== 'undefined' && allProductsData && Array.isArray(allProductsData.products)) {
+      const pid2 = String(targetId);
+      const fullProduct2 = allProductsData.products.find(function(p){ return String(p.id) === pid2 || String(p.shopifyId) === pid2; });
+      if (fullProduct2 && Array.isArray(fullProduct2.campaignsAdvertisedIn)) {
+        camps = fullProduct2.campaignsAdvertisedIn;
+      }
+    }
+
+    if (camps && camps.length > 0 && !body.campaignId) {
       body.campaignId = String(camps[0].campaignId || camps[0]);
+      if (!body.campaignName) {
+        body.campaignName = camps[0].campaignName || '';
+      }
     }
   }
-  if (!body.campaignId) {
-    alert('Could not determine campaign for this task. Open the campaign view to create the task instead.');
+  if (!body.campaignId || body.campaignId === 'undefined' || body.campaignId === 'null') {
+    alert('Could not determine which campaign this product belongs to. Open the campaign view directly and create the task from there.');
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create task'; }
     return;
   }
@@ -3842,23 +3867,11 @@ function renderCritiqueInlineInProductModal(j, productId) {
   }
 
   if (buttonsDiv) {
-    // r28: dual-model re-run buttons (Haiku / Opus). Manager can override 24h lock for Opus.
-    // Always show "Open in reader" button when there's an analysis to read
+    // r29e: always show both Haiku + Opus buttons. Server is single source of truth for
+    // gating. Cache-lock now lifts for agents who've submitted feedback (server bypasses
+    // 24h lock for "earned Opus"). Manager: never gated.
     let btns = '<button class="btn btn-primary" onclick="openCritiqueReader(\'' + productId + '\')" style="font-size:13px">📖 Open in reader</button>';
-    if (!locked) {
-      btns += ' ' + _gpcRunButtonsHtml(productId, true);
-    } else {
-      // Locked for 24h. Manager can still force-refresh — show their re-run options.
-      const me = window.currentUser || {};
-      const role = (me.role || '').toLowerCase();
-      const dept = (me.department || '').toLowerCase();
-      const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
-      if (isPriv) {
-        btns += ' ' + _gpcRunButtonsHtml(productId, true);
-      } else {
-        btns += ' <span style="font-size:11px;color:var(--text3);font-family:var(--mono);align-self:center">🔒 Manager can re-analyse</span>';
-      }
-    }
+    btns += ' ' + _gpcRunButtonsHtml(productId, true);
     if (j.productUrl) btns += ' <a class="btn btn-ghost" href="' + j.productUrl + '" target="_blank" style="font-size:13px">View live page ↗</a>';
     buttonsDiv.innerHTML = btns;
   }

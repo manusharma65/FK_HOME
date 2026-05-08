@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29d (Bugfix: agents who've earned Opus by submitting feedback now bypass the 24h cache lock — previously the lock returned cached Haiku before the model-selection check, making "earned Opus" effectively impossible. Both product critique + campaign AI fixed.)
+// CampaignPulse — deploy marker 2026-05-08 r29e (Multiple bugfixes: (1) Opus button visible to agents on both Google product critique + Amazon listing critique even after Haiku ran (server gates with feedback). (2) Amazon "AI returned malformed response" — feedback prompt now JSON-aware (puts question-answers inside JSON summary), parser strips preamble. (3) Create task from product AI now looks up campaign via allProductsData cache fallback — fixes "could not determine campaign". (4) 24h cache lock bypassed for agents who earned Opus on Google product + campaign endpoints.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3238,16 +3238,20 @@ async function buildFeedbackPromptSection(scope, targetId) {
   // r28: Promote feedback to a prominent block at the END of the prompt with
   // explicit anti-repeat instruction.
   // r29: HARD RULE — if agent asked a question, answer it directly in your output.
+  // r29e: If the response format is structured JSON, the answer-to-question goes INSIDE
+  // the JSON output (in summary or first action), not as a preamble. Critical for callers
+  // that JSON.parse the response (Amazon listing critique, Google product critique).
   return '\n\n═══ AGENT FEEDBACK ON PREVIOUS ANALYSES — MUST READ ═══\n' +
     'These are messages the same agents have left after seeing your previous analysis on this exact target. Most recent first.\n\n' +
     lines.join('\n') +
     '\n\n═══ HOW TO USE THE FEEDBACK — HARD RULES ═══\n' +
-    '1. **ANSWER EVERY QUESTION.** If the agent asked a question (e.g. "where did you get the info that 2.5kg is out of stock?", "why doesn\'t this campaign show in shopping?"), your output MUST contain a direct answer to that question, beginning with "Answering your question: ...". If you can\'t answer because you lack the data, say so plainly: "Answering your question: I can\'t verify that from the data I have — your domain knowledge is correct, removing that point."\n' +
+    '1. **ANSWER EVERY QUESTION** the agent asked. If they asked "where did you get the info that 2.5kg is out of stock?", or "why doesn\'t this campaign show in shopping?", you must answer them directly. If your output is structured JSON (summary + actions), put the answers INSIDE the JSON — start the `summary` field with "Answering [agent]\'s question: ...". DO NOT write any text outside the JSON.\n' +
     '2. **DO NOT REPEAT.** If the agent already TRIED something (e.g. "we already negated X" / "we lowered the bid by 30%"), do NOT recommend that thing again.\n' +
-    '3. **ACCEPT CORRECTIONS.** If the agent CONTRADICTED a fact you stated (e.g. "you said 2.5kg out of stock but it\'s in stock"), accept the correction. Do not repeat the wrong fact. Apologise briefly: "Correction accepted — [thing] was wrong in my previous analysis."\n' +
-    '4. **PIVOT.** If the agent said "the title is fine, our reviews are the problem", focus your new output on the reviews angle. Do not waste words defending the title.\n' +
-    '5. **NO OVERLAP.** Your output must be SUBSTANTIVELY different from what was given before. If the data is identical and the agent has corrected most points, focus on a NEW angle the previous analysis missed (e.g. mobile UX, page speed, image dimensions, schema markup).\n' +
-    '6. **NO PADDING.** If you have nothing new to say after considering all the feedback, say so plainly in 2 lines: "Based on your feedback, my previous analysis was largely wrong. The remaining issue worth investigating is X." Do not invent issues to look thorough.';
+    '3. **ACCEPT CORRECTIONS.** If the agent CONTRADICTED a fact you stated (e.g. "you said 2.5kg out of stock but it\'s in stock"), accept the correction in your `summary` field. Brief acknowledgement: "Previous analysis incorrectly stated [thing] — correcting that, the real issue is [Y]."\n' +
+    '4. **PIVOT.** If the agent said "the title is fine, our reviews are the problem", focus your new output on the reviews angle. Do not waste an action defending the title.\n' +
+    '5. **NO OVERLAP.** Your output must be SUBSTANTIVELY different from what was given before. If most points have been pushed back on, focus on a NEW angle the previous analysis missed (mobile UX, page speed, image dimensions, schema markup, etc.).\n' +
+    '6. **NO PADDING.** If you have nothing new to say after considering all the feedback, your `summary` should plainly state: "Based on agent feedback, my previous analysis was largely wrong. The remaining issue worth investigating is X." Use 1-2 actions max. Do not invent issues to look thorough.\n' +
+    '7. **OUTPUT IS STILL STRICTLY THE JSON SHAPE SPECIFIED ABOVE.** Even when responding to feedback, do not add commentary, headers, or text outside the JSON object. The agent reads everything through a UI that parses the JSON — anything outside breaks the display.';
 }
 
 // POST /api/ai/feedback — save a new feedback entry. Body: { scope, targetId, feedback }
@@ -5558,12 +5562,20 @@ async function runListingCritique(asin, groupKey, modelId) {
 
     let critique = null;
     const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
-    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    // r29e: more forgiving parse. AI sometimes wraps the JSON in backticks or preamble
+    // despite instructions — strip everything before first { and after last }.
+    let cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace > 0 && lastBrace > firstBrace) {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    }
     try {
       critique = JSON.parse(cleaned);
     } catch(parseErr) {
       console.error('[amz-critique] JSON parse failed: ' + parseErr.message);
-      throw new Error('AI returned malformed response');
+      console.error('[amz-critique] raw response (first 500 chars): ' + text.substring(0, 500));
+      throw new Error('AI returned malformed response. Try Re-analyse — usually transient.');
     }
 
     // Cache result — store the model used + r20 signals hash so a fresh signal
