@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29h (Fix: Campaigns page now auto-fetches advertisedData if missing instead of showing "Loading..." forever — fixes "click campaigns, nothing happens, have to refresh several times") -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29k (Cancel task button — soft delete with reason. Manager any time, agent within 30 min of creation. Cancelled tasks excluded from repeat-detection.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2199,6 +2199,26 @@ async function pauseTask(id)   { return setTaskStatus(id, 'paused'); }
 async function reopenTask(id)  { return setTaskStatus(id, 'reopened'); }
 async function promoteToScale(id) { return setTaskStatus(id, 'scale_promoted'); }
 
+// r29k: cancel task — soft delete with reason. Used for mistaken or wrong-description
+// tasks. Cancelled tasks are excluded from repeat-detection so the agent can immediately
+// recreate. Manager can cancel any; agent can cancel own tasks within 30 min.
+async function cancelTask(id) {
+  const reason = prompt('Why are you cancelling this task?\n\n(Required. Examples: "created by mistake", "wrong product", "duplicate of #N")');
+  if (reason === null) return;  // user hit Cancel on prompt
+  if (!reason.trim()) { alert('A cancel reason is required.'); return; }
+  if (!confirm('Cancel this task?\n\nReason: ' + reason.trim() + '\n\nThis is a soft delete — the task stays for audit, but is excluded from repeat-detection so you can recreate immediately.')) return;
+  try {
+    const r = await authedFetch('/api/google/tasks/' + id + '/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason.trim() })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed to cancel task');
+    closeTaskDetail();
+    loadGoogleTasks();
+  } catch(e) { alert('Could not cancel: ' + e.message); }
+}
+
 async function openDay7Decision(id) {
   // Custom modal with three buttons + note textarea
   showDay7Modal(id);
@@ -2412,6 +2432,20 @@ function _openTaskDetailRender(task, taskId, history) {
   // Reopen button for closed tasks
   if (isClosed) {
     actions.push('<button class="btn btn-primary" onclick="reopenTask(' + taskId + ')" style="font-size:13px;padding:8px 16px">↻ Reopen</button>');
+  }
+  // r29k: Cancel button — for tasks created by mistake. Manager always sees it;
+  // agent only sees it if task is theirs and <30 min old. Server enforces same rules.
+  if (!isClosed && status !== 'cancelled') {
+    const me = window.currentUser || {};
+    const myRole = (me.role || '').toLowerCase();
+    const myDept = (me.department || '').toLowerCase();
+    const myName = me.name || me.username || '';
+    const isPriv = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
+    const taskAgeMin = task.created_at ? (Date.now() - new Date(task.created_at).getTime()) / 60000 : 999;
+    const canCancel = isPriv || (task.agent_name === myName && taskAgeMin < 30);
+    if (canCancel) {
+      actions.push('<button class="btn btn-ghost" onclick="cancelTask(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#6b7280;border:1px dashed #d1d5db" title="Cancel this task — created by mistake or wrong description. Reason required.">🗑 Cancel task</button>');
+    }
   }
   // "Open product analysis" for product-level tasks
   if (isProductTask && task.product_key) {

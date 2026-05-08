@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29j (Migration fix: dedicated ensureCriticalColumns() runs at boot with each ALTER TABLE in its own try/catch. Adds missing landing_page_critiques.model_used (cause of vanishing critique — saves were silently failing) and google_campaign_archive.state (cause of /archive 500). Also drops legacy unique constraint on campaign_tasks(campaign_id, created_date) idempotently.)
+// CampaignPulse — deploy marker 2026-05-08 r29k (Two fixes: (1) Manual product-task creation now resolves product correctly when front-end sends raw Shopify ID — server tries both compound shopifyItemId match AND embedded shopifyId match. Pulls product title from Shopify state as fallback. Fixes "task says whole campaign" bug. (2) New Cancel task button on Google + Amazon. Manager can cancel any task; agent can cancel own task within 30 min of creation. Reason required. Cancelled tasks excluded from repeat-detection so agent can immediately recreate. Soft-delete (status='cancelled') for audit trail.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -8069,6 +8069,54 @@ app.post('/api/tasks/:id/archive', async function(req, res) {
   try { await db.query('UPDATE campaign_tasks SET status=$1, archived_at=NOW(), updated_at=NOW() WHERE id=$2', ['archived', req.params.id]); res.json({ success: true }); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// r29k: cancel an Amazon task — mirrors the Google endpoint pattern.
+// Manager can cancel any; agent can cancel own task within 30 min.
+app.post('/api/tasks/:id/cancel', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'A cancel reason is required.' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    if (task.status === 'cancelled') return res.status(400).json({ error: 'Task already cancelled.' });
+
+    const u = req.user || {};
+    const userRole = (u.role || '').toLowerCase();
+    const userDept = (u.department || '').toLowerCase();
+    const actor = u.name || u.username || 'unknown';
+    const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+    if (!isPrivileged) {
+      if (task.agent_name !== actor) {
+        return res.status(403).json({ error: 'You can only cancel tasks assigned to you. Manager can cancel any task.' });
+      }
+      const ageMinutes = (Date.now() - new Date(task.created_at || task.created_date).getTime()) / 60000;
+      if (ageMinutes > 30) {
+        return res.status(403).json({ error: 'Agents can only cancel tasks within 30 minutes of creation. Ask manager to cancel.' });
+      }
+    }
+
+    await db.query(
+      "UPDATE campaign_tasks SET status='cancelled', dismissed_reason=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2",
+      [reason, id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, department, task_id) " +
+        "VALUES ($1,$2,$3,$4,'task_cancelled',$5,$6,'cancelled','amazon',$7)",
+        [task.campaign_id, task.campaign_name, task.agent_name, actor, reason, task.status, parseInt(id, 10)]
+      );
+    } catch(e) { console.error('[AMZ TASK cancel log] ' + e.message); }
+
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[AMZ TASK cancel] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/tasks/run-now', async function(req, res) {
   runDailyTaskScheduler().catch(function(e){ console.error('Manual task run error: ' + e.message); });
   res.json({ success: true, message: 'Task scheduler triggered' });
@@ -8353,6 +8401,64 @@ app.get('/api/google/tasks/:id/history', async function(req, res) {
   }
 });
 
+// r29k: Cancel a task — soft delete with reason. Used when an agent creates a task
+// by mistake or with a wrong description. Cancelled tasks are EXCLUDED from
+// repeat-offender / failure_count math — getPreviousTaskContext ignores them.
+//
+// Permissions:
+//   - Manager / owner: can cancel any task
+//   - Agent (Rahul/Anuj): can cancel a task they own that's <30 minutes old
+// Reason is required.
+app.post('/api/google/tasks/:id/cancel', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'A cancel reason is required.' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found (or not a Google task)' });
+    const task = taskRes.rows[0];
+
+    if (task.status === 'cancelled') return res.status(400).json({ error: 'Task already cancelled.' });
+
+    const u = req.user || {};
+    const userRole = (u.role || '').toLowerCase();
+    const userDept = (u.department || '').toLowerCase();
+    const actor = u.name || u.username || 'unknown';
+    const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+
+    // Agent can only cancel their own task within 30 min of creation
+    if (!isPrivileged) {
+      if (task.agent_name !== actor) {
+        return res.status(403).json({ error: 'You can only cancel tasks assigned to you. Manager can cancel any task.' });
+      }
+      const ageMinutes = (Date.now() - new Date(task.created_at || task.created_date).getTime()) / 60000;
+      if (ageMinutes > 30) {
+        return res.status(403).json({ error: 'Agents can only cancel tasks within 30 minutes of creation. Ask manager to cancel.' });
+      }
+    }
+
+    await db.query(
+      "UPDATE campaign_tasks SET status='cancelled', dismissed_reason=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2",
+      [reason, id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, department, task_id) " +
+        "VALUES ($1,$2,$3,$4,'task_cancelled',$5,$6,'cancelled','google',$7)",
+        [task.campaign_id, task.campaign_name, task.agent_name, actor, reason, task.status, parseInt(id, 10)]
+      );
+    } catch(e) { console.error('[GTASK cancel log] ' + e.message); }
+
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[GTASK cancel] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // Manual task creation — used by the "Assign" buttons on campaign rows / product cards / product modal.
 // The manager picks an agent and writes a brief, server creates a task with task_source='manual'.
 app.post('/api/google/tasks/manual-create', async function(req, res) {
@@ -8391,10 +8497,20 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   let productImageUrl = null;
 
   if (productKey) {
-    // Product-level task — find the product row
+    // Product-level task — find the product row.
+    // r29k: front-end sometimes sends just the Shopify product ID (e.g. "15233063518591")
+    // because that's what the AI critique surfaces. Server's googleState rows use a
+    // compound key (something_something_<shopifyId>_something). Match against both.
     const productRow = (googleState.products || []).find(function(p){
       const pk = p.shopifyItemId || p.productId || (p.adGroupId ? String(p.campaignId) + '_' + p.adGroupId : null);
-      return String(pk) === String(productKey);
+      if (String(pk) === String(productKey)) return true;
+      // Also try matching the embedded shopify id portion of shopifyItemId
+      if (p.shopifyItemId) {
+        const parts = String(p.shopifyItemId).split('_');
+        const embeddedShopifyId = parts.length >= 3 ? parts[2] : null;
+        if (embeddedShopifyId && String(embeddedShopifyId) === String(productKey)) return true;
+      }
+      return false;
     });
     if (productRow) {
       baselineSpend = productRow.spend || 0;
@@ -8405,12 +8521,19 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
       resolvedCampaignType = resolvedCampaignType || productRow.campaignType;
       resolvedProductTitle = resolvedProductTitle || productRow.name || productRow.productName;
     }
-    // Try to get image from shopify
+    // r29k: image lookup. Try compound-key split first (when productKey IS a compound key),
+    // then treat productKey as a raw shopify id directly.
+    let shopifyId = null;
     const parts = String(productKey).split('_');
-    const shopifyId = parts.length >= 3 ? parts[2] : null;
+    if (parts.length >= 3) shopifyId = parts[2];
+    else if (/^\d+$/.test(String(productKey))) shopifyId = String(productKey);
     if (shopifyId) {
       const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === shopifyId; });
-      if (sp && sp.imageUrl) productImageUrl = sp.imageUrl;
+      if (sp) {
+        if (sp.imageUrl) productImageUrl = sp.imageUrl;
+        // r29k: also pull product title from Shopify if we didn't get it from googleState
+        if (!resolvedProductTitle && sp.title) resolvedProductTitle = sp.title;
+      }
     }
   } else {
     // Campaign-level — aggregate
