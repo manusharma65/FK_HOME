@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r27 (Page-state persistence on refresh; gated Create task button on product + campaign AI; subtasks UI on task detail modal; assignToProduct feedback-gated for agents) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r28 (Haiku/Opus dual buttons on product + campaign AI; subtask preview removed from create-task modal; View campaign link on task detail; TACOS in product modal stats grid) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -921,8 +921,10 @@ function openCreateTaskFromAi(scope, targetId) {
     analysisText = parts.join('\n\n');
   }
 
-  // Subtasks: split AI structured fields if available, else split text by line/bullet
-  const subtasks = _extractSubtasksFromAi(scope, ctx);
+  // Subtasks: split AI structured fields if available, else split text by line/bullet.
+  // r28: subtasks are no longer previewed in the modal — they are created silently
+  // behind the scenes and appear only inside the task card after creation.
+  // This matches the Amazon pattern.
 
   const existing = document.getElementById('google-create-task-modal');
   if (existing) existing.remove();
@@ -931,10 +933,6 @@ function openCreateTaskFromAi(scope, targetId) {
   const titleContext = isCampaign
     ? (ctx.campaignName || 'Campaign')
     : (ctx.productData && ctx.productData.title) || 'Product';
-
-  const subtaskListHtml = subtasks.length
-    ? '<ul style="font-size:13px;color:var(--text2);padding-left:20px;margin:6px 0">' + subtasks.map(function(s){ return '<li>' + escapeHtml(s) + '</li>'; }).join('') + '</ul>'
-    : '<div style="font-size:12px;color:var(--text3);padding:6px 0">No subtask candidates detected — agent will work from the brief only.</div>';
 
   const html =
     '<div id="google-create-task-modal" onclick="if(event.target===this)closeCreateTaskModal()" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:flex-start;justify-content:center;padding:30px;overflow-y:auto">' +
@@ -949,14 +947,10 @@ function openCreateTaskFromAi(scope, targetId) {
             '<option value="Unassigned">Unassigned</option>' +
           '</select>' +
         '</div>' +
-        '<div style="margin-bottom:14px">' +
+        '<div style="margin-bottom:18px">' +
           '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Brief (description shown to agent)</label>' +
           '<textarea id="g-task-brief" rows="4" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--border);border-radius:8px;font-family:inherit;resize:vertical">' + escapeHtml(analysisText.slice(0, 800)) + '</textarea>' +
-        '</div>' +
-        '<div style="margin-bottom:18px">' +
-          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Subtasks (auto-extracted from AI)</label>' +
-          subtaskListHtml +
-          '<div style="font-size:11px;color:var(--text3);margin-top:4px">Each subtask must be completed or dismissed-with-reason before the parent task can be marked complete.</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:6px">Subtasks will be auto-generated from the AI analysis. The agent sees them inside the task card on the Tasks page.</div>' +
         '</div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px">' +
           '<button class="btn btn-ghost" onclick="closeCreateTaskModal()" style="font-size:13px">Cancel</button>' +
@@ -2396,13 +2390,13 @@ async function openTaskDetail(taskId) {
         + '<div style="font-size:14px;color:#111;line-height:1.6">' + escapeHtml(task.problem_detail || '') + '</div>'
       + '</div>'
 
-      + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:8px">Baseline metrics (when task was created)</div>'
-      + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:18px">'
-        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">Spend</div><div style="font-size:18px;font-weight:700;color:#111">£' + bSpend.toFixed(2) + '</div></div>'
-        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">Sales</div><div style="font-size:18px;font-weight:700;color:#111">£' + bSales.toFixed(2) + '</div></div>'
-        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">ACOS</div><div style="font-size:18px;font-weight:700;color:#111">' + (bAcos > 0 ? bAcos.toFixed(0) + '%' : '—') + '</div></div>'
-        + '<div style="padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px"><div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em">Impressions</div><div style="font-size:18px;font-weight:700;color:#111">' + bImpr.toLocaleString('en-GB') + '</div></div>'
-      + '</div>'
+      // r28: link to live campaign data instead of stale baseline-at-creation metrics.
+      // Click opens the campaign AI modal as overlay (single source of truth).
+      + (task.campaign_id
+        ? '<div style="margin-bottom:18px"><button class="btn btn-ghost" onclick="event.stopPropagation();openCampaignFromTask(\'' + task.campaign_id + '\',\'' + escapeHtml(task.campaign_name || '').replace(/\'/g, '&#39;') + '\')" style="font-size:13px;border:1px solid var(--border);background:white">📊 View live campaign data &amp; AI analysis →</button>'
+          + '<div style="font-size:11px;color:#6b7280;margin-top:6px">Spend, sales, ACOS, TACOS, AI verdict — all on the campaign card. No duplicate data here.</div>'
+          + '</div>'
+        : '')
 
       + closedCallouts
 
@@ -2429,6 +2423,20 @@ async function openTaskDetail(taskId) {
 }
 
 function taskDetailEscHandler(e) { if (e.key === 'Escape') closeTaskDetail(); }
+
+// r28: Open the existing campaign analysis modal from a task card. The campaign
+// modal shows live data + AI verdict — single source of truth, no duplication.
+// Closes the task detail first so the campaign modal isn't behind it; once the
+// campaign modal closes, user is back on the Tasks page (not on the task detail).
+function openCampaignFromTask(campaignId, campaignName) {
+  closeTaskDetail();
+  // Slight delay so the close animation completes before the new modal opens
+  setTimeout(function() {
+    if (typeof aiAnalyseCampaign === 'function') {
+      aiAnalyseCampaign(campaignId, campaignName);
+    }
+  }, 50);
+}
 
 // ─── r27: Google subtasks render + actions ──────────────────────────────────
 // Mirrors Amazon's loadTaskSubtasks pattern. Reuses /api/tasks/:id/subtasks
@@ -3079,9 +3087,17 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
   if (lockBadge) lockBadge.innerHTML = locked ? '· 🔒 locked for 24h' : '';
 
   if (buttonsDiv) {
+    // r28: dual-model re-run buttons (Haiku/Opus). Manager can override 24h lock.
+    const me = window.currentUser || {};
+    const role = (me.role || '').toLowerCase();
+    const dept = (me.department || '').toLowerCase();
+    const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+    const escName = String(campaignName).replace(/'/g, "&#39;");
+    const haikuBtn = '<button class="btn btn-primary" onclick="runCampaignAi(\'' + campaignId + '\',\'' + escName + '\', true, \'haiku\')" style="font-size:13px">↻ Re-analyse (Haiku)</button>';
+    const opusBtn = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + escName + '\', true, \'opus\')" style="font-size:13px;border:1px solid var(--border)">↻ Re-analyse (Opus — deep)</button>';
     let btns = '';
-    if (!locked) {
-      btns = '<button class="btn btn-ghost" onclick="runCampaignAi(\'' + campaignId + '\',\'' + campaignName.replace(/'/g, "&#39;") + '\', true)">↻ Re-analyse</button>';
+    if (!locked || isPriv) {
+      btns = haikuBtn + (isPriv ? ' ' + opusBtn : ' <span style="font-size:11px;color:var(--text3);align-self:center">🔒 Manager can run Opus</span>');
     } else {
       btns = '<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">🔒 Manager can re-analyse</span>';
     }
@@ -3092,7 +3108,6 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
     const tags = [];
     if (j.cached) tags.push('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago');
     else tags.push('Fresh analysis');
-    // r25b: model display now also handles Haiku
     if (j.modelUsed) {
       const m = j.modelUsed.toLowerCase();
       tags.push(m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : 'Sonnet'));
@@ -3102,20 +3117,22 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
   }
 }
 
-async function runCampaignAi(campaignId, campaignName, forceRefresh) {
+async function runCampaignAi(campaignId, campaignName, forceRefresh, model) {
   const buttonsDiv = document.getElementById('ai-buttons-campaign');
   const contentDiv = document.getElementById('ai-content-campaign');
   const metaDiv = document.getElementById('ai-meta-campaign');
   if (!contentDiv) return;
-
+  model = model === 'opus' ? 'opus' : (model === 'haiku' ? 'haiku' : null);
   contentDiv.textContent = 'Loading… checking for cached analysis.';
   if (metaDiv) metaDiv.textContent = '';
   if (buttonsDiv) buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Loading…</span>';
 
   try {
+    const reqBody = { campaignId: campaignId, forceRefresh: !!forceRefresh };
+    if (model) reqBody.model = model;
     const r = await authedFetch('/api/google/ai-analyse-campaign', {
       method: 'POST',
-      body: JSON.stringify({ campaignId: campaignId, forceRefresh: !!forceRefresh })
+      body: JSON.stringify(reqBody)
     });
     const j = await r.json();
     if (j.error) throw new Error(j.error);
@@ -3272,6 +3289,8 @@ function openProductDetailFromObj(p) {
     stat('Conversions', fmtNum(p.googleConversions)) +
     stat('Ad revenue', fmtCurrency(p.googleSales)) +
     stat('ACOS', fmtPct(p.googleAcos), 'acos') +
+    // r28: TACOS in stats grid (was on card but missing from modal). TACOS = ad spend / total Shopify rev.
+    stat('TACOS', (p.revenue7d > 0 && p.googleSpend > 0) ? (100 * p.googleSpend / p.revenue7d).toFixed(1) + '%' : '—') +
     stat('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—') +
     stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
     '</div>' +
@@ -3417,9 +3436,9 @@ async function renderProductAiSection(p) {
   }
 
   // Render run button immediately so user can always click it
-  const runBtnHtml = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">🔍 Run landing page critique</button>';
+  // r28: dual button layout — Haiku for everyone, Opus for managers only
   contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Loading any saved analysis…</div>';
-  buttonsDiv.innerHTML = runBtnHtml;
+  buttonsDiv.innerHTML = _gpcRunButtonsHtml(productId, false);
   metaDiv.textContent = '';
 
   // Try to fetch cached analysis ONLY (cachedOnly:true so we never auto-run AI)
@@ -3438,23 +3457,39 @@ async function renderProductAiSection(p) {
     }
     // No cached analysis — show prompt to run
     contentDiv.innerHTML = '<div style="color:var(--text);font-size:13px;line-height:1.6">'
-      + '<strong>The most powerful analysis</strong> — fetches your live product page (UK locale), cross-references your ads, GA4 funnel, and Shopify data, then identifies friction and ranks fixes by impact.<br><br>'
-      + '<span style="color:var(--text3)">Takes 15–25 seconds. Cached for 24h afterwards. Result will reappear here every time you re-open this product.</span>'
+      + '<strong>Run an AI critique of this product page.</strong> Analyses title, images, copy, keywords on page, trust signals, ad-vs-page coherence.<br><br>'
+      + '<span style="color:var(--text3)">Haiku: fast (~10s), £0.01. Opus: deeper (~25s), £0.05–0.10 — manager only. Cached 24h either way.</span>'
       + '</div>';
-    buttonsDiv.innerHTML = runBtnHtml;
+    buttonsDiv.innerHTML = _gpcRunButtonsHtml(productId, false);
   } catch(e) {
     contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Could not check for saved analysis: ' + escapeHtml(e.message) + '</div>';
-    buttonsDiv.innerHTML = runBtnHtml;
+    buttonsDiv.innerHTML = _gpcRunButtonsHtml(productId, false);
   }
 }
 
-async function runProductCritique(productId) {
+// r28: build run-buttons HTML — Haiku always; Opus restricted to managers.
+// reanalyse=true switches button text to "Re-analyse" instead of "Run".
+function _gpcRunButtonsHtml(productId, reanalyse) {
+  const me = window.currentUser || {};
+  const role = (me.role || '').toLowerCase();
+  const dept = (me.department || '').toLowerCase();
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  const verb = reanalyse ? '↻ Re-analyse' : '🔍 Run';
+  const haikuBtn = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\',\'haiku\')" style="font-size:13px">' + verb + ' (Haiku)</button>';
+  const opusBtn = isPriv
+    ? '<button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\',\'opus\')" style="font-size:13px;border:1px solid var(--border)">' + verb + ' (Opus — deep)</button>'
+    : '<span style="font-size:11px;color:var(--text3);align-self:center">🔒 Manager can run Opus (deeper)</span>';
+  return haikuBtn + ' ' + opusBtn;
+}
+
+async function runProductCritique(productId, model) {
   const buttonsDiv = document.getElementById('lpc-buttons-product');
   const contentDiv = document.getElementById('lpc-content-product');
   const metaDiv = document.getElementById('lpc-meta-product');
   if (!contentDiv) return;
+  model = model === 'opus' ? 'opus' : 'haiku';
 
-  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Running analysis — fetching live page (UK locale), cross-referencing ads &amp; funnel, identifying friction… (15–25s)</div>';
+  contentDiv.innerHTML = '<div style="color:var(--text3);font-size:13px">Running ' + (model === 'opus' ? 'Opus deep' : 'Haiku') + ' analysis — fetching live page (UK locale), cross-referencing ads &amp; funnel, identifying friction…</div>';
   buttonsDiv.innerHTML = '<span style="font-size:12px;color:var(--text3)">Running…</span>';
   metaDiv.textContent = '';
 
@@ -3462,14 +3497,14 @@ async function runProductCritique(productId) {
     const r = await authedFetch('/api/google/landing-page-critique', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ productId: String(productId), forceRefresh: true })
+      body: JSON.stringify({ productId: String(productId), forceRefresh: true, model: model })
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Critique failed');
     renderCritiqueInlineInProductModal(j, productId);
   } catch(e) {
     contentDiv.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + escapeHtml(e.message) + '</div>';
-    buttonsDiv.innerHTML = '<button class="btn btn-primary" onclick="runProductCritique(\'' + productId + '\')">↻ Try again</button>';
+    buttonsDiv.innerHTML = _gpcRunButtonsHtml(productId, true);
   }
 }
 
@@ -3536,7 +3571,7 @@ function renderCritiqueInlineInProductModal(j, productId) {
   // Partial-output warning banner
   const partialBanner = j.partial
     ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-left:3px solid #ea580c;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:13px;color:#9a3412">'
-        + '<strong>⚠ Partial analysis:</strong> the AI output was truncated mid-response. Click <strong>📖 Open in reader</strong> to see the full raw text, or <strong>↻ Re-analyse</strong> for a complete result.'
+        + '<strong>⚠ Partial analysis:</strong> the AI output was truncated mid-response. Click <strong>📖 Open in reader</strong> to see the full raw text, or click one of the re-run buttons for a complete result.'
       + '</div>'
     : '';
 
@@ -3580,14 +3615,24 @@ function renderCritiqueInlineInProductModal(j, productId) {
   }
 
   if (buttonsDiv) {
+    // r28: dual-model re-run buttons (Haiku / Opus). Manager can override 24h lock for Opus.
     // Always show "Open in reader" button when there's an analysis to read
-    let btns = '<button class="btn btn-primary" onclick="openCritiqueReader(\'' + productId + '\')">📖 Open in reader</button>';
+    let btns = '<button class="btn btn-primary" onclick="openCritiqueReader(\'' + productId + '\')" style="font-size:13px">📖 Open in reader</button>';
     if (!locked) {
-      btns += ' <button class="btn btn-ghost" onclick="runProductCritique(\'' + productId + '\')">↻ Re-analyse</button>';
+      btns += ' ' + _gpcRunButtonsHtml(productId, true);
     } else {
-      btns += ' <span style="font-size:11px;color:var(--text3);font-family:var(--mono);align-self:center">🔒 Manager can re-analyse</span>';
+      // Locked for 24h. Manager can still force-refresh — show their re-run options.
+      const me = window.currentUser || {};
+      const role = (me.role || '').toLowerCase();
+      const dept = (me.department || '').toLowerCase();
+      const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+      if (isPriv) {
+        btns += ' ' + _gpcRunButtonsHtml(productId, true);
+      } else {
+        btns += ' <span style="font-size:11px;color:var(--text3);font-family:var(--mono);align-self:center">🔒 Manager can re-analyse</span>';
+      }
     }
-    if (j.productUrl) btns += ' <a class="btn btn-ghost" href="' + j.productUrl + '" target="_blank">View live page ↗</a>';
+    if (j.productUrl) btns += ' <a class="btn btn-ghost" href="' + j.productUrl + '" target="_blank" style="font-size:13px">View live page ↗</a>';
     buttonsDiv.innerHTML = btns;
   }
   if (metaDiv) {

@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r27 (Google task creation from AI with subtasks; feedback-required gate on Amazon + Google task creation; Google page-state persistence; subtasks UI on Google task detail modal)
+// CampaignPulse — deploy marker 2026-05-08 r28 (Sharper AI prompts: feedback-aware (anti-repeat, answer-questions), product critique focuses on title/images/keywords/copy/trust/CTA, campaign analysis 150-word capped focuses on budget/bid/ACOS/TACOS/keywords/negatives. Haiku/Opus split on Google product + campaign critiques (manager-only Opus). model_used persisted to DB.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2077,6 +2077,8 @@ async function initTasksTable() {
       `);
       await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC)");
       await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_score ON landing_page_critiques(score DESC)");
+      // r28: track which model produced this critique so the UI can show Haiku vs Opus
+      await db.query("ALTER TABLE landing_page_critiques ADD COLUMN IF NOT EXISTS model_used TEXT");
       console.log('[INIT] landing_page_critiques table ready');
     } catch (e) {
       console.error('[INIT] landing_page_critiques error: ' + e.message);
@@ -2984,10 +2986,19 @@ async function buildFeedbackPromptSection(scope, targetId) {
     const who = r.agent_name ? ' (by ' + r.agent_name + ')' : '';
     return (i + 1) + '. [' + dateStr + who + '] ' + r.feedback_text;
   });
-  return '\n\nAGENT FEEDBACK ON PREVIOUS ANALYSES (most recent first — TAKE THESE INTO ACCOUNT):\n' +
+  // r28: Promote feedback to a prominent block at the END of the prompt with
+  // explicit anti-repeat instruction. Recency-listed (newest first). The aim is
+  // for the model to give a *different* answer that addresses what the agent
+  // said — not a polite re-statement of the same generic advice.
+  return '\n\n═══ AGENT FEEDBACK ON PREVIOUS ANALYSES — MUST READ ═══\n' +
+    'These are messages the same agents have left after seeing your previous analysis on this exact target. Most recent first.\n\n' +
     lines.join('\n') +
-    '\n\nWhen producing your analysis, address what the agent said. If they corrected a wrong assumption, acknowledge it. ' +
-    'If they said "the AI keeps recommending X but Y is the real issue", focus on Y. Do not repeat advice agents have already pushed back on.';
+    '\n\n═══ HOW TO USE THE FEEDBACK ═══\n' +
+    '1. If the agent already TRIED something (e.g. "we already negated X" / "we lowered the bid by 30%"), do NOT recommend that thing again. Recommend something different.\n' +
+    '2. If the agent ASKED A QUESTION (e.g. "why is this not showing in shopping?"), give a direct answer to that question in your output. Do not ignore it.\n' +
+    '3. If the agent CONTRADICTED the AI (e.g. "the title is fine, our reviews are the problem"), accept their domain knowledge and pivot. Do not repeat the contradicted point.\n' +
+    '4. Your output must be SUBSTANTIVELY different from what was clearly given before. If the data has not changed, focus on a different angle the previous analysis missed.\n' +
+    '5. If you have nothing new to say after considering the feedback, say so plainly: "Based on the feedback, my previous analysis was correct — try X next." Do not pad.';
 }
 
 // POST /api/ai/feedback — save a new feedback entry. Body: { scope, targetId, feedback }
@@ -10725,66 +10736,72 @@ function buildLandingPageDossier(shopifyProduct) {
 }
 
 function buildCritiquePrompt(dossier, pageSummary) {
+  // r28: rewritten to be specifically about the LANDING PAGE itself + how it
+  // converts. Forces the AI to call out title, images, keywords-on-page, copy,
+  // trust signals, mobile, CTA — not the generic "diagnosis" output it used to
+  // give. Different focus from campaign-AI prompt.
   return [
-    "You are helping a marketing agent at FK Sports UK understand why a product on their Shopify store isn't selling well.",
-    "The agent is NOT a technical expert. They speak plain English and need clear, actionable advice — not industry jargon.",
+    "You are an e-commerce conversion expert reviewing ONE Shopify product page for FK Sports UK (UK fitness + baby equipment seller).",
+    "Your job: explain in plain English what is wrong with THIS PRODUCT PAGE specifically — title, images, copy, keywords, trust signals, mobile experience — and what to fix this week.",
     "",
-    "WRITING RULES — these are mandatory:",
-    "• Write like you're talking to a small-business owner, not a marketing director.",
-    "• NO jargon. Avoid: CRO, CTA, funnel, conversion rate optimisation, friction, value proposition, USP, social proof, A/B test, heatmap, bounce rate, attribution.",
-    "• If you must use a term, explain it in brackets the first time. Example: 'CTA (the buy button)'.",
-    "• Every problem you flag must say WHY it's a problem in real-world terms. Don't say 'weak CTA' — say 'the Add to Cart button is small and hard to find on mobile, so people give up before buying'.",
-    "• Every action must be something a person could do this week without specialist help.",
-    "• Use simple sentences. Short is better than long.",
-    "• Use £ for money. Talk about 'shoppers' or 'people' — not 'users' or 'sessions'.",
+    "═══ AUDIENCE ═══",
+    "The agent reading this is NOT technical. They speak plain English. NO jargon: no CRO, CTA, funnel, conversion rate optimisation, friction, value proposition, USP, social proof, A/B test, bounce rate.",
+    "If you must use a term, explain in brackets the first time. Example: 'Add to Cart button (the buy button)'.",
+    "Use British English, £ for money. Sentences should be short.",
     "",
-    "IMPORTANT CONTEXT — DO NOT misinterpret currency:",
-    "• This is a UK-based store (fksports.co.uk). All prices in the dossier are in GBP (£).",
-    "• The live page is fetched with ?country=GB&currency=GBP query parameters and UK headers, so it should render in GBP.",
-    "• If the page text still contains '$' or 'USD' references, this is likely Shopify's currency selector dropdown listing other markets — NOT the price the UK customer sees.",
-    "• DO NOT flag a 'currency mismatch' or 'USD shown to UK shoppers' unless you have direct evidence in the page TEXT that the actual product price next to Add to Cart is shown in USD.",
-    "• The dossier price is the source of truth for the GBP price.",
+    "═══ FOCUS — YOU MUST DIAGNOSE EACH OF THESE ═══",
+    "1. PAGE TITLE — does it match what people search for? Is it descriptive enough? Word too long, too short, missing brand or model number?",
+    "2. PRODUCT IMAGES — count, quality, lifestyle vs product-only, missing scale shots, missing dimension shots, image-to-text ratio.",
+    "3. KEYWORDS ON PAGE — does the visible page text actually contain the keywords this product is being advertised for? (Cross-reference the search keywords from the ad data with what's in the page text.)",
+    "4. PRODUCT DESCRIPTION / COPY — long enough? clear benefits? specs visible? warranty/returns mentioned?",
+    "5. TRUST SIGNALS — review count, recency, badges, returns policy, warranty, payment options.",
+    "6. PRICE & PROMOTION — visible? competitive-looking? promo missing?",
+    "7. ADD TO CART — visible without scrolling on mobile? clear text?",
+    "8. AD-vs-PAGE COHERENCE — does the page deliver what the search ad promised?",
     "",
-    "Your job: explain in plain English why this product is or isn't selling, and what to fix this week.",
+    "═══ DO NOT DO THESE ═══",
+    "- Do NOT use generic phrases like 'optimise the listing', 'improve conversion', 'monitor performance', 'consider A/B testing', 'review keywords'.",
+    "- Do NOT recommend things outside the product page (no 'change campaign budget' — that is the campaign-level analyst's job).",
+    "- Do NOT flag a 'currency mismatch' or 'USD shown to UK shoppers' unless you have direct evidence in the page TEXT that the actual product price next to Add to Cart is shown in USD. The dossier price is the source of truth for the GBP price.",
+    "- Do NOT pad. If a section has nothing wrong, skip it.",
     "",
-    "PRODUCT DOSSIER:",
+    "═══ PRODUCT DOSSIER ═══",
     "```json",
     JSON.stringify(dossier, null, 2),
     "```",
     "",
-    "LANDING PAGE — STRUCTURAL SIGNALS:",
+    "═══ LANDING PAGE — STRUCTURAL SIGNALS ═══",
     JSON.stringify(pageSummary.signals, null, 2),
     "",
-    "LANDING PAGE — META:",
+    "═══ LANDING PAGE — META ═══",
     "Page title: " + (pageSummary.pageTitle || '(none)'),
     "Meta description: " + (pageSummary.metaDescription || '(none)'),
     "JSON-LD product schema present: " + pageSummary.jsonLdPresent,
     "",
-    "LANDING PAGE — VISIBLE TEXT (truncated to 6000 chars):",
+    "═══ LANDING PAGE — VISIBLE TEXT (truncated to 6000 chars) ═══",
     pageSummary.text,
     "",
-    "Return STRICT JSON in this exact shape (no markdown fences, no commentary):",
+    "═══ OUTPUT FORMAT — STRICT JSON ═══",
+    "Return ONLY this JSON shape, no markdown fences, no commentary outside the JSON:",
     "{",
-    '  "diagnosis": "ONE plain-English sentence saying what the main problem is. No jargon.",',
-    '  "funnelDiagnosis": "Where shoppers are dropping off, in plain language. E.g. \\"500 people visited but only 3 added to cart — most leave before clicking Buy.\\" Use real numbers.",',
+    '  "diagnosis": "ONE plain-English sentence with the SPECIFIC biggest issue with THIS page. Cite a number or visible-text fact. No jargon.",',
     '  "frictionPoints": [',
-    '    { "priority": "P1|P2|P3", "issue": "Short plain-English title", "evidence": "Why this is a problem in everyday language. Cite numbers or page text. No jargon.", "category": "trust|price|cta|copy|imagery|mobile|stock|ad-coherence|other" }',
+    '    { "priority": "P1|P2|P3", "issue": "Short title naming a specific page element (Title / Images / Description / Reviews / Add to Cart / Page Speed / etc.)", "evidence": "Why this is a problem in everyday language. Quote actual page text or specific numbers.", "category": "title|images|keywords|copy|reviews|trust|price|cta|mobile|ad-coherence|other" }',
     '  ],',
     '  "actions": [',
-    '    { "rank": 1, "action": "What to do this week, written as a clear instruction. E.g. \\"Add a bigger Buy Now button on the product page.\\"", "expectedImpact": "What might happen if this is fixed, in plain words. E.g. \\"More people likely to click Buy on phones.\\"", "effort": "low|medium|high" }',
+    '    { "rank": 1, "action": "What to do this week. Specific. E.g. \\"Add 3 lifestyle images showing the bench in a home gym setup.\\"", "expectedImpact": "Plain words. E.g. \\"More people likely to add to cart on phone.\\"", "effort": "low|medium|high" }',
     '  ],',
-    '  "adVsPageCoherence": "Plain English: does what the ad promised match what the visitor sees? Be specific.",',
-    '  "trustSignals": "What customer trust signs are on the page (reviews, free returns, badges) and what is missing — in everyday words.",',
-    '  "summary": "2-3 sentences any agent can read and immediately understand. The single most important thing they should know."',
+    '  "adVsPageCoherence": "Plain English: does what the ad promised match what the visitor sees? Be specific. Quote the search keyword and what is actually on the page.",',
+    '  "trustSignals": "What customer trust signals are present (reviews count, free returns, badges) and what is missing.",',
+    '  "summary": "2-3 sentences. The single most important thing the agent should do this week, named as a specific action."',
     "}",
     "",
-    "Rules:",
-    "- Be specific. Quote numbers. Reference exact text from the page where useful.",
-    "- Rank friction points P1 (highest impact, fix first) to P3 (low priority).",
-    "- Provide 3 to 6 actions, ranked by expected revenue impact.",
-    "- Don't invent data. If the page text is missing something, say so explicitly.",
-    "- If the funnel data is null, say funnel data unavailable in funnelDiagnosis.",
-    "- Keep your response under 1500 words total."
+    "═══ HARD RULES ═══",
+    "- Quote real numbers and real page text. Do not invent.",
+    "- Rank 3-6 friction points P1 (highest impact) to P3 (low priority). Be honest — if there are only 2 real issues, return 2.",
+    "- Provide 3-6 actions, ranked by expected revenue impact.",
+    "- Total response under 1500 words.",
+    "- If a section has no information (e.g. no review count visible on the page), say so explicitly: \"Reviews not visible on the page text scraped\" — do not invent a number."
   ].join('\n');
 }
 
@@ -10853,10 +10870,11 @@ async function getCachedCritique(productId) {
       adSummary: row.ad_summary,
       pageSummary: row.page_summary,
       rawText: row.raw_ai_text || '',
-      partial: !!partialFlag,
       score: parseFloat(row.score) || 0,
       cached: true,
-      ageHours: Math.round(ageHours * 10) / 10
+      ageHours: ageHours,
+      partial: partialFlag,
+      modelUsed: row.model_used || null  // r28
     };
   } catch (e) {
     console.error('[LPC] cache read error productId=' + productId + ': ' + e.message);
@@ -10921,7 +10939,8 @@ function recoverPartialCritiqueJson(rawText) {
   return result;
 }
 
-async function runCritiqueForProduct(shopifyProduct, score) {
+async function runCritiqueForProduct(shopifyProduct, score, options) {
+  options = options || {};
   const dossier = buildLandingPageDossier(shopifyProduct);
   if (!dossier) throw new Error('Could not build dossier');
   const fetchResult = await fetchProductPageHtml(dossier.product.url);
@@ -10929,13 +10948,26 @@ async function runCritiqueForProduct(shopifyProduct, score) {
     throw new Error('Could not fetch product page (' + dossier.product.url + '): ' + (fetchResult.error || 'unknown') + (fetchResult.code ? ' [' + fetchResult.code + ']' : '') + (fetchResult.status ? ' status=' + fetchResult.status : ''));
   }
   const pageSummary = summariseProductPage(fetchResult.html);
-  const prompt = buildCritiquePrompt(dossier, pageSummary);
+  let prompt = buildCritiquePrompt(dossier, pageSummary);
+
+  // r28: append agent feedback so re-runs after feedback produce different answers.
+  try {
+    const fb = await buildFeedbackPromptSection('google_product', String(shopifyProduct.id));
+    if (fb) prompt = prompt + fb;
+  } catch(e) { /* non-fatal */ }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
+  // r28: Haiku/Opus split — agents default to Haiku (fast, ~£0.01). Manager can
+  // request Opus via options.model='opus' for deeper analysis.
+  const HAIKU = 'claude-haiku-4-5-20251001';
+  const OPUS  = 'claude-opus-4-5-20251101';
+  const useOpus = options.model === 'opus';
+  const modelToUse = useOpus ? OPUS : HAIKU;
+
   const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
-    model: LPC_MODEL,
+    model: modelToUse,
     max_tokens: 4500,
     messages: [{ role: 'user', content: prompt }]
   }, {
@@ -10974,24 +11006,25 @@ async function runCritiqueForProduct(shopifyProduct, score) {
     rawText: rawText,
     partial: partial,
     score: score || 0,
-    cached: false
+    cached: false,
+    modelUsed: modelToUse  // r28: front-end shows which model ran
   };
 
   // Persist
   if (db) {
     try {
       await db.query(
-        "INSERT INTO landing_page_critiques (product_id, product_title, product_url, generated_at, diagnosis, friction_json, actions_json, funnel_summary, ad_summary, page_summary, raw_ai_text, score) " +
-        "VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7,$8,$9,$10,$11) " +
+        "INSERT INTO landing_page_critiques (product_id, product_title, product_url, generated_at, diagnosis, friction_json, actions_json, funnel_summary, ad_summary, page_summary, raw_ai_text, score, model_used) " +
+        "VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7,$8,$9,$10,$11,$12) " +
         "ON CONFLICT (product_id) DO UPDATE SET " +
         "  product_title=EXCLUDED.product_title, product_url=EXCLUDED.product_url, generated_at=NOW(), " +
         "  diagnosis=EXCLUDED.diagnosis, friction_json=EXCLUDED.friction_json, actions_json=EXCLUDED.actions_json, " +
         "  funnel_summary=EXCLUDED.funnel_summary, ad_summary=EXCLUDED.ad_summary, page_summary=EXCLUDED.page_summary, " +
-        "  raw_ai_text=EXCLUDED.raw_ai_text, score=EXCLUDED.score",
+        "  raw_ai_text=EXCLUDED.raw_ai_text, score=EXCLUDED.score, model_used=EXCLUDED.model_used",
         [result.productId, result.productTitle, result.productUrl, result.diagnosis,
           JSON.stringify(result.friction), JSON.stringify(result.actions),
           JSON.stringify(result.funnelSummary), JSON.stringify(result.adSummary), JSON.stringify(result.pageSummary),
-          rawText, result.score]
+          rawText, result.score, result.modelUsed || null]
       );
       console.log('[LPC] persisted productId=' + result.productId + ' title="' + (result.productTitle || '').slice(0, 40) + '"');
     } catch (e) {
@@ -11079,7 +11112,15 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
         return res.status(404).json({ error: 'No cached analysis', cached: false });
       }
     }
-    const result = await runCritiqueForProduct(sp, 0);
+    // r28: model selection — agents get Haiku by default, manager can request Opus.
+    let modelChoice = 'haiku';
+    if (req.body && req.body.model === 'opus') {
+      if (!isManager) {
+        return res.status(403).json({ error: 'Opus (deep analysis) is restricted to managers and owner. Use Haiku instead.' });
+      }
+      modelChoice = 'opus';
+    }
+    const result = await runCritiqueForProduct(sp, 0, { model: modelChoice });
     result.lockedForAgent = !isManager;
     res.json(result);
   } catch (e) {
@@ -11595,6 +11636,13 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
   const u = req.user || {};
   const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
 
+  // r28: model selection — Haiku default, Opus manager-only
+  let modelChoice = 'haiku';
+  if (req.body && req.body.model === 'opus') {
+    if (!isManager) return res.status(403).json({ error: 'Opus (deep analysis) is restricted to managers and owner. Use Haiku instead.' });
+    modelChoice = 'opus';
+  }
+
   // Cache lookup (24h)
   if (db) {
     try {
@@ -11638,6 +11686,14 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
     const overallAcos = totalSales > 0 ? (totalSpend / totalSales * 100).toFixed(1) : 'N/A';
     const overallCostPerConv = totalConv > 0 ? (totalSpend / totalConv).toFixed(2) : 'N/A';
 
+    // r28: TACOS = ad spend / TOTAL site sales (not just ad-attributed). Pull
+    // from shopifyState totals to give the AI a different, broader signal than ACOS.
+    let tacos = 'N/A';
+    try {
+      const totalShopify7d = (shopifyState.products || []).reduce(function(s, sp){ return s + (sp.revenue7d || 0); }, 0);
+      if (totalShopify7d > 0) tacos = (totalSpend / totalShopify7d * 100).toFixed(1);
+    } catch(_) {}
+
     // Sort products by spend descending so AI sees biggest spenders first
     const sorted = allProducts.slice().sort(function(a, b){ return (b.spend || 0) - (a.spend || 0); });
     const top = sorted.slice(0, 15); // limit to 15 to keep prompt manageable
@@ -11675,49 +11731,70 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       ? '\n... and ' + remaining + ' more product rows in this campaign.'
       : '';
 
-    const prompt = 'You are advising FK Sports UK on one Google Ads campaign.\n\n'
-      + 'CONTEXT YOU NEED TO KNOW:\n'
-      + '- FK Sports UK is a Shopify store (fksports.co.uk) selling home fitness equipment AND baby products. ~150+ orders/day.\n'
-      + '- One Google Ads account covers everything today (fitness + baby split into separate accounts is planned).\n'
-      + '- Shopify is the source of truth for actual sales. Google "Revenue" lags 24-48 hours — when Google shows conversions but £0 revenue, that is normally attribution lag, not broken tracking.\n'
-      + '- ACOS = ad spend / Google-attributed revenue. Reads N/A when Google revenue is £0.\n'
-      + '- For each product below we show both the Google revenue (lagged) AND its Shopify net sales for the same 7-day window. Use Shopify net as the truth for whether the product is selling.\n\n'
-      + 'CAMPAIGN: ' + campaignName + '\n'
-      + 'TYPE: ' + campaignType + '\n'
-      + 'PERIOD: Last 7 days\n\n'
-      + 'CAMPAIGN TOTALS:\n'
+    // r28: Sharper, campaign-specific prompt. Different from product-level critique.
+    // Focus areas: budget, bid strategy, ACOS/TACOS, keywords, negatives, conversion
+    // tracking, ad-vs-page coherence. Word-cap 150.
+    const prompt = 'You are a senior Google Ads analyst advising FK Sports UK on ONE campaign.\n\n'
+      + '═══ CONTEXT ═══\n'
+      + 'FK Sports UK is a Shopify store (fksports.co.uk) selling home fitness equipment AND baby products. ~150+ orders/day. Single Google Ads account covers all today.\n'
+      + 'Shopify is the source of truth for actual sales. Google "Revenue" lags 24-48h — when Google shows conversions but £0 revenue, that is normally attribution lag, not broken tracking.\n'
+      + 'ACOS = ad spend / Google-attributed revenue. TACOS = ad spend / TOTAL site revenue (broader picture — captures the halo effect on direct/organic traffic).\n\n'
+      + '═══ THIS CAMPAIGN ═══\n'
+      + 'Name: ' + campaignName + '\n'
+      + 'Type: ' + campaignType + '\n'
+      + 'Period: Last 7 days\n\n'
+      + 'TOTALS:\n'
       + '- Spend: £' + totalSpend.toFixed(2) + '\n'
       + '- Google-attributed sales (lagged): £' + totalSales.toFixed(2) + '\n'
       + '- Impressions: ' + totalImpressions + '\n'
       + '- Clicks: ' + totalClicks + ' (CTR ' + overallCtr + '%)\n'
       + '- Conversions: ' + totalConv + '\n'
-      + '- ACOS: ' + overallAcos + '\n'
+      + '- ACOS: ' + overallAcos + (overallAcos === 'N/A' ? '' : '%') + '\n'
+      + '- TACOS (vs total store revenue 7d): ' + tacos + (tacos === 'N/A' ? '' : '%') + '\n'
       + '- Cost per conversion: £' + overallCostPerConv + ' (use this when ACOS is N/A — tells you what one sale costs regardless of revenue lag)\n'
       + '- Product rows in campaign: ' + allProducts.length + '\n\n'
       + 'TOP PRODUCTS BY SPEND (with Shopify-side truth):\n' + productLines + remainingNote + '\n\n'
-      + 'THE QUESTION:\n'
-      + 'What is going right and wrong in this campaign, and what is the one structural change to make this week?\n\n'
-      + 'Specifically:\n'
-      + '1. Health verdict in one line.\n'
-      + '2. Which products are dragging this down — name 1-3 with their numbers (compare ad spend to Shopify net sales — if a product has high ad spend but low Shopify net sales it is genuinely failing; if it has low Shopify net AND low ad spend, it is just inactive).\n'
-      + '3. Which products are working and could absorb more budget — name 1-3.\n'
-      + '4. ONE specific structural change for this week (e.g. exclude product type X, split product Y into its own campaign, lower bid on Z by 30%, etc.).\n'
-      + '5. If the campaign mixes fitness and baby products, flag it — they convert differently and benefit from separate campaigns.\n'
-      + '6. If this is Performance Max or Shopping, comment on whether the right products are in scope.\n\n'
-      + 'Be direct, specific, named. Reference actual numbers. No generic advice.';
+      + '═══ YOUR JOB — DIAGNOSE EACH OF THESE ═══\n'
+      + '1. BUDGET — too high? too low? being exhausted daily? sitting unspent?\n'
+      + '2. BID STRATEGY — given the campaign type, is it appropriate? Should it switch (e.g. Manual CPC → Max Conversions)?\n'
+      + '3. ACOS / TACOS — are they sustainable? trend?\n'
+      + '4. KEYWORDS — for Search campaigns: wasted spend on broad terms? are converting terms set as exact match?\n'
+      + '5. NEGATIVES — should specific negative keywords be added? (Look at product names — anything in the campaign name that should be excluded?)\n'
+      + '6. CONVERSION TRACKING — does the conversion count look plausible vs clicks? if 1000 clicks → 0 conv, suspect tracking.\n'
+      + '7. AD-vs-PAGE COHERENCE — do the products being advertised match what the campaign is supposed to be about?\n\n'
+      + '═══ OUTPUT FORMAT ═══\n'
+      + 'STRICT 150 word cap. Format:\n\n'
+      + '**Verdict:** [healthy / waste / underspent / mistargeted / structural-fix-needed]\n\n'
+      + '**The problem:** [1-2 sentences naming THE specific issue with numbers]\n\n'
+      + '**1 thing to do this week:** [exact action — be concrete: "Pause product X", "Add negative keyword Y", "Lower daily budget from £A to £B", "Move product Z into its own campaign"]\n\n'
+      + '═══ HARD RULES ═══\n'
+      + '- DO NOT use these phrases: "monitor closely", "review performance", "optimise targeting", "consider A/B testing", "ongoing optimisation needed".\n'
+      + '- DO NOT recommend things at the product page level (titles, images, descriptions) — that is the product analyst\'s job.\n'
+      + '- DO quote real numbers and named products.\n'
+      + '- If the campaign is genuinely fine, say so in one line: "Verdict: healthy. ACOS X%, TACOS Y%, on track. No action needed this week."';
 
-    // r25b: append agent feedback for this campaign
+    // r25b/r28: append agent feedback — handled via stronger buildFeedbackPromptSection.
     let promptWithFeedback = prompt;
     try {
       const fb = await buildFeedbackPromptSection('google_campaign', String(campaignId));
       if (fb) promptWithFeedback = prompt + fb;
     } catch(e) { /* non-fatal */ }
 
-    // r25b: Haiku-then-Opus instead of Opus-only. Most campaign analyses are
-    // routine; Haiku handles them well. Only escalate when output is thin.
-    const ai = await aiHaikuThenOpus(promptWithFeedback, { max_tokens: 1000, min_useful_chars: 200 });
-    const analysisText = ai.text;
-    const modelUsedActual = ai.modelUsed;
+    // r28: model selection
+    const HAIKU = 'claude-haiku-4-5-20251001';
+    const OPUS  = 'claude-opus-4-5-20251101';
+    const modelToUse = modelChoice === 'opus' ? OPUS : HAIKU;
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: modelToUse,
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: promptWithFeedback }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 90000
+    });
+    const analysisText = aiResp.data.content[0].text;
+    const modelUsedActual = modelToUse;
 
     // Persist to 24h cache
     if (db) {

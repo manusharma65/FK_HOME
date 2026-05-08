@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r27 (Feedback-required gate on assign-task — agents must submit feedback before creating a task; owner/manager bypass) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r28 (Task detail modal: View campaign link replaces baseline metrics — single source of truth) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3698,6 +3698,17 @@ function openTaskDetailModal(taskId) {
   }
   sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Problem:</strong> ' + escHtml(t.problem_detail || '—') + '</div>');
   sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>Score:</strong> ' + (t.score || 0) + ' pts · <strong>Working days open:</strong> ' + wdo + ' · <strong>Stage:</strong> ' + stage + '</div>');
+
+  // r28: link to live campaign data instead of carrying baseline metrics on the task.
+  // Click opens the existing campaign detail modal as overlay. Single source of truth.
+  if (t.campaign_id) {
+    sections.push(
+      '<div style="margin-bottom:14px">' +
+        '<button class="btn btn-ghost" style="font-size:13px;border:1px solid var(--border);background:white" onclick="event.stopPropagation();openCampaignFromAmzTask(\'' + t.campaign_id + '\',\'' + (t.campaign_name || '').replace(/[\'"]/g, '') + '\')">📊 View live campaign data &amp; AI →</button>' +
+        '<div style="font-size:11px;color:var(--text3);margin-top:6px">Spend, sales, ACOS, TACOS — all on the campaign card. No duplicate data here.</div>' +
+      '</div>'
+    );
+  }
   if (t.first_action_at) {
     sections.push('<div style="font-size:15px;color:var(--text);margin-bottom:12px"><strong>First action:</strong> ' + new Date(t.first_action_at).toLocaleString('en-GB') + '</div>');
   } else if (notStarted) {
@@ -3819,6 +3830,17 @@ function openTaskDetailModal(taskId) {
 function closeTaskDetailModal() {
   const modal = document.getElementById('task-detail-modal');
   if (modal) modal.style.display = 'none';
+}
+
+// r28: open campaign detail modal from a task. Closes task modal first, then
+// opens campaign — single source of truth for campaign metrics.
+function openCampaignFromAmzTask(campaignId, campaignName) {
+  closeTaskDetailModal();
+  setTimeout(function() {
+    if (typeof openCampDetailModal === 'function') {
+      openCampDetailModal(campaignId);
+    }
+  }, 50);
 }
 
 // ── Toggle Task Detail Panel (legacy — kept so existing inline elements still resolve) ──
