@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29c (Bugfix: restored taskDetailEscHandler function — was lost in earlier edit, killing Google task modal. Also: history endpoint now returns empty array on errors instead of 500 so frontend doesn't break.)
+// CampaignPulse — deploy marker 2026-05-08 r29d (Bugfix: agents who've earned Opus by submitting feedback now bypass the 24h cache lock — previously the lock returned cached Haiku before the model-selection check, making "earned Opus" effectively impossible. Both product critique + campaign AI fixed.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -11353,11 +11353,24 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
 
     // 24h lock: if a critique was generated in the last 24h, return it. Only managers
     // can override (forceRefresh=true requires manager role).
+    // r29d: EXCEPTION — if agent is requesting Opus AND has submitted ≥1 feedback row,
+    // they've earned a fresh Opus run. Skip the cache lock for that case.
     const u = req.user || {};
     const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
+    const wantsOpus = req.body && req.body.model === 'opus';
+    let agentEarnedOpusBypass = false;
+    if (wantsOpus && !isManager) {
+      try {
+        const fbProbe = await db.query("SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope='google_product' AND target_id=$1", [productId]);
+        if (fbProbe.rows[0] && fbProbe.rows[0].c >= 1) agentEarnedOpusBypass = true;
+      } catch(_) {}
+    }
     let forceRefresh = false;
     if (requestedRefresh && !cachedOnly) {
       if (isManager) {
+        forceRefresh = true;
+      } else if (agentEarnedOpusBypass) {
+        // Agent earned Opus by submitting feedback — let them through the 24h lock
         forceRefresh = true;
       } else {
         // Agent requested refresh — only allowed if no cache exists yet (first run)
@@ -11945,6 +11958,12 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
   }
 
   // Cache lookup (24h)
+  // r29d: agents who've earned Opus (submitted ≥1 feedback) bypass the cache lock for this run.
+  let agentEarnedOpusBypass = false;
+  if (modelChoice === 'opus' && !isManager) {
+    // We already verified above; just trust modelChoice — if it survived to here, agent has feedback.
+    agentEarnedOpusBypass = true;
+  }
   if (db) {
     try {
       const cacheRes = await db.query("SELECT * FROM campaign_ai_cache WHERE campaign_id=$1", [String(campaignId)]);
@@ -11952,7 +11971,8 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
         const ageHours = (Date.now() - new Date(cacheRes.rows[0].generated_at).getTime()) / 36e5;
         if (ageHours < 24) {
           // Inside lock window
-          if (!requestedRefresh || !isManager) {
+          const canBypass = isManager || agentEarnedOpusBypass;
+          if (!requestedRefresh || !canBypass) {
             return res.json({
               analysis: cacheRes.rows[0].analysis,
               campaignName: cacheRes.rows[0].campaign_name,
@@ -11963,7 +11983,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
               lockMessage: !isManager ? 'Already analysed in the last 24h. Manager can re-analyse.' : null
             });
           }
-          // Manager forced refresh — fall through to fresh run
+          // Bypass — fall through to fresh run
         }
       }
     } catch(e) { /* fall through to fresh */ }
