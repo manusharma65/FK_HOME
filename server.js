@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29e (Multiple bugfixes: (1) Opus button visible to agents on both Google product critique + Amazon listing critique even after Haiku ran (server gates with feedback). (2) Amazon "AI returned malformed response" — feedback prompt now JSON-aware (puts question-answers inside JSON summary), parser strips preamble. (3) Create task from product AI now looks up campaign via allProductsData cache fallback — fixes "could not determine campaign". (4) 24h cache lock bypassed for agents who earned Opus on Google product + campaign endpoints.)
+// CampaignPulse — deploy marker 2026-05-08 r29f (Three fixes: (1) Removed redundant rule-based "Friction check" block from Google product modal — AI Landing page critique now the single AI surface. (2) Dropped legacy UNIQUE(campaign_id, created_date) constraint on campaign_tasks that was blocking manual task creation when daily cron had already inserted a row for the same campaign that day. (3) When auto-cron detects rule firing on a target with an OPEN task, it now APPENDS a "fired again Day N" note to the existing task instead of silently failing or duplicating — task description evolves as situation persists; after 2 re-fires while open, marked as repeat offender.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1756,6 +1756,16 @@ async function initTasksTable() {
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS last_resolved_date TIMESTAMP`);
     await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE`);
 
+    // r29f: drop the legacy UNIQUE(campaign_id, created_date) constraint that was
+    // blocking manual task creation when the daily cron had already inserted a row
+    // for that campaign on the same day. The constraint exists in the live DB but
+    // not in current source. We have proper repeat-detection (failure_count, stuck
+    // table) — we don't need the unique index on top. Idempotent (no-op if missing).
+    try {
+      await db.query("ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key");
+      console.log('[r29f] dropped legacy unique constraint on campaign_tasks (if it existed)');
+    } catch(e) { console.error('[r29f] could not drop unique constraint: ' + e.message); }
+
     // r29: stuck_campaigns — surfaces campaigns/products that have failed the same
     // rule 3+ times. Auto-task creation STOPS for these (no more clutter on Repeat
     // Offenders tab). Manager reviews the stuck list and decides on structural change.
@@ -2435,6 +2445,38 @@ async function createGoogleTask(taskRow) {
   if (!db) return false;
   const exists = await googleTaskAlreadyExistsToday(taskRow.campaignId, taskRow.problemType, taskRow.productKey);
   if (exists) return false;
+
+  // r29f: if there's an OPEN task on this exact target (any age), append a
+  // "fired again" note to the existing task instead of creating a duplicate.
+  // After 2 re-fires while still open, mark the existing task as repeat offender.
+  // This makes the task description evolve as the situation persists, instead
+  // of silently failing on the unique constraint or creating duplicate tasks.
+  try {
+    const openCheck = await db.query(
+      "SELECT id, problem_detail, failure_count, created_date " +
+      "FROM campaign_tasks " +
+      "WHERE department='google' AND campaign_id=$1 " +
+      "  AND COALESCE(product_key, '')=COALESCE($2, '') " +
+      "  AND status IN ('open','in_progress','discussion','paused') " +
+      "ORDER BY created_date DESC LIMIT 1",
+      [String(taskRow.campaignId), taskRow.productKey || null]
+    );
+    if (openCheck.rows.length) {
+      const existing = openCheck.rows[0];
+      const daysSinceCreate = Math.floor((Date.now() - new Date(existing.created_date).getTime()) / 86400000);
+      const newCount = (existing.failure_count || 1) + 1;
+      const refireNote = '\n\n— 🔁 Fired again Day ' + daysSinceCreate + ' (' + new Date().toISOString().slice(0, 10) + '): ' + (taskRow.problemDetail || '');
+      const newDetail = (existing.problem_detail || '') + refireNote;
+      const becomeRepeat = newCount >= 2;
+      await db.query(
+        "UPDATE campaign_tasks SET problem_detail=$1, failure_count=$2, is_repeat_offender=$3, updated_at=NOW() WHERE id=$4",
+        [newDetail, newCount, becomeRepeat, existing.id]
+      );
+      console.log('[r29f GTASK refire] ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') +
+        ' — existing OPEN task #' + existing.id + ' updated (failure_count=' + newCount + ', repeat=' + becomeRepeat + ')');
+      return false;  // didn't create new — updated existing
+    }
+  } catch(e) { console.error('[r29f open-task check] ' + e.message); }
 
   // r29: read previous task context BEFORE deciding whether to create
   const prevCtx = await getPreviousTaskContext('google', taskRow.campaignId, taskRow.productKey);
