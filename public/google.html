@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29f (Removed rule-based Friction check section from product modal — AI Landing page critique is now the only AI surface) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29h (Fix: Campaigns page now auto-fetches advertisedData if missing instead of showing "Loading..." forever — fixes "click campaigns, nothing happens, have to refresh several times") -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1775,7 +1775,24 @@ function setCampaignsTab(tab, btn) {
 }
 function renderCampaignsPage() {
   if (!advertisedData) {
-    document.getElementById('campaigns-list').innerHTML = '<div class="empty-state">Loading...</div>';
+    document.getElementById('campaigns-list').innerHTML = '<div class="empty-state">Loading campaign data…</div>';
+    // r29h: if data isn't loaded yet (user navigated to Campaigns before refreshAll
+    // finished, or after a fail), trigger a fetch right now and re-render once it
+    // lands. Previously the page would just say "Loading..." forever and need the
+    // user to manually refresh.
+    if (!window._campaignsAutoFetchInFlight) {
+      window._campaignsAutoFetchInFlight = true;
+      fetchAdvertised()
+        .then(function(a){
+          advertisedData = a;
+          window._campaignsAutoFetchInFlight = false;
+          renderCampaignsPage();
+        })
+        .catch(function(e){
+          window._campaignsAutoFetchInFlight = false;
+          document.getElementById('campaigns-list').innerHTML = '<div class="empty-state" style="color:var(--red)">Could not load campaigns: ' + escapeHtml(e.message) + '<br><button class="btn btn-ghost" style="margin-top:10px" onclick="renderCampaignsPage()">↻ Retry</button></div>';
+        });
+    }
     return;
   }
   const dismissedCount = (archiveData && archiveData.dismissed) ? archiveData.dismissed.length : 0;

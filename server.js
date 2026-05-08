@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29f (Three fixes: (1) Removed redundant rule-based "Friction check" block from Google product modal — AI Landing page critique now the single AI surface. (2) Dropped legacy UNIQUE(campaign_id, created_date) constraint on campaign_tasks that was blocking manual task creation when daily cron had already inserted a row for the same campaign that day. (3) When auto-cron detects rule firing on a target with an OPEN task, it now APPENDS a "fired again Day N" note to the existing task instead of silently failing or duplicating — task description evolves as situation persists; after 2 re-fires while open, marked as repeat offender.)
+// CampaignPulse — deploy marker 2026-05-08 r29g (Fix: AI critique vanishing after modal close+reopen. Cause: when cachedOnly=true, server was checking shopifyState BEFORE cache, returning 404 if Shopify sync had evicted the product (which happens for low-traffic items). Now: cachedOnly looks up cache directly by productId, returns it if exists. Cache is source of truth for "what was AI'd before"; live Shopify state only needed for fresh runs.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -11401,6 +11401,22 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
     const requestedRefresh = !!req.body.forceRefresh;
     const cachedOnly = !!req.body.cachedOnly;   // if true, never auto-run AI, return 404 when no cache
     if (!productId) return res.status(400).json({ error: 'productId required' });
+
+    // r29g: cachedOnly bypass — if caller only wants the cached row, look up directly
+    // by productId. Don't require the Shopify product to still be in current state
+    // (sync state evicts old products; cache row remains valid for display).
+    // Without this, reopening a product modal after sync churn returns 404 even when
+    // a perfectly good critique row exists in landing_page_critiques.
+    if (cachedOnly) {
+      const cached = await getCachedCritique(productId);
+      if (cached) {
+        const u0 = req.user || {};
+        const isManager0 = ['manager','admin'].includes(u0.role) || ['Bobby','Satyam','bobby','satyam'].includes(u0.name || u0.username || '');
+        cached.lockedForAgent = !isManager0;
+        return res.json(cached);
+      }
+      return res.status(404).json({ error: 'No cached analysis', cached: false });
+    }
 
     const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
     if (!sp) return res.status(404).json({ error: 'Product not found in Shopify state' });
