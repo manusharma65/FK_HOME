@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-07 r26e (campaign-analysis Opus now gated to owner+manager — agents get 403, matches Amazon listing critique rule)
+// CampaignPulse — deploy marker 2026-05-08 r27 (Google task creation from AI with subtasks; feedback-required gate on Amazon + Google task creation; Google page-state persistence; subtasks UI on Google task detail modal)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3025,6 +3025,27 @@ app.get('/api/ai/feedback', async function(req, res) {
   res.json({ feedback: rows });
 });
 
+// r27: GET /api/ai/feedback/count?scope=...&targetId=... — used to gate the "Create
+// task" button. Agents must submit feedback before creating a task. Owner/manager
+// bypass. Cheap query (COUNT only).
+app.get('/api/ai/feedback/count', async function(req, res) {
+  if (!db) return res.json({ count: 0 });
+  const scope = String(req.query.scope || '').trim();
+  const targetId = String(req.query.targetId || '').trim();
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return res.status(400).json({ error: 'invalid scope' });
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  try {
+    const r = await db.query(
+      "SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope = $1 AND target_id = $2",
+      [scope, targetId]
+    );
+    res.json({ count: r.rows[0] ? r.rows[0].c : 0 });
+  } catch(e) {
+    console.error('[r27 feedback count] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 app.post('/api/ai/analyse', async function(req, res) {
   try {
@@ -5422,6 +5443,21 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
   const role = (req.user && (req.user.role || '').toLowerCase()) || '';
   const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
   const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+
+  // r27: feedback-required gate (matches Google rule). Agents must have
+  // submitted ≥1 feedback row for this product's AI critique before assigning.
+  // Owner/manager bypass.
+  if (!isPriv) {
+    try {
+      const fc = await db.query(
+        "SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope = 'amazon_product' AND target_id = $1",
+        [groupKey]
+      );
+      if (!fc.rows[0] || fc.rows[0].c < 1) {
+        return res.status(403).json({ error: 'Submit feedback on the AI critique before assigning a task. Open the product → Run AI → write feedback → then assign.' });
+      }
+    } catch(e) { console.error('[r27 amazon assign-task feedback gate] ' + e.message); }
+  }
   try {
     // r22: gather ALL SKUs for this groupKey, not just one. Pick the best-ASIN row.
     const prodRes = await db.query(
@@ -7959,11 +7995,29 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   await ensureGoogleTaskColumns();
 
-  const { campaignId, campaignName, campaignType, productKey, productTitle, agentName, brief, taskType } = req.body;
+  const { campaignId, campaignName, campaignType, productKey, productTitle, agentName, brief, taskType, subtaskBodies, feedbackScope, feedbackTargetId } = req.body;
   if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
   if (!agentName) return res.status(400).json({ error: 'agentName required (Rahul, Anuj, or Unassigned)' });
   if (!brief || !brief.trim()) return res.status(400).json({ error: 'A brief is required — describe what the agent should do.' });
   if (!['Rahul', 'Anuj', 'Unassigned'].includes(agentName)) return res.status(400).json({ error: 'agentName must be Rahul, Anuj, or Unassigned' });
+
+  // r27: feedback-required gate. Agents must have submitted ≥1 feedback row for
+  // this scope/target before creating a task. Owner/manager bypass.
+  // Front-end also enforces but we double-check server-side.
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+  if (!isPrivileged && feedbackScope && feedbackTargetId) {
+    try {
+      const fc = await db.query(
+        "SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope = $1 AND target_id = $2",
+        [feedbackScope, feedbackTargetId]
+      );
+      if (!fc.rows[0] || fc.rows[0].c < 1) {
+        return res.status(403).json({ error: 'Submit AI feedback before creating a task. Agents must run AI, submit feedback, then create task.' });
+      }
+    } catch(e) { console.error('[r27 google manual-create feedback gate] ' + e.message); }
+  }
 
   // Pull baseline metrics from current googleState if available
   let baselineSpend = 0, baselineSales = 0, baselineAcos = 0, baselineImpressions = 0;
@@ -8037,16 +8091,32 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
       ]
     );
     const newId = r.rows[0] && r.rows[0].id;
+    // r27: insert subtasks if provided. One row per body string. Reuses the
+    // same task_subtasks table Amazon uses — subtasks are generic by task_id.
+    let subCount = 0;
+    if (Array.isArray(subtaskBodies) && subtaskBodies.length && newId) {
+      for (let i = 0; i < subtaskBodies.length; i++) {
+        const body = String(subtaskBodies[i] || '').trim();
+        if (!body) continue;
+        try {
+          await db.query(
+            "INSERT INTO task_subtasks (task_id, position, body, status) VALUES ($1, $2, $3, 'open')",
+            [newId, i, body]
+          );
+          subCount++;
+        } catch(e) { console.error('[r27 google subtask insert] ' + e.message); }
+      }
+    }
     // Log it
     const u = req.user || {};
     const actor = u.name || u.username || 'manager';
     try {
       await db.query(
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'manual_create',$5,'',$6,$7,'google')",
-        [String(campaignId), resolvedCampaignName || '', agentName, actor, brief.trim(), 'open', newId]
+        [String(campaignId), resolvedCampaignName || '', agentName, actor, brief.trim() + (subCount ? ' (' + subCount + ' subtasks)' : ''), 'open', newId]
       );
     } catch(e) { console.error('[GTASK] manual-create log error: ' + e.message); }
-    res.json({ success: true, id: newId });
+    res.json({ success: true, id: newId, subtaskCount: subCount });
   } catch (e) {
     console.error('[GTASK] manual-create error: ' + e.message);
     res.status(500).json({ error: e.message });

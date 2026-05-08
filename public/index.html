@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-07 r26e (Campaign AI Opus button hidden for agents, shows lock indicator instead. Haiku unrestricted) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r27 (Feedback-required gate on assign-task — agents must submit feedback before creating a task; owner/manager bypass) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -5543,6 +5543,25 @@ async function amzAssignTask(groupKey) {
     if (!confirm('This product already has an active task assigned to ' + (p.active_task.agent_name || 'an agent') + ' (status: ' + p.active_task.status + ').\n\nMark that task complete first, OR click OK to view the existing task on the Tasks page.')) return;
     showPage('tasks', document.querySelector('.nav-item[onclick*="showPage(\'tasks\'"]'));
     return;
+  }
+
+  // r27: feedback-required gate. Agents must have submitted ≥1 feedback row on
+  // this product's AI critique before they can assign. Owner/manager bypass.
+  const me0 = window._meCache || {};
+  const role0 = (me0.role || '').toLowerCase();
+  const isPrivR27 = role0 === 'owner' || role0 === 'manager' || ((me0.department || '').toLowerCase() === 'manager');
+  if (!isPrivR27) {
+    try {
+      const fcr = await fetch('/api/ai/feedback/count?scope=amazon_product&targetId=' + encodeURIComponent(groupKey), { headers: getAuthHeaders() });
+      const fcj = await fcr.json();
+      if ((fcj.count || 0) < 1) {
+        alert('Submit feedback on the AI critique before assigning a task.\n\nOpen the product → Run AI critique → write your feedback in the box below → then assign.\n\nThis forces agents to engage with the AI rather than blindly assigning.');
+        return;
+      }
+    } catch(e) {
+      alert('Could not verify feedback: ' + e.message);
+      return;
+    }
   }
 
   // r21: hard-block if no cached AI critique. Subtasks are seeded from critique

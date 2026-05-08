@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-07 r26b (GSC moved up next to Google Ads; feedback widget restored on inline product critique; dynamic model name) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r27 (Page-state persistence on refresh; gated Create task button on product + campaign AI; subtasks UI on task detail modal; assignToProduct feedback-gated for agents) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -632,6 +632,9 @@ function showPage(id, btn) {
   if (btn) btn.classList.add('active');
   const titles = { dashboard: 'Overview', products: 'All Products', campaigns: 'Advertised — Campaigns', activity: 'Activity log', landing: 'Landing Page AI — Daily Critique', tasks: 'Tasks', 'my-profile': 'My profile' };
   document.getElementById('page-title').textContent = titles[id] || id;
+  // r27: persist last visited page so refresh lands back where the user was.
+  // Separate localStorage key from Amazon side (cp_last_page) to avoid cross-dashboard conflicts.
+  try { localStorage.setItem('cp_google_last_page', id); } catch(_) {}
   if (id === 'campaigns') renderCampaignsPage();
   if (id === 'activity') loadActivity();
   if (id === 'landing') renderLandingPage();
@@ -812,11 +815,247 @@ async function submitAiFeedback(scope, targetId, btn) {
     ta.value = '';
     if (status) status.textContent = '✓ Saved. Re-run AI to see it taken into account.';
     loadAiFeedbackList(scope, targetId);
+    // r27: re-render task button gating — submitting feedback may unlock it
+    refreshTaskButtonGate(scope, targetId);
     setTimeout(function(){ if (status) status.textContent = ''; }, 4000);
   } catch(e) {
     if (status) status.textContent = '✗ ' + e.message;
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+// ─── r27: gated "Create task" button below feedback widget ──────────────────
+// Agents must run AI AND submit ≥1 feedback row before they get the button.
+// Owner/manager bypass.
+//
+// Container ID is `task-gate-{scope}-{targetId-sanitised}`. We insert it right
+// after the feedback widget. The state is determined by:
+//   1. User role (owner/manager bypass)
+//   2. Feedback count for this scope/target
+//
+// Stores context (e.g. campaignId, productData) on a global so the click handler
+// can pick it up without bloating the data attributes.
+const _taskGateContext = {};  // key: 'scope|targetId' → { surface, productData/campaignData, ... }
+
+function _taskGateKey(scope, targetId) { return scope + '|' + targetId; }
+function _taskGateDomId(scope, targetId) {
+  return 'task-gate-' + scope + '-' + String(targetId).replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+function renderTaskButtonGated(scope, targetId, ctx) {
+  // Stash context for later
+  _taskGateContext[_taskGateKey(scope, targetId)] = ctx;
+
+  // Find the feedback widget for this scope/target — we render the gate beside it
+  const feedbackWrapId = 'fb-list-' + scope + '-' + String(targetId).replace(/[^a-zA-Z0-9]/g, '_');
+  const fbEl = document.getElementById(feedbackWrapId);
+  const gateId = _taskGateDomId(scope, targetId);
+  let gateEl = document.getElementById(gateId);
+  if (!gateEl) {
+    gateEl = document.createElement('div');
+    gateEl.id = gateId;
+    gateEl.style.cssText = 'margin-top:14px;padding:12px 14px;background:var(--bg);border:1px solid var(--border);border-radius:8px';
+    if (fbEl && fbEl.parentNode) fbEl.parentNode.appendChild(gateEl);
+    // Fallback: append to the AI content area
+    else {
+      const fallback = document.getElementById(scope === 'google_campaign' ? 'ai-content-campaign' : 'lpc-content-product');
+      if (fallback) fallback.appendChild(gateEl);
+    }
+  }
+  refreshTaskButtonGate(scope, targetId);
+}
+
+async function refreshTaskButtonGate(scope, targetId) {
+  const ctx = _taskGateContext[_taskGateKey(scope, targetId)];
+  const gateEl = document.getElementById(_taskGateDomId(scope, targetId));
+  if (!gateEl || !ctx) return;
+
+  const me = window.currentUser || {};
+  const role = (me.role || '').toLowerCase();
+  const dept = (me.department || '').toLowerCase();
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+
+  // Manager / owner: button is always enabled
+  if (isPriv) {
+    gateEl.innerHTML = '<button class="btn btn-primary" style="font-size:13px" onclick="openCreateTaskFromAi(\'' + scope + '\',\'' + escapeHtml(String(targetId)).replace(/'/g, "\\'") + '\')">📋 Create task from this analysis</button>' +
+      '<span style="font-size:11px;color:var(--text3);margin-left:10px">Manager bypass — feedback not required</span>';
+    return;
+  }
+
+  // Agent: need ≥1 feedback row
+  let count = 0;
+  try {
+    const r = await authedFetch('/api/ai/feedback/count?scope=' + encodeURIComponent(scope) + '&targetId=' + encodeURIComponent(targetId));
+    const j = await r.json();
+    count = j.count || 0;
+  } catch(e) { count = 0; }
+
+  if (count >= 1) {
+    gateEl.innerHTML = '<button class="btn btn-primary" style="font-size:13px" onclick="openCreateTaskFromAi(\'' + scope + '\',\'' + escapeHtml(String(targetId)).replace(/'/g, "\\'") + '\')">📋 Create task from this analysis</button>' +
+      '<span style="font-size:11px;color:var(--text3);margin-left:10px">✓ Feedback submitted</span>';
+  } else {
+    gateEl.innerHTML = '<button class="btn btn-ghost" style="font-size:13px;opacity:0.5;cursor:not-allowed" disabled>📋 Create task from this analysis</button>' +
+      '<div style="font-size:11px;color:var(--text3);margin-top:6px">⚠ Submit feedback on the AI analysis above before creating a task. This forces agents to engage with the AI rather than blindly assigning.</div>';
+  }
+}
+
+// ─── r27: Create task flow — opens modal with brief + agent picker ──────────
+function openCreateTaskFromAi(scope, targetId) {
+  const ctx = _taskGateContext[_taskGateKey(scope, targetId)];
+  if (!ctx) { alert('Could not find AI context. Try re-running the AI analysis.'); return; }
+
+  const isCampaign = scope === 'google_campaign';
+  // Pull text content of the analysis to seed the brief + subtask split
+  let analysisText = '';
+  if (isCampaign) {
+    analysisText = ctx.analysisText || '';
+  } else {
+    // Product: pull the AI critique JSON and stitch it into a brief
+    const j = ctx.productData || {};
+    const parts = [];
+    if (j.diagnosis) parts.push('Diagnosis: ' + j.diagnosis);
+    if (j.summary) parts.push(j.summary);
+    if (j.adCoherence) parts.push('Ad-vs-page: ' + j.adCoherence);
+    if (j.trustSignals) parts.push('Trust signals: ' + j.trustSignals);
+    analysisText = parts.join('\n\n');
+  }
+
+  // Subtasks: split AI structured fields if available, else split text by line/bullet
+  const subtasks = _extractSubtasksFromAi(scope, ctx);
+
+  const existing = document.getElementById('google-create-task-modal');
+  if (existing) existing.remove();
+
+  // Title context shown in the modal header
+  const titleContext = isCampaign
+    ? (ctx.campaignName || 'Campaign')
+    : (ctx.productData && ctx.productData.title) || 'Product';
+
+  const subtaskListHtml = subtasks.length
+    ? '<ul style="font-size:13px;color:var(--text2);padding-left:20px;margin:6px 0">' + subtasks.map(function(s){ return '<li>' + escapeHtml(s) + '</li>'; }).join('') + '</ul>'
+    : '<div style="font-size:12px;color:var(--text3);padding:6px 0">No subtask candidates detected — agent will work from the brief only.</div>';
+
+  const html =
+    '<div id="google-create-task-modal" onclick="if(event.target===this)closeCreateTaskModal()" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:flex-start;justify-content:center;padding:30px;overflow-y:auto">' +
+      '<div style="background:var(--surface);width:100%;max-width:560px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);padding:22px">' +
+        '<div style="font-size:16px;font-weight:600;margin-bottom:6px">Create task from AI analysis</div>' +
+        '<div style="font-size:12px;color:var(--text3);margin-bottom:16px;max-height:48px;overflow:hidden">' + escapeHtml(titleContext) + '</div>' +
+        '<div style="margin-bottom:14px">' +
+          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Assign to</label>' +
+          '<select id="g-task-agent" style="width:100%;padding:8px 10px;font-size:14px;border:1px solid var(--border);border-radius:8px;background:white;font-family:inherit">' +
+            '<option value="Rahul">Rahul</option>' +
+            '<option value="Anuj">Anuj</option>' +
+            '<option value="Unassigned">Unassigned</option>' +
+          '</select>' +
+        '</div>' +
+        '<div style="margin-bottom:14px">' +
+          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Brief (description shown to agent)</label>' +
+          '<textarea id="g-task-brief" rows="4" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--border);border-radius:8px;font-family:inherit;resize:vertical">' + escapeHtml(analysisText.slice(0, 800)) + '</textarea>' +
+        '</div>' +
+        '<div style="margin-bottom:18px">' +
+          '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Subtasks (auto-extracted from AI)</label>' +
+          subtaskListHtml +
+          '<div style="font-size:11px;color:var(--text3);margin-top:4px">Each subtask must be completed or dismissed-with-reason before the parent task can be marked complete.</div>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+          '<button class="btn btn-ghost" onclick="closeCreateTaskModal()" style="font-size:13px">Cancel</button>' +
+          '<button class="btn btn-primary" id="g-task-submit" onclick="submitCreateTaskFromAi(\'' + scope + '\',\'' + escapeHtml(String(targetId)).replace(/'/g, "\\'") + '\')" style="font-size:13px">Create task</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeCreateTaskModal() {
+  const m = document.getElementById('google-create-task-modal');
+  if (m) m.remove();
+}
+
+// Extract bulleted/numbered/structured subtasks from AI output. Conservative: returns []
+// if nothing reasonable is found, in which case server creates only the parent task.
+function _extractSubtasksFromAi(scope, ctx) {
+  const items = [];
+  if (scope === 'google_product') {
+    // Product critique typically has structured friction.points and actions arrays
+    const j = ctx.productData || {};
+    if (Array.isArray(j.friction)) j.friction.forEach(function(f){
+      if (typeof f === 'string') items.push(f);
+      else if (f && f.point) items.push(f.point);
+    });
+    if (Array.isArray(j.actions)) j.actions.forEach(function(a){
+      if (typeof a === 'string') items.push(a);
+      else if (a && a.action) items.push(a.action);
+    });
+  } else if (scope === 'google_campaign') {
+    // Campaign AI is plain text — split on bullet/dash/numbered lines
+    const text = ctx.analysisText || '';
+    const lines = text.split(/\n+/).map(function(l){ return l.trim(); }).filter(Boolean);
+    lines.forEach(function(l){
+      // Match common list markers: "1.", "-", "*", "•", "1)"
+      const m = l.match(/^(?:\d+[.)]|[-*•])\s*(.+)/);
+      if (m && m[1].length > 5 && m[1].length < 200) items.push(m[1]);
+    });
+  }
+  // Cap at 8 to keep tasks manageable
+  return items.slice(0, 8);
+}
+
+async function submitCreateTaskFromAi(scope, targetId) {
+  const ctx = _taskGateContext[_taskGateKey(scope, targetId)];
+  if (!ctx) return;
+  const submitBtn = document.getElementById('g-task-submit');
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
+
+  const agent = document.getElementById('g-task-agent').value;
+  const brief = document.getElementById('g-task-brief').value.trim();
+  if (!brief) { alert('Brief required'); if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create task'; } return; }
+  const subtaskBodies = _extractSubtasksFromAi(scope, ctx);
+
+  // Build the request payload
+  const isCampaign = scope === 'google_campaign';
+  const body = {
+    campaignId: isCampaign ? String(ctx.campaignId) : null,
+    campaignName: isCampaign ? ctx.campaignName : '',
+    productKey: !isCampaign ? String(targetId) : null,
+    productTitle: !isCampaign && ctx.productData ? ctx.productData.title : null,
+    agentName: agent,
+    brief: brief,
+    taskType: 'problem',
+    subtaskBodies: subtaskBodies,
+    feedbackScope: scope,
+    feedbackTargetId: String(targetId)
+  };
+
+  // For product tasks, derive the campaignId from product card if available
+  if (!isCampaign) {
+    // The product modal may have campaignsAdvertisedIn[0]
+    const j = ctx.productData || {};
+    const camps = j.campaignsAdvertisedIn || [];
+    if (!body.campaignId && camps.length > 0) {
+      body.campaignId = String(camps[0].campaignId || camps[0]);
+    }
+  }
+  if (!body.campaignId) {
+    alert('Could not determine campaign for this task. Open the campaign view to create the task instead.');
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create task'; }
+    return;
+  }
+
+  try {
+    const r = await authedFetch('/api/google/tasks/manual-create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || 'Failed');
+    closeCreateTaskModal();
+    const subCount = j.subtaskCount || 0;
+    alert('Task created' + (subCount ? ' with ' + subCount + ' subtasks' : '') + '. Visit the Tasks page to see it.');
+  } catch(e) {
+    alert('Failed to create task: ' + e.message);
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create task'; }
   }
 }
 
@@ -2167,6 +2406,10 @@ async function openTaskDetail(taskId) {
 
       + closedCallouts
 
+      // r27: subtasks block — agent must complete or dismiss-with-reason each.
+      // Lazy-loaded after modal opens to avoid bloating the initial render.
+      + '<div id="g-subtasks-container-' + taskId + '" style="margin-bottom:20px"></div>'
+
       + '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:10px">Action history</div>'
       + '<div style="max-height:300px;overflow-y:auto;margin-bottom:20px">' + historyHtml + '</div>'
 
@@ -2179,9 +2422,113 @@ async function openTaskDetail(taskId) {
   document.addEventListener('keydown', taskDetailEscHandler);
   document.body.appendChild(overlay);
   document.body.style.overflow = 'hidden';
+
+  // r27: load subtasks for this task (mirrors Amazon pattern). Subtasks live in
+  // the generic task_subtasks table — endpoints work for any task in campaign_tasks.
+  loadGoogleTaskSubtasks(taskId);
 }
 
 function taskDetailEscHandler(e) { if (e.key === 'Escape') closeTaskDetail(); }
+
+// ─── r27: Google subtasks render + actions ──────────────────────────────────
+// Mirrors Amazon's loadTaskSubtasks pattern. Reuses /api/tasks/:id/subtasks
+// endpoints which are generic by task_id (work for both Amazon and Google tasks).
+async function loadGoogleTaskSubtasks(taskId) {
+  const container = document.getElementById('g-subtasks-container-' + taskId);
+  if (!container) return;
+  container.innerHTML = '<div style="font-size:12px;color:#6b7280">Loading subtasks…</div>';
+  try {
+    const r = await authedFetch('/api/tasks/' + taskId + '/subtasks');
+    const j = await r.json();
+    const subtasks = (j && j.subtasks) || [];
+    if (!subtasks.length) {
+      container.innerHTML = '';  // no subtasks — nothing to show
+      return;
+    }
+    renderGoogleSubtasksList(taskId, subtasks);
+  } catch(e) {
+    container.innerHTML = '<div style="font-size:12px;color:#dc2626">Could not load subtasks: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderGoogleSubtasksList(taskId, subtasks) {
+  const container = document.getElementById('g-subtasks-container-' + taskId);
+  if (!container) return;
+  const open = subtasks.filter(function(s){ return s.status === 'open'; });
+  const done = subtasks.filter(function(s){ return s.status === 'complete'; });
+  const dismissed = subtasks.filter(function(s){ return s.status === 'dismissed'; });
+
+  const me = window.currentUser || {};
+  const role = (me.role || '').toLowerCase();
+  const dept = (me.department || '').toLowerCase();
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+
+  const headLine = '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:8px">' +
+    'Subtasks (' + done.length + ' done · ' + open.length + ' open · ' + dismissed.length + ' dismissed)' +
+  '</div>';
+
+  function rowHtml(s) {
+    const isOpen = s.status === 'open';
+    const isComplete = s.status === 'complete';
+    const isDismissed = s.status === 'dismissed';
+    const stripe = isComplete ? '#16a34a' : (isDismissed ? '#9ca3af' : '#f59e0b');
+    const bg = isComplete ? '#f0fdf4' : (isDismissed ? '#f9fafb' : '#fffbeb');
+    const lineThrough = isComplete || isDismissed ? 'text-decoration:line-through;color:#9ca3af' : '';
+    const meta = isComplete && s.completed_by
+      ? ' · <span style="color:#16a34a">✓ ' + escapeHtml(s.completed_by) + '</span>'
+      : (isDismissed && s.dismiss_reason
+          ? ' · <span style="color:#6b7280">✕ ' + escapeHtml(s.dismiss_reason) + '</span>'
+          : '');
+    let actions = '';
+    if (isOpen) {
+      actions =
+        '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:#16a34a" onclick="event.stopPropagation();completeGoogleSubtask(' + taskId + ',' + s.id + ')">✓ Complete</button> ' +
+        '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:#dc2626" onclick="event.stopPropagation();dismissGoogleSubtask(' + taskId + ',' + s.id + ')">✕ Dismiss</button>';
+    } else if (isPriv && (isComplete || isDismissed)) {
+      actions = '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:#6b7280" onclick="event.stopPropagation();reopenGoogleSubtask(' + taskId + ',' + s.id + ')">↺ Reopen</button>';
+    }
+    return '<div style="padding:8px 12px;background:' + bg + ';border-left:3px solid ' + stripe + ';border-radius:4px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:10px">' +
+      '<div style="flex:1;font-size:13px;line-height:1.5;' + lineThrough + '">' + escapeHtml(s.body) + meta + '</div>' +
+      '<div style="display:flex;gap:4px;flex-shrink:0">' + actions + '</div>' +
+    '</div>';
+  }
+
+  container.innerHTML = headLine + subtasks.map(rowHtml).join('');
+}
+
+async function completeGoogleSubtask(taskId, subtaskId) {
+  try {
+    const r = await authedFetch('/api/tasks/' + taskId + '/subtasks/' + subtaskId + '/complete', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTaskSubtasks(taskId);
+  } catch(e) { alert('Could not complete subtask: ' + e.message); }
+}
+
+async function dismissGoogleSubtask(taskId, subtaskId) {
+  const reason = prompt('Why are you dismissing this subtask? (required, will be visible to managers)');
+  if (!reason || !reason.trim()) return;
+  try {
+    const r = await authedFetch('/api/tasks/' + taskId + '/subtasks/' + subtaskId + '/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason.trim() })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTaskSubtasks(taskId);
+  } catch(e) { alert('Could not dismiss subtask: ' + e.message); }
+}
+
+async function reopenGoogleSubtask(taskId, subtaskId) {
+  if (!confirm('Reopen this subtask? It will need to be completed or dismissed again before the parent task can be marked complete.')) return;
+  try {
+    const r = await authedFetch('/api/tasks/' + taskId + '/subtasks/' + subtaskId + '/reopen', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    loadGoogleTaskSubtasks(taskId);
+  } catch(e) { alert('Could not reopen subtask: ' + e.message); }
+}
 function closeTaskDetail() {
   const overlay = document.getElementById('task-detail-overlay');
   if (overlay) overlay.remove();
@@ -2366,8 +2713,34 @@ function assignToCampaign(campaignId, campaignName, campaignType) {
 //   • A campaign-row product (has p.campaignId, p.campaignName, p.shopifyTitle, p.spend etc.)
 //   • A merged modal object (has p.title, p.googleSpend, p.campaignsAdvertisedIn[] etc.)
 //   • A Shopify product card (has p.shopifyId but no campaign — needs prompting)
-function assignToProduct(p) {
+async function assignToProduct(p) {
   if (!p) return;
+
+  // r27: feedback-required gate. Agents must have submitted ≥1 feedback row on
+  // this product's AI critique before they can assign. Owner/manager bypass.
+  // Server also enforces this; UI just gives a clearer error.
+  const me = window.currentUser || {};
+  const role = (me.role || '').toLowerCase();
+  const dept = (me.department || '').toLowerCase();
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  if (!isPriv) {
+    const productKeyForGate = p.shopifyItemId || p.productId || '';
+    if (!productKeyForGate) {
+      alert('Cannot determine product ID for feedback gate. Open the product modal and use the Create task button there instead.');
+      return;
+    }
+    try {
+      const fcRes = await authedFetch('/api/ai/feedback/count?scope=google_product&targetId=' + encodeURIComponent(productKeyForGate));
+      const fcJson = await fcRes.json();
+      if ((fcJson.count || 0) < 1) {
+        alert('Submit feedback on the AI analysis before assigning a task.\n\nOpen the product → Run AI critique → write your feedback in the box below → then assign.');
+        return;
+      }
+    } catch(e) {
+      alert('Could not verify feedback. Try again or use the Create task button inside the product AI section.');
+      return;
+    }
+  }
 
   // Resolve campaign — try every shape we know about
   let campaignId = p.campaignId || null;
@@ -2692,6 +3065,15 @@ function renderCampaignAiResult(j, campaignId, campaignName) {
   contentDiv.innerHTML = '<div style="white-space:pre-wrap">' + escapeHtml(analysisText) + '</div>' +
     renderAiFeedbackWidget('google_campaign', String(campaignId));
   loadAiFeedbackList('google_campaign', String(campaignId));
+
+  // r27: gated Create task button under feedback widget. Agents need feedback first.
+  renderTaskButtonGated('google_campaign', String(campaignId), {
+    surface: 'campaign',
+    campaignData: j,
+    campaignId: campaignId,
+    campaignName: campaignName,
+    analysisText: analysisText
+  });
 
   const locked = !!j.lockedForAgent;
   if (lockBadge) lockBadge.innerHTML = locked ? '· 🔒 locked for 24h' : '';
@@ -3178,6 +3560,15 @@ function renderCritiqueInlineInProductModal(j, productId) {
   // r26b: load existing feedback after innerHTML is set (it'll find the list element)
   loadAiFeedbackList('google_product', String(productId));
 
+  // r27: render the "Create task" gating area — appears below feedback widget.
+  // Agents must have ≥1 feedback row before they can create a task.
+  // Owner/manager bypass.
+  renderTaskButtonGated('google_product', String(productId), {
+    surface: 'product',
+    productData: j,
+    productId: productId
+  });
+
   // Lock state — only managers can re-analyse if cache <24h
   const locked = !!j.lockedForAgent;
   if (lockBadge) {
@@ -3524,6 +3915,18 @@ loadGa4Status();
 refreshAll();
 setInterval(refreshAll, 5 * 60 * 1000);
 setInterval(loadGa4Status, 60 * 1000);
+
+// r27: restore last visited page on refresh. Skip 'dashboard' (already default)
+// and any unknown id (defensive — protects against stale localStorage values).
+try {
+  const last = localStorage.getItem('cp_google_last_page');
+  const validPages = ['dashboard','products','campaigns','activity','landing','tasks','my-profile'];
+  if (last && validPages.indexOf(last) !== -1 && last !== 'dashboard') {
+    // Find matching nav button so it gets the active class
+    const btn = document.querySelector('.nav-item[onclick*="showPage(\'' + last + '\'"]');
+    showPage(last, btn);
+  }
+} catch(_) {}
 </script>
 </body>
 </html>
