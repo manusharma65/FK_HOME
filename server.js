@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29n (Cancelled tasks no longer clutter main task list. Google: 'Active' filter excludes cancelled (was only excluding complete/archived). New '🗑 Cancelled' tab on Google for audit access. Amazon: 'Complete' tab now also shows cancelled (audit visibility on Amazon side). Various Amazon WHERE clauses updated to exclude cancelled from active queries.)
+// CampaignPulse — deploy marker 2026-05-08 r29o (Account-wide funnel — manager-only card on home page showing Sessions → Cart → Checkout → Complete with conversion rates and 7-day trend. Aggregates ga4_product_metrics; daily snapshot table for trend comparison; new GET /api/google/account-funnel endpoint. No new GA4 API calls — reuses existing daily fetch.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2243,6 +2243,23 @@ async function ensureCriticalColumns() {
     console.error('[r29j MIGRATIONS] ' + failedList.length + ' failed:');
     failedList.forEach(function(f){ console.error('  · ' + f); });
   }
+
+  // r29o: account-wide funnel snapshot table — used for "vs last 7 days" comparison.
+  // Keyed by snapshot_date (London local). Cron writes one row/day. Lightweight.
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ga4_account_funnel_snapshot (
+        snapshot_date DATE PRIMARY KEY,
+        sessions INT DEFAULT 0,
+        cart_additions INT DEFAULT 0,
+        checkouts INT DEFAULT 0,
+        purchases INT DEFAULT 0,
+        revenue NUMERIC DEFAULT 0,
+        captured_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('[r29o] ga4_account_funnel_snapshot table ready');
+  } catch(e) { console.error('[r29o] ga4_account_funnel_snapshot init: ' + e.message); }
 }
 
 function scoreCampaignDays(days) {
@@ -9932,6 +9949,125 @@ app.post('/api/google/ga4-refresh', async function(req, res) {
   res.json({ success: true, message: 'GA4 refresh triggered' });
 });
 
+// r29o: account-wide funnel — sums ga4_product_metrics for current 7d, compares to a
+// snapshot from 7 days ago. Manager-only (agents look at per-product funnels).
+//
+// Returns:
+//   current: { sessions, cartAdditions, checkouts, purchases } — last 7 days
+//   previous: same shape from 7-day-ago snapshot (or null if no snapshot exists yet)
+//   percentages: { cartRate, checkoutRate, completionRate } — derived ratios
+//   trends: same shape, % change vs previous (positive = improving)
+app.get('/api/google/account-funnel', async function(req, res) {
+  if (!db) return res.json({ current: null, previous: null });
+  try {
+    const u = req.user || {};
+    const role = (u.role || '').toLowerCase();
+    const dept = (u.department || '').toLowerCase();
+    const isManager = ['manager','admin','owner'].includes(role) || dept === 'manager';
+    if (!isManager) return res.status(403).json({ error: 'Manager only' });
+
+    // Sum the current ga4_product_metrics table (always represents the most recent 7-day window
+    // — fetchGa4ProductMetrics runs daily and overwrites with last 7 days)
+    const r = await db.query(
+      "SELECT COALESCE(SUM(sessions),0)::int AS sessions, " +
+      "       COALESCE(SUM(cart_additions),0)::int AS cart_additions, " +
+      "       COALESCE(SUM(checkouts),0)::int AS checkouts, " +
+      "       COALESCE(SUM(purchases),0)::int AS purchases " +
+      "FROM ga4_product_metrics"
+    );
+    const current = r.rows[0] || { sessions: 0, cart_additions: 0, checkouts: 0, purchases: 0 };
+
+    // Look up snapshot from ~7 days ago (use the closest one between 6-8 days back)
+    const prevRes = await db.query(
+      "SELECT * FROM ga4_account_funnel_snapshot " +
+      "WHERE snapshot_date BETWEEN (CURRENT_DATE - INTERVAL '8 days') AND (CURRENT_DATE - INTERVAL '6 days') " +
+      "ORDER BY snapshot_date DESC LIMIT 1"
+    );
+    const previous = prevRes.rows[0] || null;
+
+    function rate(num, denom) { return denom > 0 ? (num / denom) * 100 : null; }
+    function pctChange(now, before) {
+      if (before == null || before === 0) return null;
+      return ((now - before) / before) * 100;
+    }
+
+    const currentPct = {
+      cartRate: rate(current.cart_additions, current.sessions),
+      checkoutRate: rate(current.checkouts, current.sessions),
+      completionRate: rate(current.purchases, current.sessions)
+    };
+    const prevPct = previous ? {
+      cartRate: rate(previous.cart_additions, previous.sessions),
+      checkoutRate: rate(previous.checkouts, previous.sessions),
+      completionRate: rate(previous.purchases, previous.sessions)
+    } : null;
+
+    const trends = previous ? {
+      sessions: pctChange(current.sessions, previous.sessions),
+      cartAdditions: pctChange(current.cart_additions, previous.cart_additions),
+      checkouts: pctChange(current.checkouts, previous.checkouts),
+      purchases: pctChange(current.purchases, previous.purchases)
+    } : null;
+
+    res.json({
+      current: {
+        sessions: current.sessions,
+        cartAdditions: current.cart_additions,
+        checkouts: current.checkouts,
+        purchases: current.purchases,
+        cartRate: currentPct.cartRate,
+        checkoutRate: currentPct.checkoutRate,
+        completionRate: currentPct.completionRate
+      },
+      previous: previous ? {
+        snapshotDate: previous.snapshot_date,
+        sessions: previous.sessions,
+        cartAdditions: previous.cart_additions,
+        checkouts: previous.checkouts,
+        purchases: previous.purchases,
+        cartRate: prevPct.cartRate,
+        checkoutRate: prevPct.checkoutRate,
+        completionRate: prevPct.completionRate
+      } : null,
+      trends: trends,
+      hasComparison: !!previous
+    });
+  } catch(e) {
+    console.error('[r29o account-funnel] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r29o: helper called by daily cron — captures today's funnel as a snapshot for
+// future comparison. Idempotent (PRIMARY KEY on snapshot_date — re-running the same
+// day overwrites the row).
+async function captureAccountFunnelSnapshot() {
+  if (!db) return;
+  try {
+    const r = await db.query(
+      "SELECT COALESCE(SUM(sessions),0)::int AS sessions, " +
+      "       COALESCE(SUM(cart_additions),0)::int AS cart_additions, " +
+      "       COALESCE(SUM(checkouts),0)::int AS checkouts, " +
+      "       COALESCE(SUM(purchases),0)::int AS purchases " +
+      "FROM ga4_product_metrics"
+    );
+    const m = r.rows[0] || { sessions: 0, cart_additions: 0, checkouts: 0, purchases: 0 };
+    // Use London-local date for the snapshot key
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
+    await db.query(
+      "INSERT INTO ga4_account_funnel_snapshot (snapshot_date, sessions, cart_additions, checkouts, purchases, captured_at) " +
+      "VALUES ($1,$2,$3,$4,$5,NOW()) " +
+      "ON CONFLICT (snapshot_date) DO UPDATE SET " +
+      "  sessions=EXCLUDED.sessions, cart_additions=EXCLUDED.cart_additions, " +
+      "  checkouts=EXCLUDED.checkouts, purchases=EXCLUDED.purchases, captured_at=NOW()",
+      [today, m.sessions, m.cart_additions, m.checkouts, m.purchases]
+    );
+    console.log('[r29o] funnel snapshot saved for ' + today + ': ' + m.sessions + ' sessions, ' + m.purchases + ' purchases');
+  } catch(e) {
+    console.error('[r29o snapshot] ' + e.message);
+  }
+}
+
 // PageSpeed endpoint — called from AI analyser (and dashboard if needed)
 app.post('/api/google/pagespeed', async function(req, res) {
   const { url } = req.body;
@@ -10726,7 +10862,11 @@ const interval = process.env.POLL_INTERVAL_MINUTES || 15;
 cron.schedule('*/' + interval + ' * * * *', function() { syncCampaigns(); });
 cron.schedule('0 */2 * * *', function() { syncShopifyProducts().catch(function(e){ console.error('Shopify cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
 // GA4 funnel data — refresh once a day at 7am UK time (after midnight UTC data settles)
-cron.schedule('0 7 * * *', function() { fetchGa4ProductMetrics().catch(function(e){ console.error('GA4 cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
+cron.schedule('0 7 * * *', function() {
+  fetchGa4ProductMetrics()
+    .then(function(){ return captureAccountFunnelSnapshot(); })  // r29o: snapshot for trend comparison
+    .catch(function(e){ console.error('GA4 cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
 
 // r26: GSC daily fetch — 06:30 London. Pulls last 3 days (covers GSC's 2-day reporting lag).
 cron.schedule('30 6 * * *', function() {
