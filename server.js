@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29m (Cancel button now actually shows: uses currentUser directly, allowed on paused tasks too, 60-min window for agents instead of 30. Duplicate-open-task gate on Google manual-create — agents can't create new task if open task exists on same campaign+product. Manager bypasses both rules.)
+// CampaignPulse — deploy marker 2026-05-08 r29n (Cancelled tasks no longer clutter main task list. Google: 'Active' filter excludes cancelled (was only excluding complete/archived). New '🗑 Cancelled' tab on Google for audit access. Amazon: 'Complete' tab now also shows cancelled (audit visibility on Amazon side). Various Amazon WHERE clauses updated to exclude cancelled from active queries.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -5056,7 +5056,7 @@ app.get('/api/amazon/products', async function(req, res) {
     try {
       const tRes = await db.query(
         "SELECT id, campaign_id, agent_name, status FROM campaign_tasks " +
-        "WHERE status NOT IN ('complete','archived','dismissed') " +
+        "WHERE status NOT IN ('complete','archived','dismissed','cancelled') " +
         "AND campaign_id LIKE 'product:%'"
       );
       tRes.rows.forEach(function(t){
@@ -5834,7 +5834,7 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
     try {
       const existing = await db.query(
         "SELECT id, agent_name, status FROM campaign_tasks " +
-        "WHERE status NOT IN ('complete','archived','dismissed') " +
+        "WHERE status NOT IN ('complete','archived','dismissed','cancelled') " +
         "AND (campaign_id = $1 OR campaign_id LIKE $2)",
         ['product:' + groupKey, '%' + groupKey + '%']
       );
@@ -8142,7 +8142,8 @@ app.get('/api/google/tasks', async function(req, res) {
 
     let where = "department='google'";
     const params = [];
-    if (statusFilter === 'active') where += " AND status NOT IN ('complete','archived')";
+    // r29n: 'active' default also excludes cancelled tasks — they were cluttering the list
+    if (statusFilter === 'active') where += " AND status NOT IN ('complete','archived','cancelled')";
     else if (statusFilter && statusFilter !== 'all') {
       params.push(statusFilter);
       where += " AND status=$" + params.length;
@@ -8782,7 +8783,7 @@ app.get('/api/google/tasks/by-campaign/:campaignId', async function(req, res) {
     await ensureGoogleTaskColumns();
     const r = await db.query(
       "SELECT id, agent_name, status, problem_type, product_title, created_date, day7_decision " +
-      "FROM campaign_tasks WHERE department='google' AND campaign_id=$1 AND status NOT IN ('complete','archived','dismissed') " +
+      "FROM campaign_tasks WHERE department='google' AND campaign_id=$1 AND status NOT IN ('complete','archived','dismissed','cancelled') " +
       "ORDER BY created_date DESC",
       [String(req.params.campaignId)]
     );
@@ -10662,7 +10663,7 @@ async function advanceTaskStages() {
   try {
     // Pick up every task that isn't already finished
     const result = await db.query(
-      "SELECT id, campaign_id, campaign_name, agent_name, department, created_date, task_stage FROM campaign_tasks WHERE status NOT IN ('complete','archived','dismissed') AND archived_at IS NULL"
+      "SELECT id, campaign_id, campaign_name, agent_name, department, created_date, task_stage FROM campaign_tasks WHERE status NOT IN ('complete','archived','dismissed','cancelled') AND archived_at IS NULL"
     );
     const today = new Date();
     const counters = { open: 0, discuss: 0, decide: 0, overdue: 0 };

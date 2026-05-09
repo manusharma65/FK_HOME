@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29m (Cancel button shows correctly now — fixed currentUser scope, allowed on paused tasks, 60-min window for agents) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29n (Cancelled tasks excluded from default Active view. New 🗑 Cancelled tab for audit access.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -405,6 +405,7 @@ table.activity tr:last-child td { border-bottom: none; }
       <button class="btn btn-ghost task-filter" data-filter-status="in_progress" onclick="setTaskFilter('status','in_progress',this)">In progress</button>
       <button class="btn btn-ghost task-filter" data-filter-status="discussion" onclick="setTaskFilter('status','discussion',this)">Discussion</button>
       <button class="btn btn-ghost task-filter" data-filter-status="complete" onclick="setTaskFilter('status','complete',this)">Complete</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="cancelled" onclick="setTaskFilter('status','cancelled',this)" title="Tasks cancelled by agents (mistakes) or managers — kept for audit, excluded from main views">🗑 Cancelled</button>
       <button class="btn btn-ghost task-filter" data-filter-status="all" onclick="setTaskFilter('status','all',this)">All</button>
       <!-- r25b: Repeat Offenders filter — campaigns/products that failed multiple times despite agent intervention -->
       <button class="btn btn-ghost task-filter" data-filter-repeat="true" onclick="setTaskFilter('repeat','true',this)" title="Tasks for campaigns/products that have failed multiple times despite agent intervention">🔁 Repeat Offenders <span id="g-tab-repeat-count" style="background:#dc2626;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>

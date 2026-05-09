@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29m (Cancel window extended 30→60 min for agents) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29n (Cancelled tasks now appear in Complete tab for audit visibility) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3088,7 +3088,7 @@ function updateTaskTabCounts() {
     escalated: agentFiltered.filter(function(t){ return t.status === 'open' && (t.days_persisted||1) >= 3; }).length,
     scaling: agentFiltered.filter(function(t){ return t.status === 'scaling'; }).length,
     repeat: agentFiltered.filter(function(t){ return t.is_repeat_offender; }).length,
-    complete: agentFiltered.filter(function(t){ return (t.status==='complete'||t.status==='dismissed'||t.status==='paused') && !t.archived_at; }).length,
+    complete: agentFiltered.filter(function(t){ return (t.status==='complete'||t.status==='dismissed'||t.status==='paused'||t.status==='cancelled') && !t.archived_at; }).length,
     archived: agentFiltered.filter(function(t){ return t.status==='archived' || t.archived_at; }).length
   };
   Object.keys(counts).forEach(function(tab) {
@@ -3116,7 +3116,7 @@ function renderTasks(tab) {
   else if (tab === 'escalated') filtered = daily.filter(function(t){ return t.status === 'open' && t.days_persisted >= 3; });
   else if (tab === 'scaling') filtered = daily.filter(function(t){ return t.status === 'scaling'; });
   else if (tab === 'repeat') filtered = daily.filter(function(t){ return t.is_repeat_offender; });
-  else if (tab === 'complete') filtered = daily.filter(function(t){ return (t.status === 'complete' || t.status === 'dismissed' || t.status === 'paused') && !t.archived_at; });
+  else if (tab === 'complete') filtered = daily.filter(function(t){ return (t.status === 'complete' || t.status === 'dismissed' || t.status === 'paused' || t.status === 'cancelled') && !t.archived_at; });
   else if (tab === 'archived') filtered = daily.filter(function(t){ return t.status === 'archived'; });
   else filtered = daily.filter(function(t){ return t.status === 'open'; });
 
