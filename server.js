@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29k (Two fixes: (1) Manual product-task creation now resolves product correctly when front-end sends raw Shopify ID — server tries both compound shopifyItemId match AND embedded shopifyId match. Pulls product title from Shopify state as fallback. Fixes "task says whole campaign" bug. (2) New Cancel task button on Google + Amazon. Manager can cancel any task; agent can cancel own task within 30 min of creation. Reason required. Cancelled tasks excluded from repeat-detection so agent can immediately recreate. Soft-delete (status='cancelled') for audit trail.)
+// CampaignPulse — deploy marker 2026-05-08 r29m (Cancel button now actually shows: uses currentUser directly, allowed on paused tasks too, 60-min window for agents instead of 30. Duplicate-open-task gate on Google manual-create — agents can't create new task if open task exists on same campaign+product. Manager bypasses both rules.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -8093,8 +8093,8 @@ app.post('/api/tasks/:id/cancel', async function(req, res) {
         return res.status(403).json({ error: 'You can only cancel tasks assigned to you. Manager can cancel any task.' });
       }
       const ageMinutes = (Date.now() - new Date(task.created_at || task.created_date).getTime()) / 60000;
-      if (ageMinutes > 30) {
-        return res.status(403).json({ error: 'Agents can only cancel tasks within 30 minutes of creation. Ask manager to cancel.' });
+      if (ageMinutes > 60) {
+        return res.status(403).json({ error: 'Agents can only cancel tasks within 60 minutes of creation. Ask manager to cancel.' });
       }
     }
 
@@ -8434,8 +8434,8 @@ app.post('/api/google/tasks/:id/cancel', async function(req, res) {
         return res.status(403).json({ error: 'You can only cancel tasks assigned to you. Manager can cancel any task.' });
       }
       const ageMinutes = (Date.now() - new Date(task.created_at || task.created_date).getTime()) / 60000;
-      if (ageMinutes > 30) {
-        return res.status(403).json({ error: 'Agents can only cancel tasks within 30 minutes of creation. Ask manager to cancel.' });
+      if (ageMinutes > 60) {
+        return res.status(403).json({ error: 'Agents can only cancel tasks within 60 minutes of creation. Ask manager to cancel.' });
       }
     }
 
@@ -8471,12 +8471,37 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   if (!brief || !brief.trim()) return res.status(400).json({ error: 'A brief is required — describe what the agent should do.' });
   if (!['Rahul', 'Anuj', 'Unassigned'].includes(agentName)) return res.status(400).json({ error: 'agentName must be Rahul, Anuj, or Unassigned' });
 
-  // r27: feedback-required gate. Agents must have submitted ≥1 feedback row for
-  // this scope/target before creating a task. Owner/manager bypass.
-  // Front-end also enforces but we double-check server-side.
   const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
   const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
   const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+
+  // r29l: prevent duplicate open task on same target. If an open/in_progress/discussion/
+  // paused task already exists on this campaign+product combo, refuse with a useful
+  // message pointing the user to the existing task. Manager bypass — they may have
+  // valid reasons. Agent: must cancel/complete the existing task first.
+  if (!isPrivileged) {
+    try {
+      const existingOpen = await db.query(
+        "SELECT id, status, agent_name FROM campaign_tasks " +
+        "WHERE department='google' AND campaign_id=$1 " +
+        "  AND COALESCE(product_key, '')=COALESCE($2, '') " +
+        "  AND status IN ('open','in_progress','discussion','paused') " +
+        "ORDER BY created_at DESC LIMIT 1",
+        [String(campaignId), productKey || null]
+      );
+      if (existingOpen.rows.length) {
+        const exTask = existingOpen.rows[0];
+        return res.status(409).json({
+          error: 'A task is already open on this ' + (productKey ? 'product' : 'campaign') + ' (#' + exTask.id + ', assigned to ' + exTask.agent_name + ', status: ' + exTask.status + '). Cancel or complete that one first before creating a new task.',
+          existingTaskId: exTask.id
+        });
+      }
+    } catch(e) { console.error('[r29l duplicate-open-task check] ' + e.message); }
+  }
+
+  // r27: feedback-required gate. Agents must have submitted ≥1 feedback row for
+  // this scope/target before creating a task. Owner/manager bypass.
+  // Front-end also enforces but we double-check server-side.
   if (!isPrivileged && feedbackScope && feedbackTargetId) {
     try {
       const fc = await db.query(

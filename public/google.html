@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29k (Cancel task button — soft delete with reason. Manager any time, agent within 30 min of creation. Cancelled tasks excluded from repeat-detection.) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29m (Cancel button shows correctly now — fixed currentUser scope, allowed on paused tasks, 60-min window for agents) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2433,16 +2433,21 @@ function _openTaskDetailRender(task, taskId, history) {
   if (isClosed) {
     actions.push('<button class="btn btn-primary" onclick="reopenTask(' + taskId + ')" style="font-size:13px;padding:8px 16px">↻ Reopen</button>');
   }
-  // r29k: Cancel button — for tasks created by mistake. Manager always sees it;
-  // agent only sees it if task is theirs and <30 min old. Server enforces same rules.
-  if (!isClosed && status !== 'cancelled') {
-    const me = window.currentUser || {};
+  // r29k/l/m: Cancel button — for tasks created by mistake. Manager always sees it;
+  // agent only sees it if task is theirs and <60 min old. Server enforces same rules.
+  // r29l: was using window.currentUser (top-level let doesn't attach to window). Fixed.
+  // r29m: cancel allowed on paused tasks too (paused is exactly when a wrong task
+  // gets parked while waiting to clean it up). Only fully closed (complete/archived/
+  // dismissed/cancelled) should hide the button.
+  const canShowCancel = status !== 'complete' && status !== 'archived' && status !== 'dismissed' && status !== 'cancelled';
+  if (canShowCancel) {
+    const me = (typeof currentUser !== 'undefined' && currentUser) || {};
     const myRole = (me.role || '').toLowerCase();
     const myDept = (me.department || '').toLowerCase();
     const myName = me.name || me.username || '';
     const isPriv = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
     const taskAgeMin = task.created_at ? (Date.now() - new Date(task.created_at).getTime()) / 60000 : 999;
-    const canCancel = isPriv || (task.agent_name === myName && taskAgeMin < 30);
+    const canCancel = isPriv || (task.agent_name === myName && taskAgeMin < 60);
     if (canCancel) {
       actions.push('<button class="btn btn-ghost" onclick="cancelTask(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#6b7280;border:1px dashed #d1d5db" title="Cancel this task — created by mistake or wrong description. Reason required.">🗑 Cancel task</button>');
     }

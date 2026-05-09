@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29k (Cancel task button — soft delete with reason. Manager any time, agent within 30 min of creation. Cancelled tasks excluded from repeat-detection.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29m (Cancel window extended 30→60 min for agents) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3256,13 +3256,13 @@ function renderTasks(tab) {
       actionButtons += '<div style="margin-top:6px"><button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--text3)" onclick="event.stopPropagation();showReassignTaskModal(' + t.id + ',&quot;' + escHtml(t.agent_name||'').replace(/"/g, '&quot;') + '&quot;)">↪ Reassign</button></div>';
     }
 
-    // r29k: Cancel button — soft delete for mistakenly-created tasks. Manager always
-    // sees it; agent only if task is theirs and <30 min old. Server enforces same rules.
+    // r29k/m: Cancel button — soft delete for mistakenly-created tasks. Manager always
+    // sees it; agent only if task is theirs and <60 min old. Server enforces same rules.
     if (t.status !== 'complete' && t.status !== 'archived' && t.status !== 'cancelled' && t.status !== 'dismissed') {
       const _myName = _me.name || _me.username || '';
       const _isPriv = _canReassign;
       const _ageMin = t.created_at ? (Date.now() - new Date(t.created_at).getTime()) / 60000 : 999;
-      const _canCancel = _isPriv || (t.agent_name === _myName && _ageMin < 30);
+      const _canCancel = _isPriv || (t.agent_name === _myName && _ageMin < 60);
       if (_canCancel) {
         actionButtons += '<div style="margin-top:6px"><button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--text3);border:1px dashed #d1d5db" onclick="event.stopPropagation();cancelAmzTask(' + t.id + ')" title="Cancel this task — created by mistake or wrong description. Reason required.">🗑 Cancel task</button></div>';
       }
