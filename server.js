@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-11 r30a (r30 + critical fix: budget alerts. After r30 rewrite, c.spend defaulted to 7d spend, so analyseCampaigns was firing "OUT OF BUDGET" alerts for every campaign with 7d_spend > daily_budget. Now uses c.todaySpend. Also: c.todaySpend is null until Amazons daily report includes today (typically 1-day lag), and all budget alerts/badges/rules skip null-spend campaigns rather than fire on stale yesterday data.)
+// CampaignPulse — deploy marker 2026-05-11 r30b (Alerts back to TODAY data only. r30a wrongly used 7d ACOS for high-ACOS alert — switched back. All three alerts (out_of_budget, high_acos, budget_low) now compute on todays spend/sales/ACOS. Skip silently if Amazons daily report doesnt include todays row yet.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1304,17 +1304,19 @@ async function analyseCampaigns(campaigns) {
     // rather than fire on stale yesterday data.
     if (c.todaySpend == null) continue;
     const spend = c.todaySpend;
-    const sales = c.sales || 0;
+    // r30b: high-ACOS alert uses TODAY's sales/spend, not 7-day. Today's actuals
+    // are needed for same-day decisions. (r30a wrongly used 7d for this.)
+    // Today's sales = last row of dailySeries7d (already proven to be today via the
+    // date check in syncCampaigns — if todaySpend != null then todaySales is also today).
+    const todayRow = (c.dailySeries7d && c.dailySeries7d.length) ? c.dailySeries7d[c.dailySeries7d.length - 1] : { sales: 0 };
+    const todaySales = parseFloat(todayRow.sales || 0);
+    const sales = todaySales;
     const acos = sales > 0 ? (spend / sales) * 100 : 0;
     const remaining = Math.max(0, budget - spend);
     const remainingPct = budget > 0 ? (remaining / budget) * 100 : 100;
     const outOfBudget = remaining <= 0.01 && budget > 0;
     const budgetLow = remainingPct <= budgetLowPct && !outOfBudget;
-    // ACOS-high alert uses 7-day data because a single noisy day shouldn't fire it
-    const spend7 = c.spend7d || 0;
-    const sales7 = c.sales7d || 0;
-    const acos7 = sales7 > 0 ? (spend7 / sales7) * 100 : 0;
-    const acosHigh = acos7 > acosCritical && spend7 > 5;
+    const acosHigh = acos > acosCritical && spend > 5;
     const ukHour = parseInt(new Date().toLocaleString('en-GB', {timeZone:'Europe/London', hour:'numeric', hour12:false}));
     if (ukHour >= 22 || ukHour < 8) continue;
     const alertType = outOfBudget ? 'out_of_budget' : acosHigh ? 'acos_high' : budgetLow ? 'budget_low' : null;
@@ -1347,7 +1349,7 @@ async function analyseCampaigns(campaigns) {
     const agent = extractAgentFromCampaign(name) || '';
     const portfolioName = c.portfolio || '';
 
-    state.alerts.push({ campaignId: c.campaignId, name: name, portfolio: portfolioName, agent: agent, type: alertType, time: timeStr, date: dateStr, budget: budget, acos: Math.round(acos7 * 10) / 10 });
+    state.alerts.push({ campaignId: c.campaignId, name: name, portfolio: portfolioName, agent: agent, type: alertType, time: timeStr, date: dateStr, budget: budget, acos: Math.round(acos * 10) / 10 });
 
     const dashUrl = process.env.DASHBOARD_URL || 'https://campaignpulse-setup-production.up.railway.app';
 
@@ -1356,15 +1358,15 @@ async function analyseCampaigns(campaigns) {
       const roas = spend > 0 ? sales / spend : 0;
       const hourly = spend / Math.max(now.getHours(), 1);
       const missed = Math.round(hourly * hoursLeft * roas);
-      state.exhaustionLog.unshift({ date: now.toLocaleDateString('en-GB'), time: timeStr, campaign: name, portfolio: portfolioName, agent: agent, budget: '£' + budget.toFixed(2), acos: acos7.toFixed(1) + '%', missed: '£' + missed, added: 'Pending', action: 'Pending' });
-      // r30: alert text shows today's exhaustion + 7d ACOS context
-      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Spent today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2), '7d ACOS: ' + acos7.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
+      state.exhaustionLog.unshift({ date: now.toLocaleDateString('en-GB'), time: timeStr, campaign: name, portfolio: portfolioName, agent: agent, budget: '£' + budget.toFixed(2), acos: acos.toFixed(1) + '%', missed: '£' + missed, added: 'Pending', action: 'Pending' });
+      // r30b: all alerts show TODAY's data — what the agent needs to act on right now
+      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Spent today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2), 'Today ACOS: ' + acos.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m1); } else { await sendGoogleChat(m1); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Budget £' + budget.toFixed(2) + ', 7d ACOS ' + acos7.toFixed(1) + '%');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Spent £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ', today ACOS ' + acos.toFixed(1) + '%');
     } else if (acosHigh) {
-      const m2 = ['📈 HIGH ACOS', name, '7d ACOS: ' + acos7.toFixed(1) + '%', '7d spend: £' + spend7.toFixed(2), dashUrl].join('\n');
+      const m2 = ['📈 HIGH ACOS', name, 'Today ACOS: ' + acos.toFixed(1) + '%', 'Today spend: £' + spend.toFixed(2) + ' · sales: £' + sales.toFixed(2), dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m2); } else { await sendGoogleChat(m2); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'ACOS ' + acos7.toFixed(1) + '% with £' + spend7.toFixed(2) + ' 7d spend');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'Today ACOS ' + acos.toFixed(1) + '% with £' + spend.toFixed(2) + ' spend');
     } else if (budgetLow) {
       const m3 = ['⚡ BUDGET LOW', name, 'Today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' (' + remainingPct.toFixed(0) + '% left)', dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m3); } else { await sendGoogleChat(m3); }
