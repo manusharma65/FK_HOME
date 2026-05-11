@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-11 r30c (Fixes the most critical post-r30 bug: dashboard cards + daily snapshots stored 7-day rollups labelled as today. Now dashboard shows TODAY actuals with 7d as subtitle. saveDailySnapshot stores single-day spend/sales (from todays row in dailySeries7d) — so day-over-day comparisons and the History page work correctly. Live endpoint exposes both today + 7d totals separately. Skips snapshot save if Amazons daily report has no today row yet — wont overwrite yesterdays good snapshot with zeros.)
+// CampaignPulse — deploy marker 2026-05-11 r30d (CRITICAL FIX: restore the today-only Amazon Ads report stream that pre-r30 code had. Without it, c.todaySpend was being inferred from daily7ds latest row which lags 1+ day, causing the r30a/b/c todaySpend null guard to silently swallow 95%+ of out-of-budget / budget-low / high-ACOS alerts. r30d adds a 4th stream (todayOnly, 90min refresh) that pulls a SUMMARY report with startDate=today endDate=today. c.todaySpend/Sales/Acos/etc come from THIS stream. Alerts back to firing every 15min when conditions hit. Snapshots, dashboard cards, History page all read from the same source. Keep all r30 streams (summary7d, summary30d, daily7d) for Campaign Health, Action Centre, and modal sparklines.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1112,18 +1112,19 @@ async function fetchCampaigns() {
   return campaigns;
 }
 
-// r30: three independent report streams, each managed separately so one failure
-// doesn't block the others. Each tracks pendingReportId / requested / data /
-// last425At independently.
-//   - summary7d: 7-day campaign rollup. Source of truth for All Campaigns + Action Centre.
-//   - summary30d: 30-day campaign rollup. Powers the "30d" toggle.
-//   - daily7d: per-day per-campaign rows over 7 days. Powers the modal sparkline +
-//     the "no_revenue 3 days" / "no_activity 3 days" rules.
-// All use sales7d attribution (matches Amazon Seller Central's default).
+// r30d: four independent report streams. todayOnly is THE source of truth for budget
+// alerts (out-of-budget, budget-low, high-ACOS) — matches what pre-r30 code did.
+// Without it, alerts went silent because daily7d's most-recent row lags by 1+ day.
+//   - todayOnly: today's summary. Powers ALL three 15-min alerts. Fast refresh (90 min).
+//   - summary7d: 7-day rollup. Source of truth for Campaign Health + Action Centre rules.
+//   - summary30d: 30-day rollup. Powers 30d toggle on Campaign Health.
+//   - daily7d: per-day rows over 7 days. Powers modal sparkline + 3-day consecutive rules.
+// All use Amazon's standard attribution (sales1d for today, sales7d for 7d, sales30d for 30d).
 let reportState = {
-  summary7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0 },
-  summary30d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0 },
-  daily7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0 }
+  todayOnly: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 90 * 60 * 1000 },
+  summary7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 2 * 60 * 60 * 1000 },
+  summary30d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 2 * 60 * 60 * 1000 },
+  daily7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 2 * 60 * 60 * 1000 }
 };
 
 // Helper: poll-and-download one report stream
@@ -1159,8 +1160,9 @@ async function _pollOrRequestReport(streamName, configBuilder, headers) {
     }
   }
 
-  // 2. If no pending and we haven't requested in last 2h, request a new one
-  if (!stream.pendingReportId && (now - stream.requested) > 2 * 60 * 60 * 1000) {
+  // 2. If no pending and we haven't requested in last refreshMs (default 2h), request a new one
+  const refreshMs = stream.refreshMs || (2 * 60 * 60 * 1000);
+  if (!stream.pendingReportId && (now - stream.requested) > refreshMs) {
     // 425 backoff (Too Early — Amazon throttles report creation)
     if (stream.last425At && (now - stream.last425At) < 60 * 60 * 1000) {
       return stream.data || null;
@@ -1197,9 +1199,25 @@ async function fetchCampaignStats() {
   const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
 
-  // r30: pull three streams in parallel. Each is independently managed; one
-  // pending/failed/throttled stream doesn't block the others.
-  const [summary7d, summary30d, daily7d] = await Promise.all([
+  // r30d: pull FOUR streams in parallel. todayOnly is the source for budget alerts;
+  // summary7d/30d for Campaign Health; daily7d for sparklines + consecutive-day rules.
+  const [todayOnly, summary7d, summary30d, daily7d] = await Promise.all([
+    _pollOrRequestReport('todayOnly', function() {
+      return {
+        name: 'CampaignPulse today ' + today,
+        startDate: today,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          // sales1d/purchases1d: single-day attribution, what Amazon's UI defaults to for "today"
+          columns: ['campaignId', 'campaignName', 'cost', 'sales1d', 'clicks', 'impressions', 'purchases1d', 'clickThroughRate', 'costPerClick'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      };
+    }, headers),
     _pollOrRequestReport('summary7d', function() {
       return {
         name: 'CampaignPulse 7d ' + today,
@@ -1249,7 +1267,7 @@ async function fetchCampaignStats() {
     }, headers)
   ]);
 
-  return { summary7d, summary30d, daily7d };
+  return { todayOnly, summary7d, summary30d, daily7d };
 }
 
 
@@ -1296,21 +1314,12 @@ async function analyseCampaigns(campaigns) {
   for (let i = 0; i < campaigns.length; i++) {
     const c = campaigns[i];
     const budget = c.dailyBudget || 0;
-    // r30 fix: c.spend defaults to 7-day spend after the r30 rewrite. Budget alerts
-    // must compare TODAY's spend against today's daily budget — otherwise a £4.43
-    // daily budget campaign with £20 of 7-day spend looks "out of budget" every sync.
-    // Today's spend lives on c.todaySpend (latest row from the daily7d stream).
-    // If null, Amazon's daily report doesn't have today's data yet — skip alerts
-    // rather than fire on stale yesterday data.
+    // r30d: c.todaySpend is now from the dedicated todayOnly Amazon Ads report stream
+    // (90-min refresh, live within ~hours of actual). Pre-r30 code worked the same way.
+    // If null, today's report still pending (only at startup or after API failure).
     if (c.todaySpend == null) continue;
     const spend = c.todaySpend;
-    // r30b: high-ACOS alert uses TODAY's sales/spend, not 7-day. Today's actuals
-    // are needed for same-day decisions. (r30a wrongly used 7d for this.)
-    // Today's sales = last row of dailySeries7d (already proven to be today via the
-    // date check in syncCampaigns — if todaySpend != null then todaySales is also today).
-    const todayRow = (c.dailySeries7d && c.dailySeries7d.length) ? c.dailySeries7d[c.dailySeries7d.length - 1] : { sales: 0 };
-    const todaySales = parseFloat(todayRow.sales || 0);
-    const sales = todaySales;
+    const sales = c.todaySales || 0;
     const acos = sales > 0 ? (spend / sales) * 100 : 0;
     const remaining = Math.max(0, budget - spend);
     const remainingPct = budget > 0 ? (remaining / budget) * 100 : 100;
@@ -1382,11 +1391,26 @@ async function syncCampaigns() {
   console.log('Syncing at ' + new Date().toTimeString().slice(0, 8));
   try {
     const raw = await fetchCampaigns();
-    // r30: stats now comes back as { summary7d, summary30d, daily7d } — three streams
+    // r30d: stats now { todayOnly, summary7d, summary30d, daily7d }
     const stats = await fetchCampaignStats();
+    const todayOnly = (stats && stats.todayOnly) || [];
     const summary7d = (stats && stats.summary7d) || [];
     const summary30d = (stats && stats.summary30d) || [];
     const daily7d = (stats && stats.daily7d) || [];
+
+    // r30d: today-only lookup — source of truth for budget alerts
+    const statsToday = {};
+    todayOnly.forEach(function(s) {
+      statsToday[s.campaignId] = {
+        spend: parseFloat(s.cost || 0),
+        sales: parseFloat(s.sales1d || 0),
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
+        conversions: parseInt(s.purchases1d || 0),
+        ctr: parseFloat(s.clickThroughRate || 0),
+        cpc: parseFloat(s.costPerClick || 0)
+      };
+    });
 
     // Build per-campaign lookups
     const stats7d = {};
@@ -1437,18 +1461,33 @@ async function syncCampaigns() {
     });
 
     if (Object.keys(stats7d).length === 0) {
-      console.warn('[r30] No 7d stats this sync — reports may still be processing. Campaign rows will show as loading until reports complete.');
+      console.warn('[r30d] No 7d stats this sync — reports may still be processing.');
     } else {
-      console.log('[r30] Stats loaded: 7d=' + Object.keys(stats7d).length + ', 30d=' + Object.keys(stats30d).length + ', daily7d campaigns=' + Object.keys(days7d).length);
+      console.log('[r30d] Stats loaded: today=' + Object.keys(statsToday).length + ', 7d=' + Object.keys(stats7d).length + ', 30d=' + Object.keys(stats30d).length + ', daily7d campaigns=' + Object.keys(days7d).length);
     }
 
     const campaigns = raw.map(function(c) {
       const budget = parseFloat((c.budget && c.budget.budget) || c.dailyBudget || 0);
+      const sT = statsToday[c.campaignId] || {};
       const s7 = stats7d[c.campaignId] || {};
       const s30 = stats30d[c.campaignId] || {};
       const d7 = days7d[String(c.campaignId)] || [];
 
-      // Headline numbers = 7-day. This is what every other surface reads.
+      // r30d: TODAY metrics from the dedicated todayOnly report stream (NOT from dailySeries7d).
+      // This restores the pre-r30 behaviour where today's spend updates every ~90 min from
+      // the live SUMMARY API call. Budget alerts depend on this being accurate.
+      const haveToday = Object.keys(statsToday).length > 0;
+      const todaySpend = haveToday ? parseFloat(sT.spend || 0) : null;
+      const todaySales = haveToday ? parseFloat(sT.sales || 0) : null;
+      const todayClicks = haveToday ? parseInt(sT.clicks || 0) : null;
+      const todayImpressions = haveToday ? parseInt(sT.impressions || 0) : null;
+      const todayConversions = haveToday ? parseInt(sT.conversions || 0) : null;
+      const todayAcos = (todaySales != null && todaySales > 0) ? Math.round((todaySpend / todaySales) * 1000) / 10 : 0;
+
+      const remaining = (todaySpend != null) ? Math.max(0, budget - todaySpend) : null;
+      const pct = (todaySpend != null && budget > 0) ? Math.round((todaySpend / budget) * 100) : 0;
+
+      // Headline numbers = 7-day. Campaign Health page + Action Centre rules read these.
       const spend7 = s7.spend !== undefined ? parseFloat(s7.spend) : null;
       const sales7 = s7.sales !== undefined ? parseFloat(s7.sales) : null;
       const acos7 = sales7 > 0 ? Math.round((spend7 / sales7) * 1000) / 10 : 0;
@@ -1458,19 +1497,6 @@ async function syncCampaigns() {
       const sales30 = s30.sales !== undefined ? parseFloat(s30.sales) : null;
       const acos30 = sales30 > 0 ? Math.round((spend30 / sales30) * 1000) / 10 : 0;
       const cpcv30 = s30.conversions > 0 ? +(spend30 / s30.conversions).toFixed(2) : null;
-
-      // r30: budget metrics reflect today's daily-cap status.
-      // The daily7d stream typically lags by 1 day (Amazon's daily report doesn't
-      // include today's in-flight data). We only treat the latest daily row as
-      // "today" if its date matches today's date. Otherwise todaySpend is unknown
-      // (null) and we don't fire false out-of-budget alerts.
-      const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
-      const latestDay = d7.length ? d7[d7.length - 1] : null;
-      const todaySpend = (latestDay && String(latestDay.date).slice(0, 10) === _todayStr)
-        ? parseFloat(latestDay.spend || 0)
-        : null;
-      const remaining = (todaySpend != null) ? Math.max(0, budget - todaySpend) : null;
-      const pct = (todaySpend != null && budget > 0) ? Math.round((todaySpend / budget) * 100) : 0;
 
       const portfolioName = c.portfolioId ? (state.portfolios[c.portfolioId] || '') : '';
       let agent = portfolioName ? portfolioName.replace('@', '').split(' ')[0] : '';
@@ -1486,7 +1512,7 @@ async function syncCampaigns() {
         portfolio: portfolioName,
         agent: agent,
         dailyBudget: budget,
-        // r30: spend/sales/etc default to 7-day values. Front-end picks 7d or 30d via toggle.
+        // c.spend / c.sales / c.acos default to 7-day (used by Campaign Health, Action Centre)
         spend: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
         sales: sales7 !== null ? Math.round(sales7 * 100) / 100 : null,
         acos: acos7,
@@ -1496,7 +1522,7 @@ async function syncCampaigns() {
         units: s7.units || 0,
         ctr: s7.ctr ? (s7.ctr * 100).toFixed(2) : '0.00',
         cpc: s7.cpc || 0,
-        // Explicit 7d block (front-end can show "(7d)" labels confidently)
+        // Explicit 7d block
         spend7d: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
         sales7d: sales7 !== null ? Math.round(sales7 * 100) / 100 : null,
         acos7d: acos7,
@@ -1518,11 +1544,15 @@ async function syncCampaigns() {
         ctr30d: s30.ctr ? +(s30.ctr * 100).toFixed(2) : 0,
         cpc30d: s30.cpc || 0,
         costPerConv30d: cpcv30,
-        // Per-day 7d series (for sparklines + consecutive-day rules)
+        // Per-day 7d series (sparklines + consecutive-day rules)
         dailySeries7d: d7,
-        // r30: today's spend — null if the daily stream's latest row isn't actually today.
-        // Front-end shows "—" instead of misleading numbers. Budget alerts skip null-spend campaigns.
+        // r30d: today block from todayOnly stream — live, updates every ~90min
         todaySpend: todaySpend,
+        todaySales: todaySales,
+        todayAcos: todayAcos,
+        todayClicks: todayClicks,
+        todayImpressions: todayImpressions,
+        todayConversions: todayConversions,
         budgetRemaining: (remaining != null) ? Math.round(remaining * 100) / 100 : null,
         budgetPct: pct
       };
@@ -1804,40 +1834,28 @@ async function saveDailySnapshot() {
   try {
     // r14 timezone fix: snapshots keyed by London date, not UTC.
     const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
-    // r30c: after r30, c.spend / c.sales default to 7-DAY rollups. Snapshotting those
-    // every day produces overlapping windows that cannot be summed or compared day-over-day.
-    // Snapshots must store TODAY's actuals (single-day spend/sales/etc) so the History page,
-    // daily charts, and wasted-spend metrics show real per-day data.
-    // todaySpend / todaySales / todayClicks / todayImpressions / todayConversions are derived
-    // from dailySeries7d's most-recent row (which equals today, verified by date match).
-    // If Amazon's daily report hasn't included today's row yet, todaySpend is null —
-    // we skip the snapshot rather than save misleading zeros over yesterday's good data.
+    // r30d: snapshot stores TODAY's actuals (from todayOnly stream), not 7-day rollups.
+    // c.todaySpend/Sales/etc come from the live todayOnly Amazon Ads report stream.
+    // If null, today's report not yet fetched — skip the save rather than overwrite
+    // yesterday's good snapshot with zeros.
     const liveCampaigns = state.campaigns || [];
     const haveToday = liveCampaigns.some(function(c){ return c.todaySpend != null; });
     if (!haveToday) {
-      console.log('[r30c] Skipping snapshot — Amazon daily report has no today row yet');
+      console.log('[r30d] Skipping snapshot — todayOnly report not yet fetched');
       return;
     }
     const todayCampaigns = liveCampaigns.map(function(c) {
-      const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
-      const todayRow = days.length ? days[days.length - 1] : null;
-      const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
-      const hasToday = todayRow && String(todayRow.date).slice(0, 10) === _todayStr;
-      // Use today's actuals if available, else zeros (campaign existed today but had no activity)
-      const tSpend = hasToday ? parseFloat(todayRow.spend || 0) : 0;
-      const tSales = hasToday ? parseFloat(todayRow.sales || 0) : 0;
-      const tClicks = hasToday ? parseInt(todayRow.clicks || 0) : 0;
-      const tImpressions = hasToday ? parseInt(todayRow.impressions || 0) : 0;
-      const tConversions = hasToday ? parseInt(todayRow.conversions || 0) : 0;
+      const tSpend = parseFloat(c.todaySpend || 0);
+      const tSales = parseFloat(c.todaySales || 0);
       const tAcos = tSales > 0 ? Math.round((tSpend / tSales) * 1000) / 10 : 0;
-      // Keep the original campaign object but override the 5 metric fields with today's values
+      // Snapshot row carries today's spend/sales/etc as the primary metric fields
       return Object.assign({}, c, {
         spend: Math.round(tSpend * 100) / 100,
         sales: Math.round(tSales * 100) / 100,
         acos: tAcos,
-        clicks: tClicks,
-        impressions: tImpressions,
-        conversions: tConversions
+        clicks: c.todayClicks || 0,
+        impressions: c.todayImpressions || 0,
+        conversions: c.todayConversions || 0
       });
     });
     const totalRevenue = todayCampaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
@@ -1857,7 +1875,7 @@ async function saveDailySnapshot() {
       'INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, exhaustion_log=$4, alerts=$5, created_at=NOW()',
       [today, JSON.stringify(metrics), JSON.stringify(todayCampaigns), JSON.stringify(state.exhaustionLog), JSON.stringify(state.alerts)]
     );
-    console.log('[r30c] Daily snapshot saved for ' + today + ' (today actuals): spend £' + totalSpend.toFixed(2) + ' · revenue £' + totalRevenue.toFixed(2) + ' · wasted £' + metrics.totalWastedSpend);
+    console.log('[r30d] Daily snapshot saved for ' + today + ': spend £' + totalSpend.toFixed(2) + ' · revenue £' + totalRevenue.toFixed(2) + ' · wasted £' + metrics.totalWastedSpend);
   } catch(e) {
     console.error('Snapshot save error: ' + e.message);
   }
@@ -3448,22 +3466,15 @@ app.get('/api/dashboard', async function(req, res) {
   // Old daily_snapshots-based enrichment removed — was summing trailing-14d attribution
   // values which produced incorrect totals.
 
-  // r30c: dashboard top-card metrics. We now compute both windows so the front-end
-  // can show "today" cards alongside "7-day" cards without label confusion.
-  // - 7d totals: sum of campaign.spend7d / sales7d / etc (already on each campaign from syncCampaigns).
-  // - today totals: sum of c.todaySpend and today's row from dailySeries7d. Skipped per-campaign
-  //   if c.todaySpend is null (Amazon's daily report hasn't filled today yet).
-  const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+  // r30d: today totals from the todayOnly stream (live, refreshes every ~90 min).
+  // No more inferring from dailySeries7d's lagging row.
   let totalRevenueToday = 0, totalSpendToday = 0, totalWastedToday = 0, spendNoRevenueTodayCount = 0;
   let todayHasData = false;
   campaigns.forEach(function(c) {
     if (c.todaySpend == null) return;
     todayHasData = true;
-    const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
-    const todayRow = days.length ? days[days.length - 1] : null;
-    const isToday = todayRow && String(todayRow.date).slice(0, 10) === _todayStr;
-    const tSpend = c.todaySpend;
-    const tSales = isToday ? parseFloat(todayRow.sales || 0) : 0;
+    const tSpend = parseFloat(c.todaySpend || 0);
+    const tSales = parseFloat(c.todaySales || 0);
     totalSpendToday += tSpend;
     totalRevenueToday += tSales;
     if (tSpend > 0 && tSales === 0) { totalWastedToday += tSpend; spendNoRevenueTodayCount++; }
