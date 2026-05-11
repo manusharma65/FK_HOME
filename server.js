@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29o (Account-wide funnel — manager-only card on home page showing Sessions → Cart → Checkout → Complete with conversion rates and 7-day trend. Aggregates ga4_product_metrics; daily snapshot table for trend comparison; new GET /api/google/account-funnel endpoint. No new GA4 API calls — reuses existing daily fetch.)
+// CampaignPulse — deploy marker 2026-05-11 r29p (Merged with r30a from other chat which added Logistics module at /api/logistics. r29p changes: (1) ensureGoogleTaskColumns runs once per process instead of per-request — was flooding logs with "[GTASK] columns ensured: 12/12" hundreds of times per minute, drowning out real errors. (2) /api/google/tasks/:id/history query fixed — uses logged_at (the real column) aliased to created_at. (3) Added activity_log.actor_name, .department, .details to ensureCriticalColumns so cancel-task audit log INSERTs stop silently failing.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2230,7 +2230,11 @@ async function ensureCriticalColumns() {
     ["campaign_tasks.priority", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 2"],
     ["campaign_tasks.product_image_url", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_image_url TEXT"],
     // Drop the legacy unique constraint that blocks multiple tasks per campaign per day
-    ["drop legacy unique constraint", "ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key"]
+    ["drop legacy unique constraint", "ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key"],
+    // r29p: activity_log columns referenced across the codebase but never added to schema
+    ["activity_log.actor_name", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor_name TEXT"],
+    ["activity_log.department", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS department TEXT"],
+    ["activity_log.details", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS details TEXT"]
   ];
   let okCount = 0;
   let failedList = [];
@@ -2364,8 +2368,14 @@ async function googleTaskAlreadyExistsToday(campaignId, problemType, productKey)
   }
 }
 
+let _gtaskColumnsEnsured = false;
 async function ensureGoogleTaskColumns() {
   if (!db) return;
+  // r29p: skip after first successful run. The 12 ALTERs are idempotent but were
+  // being called from every per-request handler, flooding logs hundreds of lines
+  // per minute. Once at boot is enough; this stays as a safety net for first deploy
+  // on a fresh DB or after schema reset.
+  if (_gtaskColumnsEnsured) return;
   const alters = [
     ["product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
     ["product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
@@ -2389,7 +2399,8 @@ async function ensureGoogleTaskColumns() {
       console.error('[GTASK] could not add column ' + name + ': ' + e.message);
     }
   }
-  console.log('[GTASK] columns ensured: ' + okCount + '/' + alters.length);
+  console.log('[GTASK] columns ensured (first-run): ' + okCount + '/' + alters.length);
+  _gtaskColumnsEnsured = true;
 }
 
 function scoreGoogleTask(spend, sales, problemType) {
@@ -8406,19 +8417,20 @@ app.post('/api/google/tasks/:id/status', async function(req, res) {
 app.get('/api/google/tasks/:id/history', async function(req, res) {
   if (!db) return res.json({ history: [] });
   try {
-    // r29c: defensive — task_id might not exist as a column on older rows or older deploys.
-    // Try the standard query first; if it fails due to missing column, fall back to empty.
     const taskIdNum = parseInt(req.params.id, 10);
     if (!Number.isFinite(taskIdNum)) return res.json({ history: [] });
+    // r29p: query uses real column names from CREATE TABLE (line ~1819).
+    // logged_at (not created_at). Aliased to created_at so front-end stays compatible.
+    // Doesn't filter on department or actor_name — those columns don't exist on this table.
     const r = await db.query(
-      "SELECT id, action, notes, status_before, status_after, agent_name, actor_name, created_at " +
-      "FROM activity_log WHERE department='google' AND task_id=$1 ORDER BY created_at ASC",
+      "SELECT id, action, notes, status_before, status_after, agent_name, " +
+      "       logged_at AS created_at " +
+      "FROM activity_log WHERE task_id=$1 ORDER BY logged_at ASC",
       [taskIdNum]
     );
     res.json({ history: r.rows });
   } catch (e) {
     console.error('[GTASK history] ' + e.message);
-    // Don't 500 on the front-end — return empty history so the modal can still open
     res.json({ history: [], _error: e.message });
   }
 });
