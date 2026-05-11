@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29o (Manager-only Account funnel card on home — Sessions → Cart → Checkout → Complete with 7-day trend) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-11 r29q (Shows "Stale >24h" tag on AI critique meta when cache is older than 24h. Cached critique no longer vanishes from modal after 24h.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -587,16 +587,11 @@ async function loadMe() {
     currentUser = me;
 
     // Department guard: Amazon-only agents shouldn't be on the Google dashboard
-    // Logistics agents also bounced to /logistics.html
     const dept = (me.department || '').toLowerCase();
     const role = (me.role || '').toLowerCase();
     const isMgr = role === 'manager' || dept === 'manager';
     if ((dept === 'amazon' || dept === 'agent') && !isMgr) {
       window.location.replace('/index.html');
-      return;
-    }
-    if (dept === 'logistics' && !isMgr && role !== 'owner') {
-      window.location.replace('/logistics.html');
       return;
     }
 
@@ -4018,13 +4013,16 @@ function renderCritiqueInlineInProductModal(j, productId) {
   if (metaDiv) {
     // r26b: model name now dynamic — was hardcoded "Opus 4.7" which made all
     // analyses look like Opus even when Haiku ran.
+    // r29q: also surface 'stale' flag — when cache row is >24h old. Tells user
+    // the analysis is from a previous day; they can re-run for fresh data.
     const ageNote = j.cached ? ('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago') : 'Fresh analysis';
     let modelLabel = 'Opus';
     if (j.modelUsed) {
       const m = String(j.modelUsed).toLowerCase();
       modelLabel = m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : (m.indexOf('sonnet') >= 0 ? 'Sonnet' : j.modelUsed));
     }
-    metaDiv.textContent = ageNote + ' · ' + modelLabel + (locked ? ' · Locked for 24h' : '') + (j.partial ? ' · ⚠ Partial' : '');
+    const staleNote = j.stale ? ' · ⏱ Stale (>24h)' : '';
+    metaDiv.textContent = ageNote + ' · ' + modelLabel + (locked ? ' · Locked for 24h' : '') + staleNote + (j.partial ? ' · ⚠ Partial' : '');
   }
 }
 

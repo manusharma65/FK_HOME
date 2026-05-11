@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-11 r29p (Merged with r30a from other chat which added Logistics module at /api/logistics. r29p changes: (1) ensureGoogleTaskColumns runs once per process instead of per-request — was flooding logs with "[GTASK] columns ensured: 12/12" hundreds of times per minute, drowning out real errors. (2) /api/google/tasks/:id/history query fixed — uses logged_at (the real column) aliased to created_at. (3) Added activity_log.actor_name, .department, .details to ensureCriticalColumns so cancel-task audit log INSERTs stop silently failing.)
+// CampaignPulse — deploy marker 2026-05-11 r29r (Bundle: (1) Vanishing AI critique fixed — getCachedCritique returns stale rows with a flag instead of null. (2) Amazon truncated-JSON parse: raised max_tokens 2000→4096 and added partial-JSON recovery helper. (3) pg deprecation fix: swapped Client for Pool — concurrent queries now safe, ready for pg@9. (4) Amazon Ads 425 backoff: skip report requests for 1h after a 425 to stop log spam. (5) SP-API orderItems throttle: 350ms delay between calls reduces 429 storms. Includes r29p log-spam + activity_log column migrations and r29q stale flag.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -556,6 +556,12 @@ async function syncAmazonOrders(daysBack, opts) {
           upserted++;
 
           if (!needItemsFetch) { itemsSkipped++; continue; }
+
+          // r29r: small delay between orderItems calls to stay under SP-API rate limit.
+          // Endpoint allows ~0.5 req/s sustained; we now pace at ~3 req/s (333ms) which
+          // is still over-budget but the existing 429 retry will catch what slips through.
+          // Without this, ~2000 orders in a single sync burst hits 429 repeatedly.
+          await new Promise(function(r){ setTimeout(r, 350); });
 
           // Pull line items — separate API call per order
           try {
@@ -1143,6 +1149,14 @@ async function fetchCampaignStats() {
   }
 
   if (!reportState.pendingReportId && (now - reportState.requested) > 2 * 60 * 60 * 1000) {
+    // r29r: extra backoff after 425 (Too Early). Amazon Ads API throttles report
+    // creation if requested too frequently. Without this we hit 425 every sync and
+    // log noise. Tracks last 425 in reportState; refuses to retry within 1 hour.
+    if (reportState.last425At && (now - reportState.last425At) < 60 * 60 * 1000) {
+      const minutesLeft = Math.round((60 * 60 * 1000 - (now - reportState.last425At)) / 60000);
+      console.log('[r29r] Skipping report request — under 425 backoff (' + minutesLeft + 'm left)');
+      return reportState.data || null;
+    }
     try {
       const reportRes = await axios.post(
         'https://advertising-api-eu.amazon.com/reporting/reports',
@@ -1163,9 +1177,16 @@ async function fetchCampaignStats() {
       );
       reportState.pendingReportId = reportRes.data.reportId;
       reportState.requested = now;
+      reportState.last425At = null;  // clear on success
       console.log('Report requested: ' + reportState.pendingReportId + ' (will check next sync)');
     } catch(e) {
-      console.error('Report request error: ' + e.message);
+      const status = e.response && e.response.status;
+      if (status === 425) {
+        reportState.last425At = now;
+        console.warn('[r29r] Report request 425 (Too Early) — backing off 1h');
+      } else {
+        console.error('Report request error: ' + e.message);
+      }
     }
   }
 
@@ -1363,9 +1384,22 @@ let db = null;
 async function initDB() {
   if (!process.env.DATABASE_URL) { console.log('No DATABASE_URL - skipping DB'); return; }
   try {
-    const { Client } = require('pg');
-    db = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-    await db.connect();
+    // r29r: switched from Client to Pool. Client only allows one in-flight query at a
+    // time; concurrent calls (Promise.all, parallel HTTP handlers) hit the pg@8
+    // "Calling client.query() when the client is already executing a query" deprecation
+    // and will outright fail on pg@9. Pool gives each query its own connection.
+    // Same .query() / .connect() interface — no other code changes needed.
+    const { Pool } = require('pg');
+    db = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 10,                          // connections per Railway service
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000
+    });
+    // Pool doesn't need explicit connect — first query opens a connection.
+    // Probe once to make sure DATABASE_URL is valid before the rest of init proceeds.
+    await db.query('SELECT 1');
     await db.query(`
       CREATE TABLE IF NOT EXISTS daily_snapshots (
         id SERIAL PRIMARY KEY,
@@ -5665,9 +5699,11 @@ async function runListingCritique(asin, groupKey, modelId) {
     ].join('\n');
 
     // Call Claude with the requested model
+    // r29r: raised max_tokens 2000 → 4096. AI was hitting the limit mid-response with
+    // detailed summary + 5-7 issues, causing JSON truncation and parse failures.
     const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
       model: modelId,
-      max_tokens: 2000,
+      max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }]
     }, {
       headers: {
@@ -5679,6 +5715,7 @@ async function runListingCritique(asin, groupKey, modelId) {
     });
 
     let critique = null;
+    let partialRecovery = false;
     const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
     // r29e: more forgiving parse. AI sometimes wraps the JSON in backticks or preamble
     // despite instructions — strip everything before first { and after last }.
@@ -5691,9 +5728,22 @@ async function runListingCritique(asin, groupKey, modelId) {
     try {
       critique = JSON.parse(cleaned);
     } catch(parseErr) {
-      console.error('[amz-critique] JSON parse failed: ' + parseErr.message);
-      console.error('[amz-critique] raw response (first 500 chars): ' + text.substring(0, 500));
-      throw new Error('AI returned malformed response. Try Re-analyse — usually transient.');
+      // r29r: if standard parse fails, try to recover partial JSON by regexing fields
+      // out of the raw text. Better to show summary + 2-3 issues than to fail entirely.
+      console.warn('[amz-critique] JSON parse failed, attempting recovery: ' + parseErr.message);
+      critique = _recoverPartialAmzCritique(text);
+      if (critique) {
+        partialRecovery = true;
+        console.log('[amz-critique] recovered partial: summary=' + (critique.summary ? 'yes' : 'no') + ', issues=' + (critique.issues ? critique.issues.length : 0));
+      } else {
+        console.error('[amz-critique] recovery also failed.');
+        console.error('[amz-critique] raw response (first 500 chars): ' + text.substring(0, 500));
+        throw new Error('AI returned malformed response. Try Re-analyse — usually transient.');
+      }
+    }
+    if (partialRecovery) {
+      critique._partial = true;  // surface to UI so user knows
+      critique._partialNote = 'AI response was truncated; showing what we could recover. Re-analyse for full output.';
     }
 
     // Cache result — store the model used + r20 signals hash so a fresh signal
@@ -11527,10 +11577,14 @@ async function getCachedCritique(productId) {
     if (!r.rows.length) return null;
     const row = r.rows[0];
     const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
-    if (ageHours > LPC_CACHE_HOURS) {
-      console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h)');
-      return null;
+    const isStale = ageHours > LPC_CACHE_HOURS;
+    if (isStale) {
+      console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h) — returning anyway, caller decides');
     }
+    // r29q: return the row regardless of age. Caller decides whether to use it
+    // (display: yes — show what was last analysed even if old; rerun-gate: no — let
+    // them re-run if stale). Previously returned null when stale, which caused the
+    // analysis to "vanish" from the modal on close+reopen after 24h.
     // Detect partial saves (truncated AI response): friction empty + diagnosis hints partial,
     // OR diagnosis says "(AI returned non-JSON" / "(Partial".
     const diagText = row.diagnosis || '';
@@ -11552,6 +11606,7 @@ async function getCachedCritique(productId) {
       score: parseFloat(row.score) || 0,
       cached: true,
       ageHours: ageHours,
+      stale: isStale,           // r29q: caller checks this
       partial: partialFlag,
       modelUsed: row.model_used || null  // r28
     };
@@ -11565,6 +11620,33 @@ async function getCachedCritique(productId) {
 // attempts to extract individual fields with regex so we can salvage what's there
 // rather than showing the agent nothing useful. Marks the result as partial so the
 // front-end can prompt for re-run with more tokens.
+// r29r: Amazon-shaped partial JSON recovery. Mirrors recoverPartialCritiqueJson
+// but for the Amazon critique shape: { summary, issues: [{title, severity, ...}] }.
+// Returns null if nothing recoverable, otherwise an object with whatever fields
+// the regex managed to extract.
+function _recoverPartialAmzCritique(rawText) {
+  const result = { summary: '', issues: [] };
+
+  const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sumMatch) result.summary = sumMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  // issues — array of {title, severity, evidence, fix} objects. Find each one even if
+  // the array isn't closed. Match objects that have a "title" field at minimum.
+  const issueMatches = rawText.match(/\{\s*"title"[^{}]*?\}/g);
+  if (issueMatches) {
+    issueMatches.forEach(function(s){
+      try {
+        // Attempt parse. If it fails (e.g. unclosed quote at truncation), skip it.
+        const obj = JSON.parse(s);
+        if (obj && obj.title) result.issues.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+  // If we have neither summary nor any issues, we've got nothing — caller treats as failure
+  if (!result.summary && (!result.issues || result.issues.length === 0)) return null;
+  return result;
+}
+
 function recoverPartialCritiqueJson(rawText) {
   const result = {
     diagnosis: '',
@@ -11804,15 +11886,16 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
         // Agent earned Opus by submitting feedback — let them through the 24h lock
         forceRefresh = true;
       } else {
-        // Agent requested refresh — only allowed if no cache exists yet (first run)
+        // Agent requested refresh — only allowed if no fresh cache exists (or stale)
+        // r29q: stale cache (>24h) lets the agent re-run; fresh cache blocks.
         const existing = await getCachedCritique(productId);
-        if (existing) {
-          // Cache exists; agent cannot force-refresh, return cached with a notice
+        if (existing && !existing.stale) {
+          // Fresh cache exists; agent cannot force-refresh, return cached with a notice
           existing.lockedForAgent = true;
           existing.lockMessage = 'Already analysed in the last 24h. Manager can re-analyse.';
           return res.json(existing);
         }
-        // No cache — agent's first request triggers a fresh run
+        // No cache OR stale cache — agent's request triggers a fresh run
         forceRefresh = true;
       }
     }
@@ -12015,8 +12098,10 @@ cron.schedule('30 3 * * *', async function() {
     for (const c of top) {
       try {
         // r29: cache-check first. If a fresh critique already exists, skip the AI call.
+        // r29q: with the new stale flag, "fresh" means !cached.stale (i.e. <24h old).
+        // Stale cache lets the cron re-analyse to keep data current.
         const cached = await getCachedCritique(String(c.shopifyProduct.id));
-        if (cached) {
+        if (cached && !cached.stale) {
           skipped++;
           continue;
         }
