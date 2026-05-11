@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-11 r29q (Shows "Stale >24h" tag on AI critique meta when cache is older than 24h. Cached critique no longer vanishes from modal after 24h.) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-08 r29o (Manager-only Account funnel card on home — Sessions → Cart → Checkout → Complete with 7-day trend) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -261,6 +261,12 @@ table.activity tr:last-child td { border-bottom: none; }
     <button class="nav-item" onclick="showPage('activity',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>
       <span>Activity log</span>
+    </button>
+    <button class="nav-item" onclick="window.location.href='/logistics.html'">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="5" width="9" height="7" rx="1"/><path d="M10 8h3l2 2v2h-5z"/><circle cx="4" cy="13" r="1.2"/><circle cx="12" cy="13" r="1.2"/></svg>
+      <span>Logistics</span>
+      <span id="logisticsAlertDot" style="display:none;margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(232,57,29,0.25);"></span>
+      <span id="logisticsBadge" class="nav-badge" style="display:none"></span>
     </button>
     <button class="nav-item" onclick="showPage('my-profile',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/></svg>
@@ -587,11 +593,16 @@ async function loadMe() {
     currentUser = me;
 
     // Department guard: Amazon-only agents shouldn't be on the Google dashboard
+    // Logistics agents also bounced to /logistics.html
     const dept = (me.department || '').toLowerCase();
     const role = (me.role || '').toLowerCase();
     const isMgr = role === 'manager' || dept === 'manager';
     if ((dept === 'amazon' || dept === 'agent') && !isMgr) {
       window.location.replace('/index.html');
+      return;
+    }
+    if (dept === 'logistics' && !isMgr && role !== 'owner') {
+      window.location.replace('/logistics.html');
       return;
     }
 
@@ -4013,16 +4024,13 @@ function renderCritiqueInlineInProductModal(j, productId) {
   if (metaDiv) {
     // r26b: model name now dynamic — was hardcoded "Opus 4.7" which made all
     // analyses look like Opus even when Haiku ran.
-    // r29q: also surface 'stale' flag — when cache row is >24h old. Tells user
-    // the analysis is from a previous day; they can re-run for fresh data.
     const ageNote = j.cached ? ('Cached ' + (j.ageHours < 1 ? '<1h' : Math.round(j.ageHours) + 'h') + ' ago') : 'Fresh analysis';
     let modelLabel = 'Opus';
     if (j.modelUsed) {
       const m = String(j.modelUsed).toLowerCase();
       modelLabel = m.indexOf('opus') >= 0 ? 'Opus' : (m.indexOf('haiku') >= 0 ? 'Haiku' : (m.indexOf('sonnet') >= 0 ? 'Sonnet' : j.modelUsed));
     }
-    const staleNote = j.stale ? ' · ⏱ Stale (>24h)' : '';
-    metaDiv.textContent = ageNote + ' · ' + modelLabel + (locked ? ' · Locked for 24h' : '') + staleNote + (j.partial ? ' · ⚠ Partial' : '');
+    metaDiv.textContent = ageNote + ' · ' + modelLabel + (locked ? ' · Locked for 24h' : '') + (j.partial ? ' · ⚠ Partial' : '');
   }
 }
 
@@ -4338,6 +4346,30 @@ loadGa4Status();
 refreshAll();
 setInterval(refreshAll, 5 * 60 * 1000);
 setInterval(loadGa4Status, 60 * 1000);
+
+// r30b — Logistics nav alert dot
+async function pollLogisticsAlerts() {
+  try {
+    const tk = localStorage.getItem('cp_token');
+    if (!tk) return;
+    const r = await fetch('/api/logistics/counts', { headers: { 'x-auth-token': tk } });
+    if (!r.ok) return;
+    const c = await r.json();
+    const dot = document.getElementById('logisticsAlertDot');
+    const badge = document.getElementById('logisticsBadge');
+    if (!dot || !badge) return;
+    if ((c.overdue_tasks || 0) > 0) {
+      dot.style.display = 'inline-block';
+      badge.style.display = 'inline-block';
+      badge.textContent = c.overdue_tasks;
+    } else {
+      dot.style.display = 'none';
+      badge.style.display = 'none';
+    }
+  } catch(e) {}
+}
+pollLogisticsAlerts();
+setInterval(pollLogisticsAlerts, 90 * 1000);
 
 // r27: restore last visited page on refresh. Skip 'dashboard' (already default)
 // and any unknown id (defensive — protects against stale localStorage values).
