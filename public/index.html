@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-11 r29s (All Campaigns: Today/7d toggle. Default 7d so campaign metrics match Amazon's UI. Cancel button 60min window, cancelled tasks in Complete tab. Includes all r29 fixes.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-11 r30 (Campaign Health page replaces All Campaigns. 7d/30d window toggle, matches Amazon Seller Central. New columns: TACOS, Cost/conv. Coloured urgency stripe per row. Action Centre: agent filter + search + All tab. Rules use real 7-day Amazon data via 3 new report streams.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -362,7 +362,7 @@ tbody tr:hover { background: var(--surface2); }
     </button>
     <button class="nav-item" onclick="showPage('campaigns',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 4h14M1 8h10M1 12h6"/></svg>
-      All campaigns
+      Campaign Health
     </button>
     <!-- r26: Action Centre — replaces AI analysis + Underperforming + redundant badge logic -->
     <button class="nav-item" onclick="showPage('action-centre',this)">
@@ -575,10 +575,10 @@ tbody tr:hover { background: var(--surface2); }
       </select>
       <!-- r16: Hidden campaigns reveal -->
       <button onclick="showHiddenCampaigns()" class="btn btn-ghost" style="font-size:13px;padding:8px 12px" title="View and restore hidden campaigns">👁 Hidden <span id="hidden-camps-count" style="font-size:11px;color:var(--text3);margin-left:3px"></span></button>
-      <!-- r29s: Today / 7d window toggle. Defaults to 7d so the dashboard matches Amazon's UI window. -->
-      <div style="display:inline-flex;border:1px solid var(--border2);border-radius:8px;overflow:hidden;font-size:13px" title="Switch the metrics columns between today's data and a rolling 7-day total">
-        <button id="window-today-btn" onclick="setCampWindow('today')" style="background:white;color:var(--text2);padding:8px 12px;border:none;cursor:pointer;font-family:inherit;font-size:13px">Today</button>
+      <!-- r30: 7d / 30d window toggle. Both windows use Amazon Seller Central's default attribution (sales7d / sales30d) so numbers match Amazon's UI. -->
+      <div style="display:inline-flex;border:1px solid var(--border2);border-radius:8px;overflow:hidden;font-size:13px" title="Switch the metrics columns between 7-day and 30-day windows">
         <button id="window-7d-btn" onclick="setCampWindow('7d')" style="background:var(--accent);color:white;padding:8px 12px;border:none;cursor:pointer;font-family:inherit;font-size:13px">7d</button>
+        <button id="window-30d-btn" onclick="setCampWindow('30d')" style="background:white;color:var(--text2);padding:8px 12px;border:none;cursor:pointer;font-family:inherit;font-size:13px">30d</button>
       </div>
     </div>
     <div class="tabs">
@@ -597,14 +597,16 @@ tbody tr:hover { background: var(--surface2); }
           <th onclick="sortCamps('impressions')" style="cursor:pointer">Impressions <span id="sort-impressions"></span></th>
           <th onclick="sortCamps('clicks')" style="cursor:pointer">Clicks <span id="sort-clicks"></span></th>
           <th onclick="sortCamps('ctr')" style="cursor:pointer">CTR <span id="sort-ctr"></span></th>
-          <th onclick="sortCamps('conversions')" style="cursor:pointer">Conversions <span id="sort-conversions"></span></th>
+          <th onclick="sortCamps('conversions')" style="cursor:pointer">Conv <span id="sort-conversions"></span></th>
           <th onclick="sortCamps('sales')" style="cursor:pointer">Revenue <span id="sort-sales"></span></th>
           <th onclick="sortCamps('spend')" style="cursor:pointer">Spend <span id="sort-spend"></span></th>
           <th onclick="sortCamps('acos')" style="cursor:pointer">ACOS <span id="sort-acos"></span></th>
+          <th title="TACOS = ad spend / Shopify revenue (total ACOS across all traffic, not just ad-attributed)">TACOS</th>
+          <th title="Cost per conversion = ad spend / conversions">Cost/conv</th>
           <th>Status</th>
           <th>Action</th>
         </tr></thead>
-        <tbody id="all-table"><tr><td colspan="14"><div class="loading"><div class="spinner"></div> Loading...</div></td></tr></tbody>
+        <tbody id="all-table"><tr><td colspan="16"><div class="loading"><div class="spinner"></div> Loading...</div></td></tr></tbody>
       </table></div>
     </div>
   </div>
@@ -629,8 +631,17 @@ tbody tr:hover { background: var(--surface2); }
       <button class="tab-btn active" id="ac-tab-fixnow" onclick="showActionCentreTab('fixnow',this)">🔴 Fix now <span class="tab-count" id="ac-fixnow-count">0</span></button>
       <button class="tab-btn" id="ac-tab-lookat" onclick="showActionCentreTab('lookat',this)">🟠 Look at <span class="tab-count" id="ac-lookat-count">0</span></button>
       <button class="tab-btn" id="ac-tab-scale" onclick="showActionCentreTab('scale',this)">🟢 Scale <span class="tab-count" id="ac-scale-count">0</span></button>
+      <button class="tab-btn" id="ac-tab-all" onclick="showActionCentreTab('all',this)">📋 All <span class="tab-count" id="ac-all-count">0</span></button>
       <div style="flex:1"></div>
       <button class="btn btn-ghost" style="font-size:12px" onclick="loadActionCentre(true)" title="Refresh — pulls fresh from server">↻ Refresh</button>
+    </div>
+
+    <!-- r30: Agent + search filters -->
+    <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="ac-search" placeholder="Search campaigns..." oninput="renderActionCentreList()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;width:260px;font-family:inherit">
+      <select id="ac-agent-filter" onchange="renderActionCentreList()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer">
+        <option value="">All agents</option>
+      </select>
     </div>
 
     <div id="ac-list"><div class="loading"><div class="spinner"></div> Loading Action Centre…</div></div>
@@ -1304,23 +1315,25 @@ function getTaskAgentName(t) { return getTaskAgent(t); }
 let allCampaigns = [];
 let currentFilter = 'action';
 let sortState = { col: null, dir: 1 };
-// r29s: which date window the All Campaigns table reads — 'today' or '7d'.
-// Persisted to localStorage so it survives reloads. Default '7d' matches Amazon's
-// own console UI window and shows meaningful numbers (today-only often reads as £0).
-let campWindow = localStorage.getItem('amzCampWindow') || '7d';
+// r30: which date window the Campaign Health table reads — '7d' or '30d'.
+// Persisted to localStorage. Default '7d' for daily decision-making; flip to 30d
+// for trend / monthly review. Both windows use Amazon Seller Central default attribution.
+let campWindow = (function(){
+  const stored = localStorage.getItem('amzCampWindow');
+  return (stored === '30d') ? '30d' : '7d';
+})();
 function setCampWindow(w) {
-  campWindow = (w === 'today') ? 'today' : '7d';
+  campWindow = (w === '30d') ? '30d' : '7d';
   localStorage.setItem('amzCampWindow', campWindow);
-  // Update button styling
-  const todayBtn = document.getElementById('window-today-btn');
   const sevenBtn = document.getElementById('window-7d-btn');
-  if (todayBtn && sevenBtn) {
-    if (campWindow === 'today') {
-      todayBtn.style.background = 'var(--accent)'; todayBtn.style.color = 'white';
-      sevenBtn.style.background = 'white'; sevenBtn.style.color = 'var(--text2)';
-    } else {
+  const thirtyBtn = document.getElementById('window-30d-btn');
+  if (sevenBtn && thirtyBtn) {
+    if (campWindow === '7d') {
       sevenBtn.style.background = 'var(--accent)'; sevenBtn.style.color = 'white';
-      todayBtn.style.background = 'white'; todayBtn.style.color = 'var(--text2)';
+      thirtyBtn.style.background = 'white'; thirtyBtn.style.color = 'var(--text2)';
+    } else {
+      thirtyBtn.style.background = 'var(--accent)'; thirtyBtn.style.color = 'white';
+      sevenBtn.style.background = 'white'; sevenBtn.style.color = 'var(--text2)';
     }
   }
   renderAllCampaigns();
@@ -1335,7 +1348,7 @@ function sortReport(col) {
   if (ind) ind.textContent = reportSortState.dir === -1 ? ' ↓' : ' ↑';
   renderReport();
 }
-const pageTitles = { dashboard:'Dashboard', campaigns:'All campaigns', 'action-centre':'Action Centre', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
+const pageTitles = { dashboard:'Dashboard', campaigns:'Campaign Health', 'action-centre':'Action Centre', ai:'AI analysis', keywords:'Keyword Intelligence', report:'Budget exhaustion report', activity:'Activity log', settings:'Settings', tasks:'Tasks', 'agent-performance':'Agent Performance', stuck:'Underperforming', history:'Daily History', users:'User Management', 'my-settings':'My Profile' };
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showPage(name, btn) {
@@ -1617,77 +1630,92 @@ function dismissAlert(campaignId) {
 }
 
 // ── Campaign table ─────────────────────────────────────────────────────────
+// r30: completely reworked.
+//   - All metric columns read 7d or 30d block depending on campWindow.
+//   - Status badge derives from the same rules Action Centre uses (single source of truth).
+//   - TACOS computed client-side from ad spend ÷ Shopify revenue if available, '—' otherwise.
+//   - Cost/conv ÷ window's conversions.
+//   - Coloured left border on each row matches urgency (red/amber/green).
 function renderCampaignTable(tableId, campaigns, showAction) {
   const tbody = document.getElementById(tableId);
-  if (!campaigns.length) { tbody.innerHTML = '<tr><td colspan="14"><div class="empty">No campaigns found</div></td></tr>'; return; }
-  // r29s: select which window's metrics to show. Defaults to 7d on the all-table.
-  // The summary table on the main page always uses today (single-day view).
-  const use7d = (tableId === 'all-table' && campWindow === '7d');
+  if (!campaigns.length) { tbody.innerHTML = '<tr><td colspan="16"><div class="empty">No campaigns found</div></td></tr>'; return; }
+  const use30d = (tableId === 'all-table' && campWindow === '30d');
+  // Shopify totals so we can compute TACOS (% of total Shopify revenue eaten by ad spend)
+  const shopify7d = (window.appData && appData.metrics && parseFloat(appData.metrics.totalShopifyRevenue7d || 0)) || 0;
+  const shopify30d = (window.appData && appData.metrics && parseFloat(appData.metrics.totalShopifyRevenue30d || 0)) || 0;
+
   tbody.innerHTML = campaigns.map(c => {
-    const outOfBudget = c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
-    const budgetLow = c.budgetPct >= 80 && !outOfBudget;
-    const acosHigh = c.acos > 35 && c.spend > 5;
-    // r25c: catch the silent waster — spend > 0 but zero sales today (no ACOS to fire on).
-    // This is the most common false-positive on the previous "Healthy" logic.
-    const wasted = !outOfBudget && (c.spend > 5) && (!c.sales || c.sales <= 0);
-    // r25c: chronic underperformer — uses 7-day ACOS if backend provides it (acos7d).
-    // Falls back to today's ACOS only if 7d not available.
-    const acos7d = (c.acos7d != null) ? c.acos7d : null;
-    const chronicAcos = acos7d != null && acos7d > 40 && (c.spend7d || 0) > 20;
+    // Resolve metrics for the chosen window
+    const spend = use30d ? (c.spend30d != null ? c.spend30d : 0) : (c.spend7d != null ? c.spend7d : 0);
+    const sales = use30d ? (c.sales30d != null ? c.sales30d : 0) : (c.sales7d != null ? c.sales7d : 0);
+    const clicks = use30d ? (c.clicks30d || 0) : (c.clicks7d || 0);
+    const impressions = use30d ? (c.impressions30d || 0) : (c.impressions7d || 0);
+    const conversions = use30d ? (c.conversions30d || 0) : (c.conversions7d || 0);
+    const ctr = use30d ? (c.ctr30d || 0) : (c.ctr7d || 0);
+    const acos = sales > 0 ? +((100 * spend / sales).toFixed(1)) : 0;
+    const cpcv = use30d ? c.costPerConv30d : c.costPerConv7d;
+    const shopifyRev = use30d ? shopify30d : shopify7d;
+    const tacos = (shopifyRev > 0 && spend > 0) ? (100 * spend / shopifyRev).toFixed(1) + '%' : '—';
+    const dailyBudget = c.dailyBudget || 0;
+    const budgetPct = c.budgetPct || 0;
+    const budgetRemaining = c.budgetRemaining != null ? c.budgetRemaining : dailyBudget;
+    const outOfBudget = budgetRemaining <= 0.01 && dailyBudget > 0;
+    const budgetLow = budgetPct >= 80 && !outOfBudget;
     const isAuto = c.targetingType === 'auto';
-    const budgetColor = outOfBudget ? 'color:var(--red);font-weight:600' : budgetLow ? 'color:var(--amber);font-weight:500' : '';
-    // r29s: when 7d toggle is on, use 7d ACOS for colour class
-    const displayedAcos = use7d ? (c.acos7d || 0) : c.acos;
-    const acosClass = displayedAcos > 35 ? 'acos-high' : displayedAcos > 25 ? 'acos-warn' : displayedAcos > 0 ? 'acos-ok' : '';
+
+    // Status — mirror Action Centre rules using 7d as the basis (rules are 7d-based regardless of toggle)
+    const spend7 = c.spend7d || 0;
+    const sales7 = c.sales7d || 0;
+    const clicks7 = c.clicks7d || 0;
+    const acos7 = sales7 > 0 ? +((100 * spend7 / sales7).toFixed(1)) : null;
+    let urgency = 'healthy';   // healthy | scale | p3 | p2 | p1
+    let statusLabel = 'Healthy', statusKind = 'green';
+    if (outOfBudget) { urgency = 'p1'; statusLabel = 'Out of budget'; statusKind = 'red'; }
+    else if (acos7 != null && acos7 > 40 && spend7 > 20) { urgency = 'p1'; statusLabel = 'Chronic ACOS'; statusKind = 'red'; }
+    else if (spend7 >= 15 && sales7 === 0) { urgency = 'p1'; statusLabel = 'No revenue'; statusKind = 'red'; }
+    else if (sales7 === 0 && clicks7 >= 50) { urgency = 'p1'; statusLabel = 'Clicks no sales'; statusKind = 'red'; }
+    else if (acos7 != null && acos7 > 25 && acos7 <= 40 && spend7 > 10) { urgency = 'p2'; statusLabel = 'ACOS high'; statusKind = 'amber'; }
+    else if (budgetLow) { urgency = 'p2'; statusLabel = 'Budget low'; statusKind = 'amber'; }
+    else if (acos7 != null && acos7 <= 15 && spend7 > 20 && budgetPct < 90) { urgency = 'scale'; statusLabel = 'Scale ↗'; statusKind = 'blue'; }
+
+    const stripeColour = urgency === 'p1' ? '#dc2626' : urgency === 'p2' ? '#f59e0b' : urgency === 'scale' ? '#3b82f6' : '#9ca3af';
+    const acosClass = acos > 35 ? 'acos-high' : acos > 25 ? 'acos-warn' : acos > 0 ? 'acos-ok' : '';
     const progColor = outOfBudget ? 'var(--red)' : budgetLow ? 'var(--amber)' : 'var(--green)';
-    const noData = c.spend === null;
-    let statusBadge = '<span class="badge badge-green"><span class="dot" style="background:var(--green)"></span>Healthy</span>';
-    // r25c: priority order — out-of-budget > wasted > acos high > chronic > budget low > healthy.
-    // "Wasted" beats "ACOS high" because zero sales is the bigger red flag.
-    if (outOfBudget) statusBadge = '<span class="badge badge-red"><span class="dot" style="background:var(--red)"></span>Out of budget</span>';
-    else if (wasted) statusBadge = '<span class="badge badge-red" title="Spent £' + (c.spend || 0).toFixed(2) + ' today with no sales"><span class="dot" style="background:var(--red)"></span>Wasted spend</span>';
-    else if (acosHigh) statusBadge = '<span class="badge badge-red"><span class="dot" style="background:var(--red)"></span>ACOS high</span>';
-    else if (chronicAcos) statusBadge = '<span class="badge badge-amber" title="7-day ACOS ' + acos7d.toFixed(0) + '% on £' + (c.spend7d || 0).toFixed(0) + ' spend"><span class="dot" style="background:var(--amber)"></span>Underperforming</span>';
-    else if (budgetLow) statusBadge = '<span class="badge badge-amber"><span class="dot" style="background:var(--amber)"></span>Budget low</span>';
+    const budgetColor = outOfBudget ? 'color:var(--red);font-weight:600' : budgetLow ? 'color:var(--amber);font-weight:500' : '';
+
+    const statusBadge = '<span class="badge badge-' + statusKind + '"><span class="dot" style="background:var(--' + statusKind + ')"></span>' + statusLabel + '</span>';
+
     let action = '<button class="btn btn-ghost" style="font-size:12px">View</button>';
     if (showAction) {
       if (outOfBudget) action = '<div class="ag"><button class="btn btn-green" data-cid="' + c.campaignId + '" onclick="approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">Add budget</button></div>';
-      else if (acosHigh) action = '<div class="ag"><button class="btn btn-amber" style="font-size:12px">Fix bids</button></div>';
+      else if (urgency === 'p1') action = '<div class="ag"><button class="btn btn-amber" style="font-size:12px">Review</button></div>';
       else if (budgetLow) action = '<div class="ag"><button class="btn btn-green" data-cid="' + c.campaignId + '" onclick="approveBudget(this.getAttribute(&quot;data-cid&quot;),&quot;&quot;)">Add budget</button></div>';
-      else action = '<button class="btn btn-ghost" style="font-size:12px">Scale ↗</button>';
+      else if (urgency === 'scale') action = '<button class="btn btn-ghost" style="font-size:12px">Scale ↗</button>';
+      else action = '<button class="btn btn-ghost" style="font-size:12px">View</button>';
     }
-    // r16: Hide button — appended to action cell
     const escName = escHtml(c.name).replace(/'/g, "\\'");
     const hideBtnHtml = ' <button class="btn btn-ghost" style="font-size:11px;padding:2px 6px;color:var(--text3)" onclick="hideCampaign(\'' + c.campaignId + '\',\'' + escName + '\')" title="Hide this campaign from the dashboard">🗙</button>';
     action = action + hideBtnHtml;
     const typeBadge = isAuto ? '<span class="badge badge-blue" style="font-size:10px">Auto</span>' : '<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>';
-    // r29s: column values switch based on window toggle
-    const dispImpressions = use7d ? (c.impressions7d || 0) : (c.impressions || 0);
-    const dispClicks      = use7d ? (c.clicks7d || 0)      : (c.clicks || 0);
-    const dispCtr         = use7d ? (c.ctr7d != null ? c.ctr7d.toFixed(2) : '0.00') : (c.ctr || '0.00');
-    const dispConversions = use7d ? (c.conversions7d || 0) : (c.conversions || 0);
-    const dispSales       = use7d ? (c.sales7d || 0)       : c.sales;
-    const dispSpend       = use7d ? (c.spend7d || 0)       : c.spend;
-    const dispAcos        = use7d ? (c.acos7d || 0)        : c.acos;
-    // r24: rows on the All Campaigns table open a detail modal on click. Click handler
-    // ignores clicks that originate inside a button/anchor/input so existing inline
-    // action buttons (Add budget, Hide, etc.) keep working unchanged.
     const rowAttr = (tableId === 'all-table')
-      ? ' data-camp-id="' + escHtml(String(c.campaignId)) + '" onclick="onAllCampaignRowClick(event, this)" style="cursor:pointer"'
+      ? ' data-camp-id="' + escHtml(String(c.campaignId)) + '" onclick="onAllCampaignRowClick(event, this)" style="cursor:pointer;border-left:3px solid ' + stripeColour + '"'
       : '';
+    const noMetrics = spend === 0 && sales === 0 && impressions === 0;
     return `<tr${rowAttr}>
       <td><div class="camp-name">${escHtml(c.name)}</div><div class="camp-meta">${c.campaignId}</div></td>
       <td><div class="camp-name">${escHtml(c.portfolio||'—')}</div><div class="camp-meta">${escHtml(c.agent||'')}</div></td>
       ${tableId === 'all-table' ? '<td>' + typeBadge + '</td>' : ''}
-      ${tableId === 'all-table' ? '<td class="mono">£' + c.dailyBudget + '</td>' : ''}
-      <td><div class="mono" style="${budgetColor}">£${c.budgetRemaining} / £${c.dailyBudget}</div><div class="prog"><div class="prog-fill" style="width:${Math.min(c.budgetPct,100)}%;background:${progColor}"></div></div></td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispImpressions.toLocaleString()}</td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispClicks.toLocaleString()}</td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispCtr + '%'}</td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispConversions}</td>
-      <td class="mono">${dispSales !== null && dispSales !== undefined ? '£' + (typeof dispSales === 'number' ? dispSales.toFixed(2) : dispSales) : '<span style="color:var(--text3);font-size:11px">loading</span>'}</td>
-      <td class="mono">${dispSpend !== null && dispSpend !== undefined ? '£' + (typeof dispSpend === 'number' ? dispSpend.toFixed(2) : dispSpend) : '<span style="color:var(--text3);font-size:11px">loading</span>'}</td>
-      <td class="mono ${acosClass}">${dispAcos > 0 ? dispAcos + '%' : '—'}</td>
+      ${tableId === 'all-table' ? '<td class="mono">£' + dailyBudget + '</td>' : ''}
+      <td><div class="mono" style="${budgetColor}">£${budgetRemaining} / £${dailyBudget}</div><div class="prog"><div class="prog-fill" style="width:${Math.min(budgetPct,100)}%;background:${progColor}"></div></div></td>
+      <td class="mono">${noMetrics ? '<span style="color:var(--text3)">—</span>' : impressions.toLocaleString()}</td>
+      <td class="mono">${noMetrics ? '<span style="color:var(--text3)">—</span>' : clicks.toLocaleString()}</td>
+      <td class="mono">${noMetrics ? '<span style="color:var(--text3)">—</span>' : ctr.toFixed(2) + '%'}</td>
+      <td class="mono">${noMetrics ? '<span style="color:var(--text3)">—</span>' : conversions}</td>
+      <td class="mono">${noMetrics ? '<span style="color:var(--text3)">—</span>' : '£' + sales.toFixed(2)}</td>
+      <td class="mono">${noMetrics ? '<span style="color:var(--text3)">—</span>' : '£' + spend.toFixed(2)}</td>
+      <td class="mono ${acosClass}">${acos > 0 ? acos.toFixed(1) + '%' : '—'}</td>
+      <td class="mono" style="color:var(--text2)">${tacos}</td>
+      <td class="mono">${cpcv != null ? '£' + cpcv.toFixed(2) : '<span style="color:var(--text3)">—</span>'}</td>
       <td>${statusBadge}</td>
       <td>${action}</td>
     </tr>`;
@@ -1744,8 +1772,23 @@ function renderAllCampaigns() {
 }
 
 function getFilteredCampaigns(type) {
-  if (type === 'action') return allCampaigns.filter(c => c.budgetRemaining <= 0.01 || c.acos > 35 || c.budgetPct >= 80);
-  if (type === 'healthy') return allCampaigns.filter(c => c.budgetRemaining > 0.01 && c.acos <= 35 && c.budgetPct < 80);
+  // r30: "action" and "healthy" filters now derive from 7-day data using the
+  // same logic Action Centre uses, so this page agrees with the Action Centre count.
+  function isNeedsAction(c) {
+    const outOfBudget = c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
+    const budgetLow = c.budgetPct >= 80 && !outOfBudget;
+    const s7 = c.spend7d || 0, sa7 = c.sales7d || 0, cl7 = c.clicks7d || 0;
+    const acos7 = sa7 > 0 ? (100 * s7 / sa7) : null;
+    if (outOfBudget) return true;
+    if (acos7 != null && acos7 > 40 && s7 > 20) return true;          // chronic ACOS
+    if (s7 >= 15 && sa7 === 0) return true;                            // no revenue
+    if (sa7 === 0 && cl7 >= 50) return true;                           // clicks no sales
+    if (acos7 != null && acos7 > 25 && acos7 <= 40 && s7 > 10) return true; // high ACOS
+    if (budgetLow) return true;
+    return false;
+  }
+  if (type === 'action') return allCampaigns.filter(isNeedsAction);
+  if (type === 'healthy') return allCampaigns.filter(function(c){ return !isNeedsAction(c); });
   return [...allCampaigns];
 }
 
@@ -6996,6 +7039,13 @@ async function loadActionCentre(force) {
     _acState.scale = j.scale || [];
     _acState.insight = j.strategicInsight || '';
     _acState.cached = true;
+    // r30: reset agent dropdown populate flag so next render rebuilds the list
+    const agentSelReset = document.getElementById('ac-agent-filter');
+    if (agentSelReset) {
+      // Keep first option ("All agents"), drop the rest
+      while (agentSelReset.options.length > 1) agentSelReset.remove(1);
+      agentSelReset._populated = false;
+    }
 
     // Top-strip metrics
     document.getElementById('ac-p1-count').textContent = _acState.fixnow.length;
@@ -7033,14 +7083,45 @@ function showActionCentreTab(tab, btnEl) {
 }
 
 function renderActionCentreList(tab) {
+  // r30: tab now defaults to the stored current tab. Honours ac-search and ac-agent-filter.
+  // New 'all' tab combines fixnow + lookat + scale.
   const list = document.getElementById('ac-list');
   const insightEl = document.getElementById('ac-insight');
   if (!list) return;
-  const items = _acState[tab] || [];
+  const useTab = tab || _acState.currentTab || 'fixnow';
+  let items = [];
+  if (useTab === 'all') {
+    items = [].concat(_acState.fixnow || [], _acState.lookat || [], _acState.scale || []);
+  } else {
+    items = _acState[useTab] || [];
+  }
+
+  // r30: populate agent dropdown from union of all items (only once per load)
+  const agentSel = document.getElementById('ac-agent-filter');
+  if (agentSel && !agentSel._populated) {
+    const allItems = [].concat(_acState.fixnow || [], _acState.lookat || [], _acState.scale || []);
+    const agents = Array.from(new Set(allItems.map(function(i){ return (i.agent || '').trim(); }).filter(Boolean))).sort();
+    agents.forEach(function(a){
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = a;
+      agentSel.appendChild(opt);
+    });
+    agentSel._populated = true;
+  }
+
+  // Apply search + agent filter
+  const search = (document.getElementById('ac-search')?.value || '').toLowerCase().trim();
+  const agent = (document.getElementById('ac-agent-filter')?.value || '').trim();
+  if (search) items = items.filter(function(i){ return (i.campaignName || i.title || '').toLowerCase().includes(search); });
+  if (agent)  items = items.filter(function(i){ return (i.agent || '') === agent; });
+
+  // 'All' tab count
+  const allCountEl = document.getElementById('ac-all-count');
+  if (allCountEl) allCountEl.textContent = ((_acState.fixnow || []).length + (_acState.lookat || []).length + (_acState.scale || []).length);
 
   // Strategic insight banner — only on Fix Now tab
   if (insightEl) {
-    if (tab === 'fixnow' && _acState.insight) {
+    if (useTab === 'fixnow' && _acState.insight) {
       insightEl.style.display = 'block';
       insightEl.innerHTML = '<strong style="color:#92400e">Pattern across the account:</strong> ' + escHtml(_acState.insight);
     } else {
@@ -7052,9 +7133,10 @@ function renderActionCentreList(tab) {
     const msgs = {
       fixnow: '✅ Nothing critical. Switch to "Look at" or "Scale" tabs.',
       lookat: '✅ Nothing on the watch list right now.',
-      scale: 'No campaigns ready to scale. Check Fix now first.'
+      scale: 'No campaigns ready to scale. Check Fix now first.',
+      all: 'No campaigns match the current filter.'
     };
-    list.innerHTML = '<div class="empty" style="padding:60px 20px;text-align:center;color:var(--text3);font-size:14px">' + msgs[tab] + '</div>';
+    list.innerHTML = '<div class="empty" style="padding:60px 20px;text-align:center;color:var(--text3);font-size:14px">' + (msgs[useTab] || 'Nothing to show.') + '</div>';
     return;
   }
 
