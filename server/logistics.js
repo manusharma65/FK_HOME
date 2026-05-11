@@ -212,6 +212,10 @@ async function ensureLogisticsSchema(db) {
      )`,
     `CREATE INDEX IF NOT EXISTS idx_lg_field_audit_plan ON lg_field_audit(plan_id, field_name, created_at DESC)`,
 
+    // r30e — extend audit to record old_value so we can show before/after edits past grace window
+    `ALTER TABLE lg_field_audit ADD COLUMN IF NOT EXISTS old_value TEXT`,
+    `ALTER TABLE lg_field_audit ADD COLUMN IF NOT EXISTS within_grace BOOLEAN DEFAULT TRUE`,
+
     // ── r30d additions ─────────────────────────────────────────────────────
     // File slot grouping + pinning
     `ALTER TABLE lg_plan_files ADD COLUMN IF NOT EXISTS slot_group TEXT DEFAULT 'other'`,
@@ -623,19 +627,57 @@ async function logSlipIfChanged(db, planId, field, oldVal, newVal, reason, reaso
 }
 
 // r30c — record who last set each tracked field (supplier vs agent) for override badges
+// r30e — expanded to all updatable fields, captures old_value + within_grace flag (24h grace window)
 const AUDITED_FIELDS = [
-  'approx_loading_date', 'actual_loading_date', 'container_number', 'tracking_number',
-  'bl_number', 'bl_date', 'final_amount_usd',
-  'telex_supplier_declared', 'telex_supplier_declared_date',
-  'supplier_final_payment_acknowledged'
+  // Dates
+  'deposit_received_date', 'approx_loading_date', 'actual_loading_date',
+  'bl_date', 'original_eta', 'new_eta',
+  'final_payment_received_date', 'shipper_payment_date',
+  'telex_supplier_declared_date', 'telex_release_date',
+  'docs_sent_to_import_agent_date', 'duty_invoice_received_date', 'duty_paid_date',
+  'customs_cleared_date', 'delivery_date', 'local_delivery_booked_date',
+  'campbells_in_date', 'campbells_out_date', 'campbells_estimated_retrieval',
+  // Text
+  'container_number', 'tracking_number', 'shipper_name',
+  'bl_number', 'loading_port',
+  'remarks', 'shipping_notes',
+  'campbells_reference', 'campbells_routing_reason',
+  'local_delivery_partner', 'disposition',
+  // Numbers / amounts
+  'total_amount_usd', 'deposit_usd', 'deposit_pct', 'final_amount_usd',
+  'container_price_usd', 'duty_invoice_amount_gbp', 'campbells_weekly_gbp',
+  'free_days',
+  // Booleans
+  'shipper_payment_made', 'telex_confirmed_by_agent', 'telex_supplier_declared',
+  'supplier_final_payment_acknowledged', 'supplier_form_locked'
 ];
-async function logFieldAudit(db, planId, field, newVal, setBy, setByRole) {
+const GRACE_WINDOW_HOURS = 24;
+async function logFieldAudit(db, planId, field, oldVal, newVal, setBy, setByRole) {
   if (!AUDITED_FIELDS.includes(field)) return;
+  // Skip no-op changes
+  const oldStr = oldVal == null ? null : String(oldVal);
+  const newStr = newVal == null ? null : String(newVal);
+  // Date columns may serialize as Date objects — normalize for comparison
+  const normalize = function(v) { if (v == null) return null; const s = String(v); if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10); return s; };
+  if (normalize(oldStr) === normalize(newStr)) return;
   try {
-    const v = newVal == null ? null : String(newVal).slice(0, 200);
+    // Determine if this change is within the grace window:
+    // Grace = no PRIOR audit entry exists for this field, OR the most recent entry is < 24h ago
+    const prior = await db.query(
+      'SELECT created_at FROM lg_field_audit WHERE plan_id=$1 AND field_name=$2 ORDER BY created_at ASC LIMIT 1',
+      [planId, field]
+    );
+    let withinGrace = true;
+    if (prior.rows.length) {
+      const firstSet = new Date(prior.rows[0].created_at);
+      const ageMs = Date.now() - firstSet.getTime();
+      withinGrace = (ageMs <= GRACE_WINDOW_HOURS * 3600 * 1000);
+    }
+    const ov = oldVal == null ? null : String(oldVal).slice(0, 200);
+    const nv = newVal == null ? null : String(newVal).slice(0, 200);
     await db.query(
-      `INSERT INTO lg_field_audit (plan_id, field_name, new_value, set_by, set_by_role) VALUES ($1,$2,$3,$4,$5)`,
-      [planId, field, v, setBy, setByRole]
+      `INSERT INTO lg_field_audit (plan_id, field_name, old_value, new_value, set_by, set_by_role, within_grace) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [planId, field, ov, nv, setBy, setByRole, withinGrace]
     );
   } catch(e) { console.error('[field audit] ' + e.message); }
 }
@@ -777,7 +819,7 @@ module.exports = function(getDb) {
           sets.push(f + '=$' + (i++)); vals.push(v); changes.push(f);
           if (SLIP_TRACKED_FIELDS.includes(f))
             await logSlipIfChanged(db, planRow.id, f, planRow[f], v, req.body.slip_reason, req.body.slip_reason_category, 'supplier:' + (req.body.submitted_by || 'unknown'));
-          await logFieldAudit(db, planRow.id, f, v, req.body.submitted_by || 'unknown', 'supplier');
+          await logFieldAudit(db, planRow.id, f, planRow[f], v, req.body.submitted_by || 'unknown', 'supplier');
         }
       }
       if (!sets.length) return res.status(400).json({ error: 'No fields' });
@@ -1020,14 +1062,21 @@ module.exports = function(getDb) {
         cf.forEach(f => { (byClaim[f.claim_id] = byClaim[f.claim_id] || []).push(f); });
         claims.forEach(c => { c.files = byClaim[c.id] || []; });
       }
-      // r30c — build per-field provenance: last supplier set + last agent set, used for override badges
-      const auditRows = (await db.query('SELECT field_name, new_value, set_by, set_by_role, created_at FROM lg_field_audit WHERE plan_id=$1 ORDER BY created_at ASC', [plan.id])).rows;
+      // r30c/r30e — per-field provenance + full edit history past grace window
+      const auditRows = (await db.query('SELECT field_name, old_value, new_value, set_by, set_by_role, within_grace, created_at FROM lg_field_audit WHERE plan_id=$1 ORDER BY created_at ASC', [plan.id])).rows;
       const field_audit = {};
       auditRows.forEach(function(a) {
-        if (!field_audit[a.field_name]) field_audit[a.field_name] = {};
+        if (!field_audit[a.field_name]) field_audit[a.field_name] = { history: [], post_grace_edits: 0 };
+        // Last-set per role (for r30c supplier badges)
         field_audit[a.field_name][a.set_by_role === 'supplier' ? 'supplier' : 'agent'] = {
           value: a.new_value, by: a.set_by, at: a.created_at, role: a.set_by_role
         };
+        // Full history
+        field_audit[a.field_name].history.push({
+          old_value: a.old_value, new_value: a.new_value,
+          by: a.set_by, role: a.set_by_role, at: a.created_at, within_grace: a.within_grace
+        });
+        if (a.within_grace === false) field_audit[a.field_name].post_grace_edits++;
       });
       res.json({ plan: enrichPlan(plan, sup), supplier: sup, files, issues, activity, tasks, slips, production_checks: prodChecks, field_audit: field_audit, claims: claims });
     } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1093,7 +1142,7 @@ module.exports = function(getDb) {
           sets.push(f + '=$' + (i++)); vals.push(v); changes.push(f);
           if (SLIP_TRACKED_FIELDS.includes(f))
             await logSlipIfChanged(db, id, f, before[f], v, req.body.slip_reason, req.body.slip_reason_category, actor(req));
-          await logFieldAudit(db, id, f, v, actor(req), isManager(req.user) ? 'manager' : 'agent');
+          await logFieldAudit(db, id, f, before[f], v, actor(req), isManager(req.user) ? 'manager' : 'agent');
         }
       }
       if (!sets.length) return res.status(400).json({ error: 'No fields' });
@@ -1510,6 +1559,44 @@ module.exports = function(getDb) {
     try { const r = await db.query('SELECT * FROM lg_date_slips WHERE plan_id=$1 ORDER BY created_at DESC', [parseInt(req.params.id)]); res.json({ slips: r.rows }); }
     catch(e) { res.status(500).json({ error: e.message }); }
   });
+
+  // r30e — centralized "Recently edited (post-grace)" feed for dashboard
+  // Combines field edits past grace window AND file activity (uploads, deletes, pins)
+  router.get('/audit/recent', async function(req, res) {
+    const db = req._db;
+    try {
+      const days = Math.min(parseInt(req.query.days || '7'), 60);
+      const limit = Math.min(parseInt(req.query.limit || '100'), 200);
+      // Field edits past grace
+      const fieldEdits = (await db.query(`
+        SELECT 'field' AS kind, fa.field_name AS detail_key, fa.old_value, fa.new_value,
+               fa.set_by AS by_user, fa.set_by_role AS by_role, fa.created_at,
+               p.id AS plan_id, p.plan_number, s.name AS supplier_name
+        FROM lg_field_audit fa
+        JOIN lg_plans p ON p.id = fa.plan_id
+        LEFT JOIN lg_suppliers s ON s.id = p.supplier_id
+        WHERE fa.within_grace = FALSE
+          AND fa.created_at > NOW() - ($1 || ' days')::INTERVAL
+        ORDER BY fa.created_at DESC
+        LIMIT $2`, [String(days), limit])).rows;
+      // File activity (uploads, deletes, pins) — always shown regardless of grace
+      const fileEvents = (await db.query(`
+        SELECT 'file' AS kind, a.action AS detail_key, NULL AS old_value, a.detail AS new_value,
+               a.actor_name AS by_user, NULL AS by_role, a.created_at,
+               p.id AS plan_id, p.plan_number, s.name AS supplier_name
+        FROM lg_activity a
+        JOIN lg_plans p ON p.id = a.plan_id
+        LEFT JOIN lg_suppliers s ON s.id = p.supplier_id
+        WHERE a.action IN ('file_uploaded','file_deleted','file_pinned','file_unpinned','supplier_file')
+          AND a.created_at > NOW() - ($1 || ' days')::INTERVAL
+        ORDER BY a.created_at DESC
+        LIMIT $2`, [String(days), limit])).rows;
+      // Merge + sort by created_at desc, cap at limit
+      const all = fieldEdits.concat(fileEvents).sort((a,b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, limit);
+      res.json({ edits: all, days: days });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
 
   router.get('/dashboard', async function(req, res) {
     const db = req._db;

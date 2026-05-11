@@ -362,13 +362,82 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
 .viewer-iframe { width: 100%; height: 100%; border: none; background: white; min-height: 70vh; }
 .viewer-fallback { background: var(--surface); color: var(--text); padding: 40px; border-radius: 10px; text-align: center; }
 .viewer-fallback p { margin-bottom: 14px; }
+
+/* r30e — edited badge + edit history modal */
+.edited-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--text2);
+  background: var(--surface3);
+  padding: 2px 7px;
+  border-radius: 10px;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  vertical-align: middle;
+  border: 1px solid transparent;
+}
+.edited-badge:hover {
+  background: var(--amber-bg);
+  color: var(--amber);
+  border-color: rgba(180,83,9,0.3);
+}
+.edit-history-title { font-family: var(--display); font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+.edit-history-note { font-size: 12px; color: var(--text2); margin-bottom: 12px; padding: 8px 10px; background: var(--surface2); border-radius: 6px; }
+.edit-history-list { max-height: 360px; overflow-y: auto; }
+.edit-history-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface);
+}
+.edit-history-when { font-size: 11px; color: var(--text3); margin-bottom: 4px; font-family: var(--mono); }
+.edit-history-who { font-size: 13px; color: var(--text); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+.edit-history-change { font-size: 12px; font-family: var(--mono); padding-top: 6px; border-top: 1px dashed var(--border); }
+.edit-old { color: var(--red); text-decoration: line-through; opacity: 0.85; }
+.edit-new { color: var(--green); font-weight: 600; }
+.role-tag {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.role-tag.supplier { background: var(--purple-bg); color: var(--purple); }
+.role-tag.agent { background: var(--blue-bg); color: var(--blue); }
+.role-tag.manager { background: var(--accent-bg); color: var(--accent); }
+
+/* r30e — Recently edited dashboard section */
+.recent-edits-section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; }
+.recent-edits-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.recent-edits-title { font-family: var(--display); font-size: 14px; font-weight: 700; }
+.recent-edits-sub { font-size: 11px; color: var(--text3); }
+.recent-edits-list { max-height: 320px; overflow-y: auto; }
+.recent-edit-row { display: grid; grid-template-columns: 1fr 1fr 2fr auto; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; align-items: center; cursor: pointer; }
+.recent-edit-row:hover { background: var(--surface2); }
+.recent-edit-row:last-child { border: none; }
+.recent-edit-plan { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.recent-edit-supplier { color: var(--text2); }
+.recent-edit-detail { font-size: 11px; }
+.recent-edit-detail .field-key { font-weight: 600; color: var(--text); }
+.recent-edit-detail .old-new { font-family: var(--mono); color: var(--text2); }
+.recent-edit-when { font-size: 10.5px; color: var(--text3); white-space: nowrap; font-family: var(--mono); }
+.recent-edits-empty { padding: 18px; text-align: center; color: var(--text3); font-size: 12px; }
+@media (max-width: 700px) {
+  .recent-edit-row { grid-template-columns: 1fr; gap: 4px; }
+}
 </style>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar">
     <div class="logo">
-      <div class="logo-product">CampaignPulse <span class="logo-product-badge">r30d</span></div>
+      <div class="logo-product">CampaignPulse <span class="logo-product-badge">r30e</span></div>
       <div class="logo-sub">Logistics · FK Sports</div>
     </div>
     <nav class="nav">
@@ -457,6 +526,17 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
           <button class="filter-tab" onclick="setFilter('payment', event)">Payment due</button>
         </div>
         <div id="plansTable"><div class="loading-row"><span class="spinner"></span>Loading plans…</div></div>
+      </div>
+
+      <!-- r30e: Recently edited section -->
+      <div class="recent-edits-section">
+        <div class="recent-edits-head">
+          <div>
+            <div class="recent-edits-title">Recently edited <span class="edited-badge" style="cursor:default">past 24h grace</span></div>
+            <div class="recent-edits-sub">Field changes made more than 24 hours after first being set, plus file activity. Last 7 days.</div>
+          </div>
+        </div>
+        <div id="recentEditsList"><div class="loading-row"><span class="spinner"></span>Loading…</div></div>
       </div>
     </section>
 
@@ -689,6 +769,20 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
   </div>
 </div>
 
+<!-- r30e: Edit history modal (shown when clicking ✎ badge on a field) -->
+<div class="modal-overlay" id="editHistoryModal">
+  <div class="modal" style="max-width:540px">
+    <div class="modal-head">
+      <div class="modal-title">Edit history</div>
+      <button class="modal-close" onclick="closeEditHistory()">&times;</button>
+    </div>
+    <div class="modal-body" style="padding:18px 22px" id="editHistoryBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" onclick="closeEditHistory()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- r30d: New claim modal -->
 <div class="modal-overlay" id="newClaimModal">
   <div class="modal" style="max-width:540px">
@@ -855,6 +949,7 @@ async function loadDashboard() {
     renderKPIs(_dashboard.kpis);
     renderOps(_dashboard.operational);
     renderPlansTable();
+    loadRecentEdits();  // r30e
     updateNavBadges({
       overdue_tasks: (_dashboard.tasks.overdue || []).length,
       at_kemballs: (_dashboard.lanes.at_kemballs || []).length,
@@ -1076,6 +1171,49 @@ function kpiClick(which) {
     renderPlansTable();
     document.getElementById('plansTable').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+}
+
+// r30e — Recently edited feed
+async function loadRecentEdits() {
+  try {
+    const r = await api('/audit/recent?days=7&limit=50');
+    renderRecentEdits(r.edits || []);
+  } catch(e) {
+    document.getElementById('recentEditsList').innerHTML = '<div class="recent-edits-empty">Could not load recent edits</div>';
+  }
+}
+function renderRecentEdits(edits) {
+  const el = document.getElementById('recentEditsList');
+  if (!edits.length) {
+    el.innerHTML = '<div class="recent-edits-empty">No edits past the 24-hour grace window in the last 7 days. Nothing suspicious.</div>';
+    return;
+  }
+  let html = '<div class="recent-edits-list">';
+  edits.forEach(function(e) {
+    let detail = '';
+    if (e.kind === 'field') {
+      const oldD = e.old_value == null || e.old_value === '' ? '(empty)' : e.old_value;
+      const newD = e.new_value == null || e.new_value === '' ? '(cleared)' : e.new_value;
+      detail = '<div class="recent-edit-detail"><span class="field-key">' + escapeHtml(fieldLabel(e.detail_key)) + '</span>: <span class="old-new">' + escapeHtml(String(oldD)) + ' → ' + escapeHtml(String(newD)) + '</span></div>';
+    } else if (e.kind === 'file') {
+      const actionLabels = {
+        file_uploaded: 'Uploaded file',
+        file_deleted: 'Deleted file',
+        file_pinned: 'Pinned file',
+        file_unpinned: 'Unpinned file',
+        supplier_file: 'Supplier uploaded file'
+      };
+      detail = '<div class="recent-edit-detail"><span class="field-key">' + escapeHtml(actionLabels[e.detail_key] || e.detail_key) + '</span>: <span class="old-new">' + escapeHtml(e.new_value || '') + '</span></div>';
+    }
+    html += '<div class="recent-edit-row" onclick="openPlan(' + e.plan_id + ')">' +
+      '<div><div class="recent-edit-plan">' + escapeHtml(e.plan_number) + '</div><div class="recent-edit-supplier">' + escapeHtml(e.supplier_name || '—') + '</div></div>' +
+      '<div><strong style="font-size:12px">' + escapeHtml(e.by_user || '?') + '</strong>' + (e.by_role ? ' <span class="role-tag ' + escapeHtml(e.by_role) + '">' + escapeHtml(e.by_role) + '</span>' : '') + '</div>' +
+      detail +
+      '<div class="recent-edit-when">' + fmtDate(e.created_at) + '<br>' + new Date(e.created_at).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) + '</div>' +
+    '</div>';
+  });
+  html += '</div>';
+  el.innerHTML = html;
 }
 
 // ─── Tasks page ────────────────────────────────────────────────────────
@@ -1341,6 +1479,13 @@ function renderPlanModal(data) {
 }
 
 // Helpers for field rendering with supplier-override badges
+// r30e — helper to render a tiny "edited" badge if a field has post-grace edits
+function editBadge(fieldId, audit) {
+  if (!audit || !audit.post_grace_edits) return '';
+  const n = audit.post_grace_edits;
+  return '<span class="edited-badge" onclick="event.stopPropagation();showEditHistory(\'' + fieldId + '\')" title="View edit history">✎ ' + (n === 1 ? 'edited' : n + ' edits') + '</span>';
+}
+
 function dateField(id, label, value, audit) {
   const v = value ? String(value).slice(0,10) : '';
   let badge = '';
@@ -1349,7 +1494,7 @@ function dateField(id, label, value, audit) {
     if (sv !== v && v) badge = '<span class="supplier-badge">Supplier set: ' + escapeHtml(sv) + ' (overridden)</span>';
     else if (sv === v && v) badge = '<span class="supplier-badge supplier-active">Supplier provided</span>';
   }
-  return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="date" id="f_' + id + '" value="' + v + '">' + badge + '</div>';
+  return '<div class="field" data-field="' + id + '"><label>' + escapeHtml(label) + editBadge(id, audit) + '</label><input type="date" id="f_' + id + '" value="' + v + '">' + badge + '</div>';
 }
 function textField(id, label, value, audit, placeholder) {
   const v = value || '';
@@ -1359,7 +1504,7 @@ function textField(id, label, value, audit, placeholder) {
     if (sv !== String(v) && v) badge = '<span class="supplier-badge">Supplier set: ' + escapeHtml(sv) + ' (overridden)</span>';
     else if (sv === String(v) && v) badge = '<span class="supplier-badge supplier-active">Supplier provided</span>';
   }
-  return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="text" id="f_' + id + '" value="' + escapeHtml(v) + '"' + (placeholder ? ' placeholder="' + escapeHtml(placeholder) + '"' : '') + '>' + badge + '</div>';
+  return '<div class="field" data-field="' + id + '"><label>' + escapeHtml(label) + editBadge(id, audit) + '</label><input type="text" id="f_' + id + '" value="' + escapeHtml(v) + '"' + (placeholder ? ' placeholder="' + escapeHtml(placeholder) + '"' : '') + '>' + badge + '</div>';
 }
 function numField(id, label, value, audit) {
   const v = value || '';
@@ -1369,7 +1514,7 @@ function numField(id, label, value, audit) {
     if (sv !== String(v) && v) badge = '<span class="supplier-badge">Supplier set: ' + escapeHtml(sv) + ' (overridden)</span>';
     else if (sv === String(v) && v) badge = '<span class="supplier-badge supplier-active">Supplier provided</span>';
   }
-  return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="number" step="0.01" id="f_' + id + '" value="' + escapeHtml(String(v)) + '">' + badge + '</div>';
+  return '<div class="field" data-field="' + id + '"><label>' + escapeHtml(label) + editBadge(id, audit) + '</label><input type="number" step="0.01" id="f_' + id + '" value="' + escapeHtml(String(v)) + '">' + badge + '</div>';
 }
 
 // CURRENT GATE FIELDS — only what's needed for the specified gate (defaults to current_gate)
@@ -1526,6 +1671,71 @@ function openStageEditor(gateNum) {
   editor.classList.add('active');
 }
 function closeStageEditor() { document.getElementById('stageEditorModal').classList.remove('active'); }
+
+// r30e — Edit history popover (shown when user clicks ✎ badge on a field)
+const _fieldLabels = {
+  deposit_received_date: 'Deposit received', approx_loading_date: 'Approx loading',
+  actual_loading_date: 'Actual loading', bl_date: 'BL date',
+  original_eta: 'Original ETA', new_eta: 'New ETA',
+  final_payment_received_date: 'Final payment received',
+  shipper_payment_date: 'Shipper payment date',
+  telex_supplier_declared_date: 'Telex declared date',
+  telex_release_date: 'Telex release date',
+  docs_sent_to_import_agent_date: 'Docs sent', duty_invoice_received_date: 'Duty invoice received',
+  duty_paid_date: 'Duty paid', customs_cleared_date: 'Customs cleared',
+  delivery_date: 'Delivery date', local_delivery_booked_date: 'Local delivery booked',
+  campbells_in_date: 'Kemballs in', campbells_out_date: 'Kemballs out',
+  container_number: 'Container number', tracking_number: 'Tracking number',
+  shipper_name: 'Shipper', bl_number: 'BL number', loading_port: 'Loading port',
+  remarks: 'Remarks', shipping_notes: 'Shipping notes',
+  total_amount_usd: 'Total amount', deposit_usd: 'Deposit', deposit_pct: 'Deposit %',
+  final_amount_usd: 'Final amount', container_price_usd: 'Container price',
+  duty_invoice_amount_gbp: 'Duty amount', campbells_weekly_gbp: 'Kemballs weekly rate',
+  shipper_payment_made: 'Shipper paid', telex_confirmed_by_agent: 'Telex agent verified',
+  telex_supplier_declared: 'Telex supplier declared', supplier_final_payment_acknowledged: 'Final payment acknowledged',
+  disposition: 'Disposition', supplier_form_locked: 'Supplier form locked'
+};
+function fieldLabel(id) { return _fieldLabels[id] || id; }
+
+function showEditHistory(fieldId) {
+  if (!_currentPlan || !_currentPlan.field_audit || !_currentPlan.field_audit[fieldId]) {
+    toast('No edit history', 'error'); return;
+  }
+  const audit = _currentPlan.field_audit[fieldId];
+  const history = audit.history || [];
+  // Show only post-grace edits (the ones that triggered the badge)
+  const postGrace = history.filter(h => h.within_grace === false);
+  let html = '<div class="edit-history-title">Edit history — ' + escapeHtml(fieldLabel(fieldId)) + '</div>';
+  if (audit.post_grace_edits === 0) {
+    html += '<div class="edit-history-note">No edits past the 24-hour grace window.</div>';
+  } else {
+    html += '<div class="edit-history-note">Showing edits made <strong>more than 24 hours</strong> after the field was first set:</div>';
+    html += '<div class="edit-history-list">';
+    // Reverse: newest first
+    postGrace.slice().reverse().forEach(function(h) {
+      const oldDisplay = h.old_value == null ? '(empty)' : h.old_value;
+      const newDisplay = h.new_value == null ? '(cleared)' : h.new_value;
+      const roleTag = h.role === 'supplier' ? '<span class="role-tag supplier">supplier</span>'
+                    : h.role === 'manager' ? '<span class="role-tag manager">manager</span>'
+                    : '<span class="role-tag agent">agent</span>';
+      html += '<div class="edit-history-row">' +
+        '<div class="edit-history-when">' + fmtDate(h.at) + ' · ' + new Date(h.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + '</div>' +
+        '<div class="edit-history-who"><strong>' + escapeHtml(h.by || '?') + '</strong> ' + roleTag + '</div>' +
+        '<div class="edit-history-change"><span class="edit-old">' + escapeHtml(String(oldDisplay)) + '</span> → <span class="edit-new">' + escapeHtml(String(newDisplay)) + '</span></div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+  // Also show original entry if available
+  if (history.length) {
+    const firstEntry = history[0];
+    html += '<div class="edit-history-note" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">Originally set ' + fmtDate(firstEntry.at) + ' by <strong>' + escapeHtml(firstEntry.by || '?') + '</strong></div>';
+  }
+  document.getElementById('editHistoryBody').innerHTML = html;
+  document.getElementById('editHistoryModal').classList.add('active');
+}
+function closeEditHistory() { document.getElementById('editHistoryModal').classList.remove('active'); }
+
 
 // ─── r30d: Claim card rendering ─────────────────────────────────────────
 function renderClaimCard(c, planId) {
