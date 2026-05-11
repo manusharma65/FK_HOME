@@ -199,7 +199,18 @@ async function ensureLogisticsSchema(db) {
     `CREATE INDEX IF NOT EXISTS idx_lg_tasks_plan ON lg_tasks(plan_id)`,
     `CREATE INDEX IF NOT EXISTS idx_lg_tasks_status ON lg_tasks(status)`,
     `CREATE INDEX IF NOT EXISTS idx_lg_tasks_due ON lg_tasks(due_date)`,
-    `CREATE INDEX IF NOT EXISTS idx_lg_tasks_rule_plan ON lg_tasks(plan_id, rule_key)`
+    `CREATE INDEX IF NOT EXISTS idx_lg_tasks_rule_plan ON lg_tasks(plan_id, rule_key)`,
+    // r30c — track who last set each plan field (supplier vs agent) for override audit badges
+    `CREATE TABLE IF NOT EXISTS lg_field_audit (
+       id SERIAL PRIMARY KEY,
+       plan_id INTEGER NOT NULL REFERENCES lg_plans(id) ON DELETE CASCADE,
+       field_name TEXT NOT NULL,
+       new_value TEXT,
+       set_by TEXT,
+       set_by_role TEXT,
+       created_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_field_audit_plan ON lg_field_audit(plan_id, field_name, created_at DESC)`
   ];
   let ok = 0, fail = 0;
   for (const sql of stmts) {
@@ -550,6 +561,24 @@ async function logSlipIfChanged(db, planId, field, oldVal, newVal, reason, reaso
   } catch(e) { console.error('[slip log] ' + e.message); }
 }
 
+// r30c — record who last set each tracked field (supplier vs agent) for override badges
+const AUDITED_FIELDS = [
+  'approx_loading_date', 'actual_loading_date', 'container_number', 'tracking_number',
+  'bl_number', 'bl_date', 'final_amount_usd',
+  'telex_supplier_declared', 'telex_supplier_declared_date',
+  'supplier_final_payment_acknowledged'
+];
+async function logFieldAudit(db, planId, field, newVal, setBy, setByRole) {
+  if (!AUDITED_FIELDS.includes(field)) return;
+  try {
+    const v = newVal == null ? null : String(newVal).slice(0, 200);
+    await db.query(
+      `INSERT INTO lg_field_audit (plan_id, field_name, new_value, set_by, set_by_role) VALUES ($1,$2,$3,$4,$5)`,
+      [planId, field, v, setBy, setByRole]
+    );
+  } catch(e) { console.error('[field audit] ' + e.message); }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FILE UPLOAD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -650,6 +679,7 @@ module.exports = function(getDb) {
           sets.push(f + '=$' + (i++)); vals.push(v); changes.push(f);
           if (SLIP_TRACKED_FIELDS.includes(f))
             await logSlipIfChanged(db, planRow.id, f, planRow[f], v, req.body.slip_reason, req.body.slip_reason_category, 'supplier:' + (req.body.submitted_by || 'unknown'));
+          await logFieldAudit(db, planRow.id, f, v, req.body.submitted_by || 'unknown', 'supplier');
         }
       }
       if (!sets.length) return res.status(400).json({ error: 'No fields' });
@@ -787,7 +817,16 @@ module.exports = function(getDb) {
       const tasks    = (await db.query("SELECT * FROM lg_tasks WHERE plan_id=$1 ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END, due_date NULLS LAST", [plan.id])).rows;
       const slips    = (await db.query('SELECT * FROM lg_date_slips WHERE plan_id=$1 ORDER BY created_at DESC LIMIT 20', [plan.id])).rows;
       const prodChecks = (await db.query('SELECT * FROM lg_production_checks WHERE plan_id=$1 ORDER BY created_at DESC', [plan.id])).rows;
-      res.json({ plan: enrichPlan(plan, sup), supplier: sup, files, issues, activity, tasks, slips, production_checks: prodChecks });
+      // r30c — build per-field provenance: last supplier set + last agent set, used for override badges
+      const auditRows = (await db.query('SELECT field_name, new_value, set_by, set_by_role, created_at FROM lg_field_audit WHERE plan_id=$1 ORDER BY created_at ASC', [plan.id])).rows;
+      const field_audit = {};
+      auditRows.forEach(function(a) {
+        if (!field_audit[a.field_name]) field_audit[a.field_name] = {};
+        field_audit[a.field_name][a.set_by_role === 'supplier' ? 'supplier' : 'agent'] = {
+          value: a.new_value, by: a.set_by, at: a.created_at, role: a.set_by_role
+        };
+      });
+      res.json({ plan: enrichPlan(plan, sup), supplier: sup, files, issues, activity, tasks, slips, production_checks: prodChecks, field_audit: field_audit });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -843,6 +882,7 @@ module.exports = function(getDb) {
           sets.push(f + '=$' + (i++)); vals.push(v); changes.push(f);
           if (SLIP_TRACKED_FIELDS.includes(f))
             await logSlipIfChanged(db, id, f, before[f], v, req.body.slip_reason, req.body.slip_reason_category, actor(req));
+          await logFieldAudit(db, id, f, v, actor(req), isManager(req.user) ? 'manager' : 'agent');
         }
       }
       if (!sets.length) return res.status(400).json({ error: 'No fields' });

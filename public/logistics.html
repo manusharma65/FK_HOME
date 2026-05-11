@@ -227,13 +227,82 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
   .modal-grid { grid-template-columns: 1fr; }
   .modal-side { border-left: none; border-top: 1px solid var(--border); }
 }
+
+/* r30c — minimal modal styles */
+.current-gate-section {
+  background: linear-gradient(135deg, rgba(232,57,29,0.04) 0%, rgba(255,92,63,0.02) 100%);
+  border: 1px solid rgba(232,57,29,0.2);
+  border-radius: 12px;
+  padding: 18px;
+  margin-top: 8px;
+}
+.current-gate-label {
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 14px;
+}
+.supplier-badge {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--amber-bg);
+  color: var(--amber);
+  padding: 3px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+.supplier-badge.supplier-active {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.supplier-info {
+  font-size: 13px;
+  color: var(--green);
+  background: var(--green-bg);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+.supplier-info-pending {
+  font-size: 13px;
+  color: var(--amber);
+  background: var(--amber-bg);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+.all-fields-details {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: var(--surface2);
+}
+.all-fields-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text2);
+  padding: 2px 0;
+  user-select: none;
+}
+.all-fields-details > summary:hover { color: var(--text); }
+.all-fields-details[open] > summary { color: var(--text); margin-bottom: 8px; }
+
+/* clickable KPI tiles */
+.kpi-card.clickable { cursor: pointer; transition: all 0.15s; }
+.kpi-card.clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+.kpi-card.clickable:active { transform: translateY(0); }
 </style>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar">
     <div class="logo">
-      <div class="logo-product">CampaignPulse <span class="logo-product-badge">r30b</span></div>
+      <div class="logo-product">CampaignPulse <span class="logo-product-badge">r30c</span></div>
       <div class="logo-sub">Logistics · FK Sports</div>
     </div>
     <nav class="nav">
@@ -278,11 +347,11 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
       <div id="tasksStrip"></div>
 
       <div class="kpi-grid">
-        <div class="kpi-card"><div class="kpi-label">In flight</div><div class="kpi-value" id="kpiInFlight">·</div><div class="kpi-foot">Active plans</div></div>
-        <div class="kpi-card alert"><div class="kpi-label">Overdue gates</div><div class="kpi-value" id="kpiOverdue">·</div><div class="kpi-foot">Stuck on a stage</div></div>
+        <div class="kpi-card clickable" onclick="kpiClick('in_flight')"><div class="kpi-label">In flight</div><div class="kpi-value" id="kpiInFlight">·</div><div class="kpi-foot">Active plans</div></div>
+        <div class="kpi-card alert clickable" onclick="kpiClick('overdue')"><div class="kpi-label">Overdue gates</div><div class="kpi-value" id="kpiOverdue">·</div><div class="kpi-foot">Stuck on a stage</div></div>
         <div class="kpi-card success"><div class="kpi-label">In transit (USD)</div><div class="kpi-value" id="kpiValue">·</div><div class="kpi-foot">Goods at sea / port</div></div>
-        <div class="kpi-card purple"><div class="kpi-label">At Kemballs</div><div class="kpi-value" id="kpiKemballs">·</div><div class="kpi-foot" id="kpiKemballsFoot">£·/wk</div></div>
-        <div class="kpi-card amber"><div class="kpi-label">Owed (14 days)</div><div class="kpi-value" id="kpiOwed">·</div><div class="kpi-foot">Final payments due soon</div></div>
+        <div class="kpi-card purple clickable" onclick="kpiClick('kemballs')"><div class="kpi-label">At Kemballs</div><div class="kpi-value" id="kpiKemballs">·</div><div class="kpi-foot" id="kpiKemballsFoot">£·/wk</div></div>
+        <div class="kpi-card amber clickable" onclick="kpiClick('payment')"><div class="kpi-label">Owed (14 days)</div><div class="kpi-value" id="kpiOwed">·</div><div class="kpi-foot">Final payments due soon</div></div>
       </div>
 
       <div class="section">
@@ -733,12 +802,22 @@ function renderTaskRow(t, cls) {
 }
 
 async function claimTask(id) {
-  try { await api('/tasks/' + id + '/claim', { method: 'POST' }); toast('Claimed', 'success'); loadDashboard(); if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage(); }
-  catch(e) { toast(e.message, 'error'); }
+  try {
+    await api('/tasks/' + id + '/claim', { method: 'POST' });
+    toast('Claimed', 'success');
+    loadDashboard();
+    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
+  } catch(e) { toast(e.message, 'error'); }
 }
 async function unclaimTask(id) {
-  try { await api('/tasks/' + id + '/unclaim', { method: 'POST' }); toast('Released'); loadDashboard(); if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage(); }
-  catch(e) { toast(e.message, 'error'); }
+  try {
+    await api('/tasks/' + id + '/unclaim', { method: 'POST' });
+    toast('Released');
+    loadDashboard();
+    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
+  } catch(e) { toast(e.message, 'error'); }
 }
 async function completeTask(id, ruleKey) {
   // For production check tasks, open outcome modal first
@@ -756,7 +835,7 @@ async function completeTask(id, ruleKey) {
     toast('Done', 'success');
     loadDashboard();
     if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
-    if (_currentPlan) openPlan(_currentPlan.plan.id);
+    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -845,6 +924,41 @@ function setFilter(f, ev) {
   Array.from(ev.target.parentElement.querySelectorAll('.filter-tab')).forEach(t => t.classList.remove('active'));
   ev.target.classList.add('active');
   renderPlansTable();
+}
+
+// r30c — clickable KPI tiles
+function kpiClick(which) {
+  if (which === 'kemballs') { showPage('kemballs'); return; }
+  if (which === 'overdue') {
+    // Set the table filter and scroll to it
+    _filter = 'overdue';
+    const tabs = document.querySelectorAll('#page-dashboard .filter-tab');
+    tabs.forEach(t => t.classList.remove('active'));
+    const target = Array.from(tabs).find(t => (t.getAttribute('onclick')||'').includes("'overdue'"));
+    if (target) target.classList.add('active');
+    renderPlansTable();
+    document.getElementById('plansTable').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  if (which === 'payment') {
+    _filter = 'payment';
+    const tabs = document.querySelectorAll('#page-dashboard .filter-tab');
+    tabs.forEach(t => t.classList.remove('active'));
+    const target = Array.from(tabs).find(t => (t.getAttribute('onclick')||'').includes("'payment'"));
+    if (target) target.classList.add('active');
+    renderPlansTable();
+    document.getElementById('plansTable').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  if (which === 'in_flight') {
+    _filter = 'all';
+    const tabs = document.querySelectorAll('#page-dashboard .filter-tab');
+    tabs.forEach(t => t.classList.remove('active'));
+    const target = Array.from(tabs).find(t => (t.getAttribute('onclick')||'').includes("'all'"));
+    if (target) target.classList.add('active');
+    renderPlansTable();
+    document.getElementById('plansTable').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 // ─── Tasks page ────────────────────────────────────────────────────────
@@ -1050,32 +1164,42 @@ function renderPlanModal(data) {
 
   const tasks = data.tasks || [];
   const activeTasks = tasks.filter(t => t.status === 'open' || t.status === 'claimed');
+  const fieldAudit = data.field_audit || {};
 
   let body = '<div class="modal-grid"><div class="modal-main">';
 
-  // Tasks block (top)
-  body += '<div class="tasks-block"><div class="tasks-block-head">Active tasks for this plan' + (activeTasks.length ? ' (' + activeTasks.length + ')' : '') + '</div>';
-  if (!activeTasks.length) body += '<div class="tasks-block-empty">No active tasks</div>';
-  else activeTasks.forEach(t => { body += renderTaskRow(t, 'inline'); });
-  body += '</div>';
+  // Active tasks block — only show if there are any
+  if (activeTasks.length) {
+    body += '<div class="tasks-block"><div class="tasks-block-head">What needs doing now (' + activeTasks.length + ')</div>';
+    activeTasks.forEach(t => { body += renderTaskRow(t, 'inline'); });
+    body += '</div>';
+  }
 
-  // Gate timeline
+  // Gate timeline (smaller, just visual)
   body += renderGateTimeline(p);
 
-  // Gate-specific fields
-  body += '<div class="section" style="border:none;padding:0;box-shadow:none;margin-top:8px"><div class="section-title" style="margin-bottom:12px">Update plan</div>';
-  body += gateFieldsHtml(p, s);
+  // CURRENT GATE FIELDS — only the 2-4 inputs that matter right now
+  body += '<div class="current-gate-section"><div class="current-gate-label">Step ' + (p.current_gate || 0) + ': ' + escapeHtml(p.current_gate_name || '—') + '</div>';
+  body += currentGateFieldsHtml(p, s, fieldAudit);
   body += '</div>';
 
-  // Disposition section (if past customs)
-  if (p.customs_cleared_date || p.disposition) {
-    body += '<div class="section" style="border:none;padding:0;box-shadow:none;margin-top:18px"><div class="section-title" style="margin-bottom:12px">Disposition & delivery</div>';
+  // Disposition section (only when gate >= 10)
+  if (p.current_gate >= 10 || p.disposition) {
+    body += '<div style="margin-top:18px"><div class="section-title" style="margin-bottom:12px">Disposition & delivery</div>';
     body += dispositionFieldsHtml(p);
     body += '</div>';
   }
 
-  // Issues
-  body += renderIssuesSection(p, data.issues || []);
+  // SHOW ALL FIELDS — collapsed by default
+  body += '<details class="all-fields-details" style="margin-top:20px"><summary>Show all fields</summary>';
+  body += '<div style="margin-top:14px">' + allFieldsHtml(p, s, fieldAudit) + '</div>';
+  body += '</details>';
+
+  // Issues — collapsed by default
+  const issueCount = (data.issues || []).filter(i => i.status === 'open').length;
+  body += '<details class="all-fields-details" style="margin-top:12px"' + (issueCount > 0 ? ' open' : '') + '><summary>Issues' + (issueCount > 0 ? ' (' + issueCount + ' open)' : '') + '</summary>';
+  body += '<div style="margin-top:14px">' + renderIssuesSection(p, data.issues || []) + '</div>';
+  body += '</details>';
 
   body += '</div><div class="modal-side">';
 
@@ -1098,6 +1222,123 @@ function renderPlanModal(data) {
   document.getElementById('pmFoot').innerHTML = foot;
 }
 
+// Helpers for field rendering with supplier-override badges
+function dateField(id, label, value, audit) {
+  const v = value ? String(value).slice(0,10) : '';
+  let badge = '';
+  if (audit && audit.supplier && audit.supplier.value) {
+    const sv = String(audit.supplier.value).slice(0,10);
+    if (sv !== v && v) badge = '<span class="supplier-badge">Supplier set: ' + escapeHtml(sv) + ' (overridden)</span>';
+    else if (sv === v && v) badge = '<span class="supplier-badge supplier-active">Supplier provided</span>';
+  }
+  return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="date" id="f_' + id + '" value="' + v + '">' + badge + '</div>';
+}
+function textField(id, label, value, audit, placeholder) {
+  const v = value || '';
+  let badge = '';
+  if (audit && audit.supplier && audit.supplier.value) {
+    const sv = String(audit.supplier.value);
+    if (sv !== String(v) && v) badge = '<span class="supplier-badge">Supplier set: ' + escapeHtml(sv) + ' (overridden)</span>';
+    else if (sv === String(v) && v) badge = '<span class="supplier-badge supplier-active">Supplier provided</span>';
+  }
+  return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="text" id="f_' + id + '" value="' + escapeHtml(v) + '"' + (placeholder ? ' placeholder="' + escapeHtml(placeholder) + '"' : '') + '>' + badge + '</div>';
+}
+function numField(id, label, value, audit) {
+  const v = value || '';
+  let badge = '';
+  if (audit && audit.supplier && audit.supplier.value) {
+    const sv = String(audit.supplier.value);
+    if (sv !== String(v) && v) badge = '<span class="supplier-badge">Supplier set: ' + escapeHtml(sv) + ' (overridden)</span>';
+    else if (sv === String(v) && v) badge = '<span class="supplier-badge supplier-active">Supplier provided</span>';
+  }
+  return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="number" step="0.01" id="f_' + id + '" value="' + escapeHtml(String(v)) + '">' + badge + '</div>';
+}
+
+// CURRENT GATE FIELDS — only what's needed for the current step
+function currentGateFieldsHtml(p, s, audit) {
+  const gate = p.current_gate || 0;
+  let html = '<div class="field-row">';
+
+  if (gate === 1) {
+    html += dateField('deposit_received_date', 'Deposit received date', p.deposit_received_date, audit.deposit_received_date);
+  } else if (gate === 2) {
+    html += dateField('approx_loading_date', 'Approx loading date', p.approx_loading_date, audit.approx_loading_date);
+  } else if (gate === 3) {
+    html += textField('shipper_name', 'Shipper name', p.shipper_name, audit.shipper_name, 'e.g. Maersk');
+    html += numField('container_price_usd', 'Container price (USD)', p.container_price_usd, audit.container_price_usd);
+  } else if (gate === 4) {
+    html += dateField('actual_loading_date', 'Actual loading date', p.actual_loading_date, audit.actual_loading_date);
+    html += textField('bl_number', 'BL number', p.bl_number, audit.bl_number);
+    html += dateField('bl_date', 'BL date', p.bl_date, audit.bl_date);
+    html += numField('final_amount_usd', 'Final amount (USD)', p.final_amount_usd, audit.final_amount_usd);
+    html += '</div><div class="field-help" style="margin:8px 0 12px;font-size:12px;color:var(--text2)"><strong>Files needed:</strong> Original PI, Packing List, BL. Upload via the Files panel →</div><div class="field-row">';
+    html += dateField('original_eta', 'Original ETA (agent enters)', p.original_eta, audit.original_eta);
+  } else if (gate === 5) {
+    html += dateField('final_payment_received_date', 'Final payment received', p.final_payment_received_date, audit.final_payment_received_date);
+    html += '<div class="field"><label>Shipper paid?</label><div class="field-check"><input type="checkbox" id="f_shipper_payment_made"' + (p.shipper_payment_made ? ' checked' : '') + '> <span style="font-size:12px">Yes</span></div></div>';
+    html += dateField('shipper_payment_date', 'Shipper payment date', p.shipper_payment_date, audit.shipper_payment_date);
+  } else if (gate === 6) {
+    html += '<div class="field" style="grid-column: span 2"><label>Telex release</label>';
+    if (p.telex_supplier_declared) {
+      html += '<div class="supplier-info">✓ Supplier declared telex released' + (p.telex_supplier_declared_date ? ' on ' + fmtDate(p.telex_supplier_declared_date) : '') + '</div>';
+    } else {
+      html += '<div class="supplier-info-pending">Waiting for supplier to declare telex release</div>';
+    }
+    html += '<div class="field-check" style="margin-top:8px"><input type="checkbox" id="f_telex_confirmed_by_agent"' + (p.telex_confirmed_by_agent ? ' checked' : '') + '> <span style="font-size:13px;font-weight:500">I have verified telex release with the shipping line</span></div>';
+    html += '</div>';
+  } else if (gate === 7) {
+    html += dateField('docs_sent_to_import_agent_date', 'Docs sent to import agent', p.docs_sent_to_import_agent_date, audit.docs_sent_to_import_agent_date);
+  } else if (gate === 8) {
+    html += numField('duty_invoice_amount_gbp', 'Duty invoice amount (GBP)', p.duty_invoice_amount_gbp, audit.duty_invoice_amount_gbp);
+    html += dateField('duty_invoice_received_date', 'Duty invoice received', p.duty_invoice_received_date, audit.duty_invoice_received_date);
+    html += dateField('duty_paid_date', 'Duty paid date', p.duty_paid_date, audit.duty_paid_date);
+  } else if (gate === 9) {
+    html += dateField('customs_cleared_date', 'Customs cleared date', p.customs_cleared_date, audit.customs_cleared_date);
+  } else if (gate === 10) {
+    html += '<div class="field" style="grid-column: span 2"><div class="field-help" style="font-size:13px;color:var(--text2);margin-bottom:8px">Choose where this container goes:</div></div>';
+  }
+  html += '</div>';
+
+  // Remarks + shipping notes always visible at bottom
+  html += '<div class="field-row" style="margin-top:6px">';
+  html += '<div class="field" style="grid-column: span 2"><label>Remarks</label><textarea id="f_remarks" rows="2" placeholder="Anything you want to note">' + escapeHtml(p.remarks || '') + '</textarea></div>';
+  html += '<div class="field" style="grid-column: span 2"><label>Shipping notes (delays, comments)</label><textarea id="f_shipping_notes" rows="2">' + escapeHtml(p.shipping_notes || '') + '</textarea></div>';
+  html += '</div>';
+
+  html += '<button class="btn btn-primary" onclick="savePlanFields(' + p.id + ')">Save changes</button>';
+  return html;
+}
+
+// ALL FIELDS — full expanded view for power users / corrections
+function allFieldsHtml(p, s, audit) {
+  let html = '<div class="field-row">';
+  html += dateField('deposit_received_date', 'Deposit received', p.deposit_received_date, audit.deposit_received_date);
+  html += dateField('approx_loading_date', 'Approx loading', p.approx_loading_date, audit.approx_loading_date);
+  html += textField('shipper_name', 'Shipper', p.shipper_name, audit.shipper_name);
+  html += numField('container_price_usd', 'Container $', p.container_price_usd, audit.container_price_usd);
+  html += dateField('actual_loading_date', 'Actual loading', p.actual_loading_date, audit.actual_loading_date);
+  html += textField('container_number', 'Container #', p.container_number, audit.container_number);
+  html += textField('tracking_number', 'Tracking #', p.tracking_number, audit.tracking_number);
+  html += textField('bl_number', 'BL number', p.bl_number, audit.bl_number);
+  html += dateField('bl_date', 'BL date', p.bl_date, audit.bl_date);
+  html += numField('final_amount_usd', 'Final $', p.final_amount_usd, audit.final_amount_usd);
+  html += dateField('original_eta', 'Original ETA', p.original_eta, audit.original_eta);
+  html += dateField('new_eta', 'New ETA', p.new_eta, audit.new_eta);
+  html += dateField('final_payment_received_date', 'Final paid', p.final_payment_received_date, audit.final_payment_received_date);
+  html += '<div class="field"><label>Shipper paid</label><div class="field-check"><input type="checkbox" id="f_shipper_payment_made"' + (p.shipper_payment_made ? ' checked' : '') + '> <span style="font-size:12px">Yes</span></div></div>';
+  html += dateField('shipper_payment_date', 'Shipper paid date', p.shipper_payment_date, audit.shipper_payment_date);
+  html += '<div class="field"><label>Telex (supplier declared)</label><div class="field-check"><input type="checkbox" id="f_telex_supplier_declared"' + (p.telex_supplier_declared ? ' checked' : '') + '> <span style="font-size:12px">Yes</span></div></div>';
+  html += '<div class="field"><label>Telex (agent verified)</label><div class="field-check"><input type="checkbox" id="f_telex_confirmed_by_agent"' + (p.telex_confirmed_by_agent ? ' checked' : '') + '> <span style="font-size:12px">Yes</span></div></div>';
+  html += dateField('docs_sent_to_import_agent_date', 'Docs to import agent', p.docs_sent_to_import_agent_date, audit.docs_sent_to_import_agent_date);
+  html += numField('duty_invoice_amount_gbp', 'Duty £', p.duty_invoice_amount_gbp, audit.duty_invoice_amount_gbp);
+  html += dateField('duty_invoice_received_date', 'Duty invoice received', p.duty_invoice_received_date, audit.duty_invoice_received_date);
+  html += dateField('duty_paid_date', 'Duty paid', p.duty_paid_date, audit.duty_paid_date);
+  html += dateField('customs_cleared_date', 'Customs cleared', p.customs_cleared_date, audit.customs_cleared_date);
+  html += '</div>';
+  html += '<button class="btn btn-primary" onclick="savePlanFields(' + p.id + ')" style="margin-top:8px">Save changes</button>';
+  return html;
+}
+
 function renderGateTimeline(p) {
   const gates = [
     {n:1,name:'Deposit'},{n:2,name:'Approx load'},{n:3,name:'Book'},{n:4,name:'Loading'},
@@ -1115,58 +1356,8 @@ function renderGateTimeline(p) {
 }
 
 function gateFieldsHtml(p, s) {
-  const gate = p.current_gate || 0;
-  let html = '<div class="field-row">';
-
-  // Gate 1: deposit
-  html += '<div class="field"><label>Deposit received date</label><input type="date" id="f_deposit_received_date" value="' + (p.deposit_received_date ? String(p.deposit_received_date).slice(0,10) : '') + '"></div>';
-
-  // Gate 2: approx loading
-  html += '<div class="field"><label>Approx loading date</label><input type="date" id="f_approx_loading_date" value="' + (p.approx_loading_date ? String(p.approx_loading_date).slice(0,10) : '') + '"></div>';
-
-  // Gate 3: container booking
-  html += '<div class="field"><label>Shipper name</label><input type="text" id="f_shipper_name" value="' + escapeHtml(p.shipper_name || '') + '" placeholder="e.g. Maersk"></div>';
-  html += '<div class="field"><label>Container price (USD)</label><input type="number" id="f_container_price_usd" step="0.01" value="' + (p.container_price_usd || '') + '"></div>';
-
-  // Gate 4: loading + docs
-  html += '<div class="field"><label>Actual loading date</label><input type="date" id="f_actual_loading_date" value="' + (p.actual_loading_date ? String(p.actual_loading_date).slice(0,10) : '') + '"></div>';
-  html += '<div class="field"><label>Container number</label><input type="text" id="f_container_number" value="' + escapeHtml(p.container_number || '') + '"></div>';
-  html += '<div class="field"><label>Tracking number</label><input type="text" id="f_tracking_number" value="' + escapeHtml(p.tracking_number || '') + '"></div>';
-  html += '<div class="field"><label>BL number</label><input type="text" id="f_bl_number" value="' + escapeHtml(p.bl_number || '') + '"></div>';
-  html += '<div class="field"><label>BL date</label><input type="date" id="f_bl_date" value="' + (p.bl_date ? String(p.bl_date).slice(0,10) : '') + '"></div>';
-  html += '<div class="field"><label>Final amount (USD)</label><input type="number" id="f_final_amount_usd" step="0.01" value="' + (p.final_amount_usd || '') + '"></div>';
-  html += '<div class="field"><label>Original ETA</label><input type="date" id="f_original_eta" value="' + (p.original_eta ? String(p.original_eta).slice(0,10) : '') + '"></div>';
-  html += '<div class="field"><label>New ETA</label><input type="date" id="f_new_eta" value="' + (p.new_eta ? String(p.new_eta).slice(0,10) : '') + '"></div>';
-
-  // Gate 5: payments
-  html += '<div class="field"><label>Final payment received</label><input type="date" id="f_final_payment_received_date" value="' + (p.final_payment_received_date ? String(p.final_payment_received_date).slice(0,10) : '') + '"></div>';
-  html += '<div class="field"><label>Shipper paid?</label><div class="field-check"><input type="checkbox" id="f_shipper_payment_made"' + (p.shipper_payment_made ? ' checked' : '') + '> <span style="font-size:12px">Yes, shipper has been paid</span></div><input type="date" id="f_shipper_payment_date" value="' + (p.shipper_payment_date ? String(p.shipper_payment_date).slice(0,10) : '') + '" style="margin-top:6px"></div>';
-
-  // Gate 6: telex
-  html += '<div class="field" style="grid-column: span 2"><label>Telex release</label>';
-  html += '<div style="font-size:12px;color:var(--text2);margin-bottom:6px">Supplier declares first, agent verifies.</div>';
-  html += '<div class="field-check" style="margin-bottom:6px"><input type="checkbox" id="f_telex_supplier_declared"' + (p.telex_supplier_declared ? ' checked' : '') + '> <span style="font-size:12px">Supplier has declared telex released' + (p.telex_supplier_declared_date ? ' (' + fmtDate(p.telex_supplier_declared_date) + ')' : '') + '</span></div>';
-  html += '<div class="field-check"><input type="checkbox" id="f_telex_confirmed_by_agent"' + (p.telex_confirmed_by_agent ? ' checked' : '') + '> <span style="font-size:12px">Agent has verified telex release</span></div>';
-  html += '</div>';
-
-  // Gate 7: docs to import agent
-  html += '<div class="field"><label>Docs sent to import agent</label><input type="date" id="f_docs_sent_to_import_agent_date" value="' + (p.docs_sent_to_import_agent_date ? String(p.docs_sent_to_import_agent_date).slice(0,10) : '') + '"></div>';
-
-  // Gate 8: duty
-  html += '<div class="field"><label>Duty invoice amount (GBP)</label><input type="number" id="f_duty_invoice_amount_gbp" step="0.01" value="' + (p.duty_invoice_amount_gbp || '') + '"></div>';
-  html += '<div class="field"><label>Duty invoice received</label><input type="date" id="f_duty_invoice_received_date" value="' + (p.duty_invoice_received_date ? String(p.duty_invoice_received_date).slice(0,10) : '') + '"></div>';
-  html += '<div class="field"><label>Duty paid date</label><input type="date" id="f_duty_paid_date" value="' + (p.duty_paid_date ? String(p.duty_paid_date).slice(0,10) : '') + '"></div>';
-
-  // Gate 9: customs cleared
-  html += '<div class="field"><label>Customs cleared date</label><input type="date" id="f_customs_cleared_date" value="' + (p.customs_cleared_date ? String(p.customs_cleared_date).slice(0,10) : '') + '"></div>';
-
-  // Remarks + shipping notes
-  html += '<div class="field" style="grid-column: span 2"><label>Remarks</label><textarea id="f_remarks" rows="2">' + escapeHtml(p.remarks || '') + '</textarea></div>';
-  html += '<div class="field" style="grid-column: span 2"><label>Shipping notes (delays, comments)</label><textarea id="f_shipping_notes" rows="2">' + escapeHtml(p.shipping_notes || '') + '</textarea></div>';
-
-  html += '</div>';
-  html += '<button class="btn btn-primary" onclick="savePlanFields(' + p.id + ')">Save changes</button>';
-  return html;
+  // Legacy: kept for compatibility but no longer called directly
+  return allFieldsHtml(p, s, {});
 }
 
 function dispositionFieldsHtml(p) {
