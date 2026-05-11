@@ -296,13 +296,79 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
 .kpi-card.clickable { cursor: pointer; transition: all 0.15s; }
 .kpi-card.clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
 .kpi-card.clickable:active { transform: translateY(0); }
+
+/* r30d — clickable gate circles */
+.gate-step.clickable { cursor: pointer; transition: transform 0.1s; }
+.gate-step.clickable:hover { transform: translateY(-2px); }
+.gate-step.clickable:hover .gate-circle { box-shadow: 0 0 0 4px rgba(232,57,29,0.15); }
+
+/* r30d — claims */
+.claims-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+.claim-card { background: var(--surface); border: 1px solid var(--border2); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+.claim-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+.claim-value { font-family: var(--mono); font-size: 12px; background: var(--amber-bg); color: var(--amber); padding: 2px 7px; border-radius: 4px; margin-left: 6px; font-weight: 600; }
+.claim-meta { font-size: 11px; color: var(--text3); margin-bottom: 8px; }
+.supplier-proposal { background: var(--blue-light); border: 1px solid rgba(26,111,189,0.25); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.supplier-proposal-head { font-weight: 600; font-size: 13px; color: var(--blue); margin-bottom: 4px; }
+.supplier-proposal-note { font-size: 12px; color: var(--text2); margin-top: 4px; }
+.claim-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.claim-file { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 11px; cursor: pointer; transition: background 0.1s; }
+.claim-file:hover { background: var(--surface3); }
+.file-tag.supplier { background: #6b3fa0; }
+.file-tag.fk { background: var(--accent); }
+.claim-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+
+/* r30d — file groups & tiles */
+.file-group { margin-bottom: 14px; }
+.file-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text3); margin-bottom: 6px; padding: 0 2px; }
+.file-tile { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; transition: border-color 0.1s; }
+.file-tile:hover { border-color: var(--border2); }
+.file-tile.pinned { background: linear-gradient(135deg, #fff 0%, #fef3e2 100%); border-color: rgba(180,83,9,0.3); }
+.file-tile-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; cursor: pointer; }
+.file-tile-icon { font-size: 18px; flex-shrink: 0; }
+.file-tile-info { flex: 1; min-width: 0; }
+.file-tile-slot { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text3); }
+.file-tile-name { font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tile-meta { font-size: 10px; color: var(--text3); margin-top: 1px; }
+.file-tile-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.file-action { background: none; border: none; cursor: pointer; padding: 4px 6px; font-size: 12px; border-radius: 4px; color: var(--text2); }
+.file-action:hover { background: var(--surface2); color: var(--text); }
+.file-action.active { color: var(--amber); }
+.file-action.danger:hover { background: var(--red-bg); color: var(--red); }
+.file-versions { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.file-versions > summary { font-size: 10px; color: var(--text3); cursor: pointer; padding: 2px 0; }
+.file-version-row { display: flex; gap: 6px; align-items: center; padding: 4px 0; font-size: 10.5px; cursor: pointer; }
+.file-version-row:hover { background: var(--surface2); }
+.file-version-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text2); }
+.file-version-meta { color: var(--text3); }
+.file-upload-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 10px; align-items: center; }
+.file-upload-row input[type="file"] { grid-column: span 2; }
+.file-slot-select { padding: 5px; font-size: 11px; border: 1px solid var(--border2); border-radius: 6px; background: white; font-family: inherit; }
+.file-help { font-size: 10px; color: var(--text3); margin-top: 4px; text-align: center; }
+
+/* r30d — file viewer (lightbox) */
+.viewer-overlay { background: rgba(0,0,0,0.9); padding: 0; }
+.viewer-modal { background: var(--text); color: white; width: 100%; height: 100%; max-width: 100%; max-height: 100%; border-radius: 0; display: flex; flex-direction: column; }
+.viewer-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 22px; background: rgba(0,0,0,0.4); border-bottom: 1px solid rgba(255,255,255,0.1); }
+.viewer-name { font-size: 14px; font-weight: 600; color: white; }
+.viewer-meta { font-size: 11px; color: rgba(255,255,255,0.6); margin-top: 2px; }
+.viewer-nav { display: flex; gap: 8px; align-items: center; }
+.viewer-navbtn { background: rgba(255,255,255,0.1); border: none; color: white; font-size: 22px; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; line-height: 1; padding: 0; }
+.viewer-navbtn:hover { background: rgba(255,255,255,0.2); }
+.viewer-close { background: rgba(255,255,255,0.1); border: none; color: white; font-size: 26px; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; line-height: 1; padding: 0; }
+.viewer-close:hover { background: var(--red); }
+.viewer-body { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.viewer-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.viewer-iframe { width: 100%; height: 100%; border: none; background: white; min-height: 70vh; }
+.viewer-fallback { background: var(--surface); color: var(--text); padding: 40px; border-radius: 10px; text-align: center; }
+.viewer-fallback p { margin-bottom: 14px; }
 </style>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar">
     <div class="logo">
-      <div class="logo-product">CampaignPulse <span class="logo-product-badge">r30c</span></div>
+      <div class="logo-product">CampaignPulse <span class="logo-product-badge">r30d</span></div>
       <div class="logo-sub">Logistics · FK Sports</div>
     </div>
     <nav class="nav">
@@ -611,6 +677,56 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
   </div>
 </div>
 
+<!-- r30d: Stage editor modal (click any gate circle) -->
+<div class="modal-overlay" id="stageEditorModal">
+  <div class="modal" style="max-width:680px">
+    <div class="modal-head">
+      <div class="modal-title" id="stageEditorTitle">Step</div>
+      <button class="modal-close" onclick="closeStageEditor()">&times;</button>
+    </div>
+    <div class="modal-body" style="padding:20px 24px" id="stageEditorBody"></div>
+    <div class="modal-foot" id="stageEditorFoot"></div>
+  </div>
+</div>
+
+<!-- r30d: New claim modal -->
+<div class="modal-overlay" id="newClaimModal">
+  <div class="modal" style="max-width:540px">
+    <div class="modal-head"><div class="modal-title">New discrepancy claim</div><button class="modal-close" onclick="closeNewClaimModal()">&times;</button></div>
+    <div class="modal-body" style="padding:20px 24px">
+      <div class="field"><label>Describe what's wrong</label>
+        <textarea id="nc_description" rows="4" placeholder="e.g. Received 95 units instead of 100, 3 units damaged. Upload delivery sheet / photos after creating."></textarea>
+        <div class="field-help">Be specific. Supplier will see this on their portal.</div>
+      </div>
+      <div class="field"><label>Estimated value (GBP, optional)</label>
+        <input type="number" step="0.01" id="nc_value" placeholder="0.00">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeNewClaimModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitNewClaim()">Open claim</button>
+    </div>
+  </div>
+</div>
+
+<!-- r30d: File viewer (lightbox) -->
+<div class="modal-overlay viewer-overlay" id="fileViewerModal">
+  <div class="viewer-modal">
+    <div class="viewer-head">
+      <div>
+        <div class="viewer-name" id="viewerName">file</div>
+        <div class="viewer-meta" id="viewerMeta"></div>
+      </div>
+      <div class="viewer-nav">
+        <button class="viewer-navbtn" id="viewerPrev" onclick="viewerPrev()" title="Previous (←)">‹</button>
+        <button class="viewer-navbtn" id="viewerNext" onclick="viewerNext()" title="Next (→)">›</button>
+        <button class="viewer-close" onclick="closeFileViewer()" title="Close (Esc)">×</button>
+      </div>
+    </div>
+    <div class="viewer-body" id="viewerBody"></div>
+  </div>
+</div>
+
 <script>
 // ─── State ─────────────────────────────────────────────────────────────
 let _user = null;
@@ -623,6 +739,7 @@ let _activeTaskFilter = 'open_or_claimed';
 let _currentPlan = null;
 let _slipState = null;            // { field, oldVal, newVal, planId } pending
 let _cancelPlanId = null;
+let _pendingReplacements = {};    // r30d: planId → [promises] until acknowledged or banner rendered
 let _prodCheckState = null;       // { taskId } pending
 
 function token() { return localStorage.getItem('cp_token'); }
@@ -1165,6 +1282,8 @@ function renderPlanModal(data) {
   const tasks = data.tasks || [];
   const activeTasks = tasks.filter(t => t.status === 'open' || t.status === 'claimed');
   const fieldAudit = data.field_audit || {};
+  const claims = data.claims || [];
+  const openClaims = claims.filter(c => c.status !== 'closed');
 
   let body = '<div class="modal-grid"><div class="modal-main">';
 
@@ -1175,12 +1294,13 @@ function renderPlanModal(data) {
     body += '</div>';
   }
 
-  // Gate timeline (smaller, just visual)
+  // Gate timeline — clickable
+  body += '<div style="font-size:11px;color:var(--text3);margin-bottom:4px;text-align:center">Click any step to edit</div>';
   body += renderGateTimeline(p);
 
   // CURRENT GATE FIELDS — only the 2-4 inputs that matter right now
-  body += '<div class="current-gate-section"><div class="current-gate-label">Step ' + (p.current_gate || 0) + ': ' + escapeHtml(p.current_gate_name || '—') + '</div>';
-  body += currentGateFieldsHtml(p, s, fieldAudit);
+  body += '<div class="current-gate-section"><div class="current-gate-label">Current step ' + (p.current_gate || 0) + ': ' + escapeHtml(p.current_gate_name || '—') + '</div>';
+  body += currentGateFieldsHtml(p, s, fieldAudit, p.current_gate);
   body += '</div>';
 
   // Disposition section (only when gate >= 10)
@@ -1190,16 +1310,13 @@ function renderPlanModal(data) {
     body += '</div>';
   }
 
-  // SHOW ALL FIELDS — collapsed by default
-  body += '<details class="all-fields-details" style="margin-top:20px"><summary>Show all fields</summary>';
-  body += '<div style="margin-top:14px">' + allFieldsHtml(p, s, fieldAudit) + '</div>';
-  body += '</details>';
-
-  // Issues — collapsed by default
-  const issueCount = (data.issues || []).filter(i => i.status === 'open').length;
-  body += '<details class="all-fields-details" style="margin-top:12px"' + (issueCount > 0 ? ' open' : '') + '><summary>Issues' + (issueCount > 0 ? ' (' + issueCount + ' open)' : '') + '</summary>';
-  body += '<div style="margin-top:14px">' + renderIssuesSection(p, data.issues || []) + '</div>';
-  body += '</details>';
+  // CLAIMS section — only when disposition = 'issues' or there are existing claims
+  if (p.disposition === 'issues' || claims.length) {
+    body += '<div class="claims-section"><div class="section-title" style="margin-bottom:8px;display:flex;align-items:center;justify-content:space-between"><span>Discrepancy claims' + (openClaims.length ? ' (' + openClaims.length + ' open)' : '') + '</span><button class="btn btn-sm btn-primary" onclick="openNewClaimModal(' + p.id + ')">+ New claim</button></div>';
+    if (!claims.length) body += '<div style="color:var(--text3);font-size:12px;padding:8px">No claims yet. Click "+ New claim" when you find a discrepancy.</div>';
+    else claims.forEach(c => { body += renderClaimCard(c, p.id); });
+    body += '</div>';
+  }
 
   body += '</div><div class="modal-side">';
 
@@ -1216,6 +1333,7 @@ function renderPlanModal(data) {
     if (_user && _user.is_manager) foot += '<button class="btn btn-danger" onclick="openCancelModal(' + p.id + ')">Cancel plan</button>';
     if (p.disposition === 'clean')  foot += '<button class="btn btn-success" onclick="closePlan(' + p.id + ')">Mark closed</button>';
     if (p.disposition === 'campbells' && !p.campbells_out_date) foot += '<button class="btn btn-success" onclick="markRetrieved(' + p.id + ')">Mark retrieved</button>';
+    if (p.disposition === 'issues' && openClaims.length === 0 && claims.length > 0) foot += '<button class="btn btn-success" onclick="closePlan(' + p.id + ')">Close plan (claims resolved)</button>';
   } else if (p.closed_at || p.status === 'cancelled') {
     if (_user && _user.is_manager) foot += '<button class="btn" onclick="reopenPlan(' + p.id + ')">Reopen</button>';
   }
@@ -1254,9 +1372,9 @@ function numField(id, label, value, audit) {
   return '<div class="field"><label>' + escapeHtml(label) + '</label><input type="number" step="0.01" id="f_' + id + '" value="' + escapeHtml(String(v)) + '">' + badge + '</div>';
 }
 
-// CURRENT GATE FIELDS — only what's needed for the current step
-function currentGateFieldsHtml(p, s, audit) {
-  const gate = p.current_gate || 0;
+// CURRENT GATE FIELDS — only what's needed for the specified gate (defaults to current_gate)
+function currentGateFieldsHtml(p, s, audit, targetGate) {
+  const gate = (typeof targetGate === 'number') ? targetGate : (p.current_gate || 0);
   let html = '<div class="field-row">';
 
   if (gate === 1) {
@@ -1348,7 +1466,7 @@ function renderGateTimeline(p) {
   let html = '<div class="gate-tl">';
   gates.forEach(function(g, i){
     const cls = g.n < cur ? 'done' : (g.n === cur ? 'current' : 'future');
-    html += '<div class="gate-step ' + cls + '"><div class="gate-circle">' + g.n + '</div><div class="gate-name">' + g.name + '</div></div>';
+    html += '<div class="gate-step ' + cls + ' clickable" onclick="openStageEditor(' + g.n + ')" title="Click to edit step ' + g.n + '"><div class="gate-circle">' + g.n + '</div><div class="gate-name">' + escapeHtml(g.name) + '</div></div>';
     if (i < gates.length - 1) html += '<div class="gate-line ' + (g.n < cur ? 'done' : '') + '"></div>';
   });
   html += '</div>';
@@ -1389,24 +1507,309 @@ function dispositionFieldsHtml(p) {
 }
 
 function renderIssuesSection(p, issues) {
-  let html = '<div class="section" style="border:none;padding:0;box-shadow:none;margin-top:18px"><div class="section-title" style="margin-bottom:8px">Issues</div>';
-  if (!issues.length) html += '<div style="color:var(--text3);font-size:12px;margin-bottom:10px">No issues logged</div>';
-  else {
-    html += '<div style="margin-bottom:10px">';
-    issues.forEach(function(iss){
-      const isOpen = iss.status === 'open';
-      html += '<div style="padding:8px 10px;background:' + (isOpen ? 'var(--red-light)' : 'var(--surface2)') + ';border-radius:6px;margin-bottom:6px;font-size:12px">' +
-        '<div><strong>' + escapeHtml(iss.description) + '</strong></div>' +
-        '<div style="color:var(--text3);margin-top:3px">' + fmtDate(iss.created_at) + ' · by ' + escapeHtml(iss.created_by || '?') + ' · <span class="tag ' + (isOpen ? 'red' : 'green') + '">' + iss.status + '</span></div>' +
-        (isOpen ? '<button class="btn btn-sm" style="margin-top:6px" onclick="resolveIssue(' + iss.id + ',' + p.id + ')">Mark resolved</button>' : '') +
-      '</div>';
+  // r30d: legacy generic issues no longer rendered in the new modal; kept here only for
+  // safety in case any callsite still expects it. Returns empty string.
+  return '';
+}
+
+// ─── r30d: Stage editor (click stage circle → focused editor) ──────────
+function openStageEditor(gateNum) {
+  if (!_currentPlan) return;
+  const p = _currentPlan.plan, s = _currentPlan.supplier;
+  const fa = _currentPlan.field_audit || {};
+  const gateNames = ['','Pay deposit','Approx loading','Book container','Loading & docs','Final payment','Telex','Send docs','Customs duty','Confirm cleared','Disposition','Close'];
+  const gateName = gateNames[gateNum] || ('Step ' + gateNum);
+  const editor = document.getElementById('stageEditorModal');
+  document.getElementById('stageEditorTitle').textContent = 'Step ' + gateNum + ': ' + gateName;
+  document.getElementById('stageEditorBody').innerHTML = currentGateFieldsHtml(p, s, fa, gateNum);
+  document.getElementById('stageEditorFoot').innerHTML = '<button class="btn" onclick="closeStageEditor()">Close</button>';
+  editor.classList.add('active');
+}
+function closeStageEditor() { document.getElementById('stageEditorModal').classList.remove('active'); }
+
+// ─── r30d: Claim card rendering ─────────────────────────────────────────
+function renderClaimCard(c, planId) {
+  const statusLabels = {
+    'open': 'Open — waiting for supplier',
+    'awaiting_supplier': 'Awaiting supplier',
+    'supplier_responded': 'Supplier proposed resolution',
+    'agreed': 'Agreed',
+    'closed': 'Closed'
+  };
+  const statusColors = {
+    'open': 'red', 'awaiting_supplier': 'amber', 'supplier_responded': 'blue',
+    'agreed': 'purple', 'closed': 'green'
+  };
+  const resolutionLabels = {
+    'refund': 'Refund', 'replace': 'Replace in future shipment',
+    'credit': 'Credit note', 'dispute': 'Dispute (no fault)'
+  };
+  let html = '<div class="claim-card">';
+  html += '<div class="claim-card-head"><div><strong>' + escapeHtml((c.description || '').slice(0, 100)) + '</strong>' + (c.claim_value_gbp ? ' <span class="claim-value">' + fmtGbp(c.claim_value_gbp) + '</span>' : '') + '</div>';
+  html += '<span class="tag ' + (statusColors[c.status] || 'grey') + '">' + escapeHtml(statusLabels[c.status] || c.status) + '</span></div>';
+  html += '<div class="claim-meta">Opened ' + fmtDate(c.created_at) + ' by ' + escapeHtml(c.created_by || '?') + '</div>';
+
+  // Supplier response, if any
+  if (c.supplier_proposed_resolution) {
+    html += '<div class="supplier-proposal">';
+    html += '<div class="supplier-proposal-head">Supplier proposed: ' + escapeHtml(resolutionLabels[c.supplier_proposed_resolution] || c.supplier_proposed_resolution) + '</div>';
+    if (c.supplier_resolution_note) html += '<div class="supplier-proposal-note">"' + escapeHtml(c.supplier_resolution_note) + '"</div>';
+    if (c.supplier_replacement_plan_ref) html += '<div class="supplier-proposal-note">Replacement will be in: <strong>' + escapeHtml(c.supplier_replacement_plan_ref) + '</strong></div>';
+    if (c.supplier_responded_at) html += '<div class="claim-meta">Responded ' + fmtDate(c.supplier_responded_at) + '</div>';
+    html += '</div>';
+  }
+
+  // Claim files
+  if (c.files && c.files.length) {
+    html += '<div class="claim-files">';
+    c.files.forEach(function(f){
+      const isImg = (f.mime_type || '').startsWith('image/');
+      const tag = f.uploaded_by_role === 'supplier' ? '<span class="file-tag supplier">Supplier</span>' : '<span class="file-tag fk">FK</span>';
+      html += '<div class="claim-file" onclick="openFileViewer(\'claim\',' + f.id + ', null)">' + tag + ' ' + (isImg ? '🖼' : '📄') + ' ' + escapeHtml(f.filename) + '</div>';
     });
     html += '</div>';
   }
-  html += '<div class="field-row" style="gap:8px;align-items:end"><div class="field" style="margin-bottom:0;flex:1"><label>Add issue</label><input type="text" id="newIssueText" placeholder="Describe the issue"></div><button class="btn btn-sm btn-primary" onclick="addIssue(' + p.id + ')">Add</button></div>';
+
+  // Actions row
+  html += '<div class="claim-actions">';
+  // Upload claim file
+  html += '<label class="btn btn-sm" style="margin:0">Add photo/doc<input type="file" id="claimFile_' + c.id + '" style="display:none" onchange="uploadClaimFile(' + c.id + ',' + planId + ')" accept="image/*,application/pdf"></label>';
+  // Agree to supplier proposal
+  if (c.status === 'supplier_responded' && !c.agreed_resolution) {
+    html += '<button class="btn btn-sm btn-success" onclick="agreeClaim(' + c.id + ',\'' + c.supplier_proposed_resolution + '\',' + planId + ')">Agree to ' + escapeHtml(resolutionLabels[c.supplier_proposed_resolution] || c.supplier_proposed_resolution) + '</button>';
+  }
+  // Reject / re-open: only if supplier responded
+  if (c.status === 'supplier_responded') {
+    html += '<button class="btn btn-sm" onclick="rejectClaimResponse(' + c.id + ',' + planId + ')">Reject — ask supplier again</button>';
+  }
+  // Close — only if agreed or no response and want to close anyway
+  if (c.status !== 'closed') {
+    html += '<button class="btn btn-sm btn-ghost" onclick="closeClaim(' + c.id + ',' + planId + ')">Close claim</button>';
+  } else if (_user && _user.is_manager) {
+    html += '<button class="btn btn-sm btn-ghost" onclick="reopenClaim(' + c.id + ',' + planId + ')">Reopen</button>';
+  }
+  html += '</div></div>';
+  return html;
+}
+
+async function openNewClaimModal(planId) {
+  document.getElementById('nc_description').value = '';
+  document.getElementById('nc_value').value = '';
+  document.getElementById('newClaimModal').setAttribute('data-plan-id', planId);
+  document.getElementById('newClaimModal').classList.add('active');
+}
+function closeNewClaimModal() { document.getElementById('newClaimModal').classList.remove('active'); }
+
+async function submitNewClaim() {
+  const modal = document.getElementById('newClaimModal');
+  const planId = parseInt(modal.getAttribute('data-plan-id'));
+  const description = document.getElementById('nc_description').value.trim();
+  const valueGbp = parseFloat(document.getElementById('nc_value').value) || null;
+  if (!description) { toast('Description required', 'error'); return; }
+  try {
+    await api('/plans/' + planId + '/claims', { method: 'POST', body: { description, claim_value_gbp: valueGbp } });
+    toast('Claim opened', 'success');
+    closeNewClaimModal();
+    openPlan(planId);
+    loadDashboard();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function uploadClaimFile(claimId, planId) {
+  const input = document.getElementById('claimFile_' + claimId);
+  if (!input.files || !input.files.length) return;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  try {
+    const r = await fetch('/api/logistics/claims/' + claimId + '/files', {
+      method: 'POST', headers: { 'x-auth-token': token() }, body: fd
+    });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || 'Upload failed'); }
+    toast('File added to claim', 'success');
+    openPlan(planId);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function agreeClaim(claimId, resolution, planId) {
+  if (!confirm('Agree to supplier\'s proposed resolution?')) return;
+  try {
+    await api('/claims/' + claimId, { method: 'PATCH', body: { status: 'agreed', agreed_resolution: resolution } });
+    toast('Agreed', 'success');
+    openPlan(planId);
+  } catch(e) { toast(e.message, 'error'); }
+}
+async function rejectClaimResponse(claimId, planId) {
+  const note = prompt('Why are you rejecting the proposal? (Will be visible to supplier on their next visit)');
+  if (note === null) return;
+  try {
+    await api('/claims/' + claimId, { method: 'PATCH', body: { status: 'open' } });
+    if (note) {
+      await api('/plans/' + planId, { method: 'PATCH', body: { shipping_notes: note } });
+    }
+    toast('Claim re-opened — supplier will see on next visit', 'success');
+    openPlan(planId);
+  } catch(e) { toast(e.message, 'error'); }
+}
+async function closeClaim(claimId, planId) {
+  if (!confirm('Close this claim?')) return;
+  try {
+    await api('/claims/' + claimId, { method: 'PATCH', body: { status: 'closed' } });
+    toast('Claim closed', 'success');
+    openPlan(planId);
+    loadDashboard();
+  } catch(e) { toast(e.message, 'error'); }
+}
+async function reopenClaim(claimId, planId) {
+  if (!confirm('Reopen this claim?')) return;
+  try {
+    await api('/claims/' + claimId, { method: 'PATCH', body: { status: 'open' } });
+    toast('Reopened', 'success');
+    openPlan(planId);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ─── r30d: File viewer ──────────────────────────────────────────────────
+let _viewerFiles = []; let _viewerIndex = -1; let _viewerKind = 'plan';
+function openFileViewer(kind, fileId, fileList) {
+  _viewerKind = kind || 'plan';
+  if (fileList && Array.isArray(fileList)) {
+    _viewerFiles = fileList;
+    _viewerIndex = fileList.findIndex(f => f.id === fileId);
+    if (_viewerIndex < 0) _viewerIndex = 0;
+  } else {
+    // Build from current plan data
+    if (_currentPlan && kind === 'plan') {
+      _viewerFiles = (_currentPlan.files || []).filter(f => f.id);
+      _viewerIndex = _viewerFiles.findIndex(f => f.id === fileId);
+      if (_viewerIndex < 0) _viewerIndex = 0;
+    } else if (_currentPlan && kind === 'claim') {
+      const allClaimFiles = [];
+      (_currentPlan.claims || []).forEach(c => (c.files || []).forEach(f => allClaimFiles.push(f)));
+      _viewerFiles = allClaimFiles;
+      _viewerIndex = _viewerFiles.findIndex(f => f.id === fileId);
+      if (_viewerIndex < 0) _viewerIndex = 0;
+    } else {
+      _viewerFiles = [];
+      _viewerIndex = 0;
+    }
+  }
+  document.getElementById('fileViewerModal').classList.add('active');
+  renderFileViewer();
+}
+function renderFileViewer() {
+  if (!_viewerFiles.length || _viewerIndex < 0) { closeFileViewer(); return; }
+  const f = _viewerFiles[_viewerIndex];
+  const baseUrl = (_viewerKind === 'claim' ? '/api/logistics/claim-files/' : '/api/logistics/files/') + f.id + '/view';
+  const mime = (f.mime_type || '').toLowerCase();
+  let body = '';
+  if (mime.startsWith('image/')) {
+    body = '<img class="viewer-img" src="' + baseUrl + '?t=' + token() + '" alt="' + escapeHtml(f.filename) + '">';
+  } else if (mime === 'application/pdf') {
+    // Use blob-fetched URL because iframe direct fetch can\'t send the auth header
+    body = '<iframe class="viewer-iframe" id="viewerIframe" src="about:blank"></iframe>';
+  } else {
+    body = '<div class="viewer-fallback"><p>Preview not available for this file type.</p><a class="btn btn-primary" href="' + (_viewerKind === 'claim' ? '/api/logistics/claim-files/' : '/api/logistics/files/') + f.id + '/download" download>Download</a></div>';
+  }
+  document.getElementById('viewerName').textContent = f.filename;
+  document.getElementById('viewerMeta').textContent = (_viewerIndex + 1) + ' of ' + _viewerFiles.length + ' · ' + (f.uploaded_by || '?');
+  document.getElementById('viewerBody').innerHTML = body;
+  // For images: append auth via fetch (since img can't send custom header)... we use blob URL
+  if (mime.startsWith('image/')) {
+    fetch(baseUrl, { headers: { 'x-auth-token': token() } })
+      .then(r => r.ok ? r.blob() : Promise.reject(new Error('Load failed')))
+      .then(b => { const u = URL.createObjectURL(b); const img = document.querySelector('.viewer-img'); if (img) img.src = u; })
+      .catch(()=>{});
+  } else if (mime === 'application/pdf') {
+    fetch(baseUrl, { headers: { 'x-auth-token': token() } })
+      .then(r => r.ok ? r.blob() : Promise.reject(new Error('Load failed')))
+      .then(b => { const u = URL.createObjectURL(b); const ifr = document.getElementById('viewerIframe'); if (ifr) ifr.src = u; })
+      .catch(()=>{});
+  }
+  // Nav buttons
+  document.getElementById('viewerPrev').style.display = _viewerFiles.length > 1 ? 'inline-block' : 'none';
+  document.getElementById('viewerNext').style.display = _viewerFiles.length > 1 ? 'inline-block' : 'none';
+}
+function closeFileViewer() { document.getElementById('fileViewerModal').classList.remove('active'); _viewerFiles = []; _viewerIndex = -1; }
+function viewerPrev() { if (!_viewerFiles.length) return; _viewerIndex = (_viewerIndex - 1 + _viewerFiles.length) % _viewerFiles.length; renderFileViewer(); }
+function viewerNext() { if (!_viewerFiles.length) return; _viewerIndex = (_viewerIndex + 1) % _viewerFiles.length; renderFileViewer(); }
+document.addEventListener('keydown', function(e) {
+  if (!document.getElementById('fileViewerModal').classList.contains('active')) return;
+  if (e.key === 'ArrowLeft') viewerPrev();
+  else if (e.key === 'ArrowRight') viewerNext();
+  else if (e.key === 'Escape') closeFileViewer();
+});
+
+// ─── r30d: File grouping for sidebar ────────────────────────────────────
+function renderFilesGrouped(files, planId) {
+  if (!files || !files.length) return '<div style="color:var(--text3);font-size:12px">No files yet</div>';
+  // Group by slot_group
+  const groups = { order: [], shipping: [], customs: [], delivery: [], other: [] };
+  const groupLabels = { order: 'Order docs', shipping: 'Shipping', customs: 'Customs', delivery: 'Delivery', other: 'Other' };
+  files.forEach(f => { const g = f.slot_group || 'other'; (groups[g] || groups.other).push(f); });
+  // Sort: pinned first, then newest
+  Object.values(groups).forEach(arr => arr.sort((a,b) => {
+    if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1;
+    return new Date(b.uploaded_at) - new Date(a.uploaded_at);
+  }));
+  let html = '';
+  Object.keys(groups).forEach(function(g){
+    const arr = groups[g];
+    if (!arr.length) return;
+    html += '<div class="file-group"><div class="file-group-title">' + escapeHtml(groupLabels[g] || g) + ' (' + arr.length + ')</div>';
+    // Group by slot — show latest, hide older as version history
+    const bySlot = {};
+    arr.forEach(f => { (bySlot[f.slot] = bySlot[f.slot] || []).push(f); });
+    Object.keys(bySlot).forEach(function(slot) {
+      const list = bySlot[slot];
+      const latest = list[0]; // already sorted newest first
+      const older = list.slice(1);
+      html += renderFileTile(latest, planId, older);
+    });
+    html += '</div>';
+  });
+  return html;
+}
+function renderFileTile(f, planId, older) {
+  const isImg = (f.mime_type || '').startsWith('image/');
+  const isPdf = (f.mime_type || '').toLowerCase() === 'application/pdf';
+  const icon = isImg ? '🖼' : (isPdf ? '📄' : '📎');
+  let html = '<div class="file-tile' + (f.pinned ? ' pinned' : '') + '">';
+  html += '<div class="file-tile-main" onclick="openFileViewer(\'plan\',' + f.id + ',null)">';
+  html += '<div class="file-tile-icon">' + icon + '</div>';
+  html += '<div class="file-tile-info">';
+  html += '<div class="file-tile-slot">' + escapeHtml(f.slot) + '</div>';
+  html += '<div class="file-tile-name">' + escapeHtml(f.filename) + '</div>';
+  html += '<div class="file-tile-meta">' + escapeHtml(f.uploaded_by || '?') + ' · ' + fmtDate(f.uploaded_at) + '</div>';
+  html += '</div></div>';
+  html += '<div class="file-tile-actions">';
+  html += '<button title="Pin" class="file-action ' + (f.pinned ? 'active' : '') + '" onclick="event.stopPropagation();togglePinFile(' + f.id + ',' + (f.pinned ? 'false' : 'true') + ',' + planId + ')">📌</button>';
+  html += '<button title="Download" class="file-action" onclick="event.stopPropagation();downloadFile(' + f.id + ')">⬇</button>';
+  html += '<button title="Delete" class="file-action danger" onclick="event.stopPropagation();deleteFile(' + f.id + ',' + planId + ')">×</button>';
+  html += '</div>';
+  if (older && older.length) {
+    html += '<details class="file-versions"><summary>+' + older.length + ' older version' + (older.length > 1 ? 's' : '') + '</summary>';
+    older.forEach(function(of){
+      html += '<div class="file-version-row" onclick="openFileViewer(\'plan\',' + of.id + ',null)">' +
+        '<span class="file-version-name">' + escapeHtml(of.filename) + '</span>' +
+        '<span class="file-version-meta">' + fmtDate(of.uploaded_at) + '</span>' +
+        '<button class="file-action danger" onclick="event.stopPropagation();deleteFile(' + of.id + ',' + planId + ')">×</button>' +
+        '</div>';
+    });
+    html += '</details>';
+  }
   html += '</div>';
   return html;
 }
+async function togglePinFile(fileId, pinned, planId) {
+  try { await api('/files/' + fileId + '/pin', { method: 'POST', body: { pinned } }); openPlan(planId); }
+  catch(e) { toast(e.message, 'error'); }
+}
+async function deleteFile(fileId, planId) {
+  if (!confirm('Delete this file? This cannot be undone.')) return;
+  try { await api('/files/' + fileId, { method: 'DELETE' }); toast('Deleted'); openPlan(planId); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
 
 function renderPlanSidebar(p, s, data) {
   let html = '';
@@ -1419,26 +1822,36 @@ function renderPlanSidebar(p, s, data) {
   if (p.container_price_usd) html += '<div class="side-row"><span class="label">Shipping</span><span class="val">' + fmtUsdFull(p.container_price_usd) + '</span></div>';
   if (p.duty_invoice_amount_gbp) html += '<div class="side-row"><span class="label">Duty</span><span class="val">' + fmtGbp(p.duty_invoice_amount_gbp) + '</span></div>';
   if (p.disposition === 'campbells') html += '<div class="side-row"><span class="label">Kemballs</span><span class="val">' + fmtGbp(p.campbells_incurred_gbp) + '</span></div>';
-  html += '</div>';
-
-  // Files
-  html += '<div class="side-section"><h4>Files</h4>';
-  if (!data.files || !data.files.length) html += '<div style="color:var(--text3);font-size:12px">No files</div>';
-  else {
-    data.files.forEach(function(f){
-      html += '<div class="file-row"><span class="file-slot">' + escapeHtml(f.slot) + '</span><a href="#" onclick="downloadFile(' + f.id + ');return false" style="color:var(--blue);text-decoration:none;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(f.filename) + '</a></div>';
-    });
+  // Open claims value
+  const openClaims = (data.claims || []).filter(c => c.status !== 'closed');
+  if (openClaims.length) {
+    const totalClaimValue = openClaims.reduce((sum, c) => sum + (parseFloat(c.claim_value_gbp) || 0), 0);
+    if (totalClaimValue > 0) html += '<div class="side-row"><span class="label">Open claims</span><span class="val">' + fmtGbp(totalClaimValue) + '</span></div>';
   }
-  html += '<div style="margin-top:8px"><input type="file" id="fileInput_' + p.id + '" style="font-size:11px;width:100%"><select id="fileSlot_' + p.id + '" style="margin-top:5px;font-size:11px;padding:4px;width:100%"><option value="quote">Quote</option><option value="bl">BL</option><option value="final_pi">Final PI</option><option value="packing_list">Packing list</option><option value="loading_photo">Loading photo</option><option value="telex">Telex</option><option value="delivery_sheet">Delivery sheet</option><option value="other">Other</option></select><button class="btn btn-sm" style="margin-top:5px;width:100%" onclick="uploadFile(' + p.id + ')">Upload</button></div>';
   html += '</div>';
 
-  // Supplier share
+  // Files — r30d grouped view with pin/delete
+  html += '<div class="side-section"><h4>Files</h4>';
+  html += renderFilesGrouped(data.files || [], p.id);
+  // Upload row
+  html += '<div class="file-upload-row">';
+  html += '<input type="file" id="fileInput_' + p.id + '" accept="image/*,application/pdf" style="font-size:11px;width:100%">';
+  html += '<select id="fileSlot_' + p.id + '" class="file-slot-select"><optgroup label="Order docs"><option value="original_pi">Original PI</option><option value="final_pi">Final PI</option><option value="packing_list">Packing list</option><option value="quote">Quote</option></optgroup><optgroup label="Shipping"><option value="bl">BL</option><option value="loading_photo">Loading photo</option><option value="telex">Telex</option><option value="container_doc">Other shipping doc</option></optgroup><optgroup label="Customs"><option value="duty_invoice">Duty invoice</option><option value="customs_doc">Customs doc</option></optgroup><optgroup label="Delivery"><option value="delivery_sheet">Delivery sheet</option><option value="discrepancy_photo">Discrepancy photo</option></optgroup><option value="other">Other</option></select>';
+  html += '<button class="btn btn-sm btn-primary" onclick="uploadFile(' + p.id + ')">Upload</button>';
+  html += '</div>';
+  html += '<div class="file-help">PDF and images only · max 25MB</div>';
+  html += '</div>';
+
+  // Supplier share — with WhatsApp button
   html += '<div class="side-section"><h4>Supplier link</h4>';
   if (p.supplier_share_token) {
     const url = window.location.origin + '/s/' + p.supplier_share_token;
     html += '<div class="share-box" id="shareBox_' + p.id + '">' + escapeHtml(url) + '</div>';
-    html += '<div style="display:flex;gap:6px;margin-bottom:6px"><button class="btn btn-sm" style="flex:1" onclick="copyShareLink(' + p.id + ',&quot;' + p.supplier_share_token + '&quot;)">Copy</button>';
-    html += '<button class="btn btn-sm" onclick="regenerateShare(' + p.id + ')">New link</button></div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">';
+    html += '<button class="btn btn-sm" onclick="copyShareLink(' + p.id + ',&quot;' + p.supplier_share_token + '&quot;)">Copy</button>';
+    html += '<button class="btn btn-sm" onclick="shareViaWhatsApp(&quot;' + p.supplier_share_token + '&quot;,&quot;' + escapeHtml(p.plan_number).replace(/&quot;/g,'') + '&quot;)">WhatsApp</button>';
+    html += '</div>';
+    html += '<button class="btn btn-sm" style="width:100%;margin-bottom:6px" onclick="regenerateShare(' + p.id + ')">Generate new link</button>';
     html += '<div class="field-check"><input type="checkbox" id="lockForm_' + p.id + '"' + (p.supplier_form_locked ? ' checked' : '') + ' onchange="toggleLock(' + p.id + ',this.checked)"> <span style="font-size:11px">Lock supplier form (read-only)</span></div>';
     if (p.supplier_submitted_by) html += '<div style="font-size:10px;color:var(--text3);margin-top:5px">Last submitted by ' + escapeHtml(p.supplier_submitted_by) + ' · ' + fmtDate(p.supplier_last_submitted_at) + '</div>';
   }
@@ -1466,6 +1879,14 @@ function renderPlanSidebar(p, s, data) {
   }
 
   return html;
+}
+
+function shareViaWhatsApp(token, planNumber) {
+  const url = window.location.origin + '/s/' + token;
+  const message = 'Hi, FK Sports needs an update on order ' + planNumber + '. Please review and update here: ' + url;
+  // Use generic wa.me without phone — supplier picks contact on their device
+  const whatsapp = 'https://wa.me/?text=' + encodeURIComponent(message);
+  window.open(whatsapp, '_blank');
 }
 
 // ─── Plan modal actions ────────────────────────────────────────────────
@@ -1635,8 +2056,28 @@ async function submitNewPlan() {
     remarks: document.getElementById('np_remarks').value || null
   };
   if (!body.plan_number) { toast('Plan number required', 'error'); return; }
-  try { const r = await api('/plans', { method: 'POST', body }); toast('Plan created', 'success'); closeNewPlanModal(); loadDashboard(); setTimeout(()=>openPlan(r.plan.id), 200); }
-  catch(e) { toast(e.message, 'error'); }
+  try {
+    const r = await api('/plans', { method: 'POST', body });
+    toast('Plan created', 'success');
+    closeNewPlanModal();
+    loadDashboard();
+    // r30d — if supplier has outstanding replacement promises, show a banner
+    if (r.outstanding_replacements && r.outstanding_replacements.length) {
+      showReplacementBanner(r.plan.id, r.outstanding_replacements);
+    }
+    setTimeout(() => openPlan(r.plan.id), 200);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function showReplacementBanner(planId, promises) {
+  // Stash + alert; the banner is shown inside the plan modal after openPlan loads
+  _pendingReplacements = _pendingReplacements || {};
+  _pendingReplacements[planId] = promises;
+  // Quick toast prompt
+  setTimeout(function(){
+    const promiseList = promises.map(p => '• ' + (p.claim_description || '').slice(0,60) + (p.promised_plan_ref ? ' (was promised: ' + p.promised_plan_ref + ')' : '')).join('\n');
+    alert('⚠ Outstanding replacement promises from this supplier:\n\n' + promiseList + '\n\nCheck the packing list carefully when this shipment arrives. You can mark each as fulfilled from the plan modal.');
+  }, 500);
 }
 
 function openNewSupplierModal()  { document.getElementById('newSupplierModal').classList.add('active'); }

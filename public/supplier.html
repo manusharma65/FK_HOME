@@ -58,6 +58,46 @@ h2 .cn { font-size: 14px; font-weight: 500; color: #4a5568; margin-left: 8px; }
 @media (max-width: 600px) {
   .field-row { grid-template-columns: 1fr; }
 }
+
+/* r30d — claims */
+.claims-banner { background: linear-gradient(135deg, #fdecea 0%, #fff5f4 100%); border: 2px solid #c0392b; border-radius: 12px; padding: 14px 18px; margin-bottom: 14px; }
+.claims-banner-head { font-size: 15px; font-weight: 700; color: #c0392b; margin-bottom: 4px; }
+.claims-banner-sub { font-size: 12px; color: #4a5568; }
+.claims-section { background: #fff; border-radius: 14px; padding: 20px 22px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+.claim-card { background: #f7f8fa; border: 1px solid rgba(0,0,0,0.08); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+.claim-card-head { font-size: 14px; color: #0f1923; margin-bottom: 6px; }
+.claim-value { background: #fef3e2; color: #b45309; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; margin-left: 6px; }
+.claim-meta { font-size: 11px; color: #8a97a8; margin-bottom: 8px; }
+.claim-files-block { margin: 8px 0; }
+.claim-files-label { font-size: 11px; font-weight: 600; color: #4a5568; margin-bottom: 4px; }
+.claim-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.claim-file { background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+.claim-file:hover { background: #e8f2fb; border-color: #1a6fbd; }
+.supplier-response-form { background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.supplier-response-shown { background: #e6f4ef; border: 1px solid rgba(0,135,90,0.25); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.supplier-response-label { font-size: 11px; font-weight: 700; color: #00875a; text-transform: uppercase; margin-bottom: 4px; }
+.supplier-response-pick { font-size: 14px; color: #0f1923; margin-bottom: 4px; }
+.supplier-response-note { font-size: 12px; color: #4a5568; margin-top: 4px; }
+.claim-status-agreed { color: #00875a; font-size: 12px; font-weight: 600; margin-top: 6px; }
+.claim-status-pending { color: #b45309; font-size: 12px; margin-top: 6px; font-style: italic; }
+.response-form-inner > .field:last-of-type { margin-bottom: 8px; }
+.claim-upload-row { padding-top: 8px; border-top: 1px dashed rgba(0,0,0,0.08); }
+
+/* r30d — file viewer */
+.viewer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: none; align-items: center; justify-content: center; z-index: 200; padding: 0; }
+.viewer-overlay.active { display: flex; }
+.viewer-modal { background: #0f1923; color: white; width: 100%; height: 100%; display: flex; flex-direction: column; }
+.viewer-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 18px; background: rgba(0,0,0,0.4); border-bottom: 1px solid rgba(255,255,255,0.1); }
+.viewer-name { font-size: 14px; font-weight: 600; }
+.viewer-meta { font-size: 11px; color: rgba(255,255,255,0.6); margin-top: 2px; }
+.viewer-nav { display: flex; gap: 8px; }
+.viewer-navbtn, .viewer-close { background: rgba(255,255,255,0.1); border: none; color: white; font-size: 22px; width: 38px; height: 38px; border-radius: 50%; cursor: pointer; padding: 0; line-height: 1; }
+.viewer-navbtn:hover { background: rgba(255,255,255,0.2); }
+.viewer-close:hover { background: #c0392b; }
+.viewer-body { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.viewer-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.viewer-iframe { width: 100%; height: 100%; min-height: 70vh; border: none; background: white; }
+.viewer-fallback { background: #fff; color: #0f1923; padding: 30px; border-radius: 10px; text-align: center; }
 </style>
 </head>
 <body>
@@ -70,11 +110,31 @@ h2 .cn { font-size: 14px; font-weight: 500; color: #4a5568; margin-left: 8px; }
   <div class="foot-note">FK Sports UK · Logistics partner portal · This page is unique to your order. / 此页面仅用于您的订单</div>
 </div>
 
+<!-- r30d: File viewer (lightbox) -->
+<div class="viewer-overlay" id="fileViewerModal">
+  <div class="viewer-modal">
+    <div class="viewer-head">
+      <div>
+        <div class="viewer-name" id="viewerName"></div>
+        <div class="viewer-meta" id="viewerMeta"></div>
+      </div>
+      <div class="viewer-nav">
+        <button class="viewer-navbtn" id="viewerPrev" onclick="viewerPrev()">‹</button>
+        <button class="viewer-navbtn" id="viewerNext" onclick="viewerNext()">›</button>
+        <button class="viewer-close" onclick="closeSupplierFileViewer()">×</button>
+      </div>
+    </div>
+    <div class="viewer-body" id="viewerBody"></div>
+  </div>
+</div>
+
 <script>
 const token = window.location.pathname.split('/').filter(Boolean).pop();
 let plan = null;
 let files = [];
+let claims = [];
 let pendingSlipReason = null;
+let _viewerFiles = []; let _viewerIndex = -1;
 
 function toast(msg, kind) {
   const el = document.createElement('div');
@@ -98,6 +158,8 @@ async function load() {
     plan = await r.json();
     const fr = await fetch('/s/api/' + token + '/files');
     if (fr.ok) { const fj = await fr.json(); files = fj.files || []; }
+    const cr = await fetch('/s/api/' + token + '/claims');
+    if (cr.ok) { const cj = await cr.json(); claims = cj.claims || []; }
     render();
   } catch(e) {
     document.getElementById('root').innerHTML = '<div class="error-box">Could not load. / 无法加载</div>';
@@ -110,6 +172,18 @@ function render() {
 
   if (plan.locked) {
     html += '<div class="locked-banner"><strong>This form is locked / 此表单已锁定</strong>You can no longer edit this form. Please contact FK Sports if changes are needed. / 您无法再编辑此表单。如需更改，请联系 FK Sports。</div>';
+  }
+
+  // r30d: Claims banner — supplier must see and respond
+  if (claims && claims.length) {
+    const needsResponse = claims.filter(c => c.status === 'open' || c.status === 'awaiting_supplier');
+    if (needsResponse.length) {
+      html += '<div class="claims-banner"><div class="claims-banner-head">⚠ FK Sports has reported ' + needsResponse.length + ' discrepancy / FK Sports 报告了' + needsResponse.length + '项差异</div><div class="claims-banner-sub">Please review and respond below. / 请审阅并在下方回复。</div></div>';
+    }
+    html += '<div class="claims-section">';
+    html += '<h2 style="border-top:0;margin-top:0">Discrepancies & claims <span class="cn">差异与索赔</span></h2>';
+    claims.forEach(c => { html += renderSupplierClaim(c); });
+    html += '</div>';
   }
 
   html += '<h1>Order update <span class="cn">订单更新</span></h1>';
@@ -253,6 +327,184 @@ async function uploadFile(slot) {
     await load();
   } catch(e) { toast(e.message, 'error'); }
 }
+
+// ─── r30d: Claim rendering + response ────────────────────────────────────
+function renderSupplierClaim(c) {
+  const resolutionLabels = {
+    refund: 'Refund / 退款',
+    replace: 'Replace in future order / 下批补货',
+    credit: 'Credit note / 信用单',
+    dispute: 'Dispute (no fault) / 不同意'
+  };
+  const responded = !!c.supplier_proposed_resolution;
+  let html = '<div class="claim-card">';
+  html += '<div class="claim-card-head"><strong>' + escapeHtml(c.description) + '</strong>';
+  if (c.claim_value_gbp) html += ' <span class="claim-value">£' + c.claim_value_gbp + '</span>';
+  html += '</div>';
+  html += '<div class="claim-meta">Opened: ' + fmtDate(c.created_at) + ' / 提出于 ' + fmtDate(c.created_at) + '</div>';
+
+  // FK-uploaded claim files (read-only for supplier, viewable)
+  const fkFiles = (c.files || []).filter(f => f.uploaded_by_role !== 'supplier');
+  if (fkFiles.length) {
+    html += '<div class="claim-files-block"><div class="claim-files-label">Files from FK / FK 上传的文件:</div><div class="claim-files">';
+    fkFiles.forEach(f => {
+      const isImg = (f.mime_type || '').startsWith('image/');
+      html += '<div class="claim-file" onclick="openSupplierFileViewer(\'claim\',' + f.id + ',null)">' + (isImg ? '🖼' : '📄') + ' ' + escapeHtml(f.filename) + '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // Supplier-uploaded files
+  const supplierFiles = (c.files || []).filter(f => f.uploaded_by_role === 'supplier');
+  if (supplierFiles.length) {
+    html += '<div class="claim-files-block"><div class="claim-files-label">Your uploaded files / 您上传的文件:</div><div class="claim-files">';
+    supplierFiles.forEach(f => {
+      const isImg = (f.mime_type || '').startsWith('image/');
+      html += '<div class="claim-file" onclick="openSupplierFileViewer(\'claim\',' + f.id + ',null)">' + (isImg ? '🖼' : '📄') + ' ' + escapeHtml(f.filename) + '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // Response form, or show existing response
+  if (responded) {
+    html += '<div class="supplier-response-shown">';
+    html += '<div class="supplier-response-label">Your response / 您的回复:</div>';
+    html += '<div class="supplier-response-pick"><strong>' + escapeHtml(resolutionLabels[c.supplier_proposed_resolution] || c.supplier_proposed_resolution) + '</strong></div>';
+    if (c.supplier_resolution_note) html += '<div class="supplier-response-note">"' + escapeHtml(c.supplier_resolution_note) + '"</div>';
+    if (c.supplier_replacement_plan_ref) html += '<div class="supplier-response-note">Replacement order / 补货订单: <strong>' + escapeHtml(c.supplier_replacement_plan_ref) + '</strong></div>';
+    if (c.status === 'agreed') html += '<div class="claim-status-agreed">✓ FK Sports has agreed / FK Sports 已同意</div>';
+    else html += '<div class="claim-status-pending">Waiting for FK Sports to agree / 等待 FK Sports 同意</div>';
+    // Allow update
+    if (!plan.locked && c.status !== 'agreed' && c.status !== 'closed') {
+      html += '<button class="btn btn-sm" style="margin-top:8px;width:auto;padding:8px 14px" onclick="showResponseForm(' + c.id + ')">Update response / 修改回复</button>';
+    }
+    html += '</div>';
+    html += '<div id="responseForm_' + c.id + '" style="display:none;margin-top:10px">' + renderResponseForm(c) + '</div>';
+  } else if (!plan.locked) {
+    html += '<div class="supplier-response-form">' + renderResponseForm(c) + '</div>';
+  }
+
+  // Upload to this claim
+  if (!plan.locked) {
+    html += '<div class="claim-upload-row" style="margin-top:10px">';
+    html += '<input type="file" id="claimFile_' + c.id + '" accept="image/*,application/pdf" style="font-size:13px;width:100%">';
+    html += '<button class="btn btn-sm btn-secondary" style="margin-top:6px;width:auto;padding:8px 14px" onclick="uploadSupplierClaimFile(' + c.id + ')">Upload photo / 上传照片</button>';
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderResponseForm(c) {
+  let html = '<div class="response-form-inner">';
+  html += '<div class="field"><label>Your proposed resolution / 您建议的解决方案</label>';
+  html += '<select id="resp_resolution_' + c.id + '" onchange="onResolutionChange(' + c.id + ')">';
+  html += '<option value="">— Select / 请选择 —</option>';
+  html += '<option value="refund"' + (c.supplier_proposed_resolution === 'refund' ? ' selected' : '') + '>Refund / 退款</option>';
+  html += '<option value="replace"' + (c.supplier_proposed_resolution === 'replace' ? ' selected' : '') + '>Replace in future order / 下批补货</option>';
+  html += '<option value="credit"' + (c.supplier_proposed_resolution === 'credit' ? ' selected' : '') + '>Credit note / 信用单</option>';
+  html += '<option value="dispute"' + (c.supplier_proposed_resolution === 'dispute' ? ' selected' : '') + '>Dispute (no fault) / 不同意</option>';
+  html += '</select></div>';
+  html += '<div class="field" id="replacementRefField_' + c.id + '" style="display:' + (c.supplier_proposed_resolution === 'replace' ? 'block' : 'none') + '">';
+  html += '<label>Which future order will the replacement be in? / 补货将放在哪一批订单？</label>';
+  html += '<input type="text" id="resp_replacement_ref_' + c.id + '" value="' + escapeHtml(c.supplier_replacement_plan_ref || '') + '" placeholder="e.g. Next JMK order / 下一个JMK订单">';
+  html += '</div>';
+  html += '<div class="field"><label>Notes (optional) / 备注（可选）</label><textarea id="resp_note_' + c.id + '" rows="3">' + escapeHtml(c.supplier_resolution_note || '') + '</textarea></div>';
+  html += '<button class="btn btn-primary" onclick="respondClaim(' + c.id + ')">Send response / 发送回复</button>';
+  html += '</div>';
+  return html;
+}
+
+function onResolutionChange(claimId) {
+  const v = document.getElementById('resp_resolution_' + claimId).value;
+  document.getElementById('replacementRefField_' + claimId).style.display = (v === 'replace') ? 'block' : 'none';
+}
+
+function showResponseForm(claimId) {
+  const el = document.getElementById('responseForm_' + claimId);
+  if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+}
+
+async function respondClaim(claimId) {
+  const submitter = document.getElementById('submitted_by') ? document.getElementById('submitted_by').value : '';
+  if (!submitter) { toast('Please enter your name first (top of form) / 请先在表单顶部输入您的姓名', 'error'); return; }
+  const resolution = document.getElementById('resp_resolution_' + claimId).value;
+  if (!resolution) { toast('Please pick a resolution / 请选择一个方案', 'error'); return; }
+  const note = document.getElementById('resp_note_' + claimId).value;
+  const replacementRef = (resolution === 'replace') ? document.getElementById('resp_replacement_ref_' + claimId).value : null;
+  if (resolution === 'replace' && !replacementRef) { toast('Please specify which order the replacement will be in / 请指定补货将放在哪一批订单', 'error'); return; }
+  try {
+    const r = await fetch('/s/api/' + token + '/claims/' + claimId + '/respond', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proposed_resolution: resolution, note, replacement_plan_ref: replacementRef, submitted_by: submitter })
+    });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || 'Response failed'); }
+    toast('Response sent / 回复已发送', 'success');
+    await load();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function uploadSupplierClaimFile(claimId) {
+  const submitter = document.getElementById('submitted_by') ? document.getElementById('submitted_by').value : '';
+  if (!submitter) { toast('Please enter your name first / 请先输入您的姓名', 'error'); return; }
+  const input = document.getElementById('claimFile_' + claimId);
+  if (!input.files || !input.files.length) { toast('Choose a file / 选择文件', 'error'); return; }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  fd.append('submitted_by', submitter);
+  try {
+    const r = await fetch('/s/api/' + token + '/claims/' + claimId + '/files', { method: 'POST', body: fd });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || 'Upload failed'); }
+    toast('Uploaded / 已上传', 'success');
+    input.value = '';
+    await load();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ─── r30d: File viewer (supplier side) ───────────────────────────────────
+function openSupplierFileViewer(kind, fileId) {
+  // Collect all files of the same kind
+  if (kind === 'claim') {
+    const allClaimFiles = [];
+    claims.forEach(c => (c.files || []).forEach(f => allClaimFiles.push({ ...f, _kind: 'claim' })));
+    _viewerFiles = allClaimFiles;
+  } else {
+    _viewerFiles = (files || []).map(f => ({ ...f, _kind: 'plan' }));
+  }
+  _viewerIndex = _viewerFiles.findIndex(f => f.id === fileId);
+  if (_viewerIndex < 0) _viewerIndex = 0;
+  document.getElementById('fileViewerModal').classList.add('active');
+  renderSupplierFileViewer();
+}
+function renderSupplierFileViewer() {
+  if (!_viewerFiles.length) { closeSupplierFileViewer(); return; }
+  const f = _viewerFiles[_viewerIndex];
+  const baseUrl = '/s/api/' + token + '/' + (f._kind === 'claim' ? 'claim-files' : 'files') + '/' + f.id + '/view';
+  const mime = (f.mime_type || '').toLowerCase();
+  let body = '';
+  if (mime.startsWith('image/')) {
+    body = '<img class="viewer-img" src="' + baseUrl + '" alt="">';
+  } else if (mime === 'application/pdf') {
+    body = '<iframe class="viewer-iframe" src="' + baseUrl + '"></iframe>';
+  } else {
+    body = '<div class="viewer-fallback"><p>Preview not available / 无法预览</p></div>';
+  }
+  document.getElementById('viewerName').textContent = f.filename;
+  document.getElementById('viewerMeta').textContent = (_viewerIndex + 1) + ' of ' + _viewerFiles.length;
+  document.getElementById('viewerBody').innerHTML = body;
+  document.getElementById('viewerPrev').style.display = _viewerFiles.length > 1 ? 'inline-block' : 'none';
+  document.getElementById('viewerNext').style.display = _viewerFiles.length > 1 ? 'inline-block' : 'none';
+}
+function closeSupplierFileViewer() { document.getElementById('fileViewerModal').classList.remove('active'); _viewerFiles = []; _viewerIndex = -1; }
+function viewerPrev() { if (!_viewerFiles.length) return; _viewerIndex = (_viewerIndex - 1 + _viewerFiles.length) % _viewerFiles.length; renderSupplierFileViewer(); }
+function viewerNext() { if (!_viewerFiles.length) return; _viewerIndex = (_viewerIndex + 1) % _viewerFiles.length; renderSupplierFileViewer(); }
+document.addEventListener('keydown', function(e) {
+  if (!document.getElementById('fileViewerModal').classList.contains('active')) return;
+  if (e.key === 'ArrowLeft') viewerPrev();
+  else if (e.key === 'ArrowRight') viewerNext();
+  else if (e.key === 'Escape') closeSupplierFileViewer();
+});
 
 load();
 </script>

@@ -210,7 +210,68 @@ async function ensureLogisticsSchema(db) {
        set_by_role TEXT,
        created_at TIMESTAMP DEFAULT NOW()
      )`,
-    `CREATE INDEX IF NOT EXISTS idx_lg_field_audit_plan ON lg_field_audit(plan_id, field_name, created_at DESC)`
+    `CREATE INDEX IF NOT EXISTS idx_lg_field_audit_plan ON lg_field_audit(plan_id, field_name, created_at DESC)`,
+
+    // ── r30d additions ─────────────────────────────────────────────────────
+    // File slot grouping + pinning
+    `ALTER TABLE lg_plan_files ADD COLUMN IF NOT EXISTS slot_group TEXT DEFAULT 'other'`,
+    `ALTER TABLE lg_plan_files ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE lg_plan_files ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP`,
+    `ALTER TABLE lg_plan_files ADD COLUMN IF NOT EXISTS deleted_by TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_files_group ON lg_plan_files(plan_id, slot_group)`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_files_pinned ON lg_plan_files(plan_id, pinned)`,
+    // Claims (post-delivery discrepancies)
+    `CREATE TABLE IF NOT EXISTS lg_claims (
+       id SERIAL PRIMARY KEY,
+       plan_id INTEGER NOT NULL REFERENCES lg_plans(id) ON DELETE CASCADE,
+       description TEXT NOT NULL,
+       claim_value_gbp NUMERIC(12,2),
+       status TEXT NOT NULL DEFAULT 'open',
+       supplier_proposed_resolution TEXT,
+       supplier_resolution_note TEXT,
+       supplier_replacement_plan_ref TEXT,
+       supplier_responded_at TIMESTAMP,
+       agreed_resolution TEXT,
+       agreed_resolution_note TEXT,
+       agreed_at TIMESTAMP,
+       agreed_by TEXT,
+       closed_at TIMESTAMP,
+       closed_by TEXT,
+       next_chase_date DATE,
+       created_at TIMESTAMP DEFAULT NOW(),
+       created_by TEXT
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_claims_plan ON lg_claims(plan_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_claims_status ON lg_claims(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_claims_chase ON lg_claims(next_chase_date)`,
+    // Claim files (photos / delivery sheets)
+    `CREATE TABLE IF NOT EXISTS lg_claim_files (
+       id SERIAL PRIMARY KEY,
+       claim_id INTEGER NOT NULL REFERENCES lg_claims(id) ON DELETE CASCADE,
+       filename TEXT NOT NULL,
+       stored_path TEXT NOT NULL,
+       mime_type TEXT,
+       size_bytes INTEGER,
+       uploaded_by TEXT,
+       uploaded_by_role TEXT,
+       uploaded_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_claim_files_claim ON lg_claim_files(claim_id)`,
+    // Replacement promises (when supplier says "replace" we record which future plan)
+    `CREATE TABLE IF NOT EXISTS lg_replacement_promises (
+       id SERIAL PRIMARY KEY,
+       source_claim_id INTEGER NOT NULL REFERENCES lg_claims(id) ON DELETE CASCADE,
+       supplier_id INTEGER NOT NULL REFERENCES lg_suppliers(id),
+       promised_plan_ref TEXT,
+       description TEXT,
+       fulfilled BOOLEAN DEFAULT FALSE,
+       fulfilled_in_plan_id INTEGER REFERENCES lg_plans(id),
+       fulfilled_at TIMESTAMP,
+       fulfilled_by TEXT,
+       created_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_repl_supplier ON lg_replacement_promises(supplier_id, fulfilled)`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_repl_claim ON lg_replacement_promises(source_claim_id)`
   ];
   let ok = 0, fail = 0;
   for (const sql of stmts) {
@@ -583,6 +644,13 @@ async function logFieldAudit(db, planId, field, newVal, setBy, setByRole) {
 // FILE UPLOAD
 // ─────────────────────────────────────────────────────────────────────────────
 
+// r30d — allow PDF + images only
+const ALLOWED_MIME_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
+function isMimeAllowed(mime) {
+  if (!mime) return false;
+  return ALLOWED_MIME_TYPES.includes(mime.toLowerCase());
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: function(req, file, cb) {
@@ -595,8 +663,38 @@ const upload = multer({
       cb(null, Date.now() + '_' + id + '_' + safe);
     }
   }),
+  fileFilter: function(req, file, cb) {
+    if (!isMimeAllowed(file.mimetype)) {
+      cb(new Error('Only PDF and image files are allowed (PNG, JPG, GIF, WebP, PDF)'));
+    } else cb(null, true);
+  },
   limits: { fileSize: 25 * 1024 * 1024 }
 });
+
+// r30d — wrap upload.single to convert multer errors into clean JSON responses
+function uploadSingleFile(fieldName) {
+  return function(req, res, next) {
+    upload.single(fieldName)(req, res, function(err) {
+      if (err) {
+        return res.status(400).json({ error: err.message || 'Upload failed' });
+      }
+      next();
+    });
+  };
+}
+
+// Slot → slot_group mapping for file organization
+const SLOT_GROUPS = {
+  'quote': 'order', 'original_pi': 'order', 'final_pi': 'order', 'packing_list': 'order',
+  'bl': 'shipping', 'loading_photo': 'shipping', 'telex': 'shipping', 'container_doc': 'shipping',
+  'duty_invoice': 'customs', 'customs_doc': 'customs', 'commercial_invoice': 'customs',
+  'delivery_sheet': 'delivery', 'discrepancy_photo': 'delivery',
+  'other': 'other'
+};
+function slotToGroup(slot) {
+  const s = (slot || 'other').toLowerCase();
+  return SLOT_GROUPS[s] || 'other';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ROUTER
@@ -657,7 +755,7 @@ module.exports = function(getDb) {
       const plan = (await db.query('SELECT id FROM lg_plans WHERE supplier_share_token=$1', [req.params.token])).rows[0];
       if (!plan) return res.status(404).json({ error: 'Invalid link' });
       const files = (await db.query(
-        "SELECT id, slot, filename, uploaded_at, uploaded_by FROM lg_plan_files WHERE plan_id=$1 AND slot IN ('bl','final_pi','packing_list','loading_photo','telex') ORDER BY uploaded_at DESC",
+        "SELECT id, slot, slot_group, filename, mime_type, uploaded_at, uploaded_by FROM lg_plan_files WHERE plan_id=$1 AND deleted_at IS NULL AND slot IN ('bl','final_pi','original_pi','packing_list','loading_photo','telex') ORDER BY uploaded_at DESC",
         [plan.id])).rows;
       res.json({ files });
     } catch(e) { res.status(500).json({ error: e.message }); }
@@ -693,7 +791,7 @@ module.exports = function(getDb) {
       res.json({ ok: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
-  publicRouter.post('/api/:token/files', upload.single('file'), async function(req, res) {
+  publicRouter.post('/api/:token/files', uploadSingleFile('file'), async function(req, res) {
     const db = getDb && getDb();
     if (!db) return res.status(503).json({ error: 'Database not ready' });
     try {
@@ -701,17 +799,114 @@ module.exports = function(getDb) {
       if (!plan) return res.status(404).json({ error: 'Invalid link' });
       if (plan.supplier_form_locked) return res.status(423).json({ error: 'Form is locked' });
       if (!req.file) return res.status(400).json({ error: 'No file' });
-      const slotMap = { bl:'bl', final_pi:'final_pi', packing_list:'packing_list', loading_photo:'loading_photo', telex:'telex', other:'other' };
-      const slot = slotMap[(req.body.slot || 'other').toLowerCase()] || 'other';
+      const allowedSupplierSlots = ['bl','final_pi','original_pi','packing_list','loading_photo','telex','other'];
+      let slot = (req.body.slot || 'other').toLowerCase();
+      if (!allowedSupplierSlots.includes(slot)) slot = 'other';
+      const slot_group = slotToGroup(slot);
       const submitter = req.body.submitted_by || 'unknown';
       await db.query(
-        `INSERT INTO lg_plan_files (plan_id, slot, filename, stored_path, mime_type, size_bytes, uploaded_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [plan.id, slot, req.file.originalname, req.file.path, req.file.mimetype, req.file.size, 'supplier:' + submitter]);
+        `INSERT INTO lg_plan_files (plan_id, slot, slot_group, filename, stored_path, mime_type, size_bytes, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [plan.id, slot, slot_group, req.file.originalname, req.file.path, req.file.mimetype, req.file.size, 'supplier:' + submitter]);
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
         [plan.id, 'supplier_file', slot + ': ' + req.file.originalname, 'supplier:' + submitter]);
       res.json({ ok: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // r30d — supplier sees claims on their plan
+  publicRouter.get('/api/:token/claims', async function(req, res) {
+    const db = getDb && getDb();
+    if (!db) return res.status(503).json({ error: 'Database not ready' });
+    try {
+      const plan = (await db.query('SELECT id FROM lg_plans WHERE supplier_share_token=$1', [req.params.token])).rows[0];
+      if (!plan) return res.status(404).json({ error: 'Invalid link' });
+      const claims = (await db.query("SELECT id, description, claim_value_gbp, status, supplier_proposed_resolution, supplier_resolution_note, supplier_replacement_plan_ref, supplier_responded_at, agreed_resolution, created_at FROM lg_claims WHERE plan_id=$1 AND status NOT IN ('closed') ORDER BY created_at DESC", [plan.id])).rows;
+      const cf = claims.length ? (await db.query('SELECT id, claim_id, filename, mime_type, uploaded_by, uploaded_by_role FROM lg_claim_files WHERE claim_id = ANY($1::int[]) ORDER BY uploaded_at DESC', [claims.map(c=>c.id)])).rows : [];
+      const byClaim = {};
+      cf.forEach(f => { (byClaim[f.claim_id] = byClaim[f.claim_id] || []).push(f); });
+      claims.forEach(c => { c.files = byClaim[c.id] || []; });
+      res.json({ claims });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Supplier responds to a claim
+  publicRouter.post('/api/:token/claims/:claimId/respond', async function(req, res) {
+    const db = getDb && getDb();
+    if (!db) return res.status(503).json({ error: 'Database not ready' });
+    try {
+      const plan = (await db.query('SELECT id, supplier_form_locked FROM lg_plans WHERE supplier_share_token=$1', [req.params.token])).rows[0];
+      if (!plan) return res.status(404).json({ error: 'Invalid link' });
+      if (plan.supplier_form_locked) return res.status(423).json({ error: 'Form is locked' });
+      const claimId = parseInt(req.params.claimId);
+      const b = req.body || {};
+      const resolution = b.proposed_resolution; // 'refund' | 'replace' | 'credit' | 'dispute'
+      if (!['refund','replace','credit','dispute'].includes(resolution)) return res.status(400).json({ error: 'Invalid resolution' });
+      const replacementRef = resolution === 'replace' ? (b.replacement_plan_ref || null) : null;
+      // Verify claim belongs to plan
+      const claim = (await db.query('SELECT id FROM lg_claims WHERE id=$1 AND plan_id=$2', [claimId, plan.id])).rows[0];
+      if (!claim) return res.status(404).json({ error: 'Claim not found on this plan' });
+      await db.query(
+        `UPDATE lg_claims SET supplier_proposed_resolution=$1, supplier_resolution_note=$2, supplier_replacement_plan_ref=$3,
+         supplier_responded_at=NOW(), status='supplier_responded' WHERE id=$4`,
+        [resolution, b.note || null, replacementRef, claimId]);
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [plan.id, 'claim_supplier_responded', resolution + ': ' + (b.note || '').slice(0,80), 'supplier:' + (b.submitted_by || 'unknown')]);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Supplier uploads file to a claim
+  publicRouter.post('/api/:token/claims/:claimId/files', uploadSingleFile('file'), async function(req, res) {
+    const db = getDb && getDb();
+    if (!db) return res.status(503).json({ error: 'Database not ready' });
+    try {
+      const plan = (await db.query('SELECT id, supplier_form_locked FROM lg_plans WHERE supplier_share_token=$1', [req.params.token])).rows[0];
+      if (!plan) return res.status(404).json({ error: 'Invalid link' });
+      if (plan.supplier_form_locked) return res.status(423).json({ error: 'Form is locked' });
+      const claimId = parseInt(req.params.claimId);
+      if (!req.file) return res.status(400).json({ error: 'No file' });
+      const claim = (await db.query('SELECT id FROM lg_claims WHERE id=$1 AND plan_id=$2', [claimId, plan.id])).rows[0];
+      if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      const submitter = req.body.submitted_by || 'unknown';
+      await db.query(
+        `INSERT INTO lg_claim_files (claim_id, filename, stored_path, mime_type, size_bytes, uploaded_by, uploaded_by_role)
+         VALUES ($1,$2,$3,$4,$5,$6,'supplier')`,
+        [claimId, req.file.originalname, req.file.path, req.file.mimetype, req.file.size, 'supplier:' + submitter]);
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [plan.id, 'claim_supplier_file', req.file.originalname, 'supplier:' + submitter]);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Public claim file view (supplier can see what FK uploaded)
+  publicRouter.get('/api/:token/claim-files/:fileId/view', async function(req, res) {
+    const db = getDb && getDb();
+    if (!db) return res.status(503).send('not ready');
+    try {
+      const plan = (await db.query('SELECT id FROM lg_plans WHERE supplier_share_token=$1', [req.params.token])).rows[0];
+      if (!plan) return res.status(404).send('Invalid link');
+      // Verify file belongs to a claim on this plan
+      const f = (await db.query(
+        `SELECT cf.* FROM lg_claim_files cf JOIN lg_claims c ON c.id = cf.claim_id
+         WHERE cf.id=$1 AND c.plan_id=$2`, [parseInt(req.params.fileId), plan.id])).rows[0];
+      if (!f) return res.status(404).send('Not found');
+      if (!fs.existsSync(f.stored_path)) return res.status(410).send('File missing');
+      res.setHeader('Content-Type', f.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'inline; filename="' + (f.filename || 'file').replace(/[^a-zA-Z0-9._\-]/g,'_') + '"');
+      res.sendFile(path.resolve(f.stored_path));
+    } catch(e) { res.status(500).send(e.message); }
+  });
+  // Public regular file view (supplier can also see plan files like Final PI, etc.)
+  publicRouter.get('/api/:token/files/:fileId/view', async function(req, res) {
+    const db = getDb && getDb();
+    if (!db) return res.status(503).send('not ready');
+    try {
+      const plan = (await db.query('SELECT id FROM lg_plans WHERE supplier_share_token=$1', [req.params.token])).rows[0];
+      if (!plan) return res.status(404).send('Invalid link');
+      const f = (await db.query('SELECT * FROM lg_plan_files WHERE id=$1 AND plan_id=$2 AND deleted_at IS NULL', [parseInt(req.params.fileId), plan.id])).rows[0];
+      if (!f) return res.status(404).send('Not found');
+      if (!fs.existsSync(f.stored_path)) return res.status(410).send('File missing');
+      res.setHeader('Content-Type', f.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'inline; filename="' + (f.filename || 'file').replace(/[^a-zA-Z0-9._\-]/g,'_') + '"');
+      res.sendFile(path.resolve(f.stored_path));
+    } catch(e) { res.status(500).send(e.message); }
   });
   router._supplierShare = publicRouter;
 
@@ -811,12 +1006,20 @@ module.exports = function(getDb) {
       if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
       const plan = r.rows[0];
       const sup = plan.supplier_id ? (await db.query('SELECT * FROM lg_suppliers WHERE id=$1', [plan.supplier_id])).rows[0] : null;
-      const files = (await db.query('SELECT id, slot, filename, mime_type, size_bytes, uploaded_by, uploaded_at FROM lg_plan_files WHERE plan_id=$1 ORDER BY uploaded_at DESC', [plan.id])).rows;
+      const files = (await db.query('SELECT id, slot, slot_group, pinned, filename, mime_type, size_bytes, uploaded_by, uploaded_at FROM lg_plan_files WHERE plan_id=$1 AND deleted_at IS NULL ORDER BY pinned DESC, uploaded_at DESC', [plan.id])).rows;
       const issues = (await db.query('SELECT * FROM lg_plan_issues WHERE plan_id=$1 ORDER BY created_at DESC', [plan.id])).rows;
       const activity = (await db.query('SELECT * FROM lg_activity WHERE plan_id=$1 ORDER BY created_at DESC LIMIT 50', [plan.id])).rows;
       const tasks    = (await db.query("SELECT * FROM lg_tasks WHERE plan_id=$1 ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END, due_date NULLS LAST", [plan.id])).rows;
       const slips    = (await db.query('SELECT * FROM lg_date_slips WHERE plan_id=$1 ORDER BY created_at DESC LIMIT 20', [plan.id])).rows;
       const prodChecks = (await db.query('SELECT * FROM lg_production_checks WHERE plan_id=$1 ORDER BY created_at DESC', [plan.id])).rows;
+      // r30d — include claims for this plan with their files
+      const claims = (await db.query('SELECT * FROM lg_claims WHERE plan_id=$1 ORDER BY created_at DESC', [plan.id])).rows;
+      if (claims.length) {
+        const cf = (await db.query('SELECT id, claim_id, filename, mime_type, uploaded_by, uploaded_by_role, uploaded_at FROM lg_claim_files WHERE claim_id = ANY($1::int[]) ORDER BY uploaded_at DESC', [claims.map(c => c.id)])).rows;
+        const byClaim = {};
+        cf.forEach(f => { (byClaim[f.claim_id] = byClaim[f.claim_id] || []).push(f); });
+        claims.forEach(c => { c.files = byClaim[c.id] || []; });
+      }
       // r30c — build per-field provenance: last supplier set + last agent set, used for override badges
       const auditRows = (await db.query('SELECT field_name, new_value, set_by, set_by_role, created_at FROM lg_field_audit WHERE plan_id=$1 ORDER BY created_at ASC', [plan.id])).rows;
       const field_audit = {};
@@ -826,7 +1029,7 @@ module.exports = function(getDb) {
           value: a.new_value, by: a.set_by, at: a.created_at, role: a.set_by_role
         };
       });
-      res.json({ plan: enrichPlan(plan, sup), supplier: sup, files, issues, activity, tasks, slips, production_checks: prodChecks, field_audit: field_audit });
+      res.json({ plan: enrichPlan(plan, sup), supplier: sup, files, issues, activity, tasks, slips, production_checks: prodChecks, field_audit: field_audit, claims: claims });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -848,7 +1051,15 @@ module.exports = function(getDb) {
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
         [newId, 'created', 'Plan ' + b.plan_number + ' created', actor(req)]);
       await evaluateTasks(db, newId);
-      res.json({ plan: r.rows[0] });
+      // r30d — surface open replacement promises from this supplier
+      const promises = (await db.query(
+        `SELECT rp.*, c.description AS claim_description, p.plan_number AS source_plan_number
+         FROM lg_replacement_promises rp
+         LEFT JOIN lg_claims c ON c.id = rp.source_claim_id
+         LEFT JOIN lg_plans p ON p.id = c.plan_id
+         WHERE rp.supplier_id=$1 AND rp.fulfilled=FALSE`,
+        [b.supplier_id])).rows;
+      res.json({ plan: r.rows[0], outstanding_replacements: promises });
     } catch(e) {
       if (String(e.message).includes('duplicate')) return res.status(409).json({ error: 'plan_number already exists' });
       res.status(500).json({ error: e.message });
@@ -959,37 +1170,64 @@ module.exports = function(getDb) {
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
-  router.post('/plans/:id/files', upload.single('file'), async function(req, res) {
+  router.post('/plans/:id/files', uploadSingleFile('file'), async function(req, res) {
     const db = req._db;
     const id = parseInt(req.params.id);
     const slot = (req.body.slot || 'other').toLowerCase();
+    const slot_group = slotToGroup(slot);
     if (!req.file) return res.status(400).json({ error: 'No file' });
     try {
-      const r = await db.query(`INSERT INTO lg_plan_files (plan_id, slot, filename, stored_path, mime_type, size_bytes, uploaded_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [id, slot, req.file.originalname, req.file.path, req.file.mimetype, req.file.size, actor(req)]);
+      const r = await db.query(`INSERT INTO lg_plan_files (plan_id, slot, slot_group, filename, stored_path, mime_type, size_bytes, uploaded_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [id, slot, slot_group, req.file.originalname, req.file.path, req.file.mimetype, req.file.size, actor(req)]);
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)', [id, 'file_uploaded', slot + ': ' + req.file.originalname, actor(req)]);
       res.json({ file: r.rows[0] });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
+  // r30d — inline view endpoint (returns the file with inline disposition so browser can render)
+  router.get('/files/:id/view', async function(req, res) {
+    const db = req._db;
+    try {
+      const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1 AND deleted_at IS NULL', [parseInt(req.params.id)]);
+      if (!r.rows.length) return res.status(404).send('Not found');
+      const f = r.rows[0];
+      if (!fs.existsSync(f.stored_path)) return res.status(410).send('File missing on disk');
+      res.setHeader('Content-Type', f.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'inline; filename="' + (f.filename || 'file').replace(/[^a-zA-Z0-9._\-]/g,'_') + '"');
+      res.sendFile(path.resolve(f.stored_path));
+    } catch(e) { res.status(500).send(e.message); }
+  });
   router.get('/files/:id/download', async function(req, res) {
     const db = req._db;
     try {
-      const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1', [parseInt(req.params.id)]);
+      const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1 AND deleted_at IS NULL', [parseInt(req.params.id)]);
       if (!r.rows.length) return res.status(404).send('Not found');
       const f = r.rows[0];
       if (!fs.existsSync(f.stored_path)) return res.status(410).send('File missing on disk (likely lost on redeploy)');
       res.download(f.stored_path, f.filename);
     } catch(e) { res.status(500).send(e.message); }
   });
+  // r30d — pin/unpin file
+  router.post('/files/:id/pin', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const pinned = !!(req.body && req.body.pinned);
+      const r = await db.query('UPDATE lg_plan_files SET pinned=$1 WHERE id=$2 RETURNING plan_id, filename', [pinned, id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)', [r.rows[0].plan_id, pinned ? 'file_pinned' : 'file_unpinned', r.rows[0].filename, actor(req)]);
+      res.json({ ok: true, pinned });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
   router.delete('/files/:id', async function(req, res) {
     const db = req._db;
     try {
-      const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1', [parseInt(req.params.id)]);
+      const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1 AND deleted_at IS NULL', [parseInt(req.params.id)]);
       if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
       const f = r.rows[0];
+      // Soft delete — keep DB row for audit, remove from disk
       try { fs.unlinkSync(f.stored_path); } catch(e) {}
-      await db.query('DELETE FROM lg_plan_files WHERE id=$1', [f.id]);
+      await db.query('UPDATE lg_plan_files SET deleted_at=NOW(), deleted_by=$1 WHERE id=$2', [actor(req), f.id]);
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)', [f.plan_id, 'file_deleted', f.slot + ': ' + f.filename, actor(req)]);
       res.json({ ok: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1025,6 +1263,188 @@ module.exports = function(getDb) {
       if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)', [r.rows[0].plan_id, 'issue_' + b.status, String(r.rows[0].description).slice(0, 100), actor(req)]);
       res.json({ issue: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ── r30d — Claims (post-delivery discrepancies) ──────────────────────────
+  // GET plan claims (also returns claim files)
+  router.get('/plans/:id/claims', async function(req, res) {
+    const db = req._db;
+    try {
+      const planId = parseInt(req.params.id);
+      const claims = (await db.query('SELECT * FROM lg_claims WHERE plan_id=$1 ORDER BY created_at DESC', [planId])).rows;
+      const cf = (await db.query('SELECT id, claim_id, filename, mime_type, uploaded_by, uploaded_by_role, uploaded_at FROM lg_claim_files WHERE claim_id = ANY($1::int[]) ORDER BY uploaded_at DESC', [claims.map(c => c.id)])).rows;
+      const byClaim = {};
+      cf.forEach(f => { (byClaim[f.claim_id] = byClaim[f.claim_id] || []).push(f); });
+      claims.forEach(c => { c.files = byClaim[c.id] || []; });
+      res.json({ claims });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Create claim
+  router.post('/plans/:id/claims', async function(req, res) {
+    const db = req._db;
+    const planId = parseInt(req.params.id);
+    const b = req.body || {};
+    if (!b.description) return res.status(400).json({ error: 'description required' });
+    try {
+      const nextChase = addDays(todayDate(), 4);
+      const r = await db.query(
+        `INSERT INTO lg_claims (plan_id, description, claim_value_gbp, next_chase_date, created_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [planId, b.description, b.claim_value_gbp || null, nextChase, actor(req)]);
+      const claim = r.rows[0];
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [planId, 'claim_opened', String(b.description).slice(0,100), actor(req)]);
+      // Auto-mark plan disposition as issues if not already set
+      await db.query("UPDATE lg_plans SET disposition='issues' WHERE id=$1 AND (disposition IS NULL OR disposition='clean')", [planId]);
+      // Create chase task
+      await db.query(
+        `INSERT INTO lg_tasks (plan_id, rule_key, title, title_cn, intended_role, priority, due_date)
+         VALUES ($1, $2, $3, $4, 'agent', 'high', $5)`,
+        [planId, 'claim_chase_' + claim.id,
+         'Chase supplier on claim — ' + String(b.description).slice(0,60),
+         '催促供应商处理索赔 — ' + String(b.description).slice(0,60),
+         nextChase]);
+      res.json({ claim });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Agent updates claim (agree to resolution, close, etc.)
+  router.patch('/claims/:id', async function(req, res) {
+    const db = req._db;
+    const id = parseInt(req.params.id);
+    const b = req.body || {};
+    try {
+      const before = (await db.query('SELECT * FROM lg_claims WHERE id=$1', [id])).rows[0];
+      if (!before) return res.status(404).json({ error: 'Not found' });
+      const fields = ['description','claim_value_gbp','status','agreed_resolution','agreed_resolution_note'];
+      const sets = []; const vals = []; let i = 1;
+      const changes = [];
+      for (const f of fields) {
+        if (Object.prototype.hasOwnProperty.call(b, f)) {
+          sets.push(f + '=$' + (i++));
+          vals.push(b[f] === '' ? null : b[f]);
+          changes.push(f);
+        }
+      }
+      // If status moving to 'agreed', stamp agreed_at + agreed_by
+      if (b.status === 'agreed') {
+        sets.push('agreed_at=NOW()'); sets.push('agreed_by=$' + (i++)); vals.push(actor(req));
+      }
+      // If status moving to 'closed', stamp closed_at + closed_by, and create replacement promise if applicable
+      if (b.status === 'closed') {
+        sets.push('closed_at=NOW()'); sets.push('closed_by=$' + (i++)); vals.push(actor(req));
+        sets.push('next_chase_date=NULL');
+      }
+      if (!sets.length) return res.status(400).json({ error: 'No fields' });
+      vals.push(id);
+      const r = await db.query('UPDATE lg_claims SET ' + sets.join(',') + ' WHERE id=$' + i + ' RETURNING *', vals);
+      const claim = r.rows[0];
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [claim.plan_id, 'claim_updated', 'Status: ' + claim.status + ' · ' + changes.join(', '), actor(req)]);
+      // When claim closed with replacement, create or update replacement promise
+      if (b.status === 'closed' && claim.agreed_resolution === 'replace' && claim.supplier_replacement_plan_ref) {
+        const plan = (await db.query('SELECT supplier_id FROM lg_plans WHERE id=$1', [claim.plan_id])).rows[0];
+        if (plan && plan.supplier_id) {
+          // Avoid duplicate
+          const existing = (await db.query('SELECT id FROM lg_replacement_promises WHERE source_claim_id=$1', [claim.id])).rows;
+          if (!existing.length) {
+            await db.query(
+              `INSERT INTO lg_replacement_promises (source_claim_id, supplier_id, promised_plan_ref, description)
+               VALUES ($1,$2,$3,$4)`,
+              [claim.id, plan.supplier_id, claim.supplier_replacement_plan_ref, claim.description]);
+            await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+              [claim.plan_id, 'replacement_promise_created', 'Supplier owes replacement in: ' + claim.supplier_replacement_plan_ref, actor(req)]);
+          }
+        }
+      }
+      // Auto-close chase task if claim closed/agreed
+      if (b.status === 'closed' || b.status === 'agreed') {
+        try {
+          await db.query("UPDATE lg_tasks SET status='done', completed_at=NOW(), completed_by=$1, completion_note=$2 WHERE plan_id=$3 AND rule_key=$4 AND status IN ('open','claimed')",
+            [actor(req), 'Claim ' + b.status, claim.plan_id, 'claim_chase_' + claim.id]);
+        } catch(e) {}
+      }
+      res.json({ claim });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Upload file to a claim (agent side)
+  router.post('/claims/:id/files', uploadSingleFile('file'), async function(req, res) {
+    const db = req._db;
+    const id = parseInt(req.params.id);
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    try {
+      const claim = (await db.query('SELECT plan_id FROM lg_claims WHERE id=$1', [id])).rows[0];
+      if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      await db.query(
+        `INSERT INTO lg_claim_files (claim_id, filename, stored_path, mime_type, size_bytes, uploaded_by, uploaded_by_role)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [id, req.file.originalname, req.file.path, req.file.mimetype, req.file.size, actor(req), isManager(req.user) ? 'manager' : 'agent']);
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [claim.plan_id, 'claim_file_uploaded', req.file.originalname, actor(req)]);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // View / download claim file
+  router.get('/claim-files/:id/view', async function(req, res) {
+    const db = req._db;
+    try {
+      const r = await db.query('SELECT * FROM lg_claim_files WHERE id=$1', [parseInt(req.params.id)]);
+      if (!r.rows.length) return res.status(404).send('Not found');
+      const f = r.rows[0];
+      if (!fs.existsSync(f.stored_path)) return res.status(410).send('File missing on disk');
+      res.setHeader('Content-Type', f.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'inline; filename="' + (f.filename || 'file').replace(/[^a-zA-Z0-9._\-]/g,'_') + '"');
+      res.sendFile(path.resolve(f.stored_path));
+    } catch(e) { res.status(500).send(e.message); }
+  });
+  router.get('/claim-files/:id/download', async function(req, res) {
+    const db = req._db;
+    try {
+      const r = await db.query('SELECT * FROM lg_claim_files WHERE id=$1', [parseInt(req.params.id)]);
+      if (!r.rows.length) return res.status(404).send('Not found');
+      const f = r.rows[0];
+      res.download(f.stored_path, f.filename);
+    } catch(e) { res.status(500).send(e.message); }
+  });
+  router.delete('/claim-files/:id', async function(req, res) {
+    const db = req._db;
+    try {
+      const r = await db.query('SELECT * FROM lg_claim_files WHERE id=$1', [parseInt(req.params.id)]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+      const f = r.rows[0];
+      try { fs.unlinkSync(f.stored_path); } catch(e) {}
+      await db.query('DELETE FROM lg_claim_files WHERE id=$1', [f.id]);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  // Replacement promises (open list per supplier)
+  router.get('/suppliers/:id/replacement-promises', async function(req, res) {
+    const db = req._db;
+    try {
+      const r = await db.query(
+        `SELECT rp.*, c.description AS claim_description, c.plan_id AS source_plan_id, p.plan_number AS source_plan_number
+         FROM lg_replacement_promises rp
+         LEFT JOIN lg_claims c ON c.id = rp.source_claim_id
+         LEFT JOIN lg_plans p ON p.id = c.plan_id
+         WHERE rp.supplier_id=$1 AND rp.fulfilled=FALSE ORDER BY rp.created_at DESC`,
+        [parseInt(req.params.id)]);
+      res.json({ promises: r.rows });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  router.post('/replacement-promises/:id/fulfill', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const planId = (req.body && req.body.fulfilled_in_plan_id) || null;
+      const r = await db.query(
+        'UPDATE lg_replacement_promises SET fulfilled=TRUE, fulfilled_in_plan_id=$1, fulfilled_at=NOW(), fulfilled_by=$2 WHERE id=$3 RETURNING *',
+        [planId, actor(req), id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+      if (planId) {
+        await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+          [planId, 'replacement_fulfilled', 'Replacement promise fulfilled (claim ID ' + r.rows[0].source_claim_id + ')', actor(req)]);
+      }
+      res.json({ promise: r.rows[0] });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
