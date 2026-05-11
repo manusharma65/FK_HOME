@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-08 r29o (Account-wide funnel — manager-only card on home page showing Sessions → Cart → Checkout → Complete with conversion rates and 7-day trend. Aggregates ga4_product_metrics; daily snapshot table for trend comparison; new GET /api/google/account-funnel endpoint. No new GA4 API calls — reuses existing daily fetch.)
+// CampaignPulse — deploy marker 2026-05-11 r30c (Fixes the most critical post-r30 bug: dashboard cards + daily snapshots stored 7-day rollups labelled as today. Now dashboard shows TODAY actuals with 7d as subtitle. saveDailySnapshot stores single-day spend/sales (from todays row in dailySeries7d) — so day-over-day comparisons and the History page work correctly. Live endpoint exposes both today + 7d totals separately. Skips snapshot save if Amazons daily report has no today row yet — wont overwrite yesterdays good snapshot with zeros.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -165,13 +165,10 @@ async function requireAuth(req, res, next) {
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-
-// r30b — Logistics module (self-contained router; lazy-binds db at request time)
-// Mount supplier-share BEFORE /api requireAuth so supplier URLs stay public (no login)
-const logisticsRouter = require('./server/logistics')(function() { return db; });
-app.use('/s', logisticsRouter._supplierShare);   // public supplier form (token-based)
-
 app.use('/api', requireAuth);
+
+// r30a — Logistics module (self-contained router; lazy-binds db at request time)
+const logisticsRouter = require('./server/logistics')(function() { return db; });
 app.use('/api/logistics', logisticsRouter);
 
 let state = {
@@ -559,6 +556,12 @@ async function syncAmazonOrders(daysBack, opts) {
           upserted++;
 
           if (!needItemsFetch) { itemsSkipped++; continue; }
+
+          // r29r: small delay between orderItems calls to stay under SP-API rate limit.
+          // Endpoint allows ~0.5 req/s sustained; we now pace at ~3 req/s (333ms) which
+          // is still over-budget but the existing 429 retry will catch what slips through.
+          // Without this, ~2000 orders in a single sync burst hits 429 repeatedly.
+          await new Promise(function(r){ setTimeout(r, 350); });
 
           // Pull line items — separate API call per order
           try {
@@ -1109,71 +1112,146 @@ async function fetchCampaigns() {
   return campaigns;
 }
 
-let reportState = { pendingReportId: null, data: null, lastFetched: 0, requested: 0 };
+// r30: three independent report streams, each managed separately so one failure
+// doesn't block the others. Each tracks pendingReportId / requested / data /
+// last425At independently.
+//   - summary7d: 7-day campaign rollup. Source of truth for All Campaigns + Action Centre.
+//   - summary30d: 30-day campaign rollup. Powers the "30d" toggle.
+//   - daily7d: per-day per-campaign rows over 7 days. Powers the modal sparkline +
+//     the "no_revenue 3 days" / "no_activity 3 days" rules.
+// All use sales7d attribution (matches Amazon Seller Central's default).
+let reportState = {
+  summary7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0 },
+  summary30d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0 },
+  daily7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0 }
+};
 
-async function fetchCampaignStats() {
+// Helper: poll-and-download one report stream
+async function _pollOrRequestReport(streamName, configBuilder, headers) {
+  const stream = reportState[streamName];
   const now = Date.now();
-  const token = await getAccessToken();
-  const profileId = await getProfileId();
-  const headers = getHeaders(profileId, token);
-  const today = new Date().toISOString().split('T')[0];
 
-  if (reportState.pendingReportId) {
+  // 1. If there's a pending report, check its status
+  if (stream.pendingReportId) {
     try {
       const statusRes = await axios.get(
-        'https://advertising-api-eu.amazon.com/reporting/reports/' + reportState.pendingReportId,
+        'https://advertising-api-eu.amazon.com/reporting/reports/' + stream.pendingReportId,
         { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
       );
       const status = statusRes.data.status;
-      console.log('Pending report status: ' + status);
       if (status === 'COMPLETED') {
         const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
         const zlib = require('zlib');
         const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
-        const reportData = JSON.parse(decompressed.toString());
-        console.log('Report downloaded: ' + reportData.length + ' records');
-        reportState.data = reportData;
-        reportState.lastFetched = now;
-        reportState.pendingReportId = null;
+        stream.data = JSON.parse(decompressed.toString());
+        stream.lastFetched = now;
+        stream.pendingReportId = null;
+        console.log('[r30 ' + streamName + '] report downloaded: ' + stream.data.length + ' records');
       } else if (status === 'FAILED') {
-        console.log('Report failed, will retry next cycle');
-        reportState.pendingReportId = null;
+        console.warn('[r30 ' + streamName + '] report FAILED, will retry');
+        stream.pendingReportId = null;
+      } else {
+        // Still PROCESSING — will check again next sync
       }
     } catch(e) {
-      console.error('Report check error: ' + e.message);
-      reportState.pendingReportId = null;
+      console.error('[r30 ' + streamName + '] poll error: ' + e.message);
+      stream.pendingReportId = null;
     }
   }
 
-  if (!reportState.pendingReportId && (now - reportState.requested) > 2 * 60 * 60 * 1000) {
+  // 2. If no pending and we haven't requested in last 2h, request a new one
+  if (!stream.pendingReportId && (now - stream.requested) > 2 * 60 * 60 * 1000) {
+    // 425 backoff (Too Early — Amazon throttles report creation)
+    if (stream.last425At && (now - stream.last425At) < 60 * 60 * 1000) {
+      return stream.data || null;
+    }
     try {
       const reportRes = await axios.post(
         'https://advertising-api-eu.amazon.com/reporting/reports',
-        {
-          name: 'CampaignPulse ' + today,
-          startDate: today,
-          endDate: today,
-          configuration: {
-            adProduct: 'SPONSORED_PRODUCTS',
-            groupBy: ['campaign'],
-            columns: ['campaignId', 'campaignName', 'cost', 'sales14d', 'clicks', 'impressions', 'purchases14d', 'clickThroughRate'],
-            reportTypeId: 'spCampaigns',
-            timeUnit: 'SUMMARY',
-            format: 'GZIP_JSON'
-          }
-        },
+        configBuilder(),
         { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
       );
-      reportState.pendingReportId = reportRes.data.reportId;
-      reportState.requested = now;
-      console.log('Report requested: ' + reportState.pendingReportId + ' (will check next sync)');
+      stream.pendingReportId = reportRes.data.reportId;
+      stream.requested = now;
+      stream.last425At = 0;
+      console.log('[r30 ' + streamName + '] requested: ' + stream.pendingReportId);
     } catch(e) {
-      console.error('Report request error: ' + e.message);
+      const status = e.response && e.response.status;
+      if (status === 425) {
+        stream.last425At = now;
+        console.warn('[r30 ' + streamName + '] 425 (Too Early) — backing off 1h');
+      } else {
+        console.error('[r30 ' + streamName + '] request error: ' + (e.response ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
+      }
     }
   }
 
-  return reportState.data || null;
+  return stream.data || null;
 }
+
+async function fetchCampaignStats() {
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  const today = new Date().toISOString().split('T')[0];
+  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+
+  // r30: pull three streams in parallel. Each is independently managed; one
+  // pending/failed/throttled stream doesn't block the others.
+  const [summary7d, summary30d, daily7d] = await Promise.all([
+    _pollOrRequestReport('summary7d', function() {
+      return {
+        name: 'CampaignPulse 7d ' + today,
+        startDate: sevenDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          // r30: sales7d/purchases7d match Amazon's default UI attribution
+          columns: ['campaignId', 'campaignName', 'cost', 'sales7d', 'clicks', 'impressions', 'purchases7d', 'clickThroughRate', 'unitsSoldClicks7d', 'costPerClick'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      };
+    }, headers),
+    _pollOrRequestReport('summary30d', function() {
+      return {
+        name: 'CampaignPulse 30d ' + today,
+        startDate: thirtyDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          columns: ['campaignId', 'campaignName', 'cost', 'sales30d', 'clicks', 'impressions', 'purchases30d', 'clickThroughRate', 'unitsSoldClicks30d', 'costPerClick'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      };
+    }, headers),
+    _pollOrRequestReport('daily7d', function() {
+      return {
+        name: 'CampaignPulse daily 7d ' + today,
+        startDate: sevenDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          // For per-day rows we use sales1d so each row reflects that day's actuals
+          columns: ['campaignId', 'campaignName', 'cost', 'sales1d', 'clicks', 'impressions', 'purchases1d', 'date'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'DAILY',
+          format: 'GZIP_JSON'
+        }
+      };
+    }, headers)
+  ]);
+
+  return { summary7d, summary30d, daily7d };
+}
+
 
 async function updateBudget(campaignId, newBudget) {
   const token = await getAccessToken();
@@ -1218,8 +1296,21 @@ async function analyseCampaigns(campaigns) {
   for (let i = 0; i < campaigns.length; i++) {
     const c = campaigns[i];
     const budget = c.dailyBudget || 0;
-    const spend = c.spend || 0;
-    const sales = c.sales || 0;
+    // r30 fix: c.spend defaults to 7-day spend after the r30 rewrite. Budget alerts
+    // must compare TODAY's spend against today's daily budget — otherwise a £4.43
+    // daily budget campaign with £20 of 7-day spend looks "out of budget" every sync.
+    // Today's spend lives on c.todaySpend (latest row from the daily7d stream).
+    // If null, Amazon's daily report doesn't have today's data yet — skip alerts
+    // rather than fire on stale yesterday data.
+    if (c.todaySpend == null) continue;
+    const spend = c.todaySpend;
+    // r30b: high-ACOS alert uses TODAY's sales/spend, not 7-day. Today's actuals
+    // are needed for same-day decisions. (r30a wrongly used 7d for this.)
+    // Today's sales = last row of dailySeries7d (already proven to be today via the
+    // date check in syncCampaigns — if todaySpend != null then todaySales is also today).
+    const todayRow = (c.dailySeries7d && c.dailySeries7d.length) ? c.dailySeries7d[c.dailySeries7d.length - 1] : { sales: 0 };
+    const todaySales = parseFloat(todayRow.sales || 0);
+    const sales = todaySales;
     const acos = sales > 0 ? (spend / sales) * 100 : 0;
     const remaining = Math.max(0, budget - spend);
     const remainingPct = budget > 0 ? (remaining / budget) * 100 : 100;
@@ -1268,17 +1359,18 @@ async function analyseCampaigns(campaigns) {
       const hourly = spend / Math.max(now.getHours(), 1);
       const missed = Math.round(hourly * hoursLeft * roas);
       state.exhaustionLog.unshift({ date: now.toLocaleDateString('en-GB'), time: timeStr, campaign: name, portfolio: portfolioName, agent: agent, budget: '£' + budget.toFixed(2), acos: acos.toFixed(1) + '%', missed: '£' + missed, added: 'Pending', action: 'Pending' });
-      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Budget: £' + budget.toFixed(2), 'ACOS: ' + acos.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
+      // r30b: all alerts show TODAY's data — what the agent needs to act on right now
+      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Spent today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2), 'Today ACOS: ' + acos.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m1); } else { await sendGoogleChat(m1); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Budget £' + budget.toFixed(2) + ', ACOS ' + acos.toFixed(1) + '%');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Spent £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ', today ACOS ' + acos.toFixed(1) + '%');
     } else if (acosHigh) {
-      const m2 = ['📈 HIGH ACOS', name, 'ACOS: ' + acos.toFixed(1) + '%', 'Spend: £' + spend.toFixed(2), dashUrl].join('\n');
+      const m2 = ['📈 HIGH ACOS', name, 'Today ACOS: ' + acos.toFixed(1) + '%', 'Today spend: £' + spend.toFixed(2) + ' · sales: £' + sales.toFixed(2), dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m2); } else { await sendGoogleChat(m2); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'ACOS ' + acos.toFixed(1) + '% with £' + spend.toFixed(2) + ' spend');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'Today ACOS ' + acos.toFixed(1) + '% with £' + spend.toFixed(2) + ' spend');
     } else if (budgetLow) {
-      const m3 = ['⚡ BUDGET LOW', name, 'Remaining: £' + remaining.toFixed(2) + ' (' + remainingPct.toFixed(0) + '%)', dashUrl].join('\n');
+      const m3 = ['⚡ BUDGET LOW', name, 'Today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' (' + remainingPct.toFixed(0) + '% left)', dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m3); } else { await sendGoogleChat(m3); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'budget_low', 'Budget ' + remainingPct.toFixed(0) + '% used, £' + remaining.toFixed(2) + ' left');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'budget_low', 'Today £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' used, £' + remaining.toFixed(2) + ' left');
     }
   }
   console.log('Alert analysis complete');
@@ -1290,37 +1382,97 @@ async function syncCampaigns() {
   console.log('Syncing at ' + new Date().toTimeString().slice(0, 8));
   try {
     const raw = await fetchCampaigns();
+    // r30: stats now comes back as { summary7d, summary30d, daily7d } — three streams
     const stats = await fetchCampaignStats();
-    const statsMap = {};
-    if (stats && stats.length) {
-      stats.forEach(function(s) {
-        statsMap[s.campaignId] = {
-          spend: parseFloat(s.cost || 0),
-          sales: parseFloat(s.sales14d || 0),
-          clicks: parseInt(s.clicks || 0),
-          impressions: parseInt(s.impressions || 0),
-          conversions: parseInt(s.purchases14d || 0),
-          ctr: parseFloat(s.clickThroughRate || 0),
-          portfolio: s.portfolioName || '',
-          portfolioId: s.portfolioId || ''
-        };
+    const summary7d = (stats && stats.summary7d) || [];
+    const summary30d = (stats && stats.summary30d) || [];
+    const daily7d = (stats && stats.daily7d) || [];
+
+    // Build per-campaign lookups
+    const stats7d = {};
+    summary7d.forEach(function(s) {
+      stats7d[s.campaignId] = {
+        spend: parseFloat(s.cost || 0),
+        sales: parseFloat(s.sales7d || 0),
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
+        conversions: parseInt(s.purchases7d || 0),
+        units: parseInt(s.unitsSoldClicks7d || 0),
+        ctr: parseFloat(s.clickThroughRate || 0),
+        cpc: parseFloat(s.costPerClick || 0),
+        portfolio: s.portfolioName || '',
+        portfolioId: s.portfolioId || ''
+      };
+    });
+    const stats30d = {};
+    summary30d.forEach(function(s) {
+      stats30d[s.campaignId] = {
+        spend: parseFloat(s.cost || 0),
+        sales: parseFloat(s.sales30d || 0),
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
+        conversions: parseInt(s.purchases30d || 0),
+        units: parseInt(s.unitsSoldClicks30d || 0),
+        ctr: parseFloat(s.clickThroughRate || 0),
+        cpc: parseFloat(s.costPerClick || 0)
+      };
+    });
+    // Per-day rows grouped by campaign (for sparkline + 3-day consecutive rules)
+    const days7d = {};
+    daily7d.forEach(function(d) {
+      const id = String(d.campaignId);
+      if (!days7d[id]) days7d[id] = [];
+      days7d[id].push({
+        date: d.date,
+        spend: parseFloat(d.cost || 0),
+        sales: parseFloat(d.sales1d || 0),
+        clicks: parseInt(d.clicks || 0),
+        impressions: parseInt(d.impressions || 0),
+        conversions: parseInt(d.purchases1d || 0)
       });
-      console.log('Stats loaded for ' + Object.keys(statsMap).length + ' campaigns');
+    });
+    // Sort each campaign's days oldest→newest so consumers can rely on order
+    Object.keys(days7d).forEach(function(id){
+      days7d[id].sort(function(a, b){ return String(a.date) < String(b.date) ? -1 : 1; });
+    });
+
+    if (Object.keys(stats7d).length === 0) {
+      console.warn('[r30] No 7d stats this sync — reports may still be processing. Campaign rows will show as loading until reports complete.');
+    } else {
+      console.log('[r30] Stats loaded: 7d=' + Object.keys(stats7d).length + ', 30d=' + Object.keys(stats30d).length + ', daily7d campaigns=' + Object.keys(days7d).length);
     }
 
     const campaigns = raw.map(function(c) {
       const budget = parseFloat((c.budget && c.budget.budget) || c.dailyBudget || 0);
-      const s = statsMap[c.campaignId] || {};
-      const spend = s.spend !== undefined ? parseFloat(s.spend) : null;
-      const sales = s.sales !== undefined ? parseFloat(s.sales) : null;
-      const acos = sales > 0 ? Math.round((spend / sales) * 1000) / 10 : 0;
-      const remaining = Math.max(0, budget - spend);
-      const pct = budget > 0 ? Math.round((spend / budget) * 100) : 0;
+      const s7 = stats7d[c.campaignId] || {};
+      const s30 = stats30d[c.campaignId] || {};
+      const d7 = days7d[String(c.campaignId)] || [];
+
+      // Headline numbers = 7-day. This is what every other surface reads.
+      const spend7 = s7.spend !== undefined ? parseFloat(s7.spend) : null;
+      const sales7 = s7.sales !== undefined ? parseFloat(s7.sales) : null;
+      const acos7 = sales7 > 0 ? Math.round((spend7 / sales7) * 1000) / 10 : 0;
+      const cpcv7 = s7.conversions > 0 ? +(spend7 / s7.conversions).toFixed(2) : null;
+
+      const spend30 = s30.spend !== undefined ? parseFloat(s30.spend) : null;
+      const sales30 = s30.sales !== undefined ? parseFloat(s30.sales) : null;
+      const acos30 = sales30 > 0 ? Math.round((spend30 / sales30) * 1000) / 10 : 0;
+      const cpcv30 = s30.conversions > 0 ? +(spend30 / s30.conversions).toFixed(2) : null;
+
+      // r30: budget metrics reflect today's daily-cap status.
+      // The daily7d stream typically lags by 1 day (Amazon's daily report doesn't
+      // include today's in-flight data). We only treat the latest daily row as
+      // "today" if its date matches today's date. Otherwise todaySpend is unknown
+      // (null) and we don't fire false out-of-budget alerts.
+      const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+      const latestDay = d7.length ? d7[d7.length - 1] : null;
+      const todaySpend = (latestDay && String(latestDay.date).slice(0, 10) === _todayStr)
+        ? parseFloat(latestDay.spend || 0)
+        : null;
+      const remaining = (todaySpend != null) ? Math.max(0, budget - todaySpend) : null;
+      const pct = (todaySpend != null && budget > 0) ? Math.round((todaySpend / budget) * 100) : 0;
+
       const portfolioName = c.portfolioId ? (state.portfolios[c.portfolioId] || '') : '';
-      // r20: when no portfolio (or portfolio name doesn't yield an agent), fall back to
-      // parsing the campaign name for an agent prefix ("Satyam | Vibration Plate Auto" → Satyam).
-      // This routes wasted spend on un-portfolioed campaigns into the right agent's row
-      // instead of all dumping into "Unassigned".
       let agent = portfolioName ? portfolioName.replace('@', '').split(' ')[0] : '';
       if (!agent) {
         const parsed = parseCampaignName(c.name || '');
@@ -1334,14 +1486,44 @@ async function syncCampaigns() {
         portfolio: portfolioName,
         agent: agent,
         dailyBudget: budget,
-        spend: spend !== null ? Math.round(spend * 100) / 100 : null,
-        sales: sales !== null ? Math.round(sales * 100) / 100 : null,
-        acos: acos,
-        clicks: s.clicks || 0,
-        impressions: s.impressions || 0,
-        conversions: s.conversions || 0,
-        ctr: s.ctr ? (s.ctr * 100).toFixed(2) : '0.00',
-        budgetRemaining: Math.round(remaining * 100) / 100,
+        // r30: spend/sales/etc default to 7-day values. Front-end picks 7d or 30d via toggle.
+        spend: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
+        sales: sales7 !== null ? Math.round(sales7 * 100) / 100 : null,
+        acos: acos7,
+        clicks: s7.clicks || 0,
+        impressions: s7.impressions || 0,
+        conversions: s7.conversions || 0,
+        units: s7.units || 0,
+        ctr: s7.ctr ? (s7.ctr * 100).toFixed(2) : '0.00',
+        cpc: s7.cpc || 0,
+        // Explicit 7d block (front-end can show "(7d)" labels confidently)
+        spend7d: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
+        sales7d: sales7 !== null ? Math.round(sales7 * 100) / 100 : null,
+        acos7d: acos7,
+        clicks7d: s7.clicks || 0,
+        impressions7d: s7.impressions || 0,
+        conversions7d: s7.conversions || 0,
+        units7d: s7.units || 0,
+        ctr7d: s7.ctr ? +(s7.ctr * 100).toFixed(2) : 0,
+        cpc7d: s7.cpc || 0,
+        costPerConv7d: cpcv7,
+        // 30d block
+        spend30d: spend30 !== null ? Math.round(spend30 * 100) / 100 : null,
+        sales30d: sales30 !== null ? Math.round(sales30 * 100) / 100 : null,
+        acos30d: acos30,
+        clicks30d: s30.clicks || 0,
+        impressions30d: s30.impressions || 0,
+        conversions30d: s30.conversions || 0,
+        units30d: s30.units || 0,
+        ctr30d: s30.ctr ? +(s30.ctr * 100).toFixed(2) : 0,
+        cpc30d: s30.cpc || 0,
+        costPerConv30d: cpcv30,
+        // Per-day 7d series (for sparklines + consecutive-day rules)
+        dailySeries7d: d7,
+        // r30: today's spend — null if the daily stream's latest row isn't actually today.
+        // Front-end shows "—" instead of misleading numbers. Budget alerts skip null-spend campaigns.
+        todaySpend: todaySpend,
+        budgetRemaining: (remaining != null) ? Math.round(remaining * 100) / 100 : null,
         budgetPct: pct
       };
     });
@@ -1366,9 +1548,22 @@ let db = null;
 async function initDB() {
   if (!process.env.DATABASE_URL) { console.log('No DATABASE_URL - skipping DB'); return; }
   try {
-    const { Client } = require('pg');
-    db = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-    await db.connect();
+    // r29r: switched from Client to Pool. Client only allows one in-flight query at a
+    // time; concurrent calls (Promise.all, parallel HTTP handlers) hit the pg@8
+    // "Calling client.query() when the client is already executing a query" deprecation
+    // and will outright fail on pg@9. Pool gives each query its own connection.
+    // Same .query() / .connect() interface — no other code changes needed.
+    const { Pool } = require('pg');
+    db = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 10,                          // connections per Railway service
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000
+    });
+    // Pool doesn't need explicit connect — first query opens a connection.
+    // Probe once to make sure DATABASE_URL is valid before the rest of init proceeds.
+    await db.query('SELECT 1');
     await db.query(`
       CREATE TABLE IF NOT EXISTS daily_snapshots (
         id SERIAL PRIMARY KEY,
@@ -1609,25 +1804,60 @@ async function saveDailySnapshot() {
   try {
     // r14 timezone fix: snapshots keyed by London date, not UTC.
     const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
-    const campaigns = state.campaigns;
-    const totalRevenue = campaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
-    const totalSpend = campaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
+    // r30c: after r30, c.spend / c.sales default to 7-DAY rollups. Snapshotting those
+    // every day produces overlapping windows that cannot be summed or compared day-over-day.
+    // Snapshots must store TODAY's actuals (single-day spend/sales/etc) so the History page,
+    // daily charts, and wasted-spend metrics show real per-day data.
+    // todaySpend / todaySales / todayClicks / todayImpressions / todayConversions are derived
+    // from dailySeries7d's most-recent row (which equals today, verified by date match).
+    // If Amazon's daily report hasn't included today's row yet, todaySpend is null —
+    // we skip the snapshot rather than save misleading zeros over yesterday's good data.
+    const liveCampaigns = state.campaigns || [];
+    const haveToday = liveCampaigns.some(function(c){ return c.todaySpend != null; });
+    if (!haveToday) {
+      console.log('[r30c] Skipping snapshot — Amazon daily report has no today row yet');
+      return;
+    }
+    const todayCampaigns = liveCampaigns.map(function(c) {
+      const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
+      const todayRow = days.length ? days[days.length - 1] : null;
+      const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+      const hasToday = todayRow && String(todayRow.date).slice(0, 10) === _todayStr;
+      // Use today's actuals if available, else zeros (campaign existed today but had no activity)
+      const tSpend = hasToday ? parseFloat(todayRow.spend || 0) : 0;
+      const tSales = hasToday ? parseFloat(todayRow.sales || 0) : 0;
+      const tClicks = hasToday ? parseInt(todayRow.clicks || 0) : 0;
+      const tImpressions = hasToday ? parseInt(todayRow.impressions || 0) : 0;
+      const tConversions = hasToday ? parseInt(todayRow.conversions || 0) : 0;
+      const tAcos = tSales > 0 ? Math.round((tSpend / tSales) * 1000) / 10 : 0;
+      // Keep the original campaign object but override the 5 metric fields with today's values
+      return Object.assign({}, c, {
+        spend: Math.round(tSpend * 100) / 100,
+        sales: Math.round(tSales * 100) / 100,
+        acos: tAcos,
+        clicks: tClicks,
+        impressions: tImpressions,
+        conversions: tConversions
+      });
+    });
+    const totalRevenue = todayCampaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
+    const totalSpend = todayCampaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
     const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend/totalRevenue)*1000)/10 : 0;
     const metrics = {
       totalRevenue: totalRevenue.toFixed(2),
       totalSpend: totalSpend.toFixed(2),
       blendedAcos,
-      activeCampaigns: campaigns.filter(function(c){ return c.state==='enabled'; }).length,
-      totalCampaigns: campaigns.length,
-      outOfBudget: campaigns.filter(function(c){ return c.budgetRemaining<=0.01&&c.dailyBudget>0; }).length,
-      spendNoRevenue: campaigns.filter(function(c){ return c.spend>0&&(c.sales===0||c.sales===null); }).length,
-      totalWastedSpend: campaigns.filter(function(c){ return c.spend>0&&(c.sales===0||c.sales===null); }).reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2)
+      activeCampaigns: todayCampaigns.filter(function(c){ return c.state==='enabled'; }).length,
+      totalCampaigns: todayCampaigns.length,
+      outOfBudget: todayCampaigns.filter(function(c){ return c.budgetRemaining!=null&&c.budgetRemaining<=0.01&&c.dailyBudget>0; }).length,
+      spendNoRevenue: todayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0||c.sales===null); }).length,
+      totalWastedSpend: todayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0||c.sales===null); }).reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2)
     };
     await db.query(
       'INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, exhaustion_log=$4, alerts=$5, created_at=NOW()',
-      [today, JSON.stringify(metrics), JSON.stringify(campaigns), JSON.stringify(state.exhaustionLog), JSON.stringify(state.alerts)]
+      [today, JSON.stringify(metrics), JSON.stringify(todayCampaigns), JSON.stringify(state.exhaustionLog), JSON.stringify(state.alerts)]
     );
-    console.log('Daily snapshot saved for ' + today);
+    console.log('[r30c] Daily snapshot saved for ' + today + ' (today actuals): spend £' + totalSpend.toFixed(2) + ' · revenue £' + totalRevenue.toFixed(2) + ' · wasted £' + metrics.totalWastedSpend);
   } catch(e) {
     console.error('Snapshot save error: ' + e.message);
   }
@@ -2233,7 +2463,11 @@ async function ensureCriticalColumns() {
     ["campaign_tasks.priority", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 2"],
     ["campaign_tasks.product_image_url", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_image_url TEXT"],
     // Drop the legacy unique constraint that blocks multiple tasks per campaign per day
-    ["drop legacy unique constraint", "ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key"]
+    ["drop legacy unique constraint", "ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key"],
+    // r29p: activity_log columns referenced across the codebase but never added to schema
+    ["activity_log.actor_name", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor_name TEXT"],
+    ["activity_log.department", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS department TEXT"],
+    ["activity_log.details", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS details TEXT"]
   ];
   let okCount = 0;
   let failedList = [];
@@ -2367,8 +2601,14 @@ async function googleTaskAlreadyExistsToday(campaignId, problemType, productKey)
   }
 }
 
+let _gtaskColumnsEnsured = false;
 async function ensureGoogleTaskColumns() {
   if (!db) return;
+  // r29p: skip after first successful run. The 12 ALTERs are idempotent but were
+  // being called from every per-request handler, flooding logs hundreds of lines
+  // per minute. Once at boot is enough; this stays as a safety net for first deploy
+  // on a fresh DB or after schema reset.
+  if (_gtaskColumnsEnsured) return;
   const alters = [
     ["product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
     ["product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
@@ -2392,7 +2632,8 @@ async function ensureGoogleTaskColumns() {
       console.error('[GTASK] could not add column ' + name + ': ' + e.message);
     }
   }
-  console.log('[GTASK] columns ensured: ' + okCount + '/' + alters.length);
+  console.log('[GTASK] columns ensured (first-run): ' + okCount + '/' + alters.length);
+  _gtaskColumnsEnsured = true;
 }
 
 function scoreGoogleTask(spend, sales, problemType) {
@@ -3202,42 +3443,52 @@ app.get('/api/dashboard', async function(req, res) {
   const allCampaigns = state.campaigns;
   const campaigns = allCampaigns.filter(function(c){ return !hiddenCampaignIds.has(String(c.campaignId)); });
 
-  // r25c: enrich each campaign with 7-day ACOS + spend so the front-end can
-  // flag chronic underperformers (single-day ACOS doesn't catch sustained waste).
-  if (db) {
-    try {
-      const snapRes = await db.query(
-        "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
-      );
-      const totals = {}; // campaignId -> { spend, sales }
-      snapRes.rows.forEach(function(snap) {
-        (snap.campaigns || []).forEach(function(sc) {
-          if (!sc.campaignId) return;
-          const id = String(sc.campaignId);
-          if (!totals[id]) totals[id] = { spend: 0, sales: 0 };
-          totals[id].spend += parseFloat(sc.spend || 0);
-          totals[id].sales += parseFloat(sc.sales || 0);
-        });
-      });
-      campaigns.forEach(function(c) {
-        const t = totals[String(c.campaignId)];
-        if (t) {
-          c.spend7d = +t.spend.toFixed(2);
-          c.sales7d = +t.sales.toFixed(2);
-          c.acos7d = t.sales > 0 ? +((100 * t.spend / t.sales).toFixed(1)) : null;
-        }
-      });
-    } catch(e) {
-      // Non-fatal — chronic-underperformer badge just won't fire
-      if (!/does not exist/.test(e.message)) console.error('[r25c] 7d enrich error: ' + e.message);
-    }
-  }
+  // r30: campaigns already carry spend7d/sales7d/clicks7d/etc + spend30d block from
+  // syncCampaigns (which pulls directly from Amazon Ads API report streams).
+  // Old daily_snapshots-based enrichment removed — was summing trailing-14d attribution
+  // values which produced incorrect totals.
 
-  const totalRevenue = campaigns.reduce(function(s, c) { return s + (c.sales || 0); }, 0);
-  const totalSpend = campaigns.reduce(function(s, c) { return s + (c.spend || 0); }, 0);
-  const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend / totalRevenue) * 1000) / 10 : 0;
+  // r30c: dashboard top-card metrics. We now compute both windows so the front-end
+  // can show "today" cards alongside "7-day" cards without label confusion.
+  // - 7d totals: sum of campaign.spend7d / sales7d / etc (already on each campaign from syncCampaigns).
+  // - today totals: sum of c.todaySpend and today's row from dailySeries7d. Skipped per-campaign
+  //   if c.todaySpend is null (Amazon's daily report hasn't filled today yet).
+  const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+  let totalRevenueToday = 0, totalSpendToday = 0, totalWastedToday = 0, spendNoRevenueTodayCount = 0;
+  let todayHasData = false;
+  campaigns.forEach(function(c) {
+    if (c.todaySpend == null) return;
+    todayHasData = true;
+    const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
+    const todayRow = days.length ? days[days.length - 1] : null;
+    const isToday = todayRow && String(todayRow.date).slice(0, 10) === _todayStr;
+    const tSpend = c.todaySpend;
+    const tSales = isToday ? parseFloat(todayRow.sales || 0) : 0;
+    totalSpendToday += tSpend;
+    totalRevenueToday += tSales;
+    if (tSpend > 0 && tSales === 0) { totalWastedToday += tSpend; spendNoRevenueTodayCount++; }
+  });
+  const blendedAcosToday = totalRevenueToday > 0 ? Math.round((totalSpendToday / totalRevenueToday) * 1000) / 10 : 0;
+
+  // 7-day totals (the "All Campaigns" / Campaign Health page summary)
+  const totalRevenue7d = campaigns.reduce(function(s, c) { return s + (c.sales7d || 0); }, 0);
+  const totalSpend7d = campaigns.reduce(function(s, c) { return s + (c.spend7d || 0); }, 0);
+  const blendedAcos7d = totalRevenue7d > 0 ? Math.round((totalSpend7d / totalRevenue7d) * 1000) / 10 : 0;
+  const totalWasted7d = campaigns.filter(function(c){ return (c.spend7d||0) > 5 && (c.sales7d||0) === 0; }).reduce(function(s,c){ return s + (c.spend7d || 0); }, 0);
+  const spendNoRevenue7dCount = campaigns.filter(function(c){ return (c.spend7d||0) > 0 && (c.sales7d||0) === 0; }).length;
+
+  // Headline = 7-day (matches table totals and Amazon Seller Central). Keep totalRevenue/Spend/blendedAcos
+  // pointing at 7-day so dashboard, table, and Amazon UI all agree.
+  const totalRevenue = totalRevenue7d;
+  const totalSpend = totalSpend7d;
+  const blendedAcos = blendedAcos7d;
   const active = campaigns.filter(function(c) { return c.state === 'enabled'; }).length;
-  const needsAction = campaigns.filter(function(c) { return c.budgetRemaining <= 0.01 || c.acos > parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35) || c.budgetPct >= 80; }).length;
+  const needsAction = campaigns.filter(function(c) {
+    const budgetKnown = (c.budgetRemaining != null);
+    const outOfBudget = budgetKnown && c.budgetRemaining <= 0.01;
+    const budgetLow = budgetKnown && c.budgetPct >= 80;
+    return outOfBudget || c.acos > parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35) || budgetLow;
+  }).length;
 
   let filteredAlerts = state.alerts.slice(-20);
   if (db) {
@@ -3250,8 +3501,43 @@ app.get('/api/dashboard', async function(req, res) {
   // Also filter alerts for hidden campaigns
   if (hiddenCampaignIds.size > 0) filteredAlerts = filteredAlerts.filter(function(a){ return !hiddenCampaignIds.has(String(a.campaignId)); });
 
+  // r30: compute Shopify 7d / 30d revenue for TACOS calculation in the front-end.
+  // Source: shopifyState.products (each carries revenue7d / revenue30d aggregates).
+  let totalShopifyRevenue7d = 0;
+  let totalShopifyRevenue30d = 0;
+  try {
+    const sp = (shopifyState && shopifyState.products) ? shopifyState.products : [];
+    sp.forEach(function(p){
+      totalShopifyRevenue7d += parseFloat(p.revenue7d || 0);
+      totalShopifyRevenue30d += parseFloat(p.revenue30d || 0);
+    });
+  } catch(e) {
+    // Non-fatal — TACOS just renders as "—" without Shopify totals
+  }
+
   res.json({
-    metrics: { totalRevenue: totalRevenue.toFixed(2), totalSpend: totalSpend.toFixed(2), blendedAcos: blendedAcos, activeCampaigns: active, needsAction: needsAction },
+    metrics: {
+      // Headline (7-day) — matches campaign table totals
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos: blendedAcos,
+      activeCampaigns: active,
+      needsAction: needsAction,
+      // r30c: today actuals (null if Amazon's daily report hasn't filled today yet)
+      todayHasData: todayHasData,
+      totalRevenueToday: todayHasData ? totalRevenueToday.toFixed(2) : null,
+      totalSpendToday: todayHasData ? totalSpendToday.toFixed(2) : null,
+      blendedAcosToday: todayHasData ? blendedAcosToday : null,
+      totalWastedToday: todayHasData ? totalWastedToday.toFixed(2) : null,
+      spendNoRevenueTodayCount: todayHasData ? spendNoRevenueTodayCount : null,
+      // 7-day waste
+      totalWastedSpend: totalWasted7d.toFixed(2),
+      spendNoRevenue: spendNoRevenue7dCount,
+      totalWasted7d: totalWasted7d.toFixed(2),
+      // for TACOS
+      totalShopifyRevenue7d: Math.round(totalShopifyRevenue7d * 100) / 100,
+      totalShopifyRevenue30d: Math.round(totalShopifyRevenue30d * 100) / 100
+    },
     campaigns: campaigns, alerts: filteredAlerts, exhaustionLog: state.exhaustionLog, lastSync: state.lastSync, error: state.error,
     hiddenCount: hiddenCampaignIds.size
   });
@@ -5657,9 +5943,11 @@ async function runListingCritique(asin, groupKey, modelId) {
     ].join('\n');
 
     // Call Claude with the requested model
+    // r29r: raised max_tokens 2000 → 4096. AI was hitting the limit mid-response with
+    // detailed summary + 5-7 issues, causing JSON truncation and parse failures.
     const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
       model: modelId,
-      max_tokens: 2000,
+      max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }]
     }, {
       headers: {
@@ -5671,6 +5959,7 @@ async function runListingCritique(asin, groupKey, modelId) {
     });
 
     let critique = null;
+    let partialRecovery = false;
     const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
     // r29e: more forgiving parse. AI sometimes wraps the JSON in backticks or preamble
     // despite instructions — strip everything before first { and after last }.
@@ -5683,9 +5972,22 @@ async function runListingCritique(asin, groupKey, modelId) {
     try {
       critique = JSON.parse(cleaned);
     } catch(parseErr) {
-      console.error('[amz-critique] JSON parse failed: ' + parseErr.message);
-      console.error('[amz-critique] raw response (first 500 chars): ' + text.substring(0, 500));
-      throw new Error('AI returned malformed response. Try Re-analyse — usually transient.');
+      // r29r: if standard parse fails, try to recover partial JSON by regexing fields
+      // out of the raw text. Better to show summary + 2-3 issues than to fail entirely.
+      console.warn('[amz-critique] JSON parse failed, attempting recovery: ' + parseErr.message);
+      critique = _recoverPartialAmzCritique(text);
+      if (critique) {
+        partialRecovery = true;
+        console.log('[amz-critique] recovered partial: summary=' + (critique.summary ? 'yes' : 'no') + ', issues=' + (critique.issues ? critique.issues.length : 0));
+      } else {
+        console.error('[amz-critique] recovery also failed.');
+        console.error('[amz-critique] raw response (first 500 chars): ' + text.substring(0, 500));
+        throw new Error('AI returned malformed response. Try Re-analyse — usually transient.');
+      }
+    }
+    if (partialRecovery) {
+      critique._partial = true;  // surface to UI so user knows
+      critique._partialNote = 'AI response was truncated; showing what we could recover. Re-analyse for full output.';
     }
 
     // Cache result — store the model used + r20 signals hash so a fresh signal
@@ -6849,33 +7151,23 @@ app.get('/api/amazon/campaign-detail/:campaignId', async function(req, res) {
   const campaignId = String(req.params.campaignId || '').trim();
   if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
   try {
-    // 1) 7-day history from daily_snapshots — extract this campaign's row from each day
-    const histRows = await db.query(
-      "SELECT snapshot_date, campaigns FROM daily_snapshots " +
-      "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days' " +
-      "ORDER BY snapshot_date ASC"
-    );
-    const history = [];
-    histRows.rows.forEach(function(row) {
-      const camps = Array.isArray(row.campaigns) ? row.campaigns : [];
-      const found = camps.find(function(c){ return String(c.campaignId) === campaignId; });
-      if (found) {
-        const spend = parseFloat(found.spend || 0);
-        const sales = parseFloat(found.sales || 0);
-        const acos = sales > 0 ? +(100 * spend / sales).toFixed(1) : null;
-        history.push({
-          date: row.snapshot_date,
-          spend: +spend.toFixed(2),
-          sales: +sales.toFixed(2),
-          acos: acos,
-          impressions: parseInt(found.impressions || 0),
-          clicks: parseInt(found.clicks || 0)
-        });
-      } else {
-        // Day exists but campaign not in snapshot — record gap so the chart isn't misleading
-        history.push({ date: row.snapshot_date, spend: 0, sales: 0, acos: null, impressions: 0, clicks: 0, missing: true });
-      }
-    });
+    // r30: 1) 7-day daily history pulled live from state.campaigns (which carries
+    // dailySeries7d from the Amazon Ads API daily7d report). No more daily_snapshots
+    // dependency — those rows had wrong attribution data.
+    const liveCamp = (state.campaigns || []).find(function(c){ return String(c.campaignId) === campaignId; });
+    const history = (liveCamp && Array.isArray(liveCamp.dailySeries7d))
+      ? liveCamp.dailySeries7d.map(function(d) {
+          const acos = (d.sales > 0) ? +(100 * d.spend / d.sales).toFixed(1) : null;
+          return {
+            date: d.date,
+            spend: +d.spend.toFixed(2),
+            sales: +d.sales.toFixed(2),
+            acos: acos,
+            impressions: d.impressions || 0,
+            clicks: d.clicks || 0
+          };
+        })
+      : [];
 
     // 2) Top ASINs in this campaign — last 7 days from amazon_asin_ad_performance
     let topAsins = [];
@@ -7660,41 +7952,38 @@ app.get('/api/amazon/action-centre', async function(req, res) {
       sRes.rows.forEach(function(r){ snoozedSet.add(String(r.campaign_id)); });
     } catch(e) {}
 
-    // ── 2. Live campaign list with today's metrics — from in-memory state ───
+    // ── 2. Live campaign list — from in-memory state (already enriched with 7d/30d
+    //      data and dailySeries7d by syncCampaigns; see r30 changes there) ─────
     const liveCampaigns = (state.campaigns || []).filter(function(c){
       return !snoozedSet.has(String(c.campaignId));
     });
 
-    // ── 3. 7-day per-campaign aggregates from daily_snapshots ──────────────
-    const snapsRes = await db.query(
-      "SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days' ORDER BY snapshot_date DESC"
-    );
-    const sevenDay = {}; // campaignId -> { spend, sales, days:[{date,spend,sales,acos,impressions}], name, agent }
-    snapsRes.rows.forEach(function(snap) {
-      (snap.campaigns || []).forEach(function(c) {
-        if (!c.campaignId) return;
-        const id = String(c.campaignId);
-        if (!sevenDay[id]) sevenDay[id] = { spend: 0, sales: 0, days: [], name: c.name, agent: c.agent || '', portfolio: c.portfolio || '', targetingType: c.targetingType || '' };
-        sevenDay[id].spend += parseFloat(c.spend || 0);
-        sevenDay[id].sales += parseFloat(c.sales || 0);
-        sevenDay[id].days.push({ date: snap.snapshot_date, spend: parseFloat(c.spend || 0), sales: parseFloat(c.sales || 0), acos: parseFloat(c.acos || 0), impressions: parseInt(c.impressions || 0) });
-      });
-    });
-
-    // ── 4. Build P1/P2/P3 items ─────────────────────────────────────────────
+    // ── 3. Build P1/P2/P3 items ─────────────────────────────────────────────
     const fixnow = [], lookat = [], scale = [];
     let totalWasted = 0;
 
+    // r30: 7-day data now lives directly on each campaign (set in syncCampaigns).
+    // No more summing daily_snapshots — that was storing trailing-14d-attribution values
+    // which couldn't be safely summed. New data comes from Amazon Ads API report
+    // streams directly (summary7d + daily7d) all using consistent attribution.
     liveCampaigns.forEach(function(c) {
       const id = String(c.campaignId);
-      const sd = sevenDay[id] || { spend: 0, sales: 0, days: [] };
-      const acos7d = sd.sales > 0 ? +((100 * sd.spend / sd.sales).toFixed(1)) : null;
-      const todaySpend = parseFloat(c.spend || 0);
-      const todaySales = parseFloat(c.sales || 0);
-      const todayAcos = parseFloat(c.acos || 0);
+      const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
+      const spend7 = parseFloat(c.spend7d || 0);
+      const sales7 = parseFloat(c.sales7d || 0);
+      const acos7d = sales7 > 0 ? +((100 * spend7 / sales7).toFixed(1)) : null;
+      const clicks7 = parseInt(c.clicks7d || 0);
+      const impressions7 = parseInt(c.impressions7d || 0);
+      const ctr7 = parseFloat(c.ctr7d || 0);
+      const conv7 = parseInt(c.conversions7d || 0);
       const dailyBudget = parseFloat(c.dailyBudget || 0);
-      const budgetPct = parseFloat(c.budgetPct || 0);
-      const budgetRemaining = parseFloat(c.budgetRemaining || 0);
+      // r30: budgetRemaining and budgetPct are null when today's daily report
+      // hasn't arrived yet from Amazon. Don't fire out-of-budget / budget-low rules
+      // on stale yesterday data. budgetKnown = false means skip those two rules.
+      const budgetKnown = (c.budgetRemaining != null);
+      const budgetPct = budgetKnown ? parseFloat(c.budgetPct || 0) : 0;
+      const budgetRemaining = budgetKnown ? parseFloat(c.budgetRemaining || 0) : 0;
+      const todaySpend = parseFloat(c.todaySpend || 0);
 
       // Check rules in priority order; assign FIRST match only (don't double-list)
       let placed = false;
@@ -7703,21 +7992,21 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         campaignName: c.name,
         targetId: id,
         title: c.name,
-        spend7d: +sd.spend.toFixed(2),
-        sales7d: +sd.sales.toFixed(2),
+        spend7d: +spend7.toFixed(2),
+        sales7d: +sales7.toFixed(2),
         acos7d: acos7d,
-        agent: sd.agent || c.agent || '',
-        targetingType: c.targetingType || sd.targetingType || ''
+        agent: c.agent || '',
+        targetingType: c.targetingType || ''
       };
       const viewBtn = { label: 'View', handler: 'acViewCampaign(\'' + id + '\')', style: 'ghost' };
       const snoozeBtn = { label: 'Snooze 7d', handler: 'acSnoozeCampaign(\'' + id + '\', 7)', style: 'ghost' };
 
-      // P1 — out of budget
-      if (!placed && dailyBudget > 0 && budgetRemaining <= 0.01) {
+      // P1 — out of budget today (only if today's daily data has arrived)
+      if (!placed && budgetKnown && dailyBudget > 0 && budgetRemaining <= 0.01) {
         fixnow.push(Object.assign({}, baseRow, {
           kind: 'out_of_budget', severity: 'p1',
           problem: 'Out of budget. Spent £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' today and stopped serving.',
-          evidence: 'Today: spend £' + todaySpend.toFixed(2) + ' · sales £' + todaySales.toFixed(2) + ' · ACOS ' + (todayAcos || 0).toFixed(1) + '%',
+          evidence: '7d: spend £' + spend7.toFixed(2) + ' · sales £' + sales7.toFixed(2) + ' · ACOS ' + (acos7d != null ? acos7d.toFixed(1) + '%' : 'no sales'),
           actions: [
             { label: 'Add £20', handler: 'acAddBudget(\'' + id + '\', 20)', style: 'primary' },
             { label: 'Add £50', handler: 'acAddBudget(\'' + id + '\', 50)', style: 'ghost' },
@@ -7728,13 +8017,13 @@ app.get('/api/amazon/action-centre', async function(req, res) {
       }
 
       // P1 — chronic high ACOS (7-day, sustained, real spend)
-      if (!placed && acos7d != null && acos7d > 40 && sd.spend > 20) {
-        const wastedAmount = sd.spend - sd.sales * 0.12; // crude — cost above target ACOS
+      if (!placed && acos7d != null && acos7d > 40 && spend7 > 20) {
+        const wastedAmount = spend7 - sales7 * 0.12;
         totalWasted += Math.max(0, wastedAmount > 0 ? wastedAmount : 0);
         fixnow.push(Object.assign({}, baseRow, {
           kind: 'chronic_acos', severity: 'p1',
-          problem: 'ACOS at ' + acos7d.toFixed(0) + '% over the last 7 days on £' + sd.spend.toFixed(0) + ' spend. Sustained underperformance.',
-          evidence: '7d: spend £' + sd.spend.toFixed(2) + ' · sales £' + sd.sales.toFixed(2) + ' · ACOS ' + acos7d.toFixed(1) + '%',
+          problem: 'ACOS at ' + acos7d.toFixed(0) + '% over the last 7 days on £' + spend7.toFixed(0) + ' spend. Sustained underperformance.',
+          evidence: '7d: spend £' + spend7.toFixed(2) + ' · sales £' + sales7.toFixed(2) + ' · ACOS ' + acos7d.toFixed(1) + '%',
           actions: [
             { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
             snoozeBtn,
@@ -7744,43 +8033,42 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         placed = true;
       }
 
-      // P1 — wasted spend today (zero sales)
-      if (!placed && todaySpend > 5 && todaySales <= 0) {
-        totalWasted += todaySpend;
+      // P1 — no revenue over 7d with real spend
+      // r30: replaces both old "wasted today" and "no_revenue 3 days" rules.
+      // If 7d spend ≥ £15 and sales = £0, that's a problem — exact same shape as Google's rule.
+      if (!placed && spend7 >= 15 && sales7 === 0) {
+        totalWasted += spend7;
         fixnow.push(Object.assign({}, baseRow, {
-          kind: 'wasted_spend', severity: 'p1',
-          problem: 'Spent £' + todaySpend.toFixed(2) + ' today with zero sales. ' + (sd.spend > 0 ? 'On track for a wasted day.' : ''),
-          evidence: 'Today: £' + todaySpend.toFixed(2) + ' spend, 0 sales · 7d total: £' + sd.spend.toFixed(2) + ' / £' + sd.sales.toFixed(2),
-          actions: [ snoozeBtn, viewBtn ]
+          kind: 'no_revenue', severity: 'p1',
+          problem: 'Spent £' + spend7.toFixed(2) + ' over 7 days with £0 sales (' + clicks7 + ' clicks, ' + conv7 + ' conv).',
+          evidence: '7d: £' + spend7.toFixed(2) + ' spend · 0 sales · ' + clicks7 + ' clicks · ' + impressions7 + ' impressions',
+          actions: [
+            { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+            snoozeBtn,
+            viewBtn
+          ]
         }));
         placed = true;
       }
 
-      // P1 — no revenue 3+ days (from snapshots)
-      if (!placed && sd.days.length >= 3) {
-        const last7 = sd.days.slice(0, Math.min(7, sd.days.length));
-        const spendDays = last7.filter(function(d){ return d.spend > 0; });
-        if (spendDays.length >= 3 && last7.every(function(d){ return d.spend === 0 || d.sales === 0; })) {
-          const totalSpend = last7.reduce(function(s,d){ return s + d.spend; }, 0);
-          totalWasted += totalSpend;
-          fixnow.push(Object.assign({}, baseRow, {
-            kind: 'no_revenue', severity: 'p1',
-            problem: 'Spending budget for ' + spendDays.length + ' of last 7 days with no revenue. £' + totalSpend.toFixed(2) + ' wasted.',
-            evidence: '7d: £' + totalSpend.toFixed(2) + ' spend · £0 attributed sales · ' + spendDays.length + ' days with spend',
-            actions: [
-              { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
-              snoozeBtn,
-              viewBtn
-            ]
-          }));
-          placed = true;
-        }
+      // P1 — many clicks no sales (landing page / product problem)
+      if (!placed && sales7 === 0 && clicks7 >= 50) {
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'clicks_no_sales', severity: 'p1',
+          problem: clicks7 + ' clicks but £0 sales in 7 days. Page or product is not closing.',
+          evidence: '7d: ' + clicks7 + ' clicks · £' + spend7.toFixed(2) + ' spend · CTR ' + ctr7.toFixed(2) + '%',
+          actions: [
+            viewBtn,
+            snoozeBtn
+          ]
+        }));
+        placed = true;
       }
 
-      // P1 — no activity 3+ days
-      if (!placed && sd.days.length >= 3) {
-        const last3 = sd.days.slice(0, 3);
-        if (last3.every(function(d){ return d.impressions === 0; })) {
+      // P1 — no activity 3+ consecutive days (zero impressions)
+      if (!placed && days.length >= 3) {
+        const last3 = days.slice(-3);
+        if (last3.every(function(d){ return (d.impressions || 0) === 0; })) {
           fixnow.push(Object.assign({}, baseRow, {
             kind: 'no_activity', severity: 'p1',
             problem: 'Zero impressions for 3+ days. Either bids are too low to show, or targeting is exhausted.',
@@ -7795,23 +8083,23 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         }
       }
 
-      // P2 — today ACOS high (not yet chronic)
-      if (!placed && todayAcos > 25 && todayAcos <= 40 && todaySpend > 5) {
+      // P2 — high ACOS 25-40% (not yet chronic)
+      if (!placed && acos7d != null && acos7d > 25 && acos7d <= 40 && spend7 > 10) {
         lookat.push(Object.assign({}, baseRow, {
           kind: 'high_acos', severity: 'p2',
-          problem: 'ACOS ' + todayAcos.toFixed(1) + '% today on £' + todaySpend.toFixed(2) + ' spend. Above target — watch.',
-          evidence: 'Today: ACOS ' + todayAcos.toFixed(1) + '% · 7d ACOS: ' + (acos7d != null ? acos7d.toFixed(1) + '%' : 'no data'),
+          problem: 'ACOS ' + acos7d.toFixed(1) + '% over 7 days on £' + spend7.toFixed(2) + ' spend. Above target — watch.',
+          evidence: '7d: ACOS ' + acos7d.toFixed(1) + '% · £' + spend7.toFixed(2) + ' spend · £' + sales7.toFixed(2) + ' sales',
           actions: [ snoozeBtn, viewBtn ]
         }));
         placed = true;
       }
 
-      // P2 — budget low
-      if (!placed && budgetPct >= 80 && budgetPct < 100 && dailyBudget > 0) {
+      // P2 — budget low (today's spend approaching cap) — only when today's data is in
+      if (!placed && budgetKnown && budgetPct >= 80 && budgetPct < 100 && dailyBudget > 0) {
         lookat.push(Object.assign({}, baseRow, {
           kind: 'budget_low', severity: 'p2',
           problem: 'Used ' + budgetPct.toFixed(0) + '% of today\'s £' + dailyBudget.toFixed(2) + ' budget. Likely to exhaust before evening.',
-          evidence: 'Today: £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' · ACOS ' + todayAcos.toFixed(1) + '%',
+          evidence: 'Today: £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' · 7d ACOS ' + (acos7d != null ? acos7d.toFixed(1) + '%' : '—'),
           actions: [
             { label: 'Add £10', handler: 'acAddBudget(\'' + id + '\', 10)', style: 'primary' },
             { label: 'Add £25', handler: 'acAddBudget(\'' + id + '\', 25)', style: 'ghost' },
@@ -7821,12 +8109,12 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         placed = true;
       }
 
-      // P3 — scale candidate
-      if (!placed && acos7d != null && acos7d <= 15 && sd.spend > 20 && budgetPct < 90) {
+      // P3 — scale candidate (low ACOS, real spend, budget headroom)
+      if (!placed && acos7d != null && acos7d <= 15 && spend7 > 20 && budgetPct < 90) {
         scale.push(Object.assign({}, baseRow, {
           kind: 'scale', severity: 'p3',
-          problem: 'Healthy ACOS ' + acos7d.toFixed(1) + '% on £' + sd.spend.toFixed(0) + ' over 7 days. Room to grow.',
-          evidence: '7d: £' + sd.spend.toFixed(2) + ' spend · £' + sd.sales.toFixed(2) + ' sales · today ' + budgetPct.toFixed(0) + '% budget used',
+          problem: 'Healthy ACOS ' + acos7d.toFixed(1) + '% on £' + spend7.toFixed(0) + ' over 7 days. Room to grow.',
+          evidence: '7d: £' + spend7.toFixed(2) + ' spend · £' + sales7.toFixed(2) + ' sales · today ' + budgetPct.toFixed(0) + '% budget used',
           actions: [
             { label: '+25% budget', handler: 'acAddBudget(\'' + id + '\', ' + Math.max(5, Math.round(dailyBudget * 0.25)) + ')', style: 'primary' },
             viewBtn
@@ -8409,19 +8697,20 @@ app.post('/api/google/tasks/:id/status', async function(req, res) {
 app.get('/api/google/tasks/:id/history', async function(req, res) {
   if (!db) return res.json({ history: [] });
   try {
-    // r29c: defensive — task_id might not exist as a column on older rows or older deploys.
-    // Try the standard query first; if it fails due to missing column, fall back to empty.
     const taskIdNum = parseInt(req.params.id, 10);
     if (!Number.isFinite(taskIdNum)) return res.json({ history: [] });
+    // r29p: query uses real column names from CREATE TABLE (line ~1819).
+    // logged_at (not created_at). Aliased to created_at so front-end stays compatible.
+    // Doesn't filter on department or actor_name — those columns don't exist on this table.
     const r = await db.query(
-      "SELECT id, action, notes, status_before, status_after, agent_name, actor_name, created_at " +
-      "FROM activity_log WHERE department='google' AND task_id=$1 ORDER BY created_at ASC",
+      "SELECT id, action, notes, status_before, status_after, agent_name, " +
+      "       logged_at AS created_at " +
+      "FROM activity_log WHERE task_id=$1 ORDER BY logged_at ASC",
       [taskIdNum]
     );
     res.json({ history: r.rows });
   } catch (e) {
     console.error('[GTASK history] ' + e.message);
-    // Don't 500 on the front-end — return empty history so the modal can still open
     res.json({ history: [], _error: e.message });
   }
 });
@@ -10738,13 +11027,6 @@ cron.schedule('1 0 * * *', function() {
   advanceTaskStages().catch(function(e){ console.error('Stage-advance cron error: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
-// r30b — Logistics task engine daily evaluation: 06:30 London (just before workday)
-cron.schedule('30 6 * * *', function() {
-  if (logisticsRouter && logisticsRouter._dailyEval) {
-    logisticsRouter._dailyEval().catch(function(e){ console.error('Logistics daily-eval cron: ' + e.message); });
-  }
-}, { timezone: 'Europe/London' });
-
 // ── SP-API sync crons (r8) ──────────────────────────────────────────────────
 // Catalogue sync: once a day at 02:30 London. Quiet hours, full refresh.
 cron.schedule('30 2 * * *', function() {
@@ -11525,10 +11807,14 @@ async function getCachedCritique(productId) {
     if (!r.rows.length) return null;
     const row = r.rows[0];
     const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
-    if (ageHours > LPC_CACHE_HOURS) {
-      console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h)');
-      return null;
+    const isStale = ageHours > LPC_CACHE_HOURS;
+    if (isStale) {
+      console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h) — returning anyway, caller decides');
     }
+    // r29q: return the row regardless of age. Caller decides whether to use it
+    // (display: yes — show what was last analysed even if old; rerun-gate: no — let
+    // them re-run if stale). Previously returned null when stale, which caused the
+    // analysis to "vanish" from the modal on close+reopen after 24h.
     // Detect partial saves (truncated AI response): friction empty + diagnosis hints partial,
     // OR diagnosis says "(AI returned non-JSON" / "(Partial".
     const diagText = row.diagnosis || '';
@@ -11550,6 +11836,7 @@ async function getCachedCritique(productId) {
       score: parseFloat(row.score) || 0,
       cached: true,
       ageHours: ageHours,
+      stale: isStale,           // r29q: caller checks this
       partial: partialFlag,
       modelUsed: row.model_used || null  // r28
     };
@@ -11563,6 +11850,33 @@ async function getCachedCritique(productId) {
 // attempts to extract individual fields with regex so we can salvage what's there
 // rather than showing the agent nothing useful. Marks the result as partial so the
 // front-end can prompt for re-run with more tokens.
+// r29r: Amazon-shaped partial JSON recovery. Mirrors recoverPartialCritiqueJson
+// but for the Amazon critique shape: { summary, issues: [{title, severity, ...}] }.
+// Returns null if nothing recoverable, otherwise an object with whatever fields
+// the regex managed to extract.
+function _recoverPartialAmzCritique(rawText) {
+  const result = { summary: '', issues: [] };
+
+  const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sumMatch) result.summary = sumMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  // issues — array of {title, severity, evidence, fix} objects. Find each one even if
+  // the array isn't closed. Match objects that have a "title" field at minimum.
+  const issueMatches = rawText.match(/\{\s*"title"[^{}]*?\}/g);
+  if (issueMatches) {
+    issueMatches.forEach(function(s){
+      try {
+        // Attempt parse. If it fails (e.g. unclosed quote at truncation), skip it.
+        const obj = JSON.parse(s);
+        if (obj && obj.title) result.issues.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+  // If we have neither summary nor any issues, we've got nothing — caller treats as failure
+  if (!result.summary && (!result.issues || result.issues.length === 0)) return null;
+  return result;
+}
+
 function recoverPartialCritiqueJson(rawText) {
   const result = {
     diagnosis: '',
@@ -11802,15 +12116,16 @@ app.post('/api/google/landing-page-critique', async function(req, res) {
         // Agent earned Opus by submitting feedback — let them through the 24h lock
         forceRefresh = true;
       } else {
-        // Agent requested refresh — only allowed if no cache exists yet (first run)
+        // Agent requested refresh — only allowed if no fresh cache exists (or stale)
+        // r29q: stale cache (>24h) lets the agent re-run; fresh cache blocks.
         const existing = await getCachedCritique(productId);
-        if (existing) {
-          // Cache exists; agent cannot force-refresh, return cached with a notice
+        if (existing && !existing.stale) {
+          // Fresh cache exists; agent cannot force-refresh, return cached with a notice
           existing.lockedForAgent = true;
           existing.lockMessage = 'Already analysed in the last 24h. Manager can re-analyse.';
           return res.json(existing);
         }
-        // No cache — agent's first request triggers a fresh run
+        // No cache OR stale cache — agent's request triggers a fresh run
         forceRefresh = true;
       }
     }
@@ -12013,8 +12328,10 @@ cron.schedule('30 3 * * *', async function() {
     for (const c of top) {
       try {
         // r29: cache-check first. If a fresh critique already exists, skip the AI call.
+        // r29q: with the new stale flag, "fresh" means !cached.stale (i.e. <24h old).
+        // Stale cache lets the cron re-analyse to keep data current.
         const cached = await getCachedCritique(String(c.shopifyProduct.id));
-        if (cached) {
+        if (cached && !cached.stale) {
           skipped++;
           continue;
         }
