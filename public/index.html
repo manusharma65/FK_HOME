@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-11 r30 (Campaign Health page replaces All Campaigns. 7d/30d window toggle, matches Amazon Seller Central. New columns: TACOS, Cost/conv. Coloured urgency stripe per row. Action Centre: agent filter + search + All tab. Rules use real 7-day Amazon data via 3 new report streams.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-11 r30a (r30 + budget alert fix: now uses today's spend not 7-day spend. Skips alerts when daily report data not yet in.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1657,10 +1657,13 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     const shopifyRev = use30d ? shopify30d : shopify7d;
     const tacos = (shopifyRev > 0 && spend > 0) ? (100 * spend / shopifyRev).toFixed(1) + '%' : '—';
     const dailyBudget = c.dailyBudget || 0;
-    const budgetPct = c.budgetPct || 0;
-    const budgetRemaining = c.budgetRemaining != null ? c.budgetRemaining : dailyBudget;
-    const outOfBudget = budgetRemaining <= 0.01 && dailyBudget > 0;
-    const budgetLow = budgetPct >= 80 && !outOfBudget;
+    // r30: when c.budgetRemaining is null, today's daily report hasn't arrived yet.
+    // Don't fire out-of-budget visuals on stale data. Show as full budget remaining.
+    const budgetKnown = (c.budgetRemaining != null);
+    const budgetPct = budgetKnown ? (c.budgetPct || 0) : 0;
+    const budgetRemaining = budgetKnown ? c.budgetRemaining : dailyBudget;
+    const outOfBudget = budgetKnown && budgetRemaining <= 0.01 && dailyBudget > 0;
+    const budgetLow = budgetKnown && budgetPct >= 80 && !outOfBudget;
     const isAuto = c.targetingType === 'auto';
 
     // Status — mirror Action Centre rules using 7d as the basis (rules are 7d-based regardless of toggle)
@@ -1756,8 +1759,9 @@ function renderAllCampaigns() {
     });
   }
   document.getElementById('t-all').textContent = allCampaigns.length;
-  document.getElementById('t-action').textContent = allCampaigns.filter(c => c.budgetRemaining <= 0.01 || c.acos > 35 || c.budgetPct >= 80).length;
-  document.getElementById('t-healthy').textContent = allCampaigns.filter(c => c.budgetRemaining > 0.01 && c.acos <= 35 && c.budgetPct < 80).length;
+  // r30: tab counts use the same isNeedsAction predicate the table uses (single source of truth)
+  document.getElementById('t-action').textContent = getFilteredCampaigns('action').length;
+  document.getElementById('t-healthy').textContent = getFilteredCampaigns('healthy').length;
   renderCampaignTable('all-table', filtered, true);
   // Populate portfolio filter
   const sel = document.getElementById('camp-portfolio-filter');
@@ -1775,8 +1779,10 @@ function getFilteredCampaigns(type) {
   // r30: "action" and "healthy" filters now derive from 7-day data using the
   // same logic Action Centre uses, so this page agrees with the Action Centre count.
   function isNeedsAction(c) {
-    const outOfBudget = c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
-    const budgetLow = c.budgetPct >= 80 && !outOfBudget;
+    // r30: budgetRemaining null = today's data not in yet — don't treat as alert
+    const budgetKnown = (c.budgetRemaining != null);
+    const outOfBudget = budgetKnown && c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
+    const budgetLow = budgetKnown && c.budgetPct >= 80 && !outOfBudget;
     const s7 = c.spend7d || 0, sa7 = c.sales7d || 0, cl7 = c.clicks7d || 0;
     const acos7 = sa7 > 0 ? (100 * s7 / sa7) : null;
     if (outOfBudget) return true;

@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-11 r30 (MAJOR: Amazon All Campaigns → "Campaign Health". Three new Amazon Ads report streams (7d summary, 30d summary, 7d daily) replace broken daily_snapshots-sum logic. Sales/spend/ACOS now match Amazon Seller Central. 7d/30d toggle. New columns: TACOS, Cost/conv. Action Centre: agent filter + search + All tab. Rules rewritten to use new clean data — no_revenue/high_ACOS/clicks-no-sales/no-activity all use 7d truth. Modal pulls from same source as table — no drift. Removed today/7d toggle + daily_snapshots 7d enrichment from r29s.)
+// CampaignPulse — deploy marker 2026-05-11 r30a (r30 + critical fix: budget alerts. After r30 rewrite, c.spend defaulted to 7d spend, so analyseCampaigns was firing "OUT OF BUDGET" alerts for every campaign with 7d_spend > daily_budget. Now uses c.todaySpend. Also: c.todaySpend is null until Amazons daily report includes today (typically 1-day lag), and all budget alerts/badges/rules skip null-spend campaigns rather than fire on stale yesterday data.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1296,14 +1296,25 @@ async function analyseCampaigns(campaigns) {
   for (let i = 0; i < campaigns.length; i++) {
     const c = campaigns[i];
     const budget = c.dailyBudget || 0;
-    const spend = c.spend || 0;
+    // r30 fix: c.spend defaults to 7-day spend after the r30 rewrite. Budget alerts
+    // must compare TODAY's spend against today's daily budget — otherwise a £4.43
+    // daily budget campaign with £20 of 7-day spend looks "out of budget" every sync.
+    // Today's spend lives on c.todaySpend (latest row from the daily7d stream).
+    // If null, Amazon's daily report doesn't have today's data yet — skip alerts
+    // rather than fire on stale yesterday data.
+    if (c.todaySpend == null) continue;
+    const spend = c.todaySpend;
     const sales = c.sales || 0;
     const acos = sales > 0 ? (spend / sales) * 100 : 0;
     const remaining = Math.max(0, budget - spend);
     const remainingPct = budget > 0 ? (remaining / budget) * 100 : 100;
     const outOfBudget = remaining <= 0.01 && budget > 0;
     const budgetLow = remainingPct <= budgetLowPct && !outOfBudget;
-    const acosHigh = acos > acosCritical && spend > 5;
+    // ACOS-high alert uses 7-day data because a single noisy day shouldn't fire it
+    const spend7 = c.spend7d || 0;
+    const sales7 = c.sales7d || 0;
+    const acos7 = sales7 > 0 ? (spend7 / sales7) * 100 : 0;
+    const acosHigh = acos7 > acosCritical && spend7 > 5;
     const ukHour = parseInt(new Date().toLocaleString('en-GB', {timeZone:'Europe/London', hour:'numeric', hour12:false}));
     if (ukHour >= 22 || ukHour < 8) continue;
     const alertType = outOfBudget ? 'out_of_budget' : acosHigh ? 'acos_high' : budgetLow ? 'budget_low' : null;
@@ -1336,7 +1347,7 @@ async function analyseCampaigns(campaigns) {
     const agent = extractAgentFromCampaign(name) || '';
     const portfolioName = c.portfolio || '';
 
-    state.alerts.push({ campaignId: c.campaignId, name: name, portfolio: portfolioName, agent: agent, type: alertType, time: timeStr, date: dateStr, budget: budget, acos: Math.round(acos * 10) / 10 });
+    state.alerts.push({ campaignId: c.campaignId, name: name, portfolio: portfolioName, agent: agent, type: alertType, time: timeStr, date: dateStr, budget: budget, acos: Math.round(acos7 * 10) / 10 });
 
     const dashUrl = process.env.DASHBOARD_URL || 'https://campaignpulse-setup-production.up.railway.app';
 
@@ -1345,18 +1356,19 @@ async function analyseCampaigns(campaigns) {
       const roas = spend > 0 ? sales / spend : 0;
       const hourly = spend / Math.max(now.getHours(), 1);
       const missed = Math.round(hourly * hoursLeft * roas);
-      state.exhaustionLog.unshift({ date: now.toLocaleDateString('en-GB'), time: timeStr, campaign: name, portfolio: portfolioName, agent: agent, budget: '£' + budget.toFixed(2), acos: acos.toFixed(1) + '%', missed: '£' + missed, added: 'Pending', action: 'Pending' });
-      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Budget: £' + budget.toFixed(2), 'ACOS: ' + acos.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
+      state.exhaustionLog.unshift({ date: now.toLocaleDateString('en-GB'), time: timeStr, campaign: name, portfolio: portfolioName, agent: agent, budget: '£' + budget.toFixed(2), acos: acos7.toFixed(1) + '%', missed: '£' + missed, added: 'Pending', action: 'Pending' });
+      // r30: alert text shows today's exhaustion + 7d ACOS context
+      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Spent today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2), '7d ACOS: ' + acos7.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m1); } else { await sendGoogleChat(m1); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Budget £' + budget.toFixed(2) + ', ACOS ' + acos.toFixed(1) + '%');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Budget £' + budget.toFixed(2) + ', 7d ACOS ' + acos7.toFixed(1) + '%');
     } else if (acosHigh) {
-      const m2 = ['📈 HIGH ACOS', name, 'ACOS: ' + acos.toFixed(1) + '%', 'Spend: £' + spend.toFixed(2), dashUrl].join('\n');
+      const m2 = ['📈 HIGH ACOS', name, '7d ACOS: ' + acos7.toFixed(1) + '%', '7d spend: £' + spend7.toFixed(2), dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m2); } else { await sendGoogleChat(m2); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'ACOS ' + acos.toFixed(1) + '% with £' + spend.toFixed(2) + ' spend');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'ACOS ' + acos7.toFixed(1) + '% with £' + spend7.toFixed(2) + ' 7d spend');
     } else if (budgetLow) {
-      const m3 = ['⚡ BUDGET LOW', name, 'Remaining: £' + remaining.toFixed(2) + ' (' + remainingPct.toFixed(0) + '%)', dashUrl].join('\n');
+      const m3 = ['⚡ BUDGET LOW', name, 'Today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' (' + remainingPct.toFixed(0) + '% left)', dashUrl].join('\n');
       if (agent) { await sendToAgent(agent, m3); } else { await sendGoogleChat(m3); }
-      createAlertTask(c.campaignId, name, agent, portfolioName, 'budget_low', 'Budget ' + remainingPct.toFixed(0) + '% used, £' + remaining.toFixed(2) + ' left');
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'budget_low', 'Today £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' used, £' + remaining.toFixed(2) + ' left');
     }
   }
   console.log('Alert analysis complete');
@@ -1445,13 +1457,18 @@ async function syncCampaigns() {
       const acos30 = sales30 > 0 ? Math.round((spend30 / sales30) * 1000) / 10 : 0;
       const cpcv30 = s30.conversions > 0 ? +(spend30 / s30.conversions).toFixed(2) : null;
 
-      // Budget metrics still reflect *today's* daily cap status, not 7d sums.
-      // Today's spend isn't pulled by the new streams — we derive from the latest
-      // daily row (yesterday's spend as a proxy) or fall back to 0.
-      // For "out of budget right now" decisions, agents check Amazon UI directly.
-      const todayRow = d7.length ? d7[d7.length - 1] : { spend: 0 };
-      const remaining = Math.max(0, budget - (todayRow.spend || 0));
-      const pct = budget > 0 ? Math.round(((todayRow.spend || 0) / budget) * 100) : 0;
+      // r30: budget metrics reflect today's daily-cap status.
+      // The daily7d stream typically lags by 1 day (Amazon's daily report doesn't
+      // include today's in-flight data). We only treat the latest daily row as
+      // "today" if its date matches today's date. Otherwise todaySpend is unknown
+      // (null) and we don't fire false out-of-budget alerts.
+      const _todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+      const latestDay = d7.length ? d7[d7.length - 1] : null;
+      const todaySpend = (latestDay && String(latestDay.date).slice(0, 10) === _todayStr)
+        ? parseFloat(latestDay.spend || 0)
+        : null;
+      const remaining = (todaySpend != null) ? Math.max(0, budget - todaySpend) : null;
+      const pct = (todaySpend != null && budget > 0) ? Math.round((todaySpend / budget) * 100) : 0;
 
       const portfolioName = c.portfolioId ? (state.portfolios[c.portfolioId] || '') : '';
       let agent = portfolioName ? portfolioName.replace('@', '').split(' ')[0] : '';
@@ -1501,9 +1518,10 @@ async function syncCampaigns() {
         costPerConv30d: cpcv30,
         // Per-day 7d series (for sparklines + consecutive-day rules)
         dailySeries7d: d7,
-        // Budget figures — based on most-recent day in the daily series
-        todaySpend: todayRow.spend || 0,
-        budgetRemaining: Math.round(remaining * 100) / 100,
+        // r30: today's spend — null if the daily stream's latest row isn't actually today.
+        // Front-end shows "—" instead of misleading numbers. Budget alerts skip null-spend campaigns.
+        todaySpend: todaySpend,
+        budgetRemaining: (remaining != null) ? Math.round(remaining * 100) / 100 : null,
         budgetPct: pct
       };
     });
@@ -3397,7 +3415,12 @@ app.get('/api/dashboard', async function(req, res) {
   const totalSpend = campaigns.reduce(function(s, c) { return s + (c.spend || 0); }, 0);
   const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend / totalRevenue) * 1000) / 10 : 0;
   const active = campaigns.filter(function(c) { return c.state === 'enabled'; }).length;
-  const needsAction = campaigns.filter(function(c) { return c.budgetRemaining <= 0.01 || c.acos > parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35) || c.budgetPct >= 80; }).length;
+  const needsAction = campaigns.filter(function(c) {
+    const budgetKnown = (c.budgetRemaining != null);
+    const outOfBudget = budgetKnown && c.budgetRemaining <= 0.01;
+    const budgetLow = budgetKnown && c.budgetPct >= 80;
+    return outOfBudget || c.acos > parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35) || budgetLow;
+  }).length;
 
   let filteredAlerts = state.alerts.slice(-20);
   if (db) {
@@ -7874,8 +7897,12 @@ app.get('/api/amazon/action-centre', async function(req, res) {
       const ctr7 = parseFloat(c.ctr7d || 0);
       const conv7 = parseInt(c.conversions7d || 0);
       const dailyBudget = parseFloat(c.dailyBudget || 0);
-      const budgetPct = parseFloat(c.budgetPct || 0);
-      const budgetRemaining = parseFloat(c.budgetRemaining || 0);
+      // r30: budgetRemaining and budgetPct are null when today's daily report
+      // hasn't arrived yet from Amazon. Don't fire out-of-budget / budget-low rules
+      // on stale yesterday data. budgetKnown = false means skip those two rules.
+      const budgetKnown = (c.budgetRemaining != null);
+      const budgetPct = budgetKnown ? parseFloat(c.budgetPct || 0) : 0;
+      const budgetRemaining = budgetKnown ? parseFloat(c.budgetRemaining || 0) : 0;
       const todaySpend = parseFloat(c.todaySpend || 0);
 
       // Check rules in priority order; assign FIRST match only (don't double-list)
@@ -7894,8 +7921,8 @@ app.get('/api/amazon/action-centre', async function(req, res) {
       const viewBtn = { label: 'View', handler: 'acViewCampaign(\'' + id + '\')', style: 'ghost' };
       const snoozeBtn = { label: 'Snooze 7d', handler: 'acSnoozeCampaign(\'' + id + '\', 7)', style: 'ghost' };
 
-      // P1 — out of budget today
-      if (!placed && dailyBudget > 0 && budgetRemaining <= 0.01) {
+      // P1 — out of budget today (only if today's daily data has arrived)
+      if (!placed && budgetKnown && dailyBudget > 0 && budgetRemaining <= 0.01) {
         fixnow.push(Object.assign({}, baseRow, {
           kind: 'out_of_budget', severity: 'p1',
           problem: 'Out of budget. Spent £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' today and stopped serving.',
@@ -7987,8 +8014,8 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         placed = true;
       }
 
-      // P2 — budget low (today's spend approaching cap)
-      if (!placed && budgetPct >= 80 && budgetPct < 100 && dailyBudget > 0) {
+      // P2 — budget low (today's spend approaching cap) — only when today's data is in
+      if (!placed && budgetKnown && budgetPct >= 80 && budgetPct < 100 && dailyBudget > 0) {
         lookat.push(Object.assign({}, baseRow, {
           kind: 'budget_low', severity: 'p2',
           problem: 'Used ' + budgetPct.toFixed(0) + '% of today\'s £' + dailyBudget.toFixed(2) + ' budget. Likely to exhaust before evening.',
