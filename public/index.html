@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-08 r29n (Cancelled tasks now appear in Complete tab for audit visibility) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-11 r29s (All Campaigns: Today/7d toggle. Default 7d so campaign metrics match Amazon's UI. Cancel button 60min window, cancelled tasks in Complete tab. Includes all r29 fixes.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -575,6 +575,11 @@ tbody tr:hover { background: var(--surface2); }
       </select>
       <!-- r16: Hidden campaigns reveal -->
       <button onclick="showHiddenCampaigns()" class="btn btn-ghost" style="font-size:13px;padding:8px 12px" title="View and restore hidden campaigns">👁 Hidden <span id="hidden-camps-count" style="font-size:11px;color:var(--text3);margin-left:3px"></span></button>
+      <!-- r29s: Today / 7d window toggle. Defaults to 7d so the dashboard matches Amazon's UI window. -->
+      <div style="display:inline-flex;border:1px solid var(--border2);border-radius:8px;overflow:hidden;font-size:13px" title="Switch the metrics columns between today's data and a rolling 7-day total">
+        <button id="window-today-btn" onclick="setCampWindow('today')" style="background:white;color:var(--text2);padding:8px 12px;border:none;cursor:pointer;font-family:inherit;font-size:13px">Today</button>
+        <button id="window-7d-btn" onclick="setCampWindow('7d')" style="background:var(--accent);color:white;padding:8px 12px;border:none;cursor:pointer;font-family:inherit;font-size:13px">7d</button>
+      </div>
     </div>
     <div class="tabs">
       <button class="tab-btn active" onclick="filterCamps('action',this)">Needs action (<span id="t-action">0</span>)</button>
@@ -1192,14 +1197,9 @@ async function checkAuth() {
     currentUser = data;
 
     // Department routing: Google-only users get bounced to /google.html
-    // Logistics-only users get bounced to /logistics.html
     // Managers see both, Amazon stays here, Google leaves
     if (data.role !== 'manager' && data.department === 'google') {
       window.location.replace('/google.html');
-      return false;
-    }
-    if (data.role !== 'manager' && data.role !== 'owner' && data.department === 'logistics') {
-      window.location.replace('/logistics.html');
       return false;
     }
 
@@ -1304,6 +1304,27 @@ function getTaskAgentName(t) { return getTaskAgent(t); }
 let allCampaigns = [];
 let currentFilter = 'action';
 let sortState = { col: null, dir: 1 };
+// r29s: which date window the All Campaigns table reads — 'today' or '7d'.
+// Persisted to localStorage so it survives reloads. Default '7d' matches Amazon's
+// own console UI window and shows meaningful numbers (today-only often reads as £0).
+let campWindow = localStorage.getItem('amzCampWindow') || '7d';
+function setCampWindow(w) {
+  campWindow = (w === 'today') ? 'today' : '7d';
+  localStorage.setItem('amzCampWindow', campWindow);
+  // Update button styling
+  const todayBtn = document.getElementById('window-today-btn');
+  const sevenBtn = document.getElementById('window-7d-btn');
+  if (todayBtn && sevenBtn) {
+    if (campWindow === 'today') {
+      todayBtn.style.background = 'var(--accent)'; todayBtn.style.color = 'white';
+      sevenBtn.style.background = 'white'; sevenBtn.style.color = 'var(--text2)';
+    } else {
+      sevenBtn.style.background = 'var(--accent)'; sevenBtn.style.color = 'white';
+      todayBtn.style.background = 'white'; todayBtn.style.color = 'var(--text2)';
+    }
+  }
+  renderAllCampaigns();
+}
 let reportSortState = { col: 'date', dir: -1 };
 
 function sortReport(col) {
@@ -1599,6 +1620,9 @@ function dismissAlert(campaignId) {
 function renderCampaignTable(tableId, campaigns, showAction) {
   const tbody = document.getElementById(tableId);
   if (!campaigns.length) { tbody.innerHTML = '<tr><td colspan="14"><div class="empty">No campaigns found</div></td></tr>'; return; }
+  // r29s: select which window's metrics to show. Defaults to 7d on the all-table.
+  // The summary table on the main page always uses today (single-day view).
+  const use7d = (tableId === 'all-table' && campWindow === '7d');
   tbody.innerHTML = campaigns.map(c => {
     const outOfBudget = c.budgetRemaining <= 0.01 && c.dailyBudget > 0;
     const budgetLow = c.budgetPct >= 80 && !outOfBudget;
@@ -1612,7 +1636,9 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     const chronicAcos = acos7d != null && acos7d > 40 && (c.spend7d || 0) > 20;
     const isAuto = c.targetingType === 'auto';
     const budgetColor = outOfBudget ? 'color:var(--red);font-weight:600' : budgetLow ? 'color:var(--amber);font-weight:500' : '';
-    const acosClass = c.acos > 35 ? 'acos-high' : c.acos > 25 ? 'acos-warn' : c.acos > 0 ? 'acos-ok' : '';
+    // r29s: when 7d toggle is on, use 7d ACOS for colour class
+    const displayedAcos = use7d ? (c.acos7d || 0) : c.acos;
+    const acosClass = displayedAcos > 35 ? 'acos-high' : displayedAcos > 25 ? 'acos-warn' : displayedAcos > 0 ? 'acos-ok' : '';
     const progColor = outOfBudget ? 'var(--red)' : budgetLow ? 'var(--amber)' : 'var(--green)';
     const noData = c.spend === null;
     let statusBadge = '<span class="badge badge-green"><span class="dot" style="background:var(--green)"></span>Healthy</span>';
@@ -1635,6 +1661,14 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     const hideBtnHtml = ' <button class="btn btn-ghost" style="font-size:11px;padding:2px 6px;color:var(--text3)" onclick="hideCampaign(\'' + c.campaignId + '\',\'' + escName + '\')" title="Hide this campaign from the dashboard">🗙</button>';
     action = action + hideBtnHtml;
     const typeBadge = isAuto ? '<span class="badge badge-blue" style="font-size:10px">Auto</span>' : '<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>';
+    // r29s: column values switch based on window toggle
+    const dispImpressions = use7d ? (c.impressions7d || 0) : (c.impressions || 0);
+    const dispClicks      = use7d ? (c.clicks7d || 0)      : (c.clicks || 0);
+    const dispCtr         = use7d ? (c.ctr7d != null ? c.ctr7d.toFixed(2) : '0.00') : (c.ctr || '0.00');
+    const dispConversions = use7d ? (c.conversions7d || 0) : (c.conversions || 0);
+    const dispSales       = use7d ? (c.sales7d || 0)       : c.sales;
+    const dispSpend       = use7d ? (c.spend7d || 0)       : c.spend;
+    const dispAcos        = use7d ? (c.acos7d || 0)        : c.acos;
     // r24: rows on the All Campaigns table open a detail modal on click. Click handler
     // ignores clicks that originate inside a button/anchor/input so existing inline
     // action buttons (Add budget, Hide, etc.) keep working unchanged.
@@ -1647,13 +1681,13 @@ function renderCampaignTable(tableId, campaigns, showAction) {
       ${tableId === 'all-table' ? '<td>' + typeBadge + '</td>' : ''}
       ${tableId === 'all-table' ? '<td class="mono">£' + c.dailyBudget + '</td>' : ''}
       <td><div class="mono" style="${budgetColor}">£${c.budgetRemaining} / £${c.dailyBudget}</div><div class="prog"><div class="prog-fill" style="width:${Math.min(c.budgetPct,100)}%;background:${progColor}"></div></div></td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : (c.impressions||0).toLocaleString()}</td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : (c.clicks||0).toLocaleString()}</td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : (c.ctr||'0.00') + '%'}</td>
-      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : (c.conversions||0)}</td>
-      <td class="mono">${c.sales !== null ? '£' + c.sales : '<span style="color:var(--text3);font-size:11px">loading</span>'}</td>
-      <td class="mono">${c.spend !== null ? '£' + c.spend : '<span style="color:var(--text3);font-size:11px">loading</span>'}</td>
-      <td class="mono ${acosClass}">${c.acos > 0 ? c.acos + '%' : '—'}</td>
+      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispImpressions.toLocaleString()}</td>
+      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispClicks.toLocaleString()}</td>
+      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispCtr + '%'}</td>
+      <td class="mono">${noData ? '<span style="color:var(--text3)">—</span>' : dispConversions}</td>
+      <td class="mono">${dispSales !== null && dispSales !== undefined ? '£' + (typeof dispSales === 'number' ? dispSales.toFixed(2) : dispSales) : '<span style="color:var(--text3);font-size:11px">loading</span>'}</td>
+      <td class="mono">${dispSpend !== null && dispSpend !== undefined ? '£' + (typeof dispSpend === 'number' ? dispSpend.toFixed(2) : dispSpend) : '<span style="color:var(--text3);font-size:11px">loading</span>'}</td>
+      <td class="mono ${acosClass}">${dispAcos > 0 ? dispAcos + '%' : '—'}</td>
       <td>${statusBadge}</td>
       <td>${action}</td>
     </tr>`;
@@ -5597,6 +5631,10 @@ document.addEventListener('DOMContentLoaded', function() {
       if (j && j.running) pollAmzBulkStatus();
     }).catch(function(){});
   }, 2000);
+  // r29s: apply persisted Today/7d toggle button state (the value is loaded at top of script)
+  setTimeout(function(){
+    if (typeof setCampWindow === 'function') setCampWindow(campWindow);
+  }, 100);
 });
 
 // r16: Hide / restore product handlers

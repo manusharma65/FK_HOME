@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-11 r29r (Bundle: (1) Vanishing AI critique fixed — getCachedCritique returns stale rows with a flag instead of null. (2) Amazon truncated-JSON parse: raised max_tokens 2000→4096 and added partial-JSON recovery helper. (3) pg deprecation fix: swapped Client for Pool — concurrent queries now safe, ready for pg@9. (4) Amazon Ads 425 backoff: skip report requests for 1h after a 425 to stop log spam. (5) SP-API orderItems throttle: 350ms delay between calls reduces 429 storms. Includes r29p log-spam + activity_log column migrations and r29q stale flag.)
+// CampaignPulse — deploy marker 2026-05-11 r29s (Amazon All Campaigns: new Today/7d toggle at top-right of toolbar. Server enriches each campaign with spend7d/sales7d/clicks7d/impressions7d/conversions7d/acos7d/ctr7d by summing last 7 daily_snapshots. Frontend swaps displayed values + ACOS colour class based on toggle. Default 7d, persists to localStorage. Includes all r29r fixes.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3244,21 +3244,25 @@ app.get('/api/dashboard', async function(req, res) {
   const allCampaigns = state.campaigns;
   const campaigns = allCampaigns.filter(function(c){ return !hiddenCampaignIds.has(String(c.campaignId)); });
 
-  // r25c: enrich each campaign with 7-day ACOS + spend so the front-end can
-  // flag chronic underperformers (single-day ACOS doesn't catch sustained waste).
+  // r25c + r29s: enrich each campaign with 7-day rollups for the All Campaigns toggle.
+  // Sums spend, sales, clicks, impressions, conversions from the last 7 daily_snapshots.
+  // Front-end has a Today/7d toggle that swaps between c.spend (today) and c.spend7d.
   if (db) {
     try {
       const snapRes = await db.query(
         "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
       );
-      const totals = {}; // campaignId -> { spend, sales }
+      const totals = {}; // campaignId -> { spend, sales, clicks, impressions, conversions }
       snapRes.rows.forEach(function(snap) {
         (snap.campaigns || []).forEach(function(sc) {
           if (!sc.campaignId) return;
           const id = String(sc.campaignId);
-          if (!totals[id]) totals[id] = { spend: 0, sales: 0 };
+          if (!totals[id]) totals[id] = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0 };
           totals[id].spend += parseFloat(sc.spend || 0);
           totals[id].sales += parseFloat(sc.sales || 0);
+          totals[id].clicks += parseInt(sc.clicks || 0);
+          totals[id].impressions += parseInt(sc.impressions || 0);
+          totals[id].conversions += parseInt(sc.conversions || 0);
         });
       });
       campaigns.forEach(function(c) {
@@ -3266,11 +3270,18 @@ app.get('/api/dashboard', async function(req, res) {
         if (t) {
           c.spend7d = +t.spend.toFixed(2);
           c.sales7d = +t.sales.toFixed(2);
+          c.clicks7d = t.clicks;
+          c.impressions7d = t.impressions;
+          c.conversions7d = t.conversions;
           c.acos7d = t.sales > 0 ? +((100 * t.spend / t.sales).toFixed(1)) : null;
+          c.ctr7d = t.impressions > 0 ? +((100 * t.clicks / t.impressions).toFixed(2)) : 0;
+        } else {
+          // No history yet — zero out so toggle doesn't show stale/undefined
+          c.spend7d = 0; c.sales7d = 0; c.clicks7d = 0;
+          c.impressions7d = 0; c.conversions7d = 0; c.acos7d = null; c.ctr7d = 0;
         }
       });
     } catch(e) {
-      // Non-fatal — chronic-underperformer badge just won't fire
       if (!/does not exist/.test(e.message)) console.error('[r25c] 7d enrich error: ' + e.message);
     }
   }
