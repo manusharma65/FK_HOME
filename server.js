@@ -167,8 +167,9 @@ async function requireAuth(req, res, next) {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', requireAuth);
 
-// r30a — Logistics module (self-contained router, see server/logistics.js)
-app.use('/api/logistics', require('./server/logistics')(db));
+// r30a — Logistics module (self-contained router; lazy-binds db at request time)
+const logisticsRouter = require('./server/logistics')(function() { return db; });
+app.use('/api/logistics', logisticsRouter);
 
 let state = {
   accessToken: null,
@@ -12022,6 +12023,9 @@ cron.schedule('30 3 * * *', async function() {
 app.listen(PORT, '0.0.0.0', async function() {
   console.log('App running on port ' + PORT);
   await initDB();
+  // r30a — boot the logistics module's schema/seed now that db is ready
+  try { if (logisticsRouter && logisticsRouter._boot) await logisticsRouter._boot(); }
+  catch(e) { console.error('[logistics _boot] ' + e.message); }
   if (db) {
     // r17: belt-and-braces migrations — ensure tables exist before any hydrate.
     // The initDB() code above already attempts these inside try/catch, but we've seen

@@ -436,20 +436,35 @@ const upload = multer({
 // ROUTER + ROUTES
 // ─────────────────────────────────────────────────────────────────────────────
 
-module.exports = function(db) {
+module.exports = function(getDb) {
+  // getDb is a function returning the current db client (may be null at mount time).
+  // We rebind `db` inside each request handler. Schema/seed boot is deferred until
+  // the first request OR an explicit `_bootLogistics()` call from server.js once
+  // initDB() has resolved.
   const router = express.Router();
+  let booted = false;
 
-  // Boot tasks (fire-and-forget — schema + seed)
-  if (db) {
-    ensureLogisticsSchema(db)
-      .then(() => ensureLogisticsSeed(db))
-      .catch(e => console.error('[logistics boot] ' + e.message));
+  async function bootIfReady() {
+    if (booted) return;
+    const db = getDb && getDb();
+    if (!db) return;
+    booted = true;
+    try {
+      await ensureLogisticsSchema(db);
+      await ensureLogisticsSeed(db);
+    } catch(e) { console.error('[logistics boot] ' + e.message); }
   }
+  // Expose for server.js to call once initDB() completes.
+  router._boot = bootIfReady;
 
-  // Gate middleware for this router. requireAuth has already set req.user.
-  router.use(function(req, res, next) {
+  // Gate middleware — runs before every request. Also lazy-boots schema on first hit.
+  router.use(async function(req, res, next) {
+    await bootIfReady();
     if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
     if (!isLogisticsAllowed(req.user)) return res.status(403).json({ error: 'Logistics access denied' });
+    // attach db to req for handlers below
+    req._db = getDb();
+    if (!req._db) return res.status(503).json({ error: 'Database not ready' });
     next();
   });
 
@@ -465,6 +480,7 @@ module.exports = function(db) {
 
   // ── suppliers ──────────────────────────────────────────────────────────────
   router.get('/suppliers', async function(req, res) {
+    const db = req._db;
     try {
       const r = await db.query('SELECT * FROM lg_suppliers WHERE is_active=TRUE ORDER BY name');
       res.json({ suppliers: r.rows });
@@ -472,6 +488,7 @@ module.exports = function(db) {
   });
 
   router.post('/suppliers', async function(req, res) {
+    const db = req._db;
     if (!isManager(req.user)) return res.status(403).json({ error: 'Manager only' });
     const { name, contact_email, contact_phone, payment_terms, default_loading_port, wechat_handle } = req.body || {};
     if (!name) return res.status(400).json({ error: 'Name required' });
@@ -487,6 +504,7 @@ module.exports = function(db) {
   });
 
   router.patch('/suppliers/:id', async function(req, res) {
+    const db = req._db;
     if (!isManager(req.user)) return res.status(403).json({ error: 'Manager only' });
     const id = parseInt(req.params.id);
     const fields = ['name','contact_email','contact_phone','payment_terms','default_loading_port','wechat_handle','is_active','notes'];
@@ -507,6 +525,7 @@ module.exports = function(db) {
 
   // ── plans: list (with computed fields) ─────────────────────────────────────
   router.get('/plans', async function(req, res) {
+    const db = req._db;
     try {
       const sql = `
         SELECT p.*, s.name AS supplier_name, s.payment_terms AS supplier_payment_terms
@@ -535,6 +554,7 @@ module.exports = function(db) {
 
   // ── plans: counts only (lightweight — used for nav badge) ──────────────────
   router.get('/counts', async function(req, res) {
+    const db = req._db;
     try {
       const r = await db.query(`
         SELECT p.*, s.payment_terms AS supplier_payment_terms
@@ -556,6 +576,7 @@ module.exports = function(db) {
 
   // ── plans: get one ─────────────────────────────────────────────────────────
   router.get('/plans/:id', async function(req, res) {
+    const db = req._db;
     try {
       const r = await db.query('SELECT * FROM lg_plans WHERE id=$1', [parseInt(req.params.id)]);
       if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
@@ -570,6 +591,7 @@ module.exports = function(db) {
 
   // ── plans: create ──────────────────────────────────────────────────────────
   router.post('/plans', async function(req, res) {
+    const db = req._db;
     const {
       plan_number, supplier_id, order_date, total_amount_usd, deposit_usd, deposit_pct,
       approx_loading_date, loading_port, original_eta, new_eta
@@ -597,6 +619,7 @@ module.exports = function(db) {
 
   // ── plans: patch — generic field update with activity log ──────────────────
   router.patch('/plans/:id', async function(req, res) {
+    const db = req._db;
     const id = parseInt(req.params.id);
     const updatable = [
       'supplier_id','order_date','total_amount_usd','deposit_usd','deposit_pct','deposit_received_date',
@@ -631,6 +654,7 @@ module.exports = function(db) {
 
   // ── plans: close ───────────────────────────────────────────────────────────
   router.post('/plans/:id/close', async function(req, res) {
+    const db = req._db;
     if (!isManager(req.user) && (req.user.department || '').toLowerCase() !== 'logistics') {
       return res.status(403).json({ error: 'Not allowed' });
     }
@@ -646,6 +670,7 @@ module.exports = function(db) {
 
   // ── plans: reopen ─────────────────────────────────────────────────────────
   router.post('/plans/:id/reopen', async function(req, res) {
+    const db = req._db;
     if (!isManager(req.user)) return res.status(403).json({ error: 'Manager only' });
     const id = parseInt(req.params.id);
     try {
@@ -658,6 +683,7 @@ module.exports = function(db) {
 
   // ── plans: delete (owner only) ─────────────────────────────────────────────
   router.delete('/plans/:id', async function(req, res) {
+    const db = req._db;
     if ((req.user.role || '').toLowerCase() !== 'owner') return res.status(403).json({ error: 'Owner only' });
     try {
       await db.query('DELETE FROM lg_plans WHERE id=$1', [parseInt(req.params.id)]);
@@ -667,6 +693,7 @@ module.exports = function(db) {
 
   // ── files ──────────────────────────────────────────────────────────────────
   router.post('/plans/:id/files', upload.single('file'), async function(req, res) {
+    const db = req._db;
     const id = parseInt(req.params.id);
     const slot = (req.body.slot || 'other').toLowerCase();
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -682,6 +709,7 @@ module.exports = function(db) {
   });
 
   router.get('/files/:id/download', async function(req, res) {
+    const db = req._db;
     try {
       const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1', [parseInt(req.params.id)]);
       if (!r.rows.length) return res.status(404).send('Not found');
@@ -692,6 +720,7 @@ module.exports = function(db) {
   });
 
   router.delete('/files/:id', async function(req, res) {
+    const db = req._db;
     try {
       const r = await db.query('SELECT * FROM lg_plan_files WHERE id=$1', [parseInt(req.params.id)]);
       if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
@@ -706,6 +735,7 @@ module.exports = function(db) {
 
   // ── issues ─────────────────────────────────────────────────────────────────
   router.post('/plans/:id/issues', async function(req, res) {
+    const db = req._db;
     const id = parseInt(req.params.id);
     const { issue_type, description } = req.body || {};
     if (!description) return res.status(400).json({ error: 'description required' });
@@ -721,6 +751,7 @@ module.exports = function(db) {
   });
 
   router.patch('/issues/:id', async function(req, res) {
+    const db = req._db;
     const id = parseInt(req.params.id);
     const { status, resolution_note } = req.body || {};
     if (!status) return res.status(400).json({ error: 'status required' });
@@ -743,6 +774,7 @@ module.exports = function(db) {
 
   // ── dashboard summary — feeds the operational "this week / next week" view ─
   router.get('/dashboard', async function(req, res) {
+    const db = req._db;
     try {
       const r = await db.query(`
         SELECT p.*, s.name AS supplier_name, s.payment_terms AS supplier_payment_terms
