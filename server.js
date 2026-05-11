@@ -167,6 +167,9 @@ async function requireAuth(req, res, next) {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', requireAuth);
 
+// r30a — Logistics module (self-contained router, see server/logistics.js)
+app.use('/api/logistics', require('./server/logistics')(db));
+
 let state = {
   accessToken: null,
   tokenExpiry: null,

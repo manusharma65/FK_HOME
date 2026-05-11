@@ -587,11 +587,16 @@ async function loadMe() {
     currentUser = me;
 
     // Department guard: Amazon-only agents shouldn't be on the Google dashboard
+    // Logistics agents also bounced to /logistics.html
     const dept = (me.department || '').toLowerCase();
     const role = (me.role || '').toLowerCase();
     const isMgr = role === 'manager' || dept === 'manager';
     if ((dept === 'amazon' || dept === 'agent') && !isMgr) {
       window.location.replace('/index.html');
+      return;
+    }
+    if (dept === 'logistics' && !isMgr && role !== 'owner') {
+      window.location.replace('/logistics.html');
       return;
     }
 

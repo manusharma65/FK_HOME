@@ -1192,9 +1192,14 @@ async function checkAuth() {
     currentUser = data;
 
     // Department routing: Google-only users get bounced to /google.html
+    // Logistics-only users get bounced to /logistics.html
     // Managers see both, Amazon stays here, Google leaves
     if (data.role !== 'manager' && data.department === 'google') {
       window.location.replace('/google.html');
+      return false;
+    }
+    if (data.role !== 'manager' && data.role !== 'owner' && data.department === 'logistics') {
+      window.location.replace('/logistics.html');
       return false;
     }
 
