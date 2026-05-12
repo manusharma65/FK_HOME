@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-11 r30d (CRITICAL FIX: restore the today-only Amazon Ads report stream that pre-r30 code had. Without it, c.todaySpend was being inferred from daily7ds latest row which lags 1+ day, causing the r30a/b/c todaySpend null guard to silently swallow 95%+ of out-of-budget / budget-low / high-ACOS alerts. r30d adds a 4th stream (todayOnly, 90min refresh) that pulls a SUMMARY report with startDate=today endDate=today. c.todaySpend/Sales/Acos/etc come from THIS stream. Alerts back to firing every 15min when conditions hit. Snapshots, dashboard cards, History page all read from the same source. Keep all r30 streams (summary7d, summary30d, daily7d) for Campaign Health, Action Centre, and modal sparklines.)
+// CampaignPulse — deploy marker 2026-05-12 r31b (r31 + new 7-day SUMMARY advertised-product report stream. Adds amazon_asin_ad_perf_7d table populated by a single Amazon Ads SUMMARY report covering last 7 days. Modal Top Products query prefers this over the old daily-summed table which had the same overlapping-windows bug we fixed for campaigns. After deploy + first 7d report download (5-15 min), modal ASIN sales should match Amazon Seller Centrals Advertised Product report for the same date range. Falls back to daily-sum table if 7d snapshot empty.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1114,81 +1114,105 @@ async function fetchCampaigns() {
 
 // r30d: four independent report streams. todayOnly is THE source of truth for budget
 // alerts (out-of-budget, budget-low, high-ACOS) — matches what pre-r30 code did.
-// Without it, alerts went silent because daily7d's most-recent row lags by 1+ day.
 //   - todayOnly: today's summary. Powers ALL three 15-min alerts. Fast refresh (90 min).
 //   - summary7d: 7-day rollup. Source of truth for Campaign Health + Action Centre rules.
 //   - summary30d: 30-day rollup. Powers 30d toggle on Campaign Health.
 //   - daily7d: per-day rows over 7 days. Powers modal sparkline + 3-day consecutive rules.
 // All use Amazon's standard attribution (sales1d for today, sales7d for 7d, sales30d for 30d).
+//
+// r30e: PRIORITY ordering + global throttle. Amazon Ads API returns 425 (Too Early) if
+// we request reports too fast. Highest priority first so when throttled, we lose the
+// least-critical streams. Only ONE new POST per sync; the rest poll any pending reports.
+const REPORT_STREAM_PRIORITY = ['todayOnly', 'summary7d', 'daily7d', 'summary30d'];
+let _lastReportPostAt = 0;
+const REPORT_POST_INTERVAL_MS = 60 * 1000;  // min 1 min between new report POSTs
+
 let reportState = {
   todayOnly: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 90 * 60 * 1000 },
-  summary7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 2 * 60 * 60 * 1000 },
-  summary30d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 2 * 60 * 60 * 1000 },
-  daily7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 2 * 60 * 60 * 1000 }
+  summary7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 4 * 60 * 60 * 1000 },
+  summary30d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 6 * 60 * 60 * 1000 },
+  daily7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 4 * 60 * 60 * 1000 }
 };
 
-// Helper: poll-and-download one report stream
-async function _pollOrRequestReport(streamName, configBuilder, headers) {
+// r30e: Just POLL the stream's pending report. Does NOT request a new one.
+// Polling is cheap and parallel-safe — many GETs against the reports endpoint are fine.
+// Request-side is handled separately by _requestNextDueReport() below.
+async function _pollReport(streamName, headers) {
   const stream = reportState[streamName];
-  const now = Date.now();
-
-  // 1. If there's a pending report, check its status
-  if (stream.pendingReportId) {
-    try {
-      const statusRes = await axios.get(
-        'https://advertising-api-eu.amazon.com/reporting/reports/' + stream.pendingReportId,
-        { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
-      );
-      const status = statusRes.data.status;
-      if (status === 'COMPLETED') {
-        const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
-        const zlib = require('zlib');
-        const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
-        stream.data = JSON.parse(decompressed.toString());
-        stream.lastFetched = now;
-        stream.pendingReportId = null;
-        console.log('[r30 ' + streamName + '] report downloaded: ' + stream.data.length + ' records');
-      } else if (status === 'FAILED') {
-        console.warn('[r30 ' + streamName + '] report FAILED, will retry');
-        stream.pendingReportId = null;
-      } else {
-        // Still PROCESSING — will check again next sync
-      }
-    } catch(e) {
-      console.error('[r30 ' + streamName + '] poll error: ' + e.message);
+  if (!stream.pendingReportId) return stream.data || null;
+  try {
+    const statusRes = await axios.get(
+      'https://advertising-api-eu.amazon.com/reporting/reports/' + stream.pendingReportId,
+      { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
+    );
+    const status = statusRes.data.status;
+    if (status === 'COMPLETED') {
+      const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+      const zlib = require('zlib');
+      const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+      stream.data = JSON.parse(decompressed.toString());
+      stream.lastFetched = Date.now();
+      stream.pendingReportId = null;
+      console.log('[r30 ' + streamName + '] report downloaded: ' + stream.data.length + ' records');
+    } else if (status === 'FAILED') {
+      console.warn('[r30 ' + streamName + '] report FAILED, will retry');
       stream.pendingReportId = null;
     }
+    // PROCESSING — check again next sync
+  } catch(e) {
+    console.error('[r30 ' + streamName + '] poll error: ' + e.message);
+    stream.pendingReportId = null;
   }
+  return stream.data || null;
+}
 
-  // 2. If no pending and we haven't requested in last refreshMs (default 2h), request a new one
-  const refreshMs = stream.refreshMs || (2 * 60 * 60 * 1000);
-  if (!stream.pendingReportId && (now - stream.requested) > refreshMs) {
-    // 425 backoff (Too Early — Amazon throttles report creation)
-    if (stream.last425At && (now - stream.last425At) < 60 * 60 * 1000) {
-      return stream.data || null;
-    }
+// r30e: Request at most ONE new report per sync, picked by priority order.
+// Skips streams that are: in 425-backoff, already pending, or recently requested.
+// This is the single bottleneck that prevents Amazon from 425-throttling us.
+async function _requestNextDueReport(configBuilders, headers) {
+  const now = Date.now();
+  // Global throttle — at most one new POST per REPORT_POST_INTERVAL_MS
+  if (now - _lastReportPostAt < REPORT_POST_INTERVAL_MS) return null;
+
+  for (const streamName of REPORT_STREAM_PRIORITY) {
+    const stream = reportState[streamName];
+    const refreshMs = stream.refreshMs || (2 * 60 * 60 * 1000);
+    // Skip: pending, in 425 backoff, recently requested
+    if (stream.pendingReportId) continue;
+    if (stream.last425At && (now - stream.last425At) < 60 * 60 * 1000) continue;
+    if ((now - stream.requested) <= refreshMs) continue;
+    // This stream is due
+    const builder = configBuilders[streamName];
+    if (!builder) continue;
     try {
       const reportRes = await axios.post(
         'https://advertising-api-eu.amazon.com/reporting/reports',
-        configBuilder(),
+        builder(),
         { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
       );
       stream.pendingReportId = reportRes.data.reportId;
       stream.requested = now;
       stream.last425At = 0;
+      _lastReportPostAt = now;
       console.log('[r30 ' + streamName + '] requested: ' + stream.pendingReportId);
+      return streamName;  // one only
     } catch(e) {
       const status = e.response && e.response.status;
       if (status === 425) {
         stream.last425At = now;
+        _lastReportPostAt = now;  // back off globally too
         console.warn('[r30 ' + streamName + '] 425 (Too Early) — backing off 1h');
-      } else {
-        console.error('[r30 ' + streamName + '] request error: ' + (e.response ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
+        return streamName;
       }
+      console.error('[r30 ' + streamName + '] request error: ' + (e.response ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
     }
   }
+  return null;
+}
 
-  return stream.data || null;
+// Legacy helper kept for any callers that haven't migrated. Now just polls.
+async function _pollOrRequestReport(streamName, configBuilder, headers) {
+  return _pollReport(streamName, headers);
 }
 
 async function fetchCampaignStats() {
@@ -1199,10 +1223,9 @@ async function fetchCampaignStats() {
   const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
 
-  // r30d: pull FOUR streams in parallel. todayOnly is the source for budget alerts;
-  // summary7d/30d for Campaign Health; daily7d for sparklines + consecutive-day rules.
-  const [todayOnly, summary7d, summary30d, daily7d] = await Promise.all([
-    _pollOrRequestReport('todayOnly', function() {
+  // r30e: build the config builders for each stream up front
+  const configBuilders = {
+    todayOnly: function() {
       return {
         name: 'CampaignPulse today ' + today,
         startDate: today,
@@ -1210,15 +1233,14 @@ async function fetchCampaignStats() {
         configuration: {
           adProduct: 'SPONSORED_PRODUCTS',
           groupBy: ['campaign'],
-          // sales1d/purchases1d: single-day attribution, what Amazon's UI defaults to for "today"
           columns: ['campaignId', 'campaignName', 'cost', 'sales1d', 'clicks', 'impressions', 'purchases1d', 'clickThroughRate', 'costPerClick'],
           reportTypeId: 'spCampaigns',
           timeUnit: 'SUMMARY',
           format: 'GZIP_JSON'
         }
       };
-    }, headers),
-    _pollOrRequestReport('summary7d', function() {
+    },
+    summary7d: function() {
       return {
         name: 'CampaignPulse 7d ' + today,
         startDate: sevenDaysAgo,
@@ -1226,15 +1248,14 @@ async function fetchCampaignStats() {
         configuration: {
           adProduct: 'SPONSORED_PRODUCTS',
           groupBy: ['campaign'],
-          // r30: sales7d/purchases7d match Amazon's default UI attribution
           columns: ['campaignId', 'campaignName', 'cost', 'sales7d', 'clicks', 'impressions', 'purchases7d', 'clickThroughRate', 'unitsSoldClicks7d', 'costPerClick'],
           reportTypeId: 'spCampaigns',
           timeUnit: 'SUMMARY',
           format: 'GZIP_JSON'
         }
       };
-    }, headers),
-    _pollOrRequestReport('summary30d', function() {
+    },
+    summary30d: function() {
       return {
         name: 'CampaignPulse 30d ' + today,
         startDate: thirtyDaysAgo,
@@ -1248,8 +1269,8 @@ async function fetchCampaignStats() {
           format: 'GZIP_JSON'
         }
       };
-    }, headers),
-    _pollOrRequestReport('daily7d', function() {
+    },
+    daily7d: function() {
       return {
         name: 'CampaignPulse daily 7d ' + today,
         startDate: sevenDaysAgo,
@@ -1257,17 +1278,32 @@ async function fetchCampaignStats() {
         configuration: {
           adProduct: 'SPONSORED_PRODUCTS',
           groupBy: ['campaign'],
-          // For per-day rows we use sales1d so each row reflects that day's actuals
           columns: ['campaignId', 'campaignName', 'cost', 'sales1d', 'clicks', 'impressions', 'purchases1d', 'date'],
           reportTypeId: 'spCampaigns',
           timeUnit: 'DAILY',
           format: 'GZIP_JSON'
         }
       };
-    }, headers)
+    }
+  };
+
+  // r30e: 1) Poll all pending reports in parallel (cheap GETs, no throttle risk)
+  await Promise.all([
+    _pollReport('todayOnly', headers),
+    _pollReport('summary7d', headers),
+    _pollReport('summary30d', headers),
+    _pollReport('daily7d', headers)
   ]);
 
-  return { todayOnly, summary7d, summary30d, daily7d };
+  // r30e: 2) Request the next due report (at most one per sync, priority-ordered)
+  await _requestNextDueReport(configBuilders, headers);
+
+  return {
+    todayOnly: reportState.todayOnly.data,
+    summary7d: reportState.summary7d.data,
+    summary30d: reportState.summary30d.data,
+    daily7d: reportState.daily7d.data
+  };
 }
 
 
@@ -3833,6 +3869,169 @@ async function checkSearchTermReport() {
 // checkAdvertisedProductReport polls and downloads + persists when ready.
 const advertisedProductState = { reportId: null, requested: 0, dateRequested: null };
 
+// r31b: separate state for the 7-DAY-SUMMARY advertised product report.
+// Pulled once every ~2 hours. Provides ONE row per (ASIN, campaign) with the
+// full 7-day cumulative sales — exactly matching what Amazon Seller Central's
+// Sponsored Products Advertised Product report shows for a 7-day date range.
+// Data stored in amazon_asin_ad_perf_7d (new table, recreated each fetch).
+const advertisedProduct7dState = { reportId: null, requested: 0, last425At: 0, data: null, lastFetched: 0 };
+
+async function requestAdvertisedProduct7dReport() {
+  const tz = 'Europe/London';
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+  const sevenDaysAgo = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(Date.now() - 7*24*60*60*1000));
+  if (advertisedProduct7dState.reportId) {
+    return { ok: false, reason: 'in-flight' };
+  }
+  // 425 backoff
+  const now = Date.now();
+  if (advertisedProduct7dState.last425At && (now - advertisedProduct7dState.last425At) < 60*60*1000) {
+    return { ok: false, reason: 'backoff' };
+  }
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const res = await axios.post(
+      'https://advertising-api-eu.amazon.com/reporting/reports',
+      {
+        name: 'CampaignPulse advertisedProduct 7d ' + today,
+        startDate: sevenDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['advertiser'],
+          columns: [
+            'advertisedAsin', 'campaignId', 'campaignName', 'adGroupId', 'adGroupName',
+            'cost', 'clicks', 'impressions',
+            'sales7d', 'purchases7d', 'unitsSoldClicks7d'
+          ],
+          reportTypeId: 'spAdvertisedProduct',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      },
+      { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
+    );
+    advertisedProduct7dState.reportId = res.data.reportId;
+    advertisedProduct7dState.requested = now;
+    advertisedProduct7dState.last425At = 0;
+    console.log('[r31b ad-perf 7d] report requested — id=' + res.data.reportId);
+    return { ok: true, reportId: res.data.reportId };
+  } catch(e) {
+    const status = e.response && e.response.status;
+    if (status === 425) {
+      advertisedProduct7dState.last425At = now;
+      console.warn('[r31b ad-perf 7d] 425 (Too Early) — 1h backoff');
+      return { ok: false, reason: '425' };
+    }
+    console.error('[r31b ad-perf 7d] request error: ' + (e.response ? JSON.stringify(e.response.data).slice(0, 300) : e.message));
+    return { ok: false, reason: 'error', error: e.message };
+  }
+}
+
+async function checkAdvertisedProduct7dReport() {
+  if (!advertisedProduct7dState.reportId) return { ok: false, reason: 'no-report' };
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const statusRes = await axios.get(
+      'https://advertising-api-eu.amazon.com/reporting/reports/' + advertisedProduct7dState.reportId,
+      { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
+    );
+    const status = statusRes.data.status;
+    if (status === 'FAILED') {
+      console.error('[r31b ad-perf 7d] report FAILED');
+      advertisedProduct7dState.reportId = null;
+      return { ok: false, reason: 'failed' };
+    }
+    if (status !== 'COMPLETED') return { ok: false, reason: 'pending', status: status };
+    const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+    const zlib = require('zlib');
+    const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+    const records = JSON.parse(decompressed.toString());
+    console.log('[r31b ad-perf 7d] downloaded ' + records.length + ' rows');
+    if (!db) {
+      advertisedProduct7dState.reportId = null;
+      return { ok: false, reason: 'no-db' };
+    }
+    // Recreate table fresh each pull — this is a current-snapshot table, not history
+    await db.query(
+      "CREATE TABLE IF NOT EXISTS amazon_asin_ad_perf_7d (" +
+      "  asin TEXT NOT NULL," +
+      "  campaign_id TEXT NOT NULL," +
+      "  ad_group_id TEXT NOT NULL DEFAULT ''," +
+      "  spend NUMERIC(10,2) DEFAULT 0," +
+      "  sales NUMERIC(10,2) DEFAULT 0," +
+      "  clicks INTEGER DEFAULT 0," +
+      "  impressions INTEGER DEFAULT 0," +
+      "  units INTEGER DEFAULT 0," +
+      "  orders INTEGER DEFAULT 0," +
+      "  campaign_name TEXT," +
+      "  fetched_at TIMESTAMP DEFAULT NOW()," +
+      "  PRIMARY KEY (asin, campaign_id, ad_group_id)" +
+      ")"
+    );
+    await db.query("CREATE INDEX IF NOT EXISTS idx_asin_perf_7d_campaign ON amazon_asin_ad_perf_7d(campaign_id)");
+    // Wipe + reinsert — this is a CURRENT view, not history
+    await db.query("DELETE FROM amazon_asin_ad_perf_7d");
+    let inserted = 0, errors = 0;
+    for (const r of records) {
+      const asin = r.advertisedAsin || r.asin;
+      const cid = r.campaignId != null ? String(r.campaignId) : null;
+      const aid = r.adGroupId != null ? String(r.adGroupId) : '';
+      if (!asin || !cid) continue;
+      try {
+        await db.query(
+          "INSERT INTO amazon_asin_ad_perf_7d " +
+          "(asin, campaign_id, ad_group_id, spend, sales, clicks, impressions, units, orders, campaign_name) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) " +
+          "ON CONFLICT (asin, campaign_id, ad_group_id) DO UPDATE SET " +
+          "spend=EXCLUDED.spend, sales=EXCLUDED.sales, clicks=EXCLUDED.clicks, " +
+          "impressions=EXCLUDED.impressions, units=EXCLUDED.units, orders=EXCLUDED.orders, " +
+          "campaign_name=EXCLUDED.campaign_name, fetched_at=NOW()",
+          [
+            asin, cid, aid,
+            parseFloat(r.cost || 0),
+            parseFloat(r.sales7d || 0),
+            parseInt(r.clicks || 0),
+            parseInt(r.impressions || 0),
+            parseInt(r.unitsSoldClicks7d || 0),
+            parseInt(r.purchases7d || 0),
+            r.campaignName || null
+          ]
+        );
+        inserted++;
+      } catch(e) {
+        errors++;
+        if (errors < 5) console.error('[r31b ad-perf 7d] insert error: ' + e.message);
+      }
+    }
+    advertisedProduct7dState.reportId = null;
+    advertisedProduct7dState.lastFetched = Date.now();
+    console.log('[r31b ad-perf 7d] persisted ' + inserted + ' rows (' + errors + ' errors)');
+    return { ok: true, inserted: inserted };
+  } catch(e) {
+    console.error('[r31b ad-perf 7d] check error: ' + e.message);
+    advertisedProduct7dState.reportId = null;
+    return { ok: false, error: e.message };
+  }
+}
+
+// Combined poller: requests a fresh 7d report every 2 hours, polls any in-flight
+async function runAdvertisedProduct7dCycle() {
+  if (advertisedProduct7dState.reportId) {
+    // Poll in-flight
+    await checkAdvertisedProduct7dReport();
+    return;
+  }
+  const sinceLast = Date.now() - advertisedProduct7dState.requested;
+  if (sinceLast > 2 * 60 * 60 * 1000) {  // 2 hour refresh
+    await requestAdvertisedProduct7dReport();
+  }
+}
+
 async function requestAdvertisedProductReport(targetDate) {
   // targetDate: 'YYYY-MM-DD' — defaults to yesterday in London
   const tz = 'Europe/London';
@@ -4531,6 +4730,82 @@ app.post('/api/admin/fetch-ad-performance', async function(req, res) {
     fetchAdvertisedProductReport(date || null).catch(function(e){ console.error('[admin] fetch-ad-performance: ' + e.message); });
     res.json({ ok: true, message: 'Report fetch started in background. Check logs in ~2-3 minutes for completion.', date: date || 'yesterday' });
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r31: POST /api/admin/backfill-snapshot?date=YYYY-MM-DD — rebuild a single day's
+// daily_snapshots row from the daily7d stream. Used after r30c silently skipped
+// snapshot saves on 2026-05-11 (todaySpend == null guard), leaving the row empty.
+// Reads per-day rows from each campaign's dailySeries7d in state.campaigns, picks
+// the rows that match the target date, builds a campaigns array + metrics from
+// those values, upserts into daily_snapshots.
+app.post('/api/admin/backfill-snapshot', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  const targetDate = String(req.query.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return res.status(400).json({ error: 'date=YYYY-MM-DD required' });
+  if (!db) return res.status(500).json({ error: 'db not connected' });
+  try {
+    const liveCampaigns = state.campaigns || [];
+    if (!liveCampaigns.length) return res.status(503).json({ error: 'no campaigns in memory — wait for first sync' });
+    let foundForDate = 0;
+    const dayCampaigns = liveCampaigns.map(function(c) {
+      const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
+      const row = days.find(function(d){ return String(d.date).slice(0, 10) === targetDate; });
+      if (!row) {
+        // Campaign existed but no row for that date — emit zero metrics so it still
+        // appears in the snapshot
+        return Object.assign({}, c, {
+          spend: 0, sales: 0, acos: 0, clicks: 0, impressions: 0, conversions: 0
+        });
+      }
+      foundForDate++;
+      const sp = parseFloat(row.spend || 0);
+      const sa = parseFloat(row.sales || 0);
+      const ac = sa > 0 ? Math.round((sp / sa) * 1000) / 10 : 0;
+      return Object.assign({}, c, {
+        spend: Math.round(sp * 100) / 100,
+        sales: Math.round(sa * 100) / 100,
+        acos: ac,
+        clicks: parseInt(row.clicks || 0),
+        impressions: parseInt(row.impressions || 0),
+        conversions: parseInt(row.conversions || 0)
+      });
+    });
+    if (foundForDate === 0) {
+      return res.status(404).json({ error: 'no daily7d rows match date ' + targetDate + ' — Amazon may not have data for this day yet, or it falls outside the 7-day window' });
+    }
+    const totalRevenue = dayCampaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
+    const totalSpend = dayCampaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
+    const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend/totalRevenue)*1000)/10 : 0;
+    const metrics = {
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos: blendedAcos,
+      activeCampaigns: dayCampaigns.filter(function(c){ return c.state==='enabled'; }).length,
+      totalCampaigns: dayCampaigns.length,
+      outOfBudget: 0,  // not derivable from per-day rows alone
+      spendNoRevenue: dayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0); }).length,
+      totalWastedSpend: dayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0); }).reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2),
+      backfilled: true,
+      backfilledAt: new Date().toISOString()
+    };
+    await db.query(
+      'INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, created_at=NOW()',
+      [targetDate, JSON.stringify(metrics), JSON.stringify(dayCampaigns), JSON.stringify([]), JSON.stringify([])]
+    );
+    console.log('[r31 backfill-snapshot] ' + targetDate + ': ' + foundForDate + ' campaign rows · revenue £' + totalRevenue.toFixed(2) + ' · spend £' + totalSpend.toFixed(2));
+    res.json({
+      ok: true,
+      date: targetDate,
+      campaignsBackfilled: foundForDate,
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos: blendedAcos
+    });
+  } catch(e) {
+    console.error('[r31 backfill-snapshot] error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -7180,44 +7455,93 @@ app.get('/api/amazon/campaign-detail/:campaignId', async function(req, res) {
         })
       : [];
 
-    // 2) Top ASINs in this campaign — last 7 days from amazon_asin_ad_performance
+    // 2) Top ASINs in this campaign — last 7 days.
+    // r31b: PREFER amazon_asin_ad_perf_7d (a CURRENT 7-day snapshot from a single
+    // SUMMARY report) over amazon_asin_ad_performance (which stored each day's
+    // 7-day-trailing values — summing them overcounts due to overlapping windows).
+    // The 7d snapshot matches Amazon Seller Central's Advertised Product report
+    // for a 7-day date range, which is the source of truth.
     let topAsins = [];
     try {
-      const asinRows = await db.query(
+      const asin7dRows = await db.query(
         "SELECT a.asin, " +
-        "       SUM(a.spend)::numeric AS spend, " +
-        "       SUM(a.sales)::numeric AS sales, " +
-        "       SUM(a.clicks)::int AS clicks, " +
-        "       SUM(a.impressions)::int AS impressions, " +
-        "       SUM(a.units)::int AS units, " +
+        "       a.spend::numeric AS spend, " +
+        "       a.sales::numeric AS sales, " +
+        "       a.clicks::int AS clicks, " +
+        "       a.impressions::int AS impressions, " +
+        "       a.units::int AS units, " +
         "       MAX(p.title) AS title, " +
         "       MAX(p.image_url) AS image_url " +
-        "FROM amazon_asin_ad_performance a " +
+        "FROM amazon_asin_ad_perf_7d a " +
         "LEFT JOIN amazon_products p ON p.asin = a.asin " +
-        "WHERE a.campaign_id = $1 AND a.report_date >= CURRENT_DATE - INTERVAL '7 days' " +
-        "GROUP BY a.asin " +
-        "ORDER BY spend DESC " +
+        "WHERE a.campaign_id = $1 " +
+        "GROUP BY a.asin, a.spend, a.sales, a.clicks, a.impressions, a.units " +
+        "ORDER BY a.spend DESC " +
         "LIMIT 8",
         [campaignId]
       );
-      topAsins = asinRows.rows.map(function(r) {
-        const sp = parseFloat(r.spend || 0);
-        const sa = parseFloat(r.sales || 0);
-        return {
-          asin: r.asin,
-          title: r.title || null,
-          image_url: r.image_url || null,
-          spend: +sp.toFixed(2),
-          sales: +sa.toFixed(2),
-          acos: sa > 0 ? +(100 * sp / sa).toFixed(1) : null,
-          clicks: r.clicks || 0,
-          impressions: r.impressions || 0,
-          units: r.units || 0
-        };
-      });
+      if (asin7dRows.rows.length > 0) {
+        topAsins = asin7dRows.rows.map(function(r) {
+          const sp = parseFloat(r.spend || 0);
+          const sa = parseFloat(r.sales || 0);
+          return {
+            asin: r.asin,
+            title: r.title || null,
+            image_url: r.image_url || null,
+            spend: +sp.toFixed(2),
+            sales: +sa.toFixed(2),
+            acos: sa > 0 ? +(100 * sp / sa).toFixed(1) : null,
+            clicks: r.clicks || 0,
+            impressions: r.impressions || 0,
+            units: r.units || 0,
+            source: '7d_summary'
+          };
+        });
+      }
     } catch(e) {
-      // r22 table may not exist on very old deployments — non-fatal
-      if (!/does not exist/.test(e.message)) console.error('[r24] top-asins lookup: ' + e.message);
+      if (!/does not exist/.test(e.message)) console.error('[r31b] asin 7d lookup: ' + e.message);
+    }
+    // Fallback: if 7d snapshot table is empty (not yet pulled, fresh boot), use the
+    // daily-summed legacy table. Less accurate due to overlapping windows but better
+    // than nothing.
+    if (topAsins.length === 0) {
+      try {
+        const asinRows = await db.query(
+          "SELECT a.asin, " +
+          "       SUM(a.spend)::numeric AS spend, " +
+          "       SUM(a.sales)::numeric AS sales, " +
+          "       SUM(a.clicks)::int AS clicks, " +
+          "       SUM(a.impressions)::int AS impressions, " +
+          "       SUM(a.units)::int AS units, " +
+          "       MAX(p.title) AS title, " +
+          "       MAX(p.image_url) AS image_url " +
+          "FROM amazon_asin_ad_performance a " +
+          "LEFT JOIN amazon_products p ON p.asin = a.asin " +
+          "WHERE a.campaign_id = $1 AND a.report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+          "GROUP BY a.asin " +
+          "ORDER BY spend DESC " +
+          "LIMIT 8",
+          [campaignId]
+        );
+        topAsins = asinRows.rows.map(function(r) {
+          const sp = parseFloat(r.spend || 0);
+          const sa = parseFloat(r.sales || 0);
+          return {
+            asin: r.asin,
+            title: r.title || null,
+            image_url: r.image_url || null,
+            spend: +sp.toFixed(2),
+            sales: +sa.toFixed(2),
+            acos: sa > 0 ? +(100 * sp / sa).toFixed(1) : null,
+            clicks: r.clicks || 0,
+            impressions: r.impressions || 0,
+            units: r.units || 0,
+            source: 'daily_sum_fallback'
+          };
+        });
+      } catch(e) {
+        if (!/does not exist/.test(e.message)) console.error('[r24] top-asins lookup: ' + e.message);
+      }
     }
 
     // 3) Recent tasks on this campaign — last 30 days, any status
@@ -7245,6 +7569,23 @@ app.get('/api/amazon/campaign-detail/:campaignId', async function(req, res) {
 
     res.json({
       campaignId: campaignId,
+      // r31: authoritative totals block — these are the headline numbers the modal
+      // displays. Sourced from summary7d (matches Amazon Seller Central's 7-day view).
+      // history[] is for the per-day SPARKLINE shape only; do not sum it for display
+      // totals — daily sales1d rows undercount because cross-day attribution is invisible.
+      totals: liveCamp ? {
+        spend7d: liveCamp.spend7d != null ? liveCamp.spend7d : null,
+        sales7d: liveCamp.sales7d != null ? liveCamp.sales7d : null,
+        acos7d: liveCamp.acos7d != null ? liveCamp.acos7d : null,
+        clicks7d: liveCamp.clicks7d || 0,
+        impressions7d: liveCamp.impressions7d || 0,
+        conversions7d: liveCamp.conversions7d || 0,
+        costPerConv7d: liveCamp.costPerConv7d != null ? liveCamp.costPerConv7d : null,
+        // Today actuals (live from todayOnly stream)
+        todaySpend: liveCamp.todaySpend != null ? liveCamp.todaySpend : null,
+        todaySales: liveCamp.todaySales != null ? liveCamp.todaySales : null,
+        todayAcos: liveCamp.todayAcos != null ? liveCamp.todayAcos : null
+      } : null,
       history: history,
       topAsins: topAsins,
       recentTasks: recentTasks
@@ -11166,7 +11507,11 @@ async function autoArchiveTasks() {
 }
 
 const interval = process.env.POLL_INTERVAL_MINUTES || 15;
-cron.schedule('*/' + interval + ' * * * *', function() { syncCampaigns(); });
+cron.schedule('*/' + interval + ' * * * *', function() {
+  syncCampaigns();
+  // r31b: also tick the 7d advertised-product report cycle. Cheap — only POSTs once per 2h.
+  runAdvertisedProduct7dCycle().catch(function(e){ console.error('[r31b] 7d ad-perf cycle: ' + e.message); });
+});
 cron.schedule('0 */2 * * *', function() { syncShopifyProducts().catch(function(e){ console.error('Shopify cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
 // GA4 funnel data — refresh once a day at 7am UK time (after midnight UTC data settles)
 cron.schedule('0 7 * * *', function() {
@@ -12442,6 +12787,10 @@ app.listen(PORT, '0.0.0.0', async function() {
       // Only refresh GA4 if we have a connection and last fetch was > 12h ago (avoid hammering on every restart)
       fetchGa4ProductMetrics().catch(function(err) { console.error('Initial GA4 fetch failed:', err.message); });
     });
+    // r31b: kick off the 7-day advertised-product report cycle at boot so the modal has data fast
+    setTimeout(function(){
+      runAdvertisedProduct7dCycle().catch(function(err) { console.error('Initial 7d ad-perf failed:', err.message); });
+    }, 5000);
   }, 30000);
 });
 

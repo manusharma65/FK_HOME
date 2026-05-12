@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-11 r30c (Dashboard cards now show today's actuals correctly with 7d subtitle. Snapshot fix in server for History page accuracy.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-12 r31 (r30 series + backfill button on Daily History page + modal totals from authoritative 7d source so header and sparkline labels agree with Amazon Seller Central) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -681,6 +681,9 @@ tbody tr:hover { background: var(--surface2); }
       <select id="history-agent-filter" onchange="filterHistoryByAgent()" style="background:white;border:1px solid var(--border2);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer;min-width:160px">
         <option value="">All agents</option>
       </select>
+      <!-- r31: backfill button — manager-only. Rebuilds the selected day's snapshot from
+           Amazon Ads daily7d data. Used when a row shows £0 because the live save was skipped. -->
+      <button id="history-backfill-btn" onclick="backfillHistorySnapshot()" style="display:none;background:white;border:1px solid var(--border2);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer" title="Rebuild this day from Amazon's daily report data">↻ Backfill this day</button>
       <span id="history-loading" style="font-size:12px;color:var(--text3)"></span>
     </div>
 
@@ -2044,15 +2047,20 @@ function campDetailHealthSummary(c) {
     lines.push({ tone: 'red', icon: '📉', text: 'ACOS is ' + c.acos + '% — every £1 of sales costs £' + (c.acos / 100).toFixed(2) + ' in ads. Bids or keywords likely too aggressive.' });
   }
   if (noSales) {
-    lines.push({ tone: 'red', icon: '💸', text: 'Spent £' + c.spend + ' today with no sales recorded. Wasted spend if it continues.' });
+    lines.push({ tone: 'red', icon: '💸', text: 'Spent £' + (c.todaySpend || 0) + ' today with no sales recorded. Wasted spend if it continues.' });
   }
   if (lines.length === 0) {
-    if (c.spend > 0 && c.sales > 0) {
-      lines.push({ tone: 'green', icon: '✅', text: 'Healthy — spent £' + c.spend + ', made £' + c.sales + ' sales (ACOS ' + (c.acos || 0) + '%). No alerts firing.' });
-    } else if (c.spend === 0 && c.impressions === 0) {
-      lines.push({ tone: 'grey', icon: '💤', text: 'No activity today — zero impressions, zero spend. Either paused, brand new, or budget never spent.' });
+    // r31: health summary uses 7d values. c.spend/sales/acos default to 7d after r30
+    // but we use the explicit 7d fields for clarity. Matches Amazon Seller Central.
+    const s7 = c.spend7d != null ? c.spend7d : (c.spend || 0);
+    const sa7 = c.sales7d != null ? c.sales7d : (c.sales || 0);
+    const a7 = c.acos7d != null ? c.acos7d : (c.acos || 0);
+    if (s7 > 0 && sa7 > 0) {
+      lines.push({ tone: 'green', icon: '✅', text: 'Healthy — 7d: spent £' + s7.toFixed(2) + ', made £' + sa7.toFixed(2) + ' sales (ACOS ' + a7.toFixed(1) + '%). No alerts firing.' });
+    } else if (s7 === 0 && (c.impressions7d || 0) === 0) {
+      lines.push({ tone: 'grey', icon: '💤', text: 'No 7-day activity — zero impressions, zero spend. Either paused, brand new, or budget never spent.' });
     } else {
-      lines.push({ tone: 'grey', icon: 'ℹ️', text: 'No alerts firing. Spend £' + (c.spend || 0) + ', sales £' + (c.sales || 0) + '.' });
+      lines.push({ tone: 'grey', icon: 'ℹ️', text: 'No alerts firing. 7d: spend £' + s7.toFixed(2) + ', sales £' + sa7.toFixed(2) + '.' });
     }
   }
   return lines;
@@ -2089,10 +2097,16 @@ function buildCampDetailBody(camp, detail) {
   }).join('');
 
   // 7-day chart block — three sparklines side by side
+  // r31: totals come from detail.totals (authoritative — matches Amazon Seller Central
+  // because it uses summary7d with proper attribution). The sparklines themselves still
+  // render from hist (per-day breakdown) but their LABELS use the authoritative totals.
+  // The per-day sum and the 7d total may differ slightly because cross-day attribution
+  // doesn't appear in any single day's sales1d — that's an Amazon data model thing, not a bug.
   const hist = detail.history || [];
-  const totalSpend = hist.reduce(function(a, h){ return a + (parseFloat(h.spend)||0); }, 0).toFixed(2);
-  const totalSales = hist.reduce(function(a, h){ return a + (parseFloat(h.sales)||0); }, 0).toFixed(2);
-  const periodAcos = totalSales > 0 ? (100 * totalSpend / totalSales).toFixed(1) : null;
+  const totalsBlock = detail.totals || {};
+  const totalSpend = (totalsBlock.spend7d != null ? totalsBlock.spend7d : hist.reduce(function(a, h){ return a + (parseFloat(h.spend)||0); }, 0)).toFixed(2);
+  const totalSales = (totalsBlock.sales7d != null ? totalsBlock.sales7d : hist.reduce(function(a, h){ return a + (parseFloat(h.sales)||0); }, 0)).toFixed(2);
+  const periodAcos = totalsBlock.acos7d != null ? totalsBlock.acos7d.toFixed(1) : (parseFloat(totalSales) > 0 ? (100 * parseFloat(totalSpend) / parseFloat(totalSales)).toFixed(1) : null);
   const chartBlock = hist.length === 0
     ? '<div style="font-size:12px;color:var(--text3);padding:10px 0">No 7-day history available yet.</div>'
     : (
@@ -2957,6 +2971,34 @@ function sortHistoryCol(col) {
   if (historyData) filterHistoryByAgent();
 }
 
+// r31: rebuild a single day's snapshot from Amazon Ads daily7d data.
+// Used when a Daily History row shows £0/£0 because the live snapshot save
+// was skipped (todaySpend == null guard in r30c).
+async function backfillHistorySnapshot() {
+  const sel = document.getElementById('history-date-select');
+  const dateStr = sel && sel.value ? String(sel.value).split('T')[0].split(' ')[0] : '';
+  if (!dateStr) { alert('Pick a date first'); return; }
+  if (!confirm('Rebuild ' + dateStr + ' snapshot from Amazon daily report data?\n\nThis overwrites whatever\'s currently saved for that date.')) return;
+  const btn = document.getElementById('history-backfill-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Backfilling...'; }
+  try {
+    const r = await fetch('/api/admin/backfill-snapshot?date=' + encodeURIComponent(dateStr), {
+      method: 'POST', headers: getAuthHeaders()
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || 'Backfill failed');
+    alert('Backfilled ' + j.date + ': £' + j.totalRevenue + ' revenue, £' + j.totalSpend + ' spend, ' + j.blendedAcos + '% ACOS (' + j.campaignsBackfilled + ' campaigns).');
+    // Reload the dropdown and re-select this date
+    await loadHistoryDates();
+    if (sel) sel.value = dateStr;
+    await loadHistoryDate();
+  } catch(e) {
+    alert('Backfill failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Backfill this day'; }
+  }
+}
+
 function filterHistoryByAgent() {
   if (!historyData) return;
   const agentFilter = document.getElementById('history-agent-filter')?.value || '';
@@ -3031,6 +3073,13 @@ async function loadHistoryDate() {
   document.getElementById('history-metrics').style.display = 'none';
   document.getElementById('history-empty').style.display = 'none';
   document.getElementById('history-placeholder').style.display = 'none';
+  // r31: show backfill button to manager+ for this selected date
+  const backfillBtn = document.getElementById('history-backfill-btn');
+  if (backfillBtn) {
+    const role = (currentUser && (currentUser.role || '').toLowerCase()) || '';
+    const isManagerPlus = ['owner','manager'].indexOf(role) !== -1;
+    backfillBtn.style.display = isManagerPlus ? '' : 'none';
+  }
   try {
     const dateClean = String(date).split('T')[0].split(' ')[0];
     const res = await fetch('/api/snapshots/' + dateClean);
