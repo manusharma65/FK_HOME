@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-12 r32 (Ground rule: 16% breakeven ACOS. SIX changes: (1) Action Centre chronic_acos lowered to >25% AND spend>10 (was >40% AND >20). (2) Action Centre high_acos band 16-25% on >10 spend (was 25-40%). (3) Action Centre scale candidate at <=13% (was <=15%). (4) Two new headline cards: Wasted today=spend with no sale today, Margin leak 7d=spend above 16% target across all profitable campaigns. (5) Each Action Centre row enriched with linkedTask {id,status} from campaign_tasks lookup — UI shows Task #X · status · View chip. (6) fetchCampaigns now pulls ENABLED+PAUSED states (was ENABLED only) so Portfolio not delivering campaigns are visible. Also: Campaign Health badges match new thresholds; CTR displayed via realCtr() from clicks/impressions (stored value unreliable); CTR diagnostic log added.)
+// CampaignPulse — deploy marker 2026-05-12 r32b (Filter campaigns to active-agent-owned only. fetchCampaigns now drops campaigns whose name doesnt start with an active agent prefix. Active prefixes auto-discovered from users table (department=amazon/manager, is_active=true, role agent/manager/owner) plus optional ACTIVE_AGENT_PREFIXES env var override. 5-min cache so new agents added to user management appear within minutes without restart. Hardcoded Aryan/Satyam fallback if DB and env both empty. Fixes r32 regression where ENABLED+PAUSED filter pulled in 20+ months of dead campaigns.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1095,6 +1095,63 @@ async function fetchSalesAndTrafficReport(reportDate) {
 // END SP-API module
 // ════════════════════════════════════════════════════════════════════════════
 
+// r32b: cached active-agent prefix list. Refreshed every 5 minutes so new agents
+// added to users table appear without restart. Falls back to env override
+// (ACTIVE_AGENT_PREFIXES, comma-separated like "Aryan |,Satyam |") if DB unreachable
+// or to catch edge cases where user.name doesn't match campaign prefix exactly.
+let _activeAgentPrefixesCache = { prefixes: null, expiresAt: 0 };
+async function getActiveAgentPrefixes() {
+  const now = Date.now();
+  if (_activeAgentPrefixesCache.prefixes && now < _activeAgentPrefixesCache.expiresAt) {
+    return _activeAgentPrefixesCache.prefixes;
+  }
+  const set = new Set();
+  // 1) Env override — always includes these regardless of DB state.
+  // Use this for edge cases where campaign prefix differs from user.name (e.g.
+  // legacy campaigns kept for reference, manager-owned campaigns).
+  const envPrefixes = String(process.env.ACTIVE_AGENT_PREFIXES || '')
+    .split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  envPrefixes.forEach(function(p){ set.add(p); });
+  // 2) Auto-discovery from users table — active Amazon staff (agent, manager, owner).
+  // Build prefix as "<FirstWord> |" because campaigns use that pattern.
+  // Uses canonicalAgent() to handle "Aryan Tomar" → "Aryan" so "Aryan |" prefix lands.
+  if (db) {
+    try {
+      const uRes = await db.query(
+        "SELECT name FROM users " +
+        "WHERE is_active = TRUE " +
+        "  AND LOWER(department) IN ('amazon','manager') " +
+        "  AND LOWER(role) IN ('agent','manager','owner','admin')"
+      );
+      uRes.rows.forEach(function(r) {
+        const raw = String(r.name || '').trim();
+        if (!raw) return;
+        // canonicalAgent maps "Aryan Tomar" → "Aryan", "satyam" → "Satyam"
+        const canonical = canonicalAgent(raw);
+        if (canonical) set.add(canonical + ' |');
+        // Also include the first word as a fallback in case the user has an
+        // unmapped name like "Kunal Sharma" — first word "Kunal" + " |".
+        const firstWord = raw.split(/\s+/)[0];
+        if (firstWord && firstWord.length >= 2 && firstWord.length <= 25) {
+          set.add(firstWord + ' |');
+        }
+      });
+    } catch(e) {
+      console.error('[r32b agent-prefixes] DB query error: ' + e.message + ' — falling back to env');
+    }
+  }
+  const prefixes = Array.from(set);
+  if (prefixes.length === 0) {
+    // Final safety: never return empty — would filter all campaigns out.
+    // Fall back to hardcoded defaults.
+    prefixes.push('Aryan |', 'Satyam |');
+    console.warn('[r32b agent-prefixes] no agents found in DB or env — using hardcoded fallback');
+  }
+  _activeAgentPrefixesCache = { prefixes: prefixes, expiresAt: now + 5 * 60 * 1000 };
+  console.log('[r32b agent-prefixes] resolved: ' + prefixes.join(', '));
+  return prefixes;
+}
+
 async function fetchCampaigns() {
   const token = await getAccessToken();
   const profileId = await getProfileId();
@@ -1104,15 +1161,23 @@ async function fetchCampaigns() {
   });
   // r32: include PAUSED campaigns too. Amazon's "Portfolio not delivering" state shows
   // up as ENABLED campaign in a paused/issue-state portfolio — campaigns can still have
-  // spend/sales while in this state. Previously filtered to ENABLED only, missing
-  // active-but-not-delivering campaigns. ARCHIVED stays excluded (truly dead).
+  // spend/sales while in this state. ARCHIVED stays excluded (truly dead).
   const res = await axios.post(
     'https://advertising-api-eu.amazon.com/sp/campaigns/list',
     { stateFilter: { include: ['ENABLED', 'PAUSED'] } },
     { headers: headers }
   );
-  const campaigns = res.data.campaigns || res.data || [];
-  console.log('[r32] Campaigns fetched: ' + campaigns.length + ' (ENABLED + PAUSED)');
+  const rawCampaigns = res.data.campaigns || res.data || [];
+  // r32b: filter to campaigns owned by active agents (prefix in name).
+  // Without this, broadening to ENABLED+PAUSED dumps in ~20 months of dead campaigns
+  // ("Auto - 30/9/2022" style) that the team isn't working on anymore.
+  // Prefix list comes from users table (Option B hybrid — auto-detect + env override).
+  const activePrefixes = await getActiveAgentPrefixes();
+  const campaigns = rawCampaigns.filter(function(c) {
+    const name = String(c.name || '');
+    return activePrefixes.some(function(p){ return name.startsWith(p); });
+  });
+  console.log('[r32b] Campaigns fetched: ' + rawCampaigns.length + ' raw → ' + campaigns.length + ' agent-owned');
   return campaigns;
 }
 
