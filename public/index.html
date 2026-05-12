@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-12 r32 (16% breakeven thresholds; Wasted today + Margin leak 7d cards; task chip on Action Centre rows; CTR computed from clicks/impressions) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-12 r32c (r32 + task chip View now works from Action Centre — openTaskDetailModal fetches task list on-demand if allTasks cache is empty, e.g. when called from a page other than Tasks) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3809,7 +3809,7 @@ async function loadSpendBreakdown(campaignId, containerId, btn) {
 // Fix: read the full task object from `allTasks` and render fresh markup,
 // including both the rich problem/score/notes details and the full action
 // button bar (Working on it, Mark complete, Pause, Dismiss, Reassign, etc.).
-function openTaskDetailModal(taskId) {
+async function openTaskDetailModal(taskId) {
   // r29: track which task is open so View campaign can return here
   window.CURRENT_OPEN_AMZ_TASK_ID = taskId;
   const modal = document.getElementById('task-detail-modal');
@@ -3817,14 +3817,31 @@ function openTaskDetailModal(taskId) {
   const metaEl = document.getElementById('task-detail-modal-meta');
   const bodyEl = document.getElementById('task-detail-modal-body');
   if (!modal || !bodyEl) return;
-  // Find the task in our local cache. allTasks is set by loadTasks().
-  const t = (Array.isArray(allTasks) ? allTasks : []).find(function(x){ return x.id === taskId; });
+  // r32c: if called from Action Centre, allTasks won't be populated (only Tasks page
+  // sets it via loadTasks()). Fetch the task list on-demand and try again.
+  let t = (Array.isArray(allTasks) ? allTasks : []).find(function(x){ return x.id === taskId; });
   if (!t) {
+    // Show loading state
     if (titleEl) titleEl.textContent = 'Task #' + taskId;
-    if (metaEl) metaEl.textContent = '';
-    bodyEl.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">Task not found in current view. Try refreshing.</div>';
+    if (metaEl) metaEl.textContent = 'Loading...';
+    bodyEl.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">Loading task details...</div>';
     modal.style.display = 'flex';
-    return;
+    try {
+      const r = await fetch('/api/tasks', { headers: getAuthHeaders() });
+      const j = await r.json();
+      if (j && Array.isArray(j.tasks)) {
+        // Hydrate allTasks so subsequent View clicks are instant
+        window.allTasks = j.tasks;
+        t = j.tasks.find(function(x){ return x.id === taskId; });
+      }
+    } catch(e) {
+      bodyEl.innerHTML = '<div style="color:var(--red);padding:20px;text-align:center">Failed to load task: ' + escHtml(e.message) + '</div>';
+      return;
+    }
+    if (!t) {
+      bodyEl.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">Task #' + taskId + ' not found. It may have been resolved or archived.</div>';
+      return;
+    }
   }
   // Derive display fields the same way the inline card does.
   const dateStr = t.created_at ? new Date(t.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : (t.created_date || '');
