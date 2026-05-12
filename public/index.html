@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-12 r31 (r30 series + backfill button on Daily History page + modal totals from authoritative 7d source so header and sparkline labels agree with Amazon Seller Central) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-12 r32 (16% breakeven thresholds; Wasted today + Margin leak 7d cards; task chip on Action Centre rows; CTR computed from clicks/impressions) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -616,11 +616,14 @@ tbody tr:hover { background: var(--surface2); }
        /api/amazon/action-centre endpoint that scores and categorises everything. -->
   <div class="page" id="page-action-centre">
     <!-- Top metric strip -->
-    <div class="metrics-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px">
+    <div class="metrics-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:18px">
       <div class="metric-card alert"><div class="metric-label">Fix now (P1)</div><div class="metric-value" id="ac-p1-count">—</div><div class="metric-delta delta-down" id="ac-p1-sub">Bleeding money or broken</div></div>
       <div class="metric-card"><div class="metric-label">Look at (P2)</div><div class="metric-value" id="ac-p2-count">—</div><div class="metric-delta" id="ac-p2-sub">Borderline / watch list</div></div>
       <div class="metric-card success"><div class="metric-label">Scale (P3)</div><div class="metric-value" id="ac-p3-count">—</div><div class="metric-delta delta-up" id="ac-p3-sub">Working — could grow</div></div>
-      <div class="metric-card"><div class="metric-label">Wasted £ (last 7d)</div><div class="metric-value" id="ac-wasted">—</div><div class="metric-delta delta-down">Spend with no sales</div></div>
+      <!-- r32: Definition A (spend with no sale today) -->
+      <div class="metric-card alert"><div class="metric-label">Wasted today</div><div class="metric-value" id="ac-wasted-today">—</div><div class="metric-delta delta-down" id="ac-wasted-today-sub">No sales</div></div>
+      <!-- r32: Definition C (spend above 16% breakeven over 7d) -->
+      <div class="metric-card alert"><div class="metric-label">Margin leak (7d)</div><div class="metric-value" id="ac-margin-leak">—</div><div class="metric-delta delta-down" id="ac-margin-leak-sub">Over 16% breakeven</div></div>
     </div>
 
     <!-- Strategic insight banner — single AI paragraph at top of Fix Now -->
@@ -1699,16 +1702,17 @@ function renderCampaignTable(tableId, campaigns, showAction) {
     const acos7 = sales7 > 0 ? +((100 * spend7 / sales7).toFixed(1)) : null;
     let urgency = 'healthy';   // healthy | scale | p3 | p2 | p1
     let statusLabel = 'Healthy', statusKind = 'green';
+    // r32: thresholds aligned to Action Centre using 16% breakeven ACOS
     if (outOfBudget) { urgency = 'p1'; statusLabel = 'Out of budget'; statusKind = 'red'; }
-    else if (acos7 != null && acos7 > 40 && spend7 > 20) { urgency = 'p1'; statusLabel = 'Chronic ACOS'; statusKind = 'red'; }
+    else if (acos7 != null && acos7 > 25 && spend7 > 10) { urgency = 'p1'; statusLabel = 'Chronic ACOS'; statusKind = 'red'; }
     else if (spend7 >= 15 && sales7 === 0) { urgency = 'p1'; statusLabel = 'No revenue'; statusKind = 'red'; }
     else if (sales7 === 0 && clicks7 >= 50) { urgency = 'p1'; statusLabel = 'Clicks no sales'; statusKind = 'red'; }
-    else if (acos7 != null && acos7 > 25 && acos7 <= 40 && spend7 > 10) { urgency = 'p2'; statusLabel = 'ACOS high'; statusKind = 'amber'; }
+    else if (acos7 != null && acos7 > 16 && acos7 <= 25 && spend7 > 10) { urgency = 'p2'; statusLabel = 'ACOS high'; statusKind = 'amber'; }
     else if (budgetLow) { urgency = 'p2'; statusLabel = 'Budget low'; statusKind = 'amber'; }
-    else if (acos7 != null && acos7 <= 15 && spend7 > 20 && budgetPct < 90) { urgency = 'scale'; statusLabel = 'Scale ↗'; statusKind = 'blue'; }
+    else if (acos7 != null && acos7 <= 13 && spend7 > 20 && budgetPct < 90) { urgency = 'scale'; statusLabel = 'Scale ↗'; statusKind = 'blue'; }
 
     const stripeColour = urgency === 'p1' ? '#dc2626' : urgency === 'p2' ? '#f59e0b' : urgency === 'scale' ? '#3b82f6' : '#9ca3af';
-    const acosClass = acos > 35 ? 'acos-high' : acos > 25 ? 'acos-warn' : acos > 0 ? 'acos-ok' : '';
+    const acosClass = acos > 25 ? 'acos-high' : acos > 16 ? 'acos-warn' : acos > 0 ? 'acos-ok' : '';
     const progColor = outOfBudget ? 'var(--red)' : budgetLow ? 'var(--amber)' : 'var(--green)';
     const budgetColor = outOfBudget ? 'color:var(--red);font-weight:600' : budgetLow ? 'color:var(--amber);font-weight:500' : '';
 
@@ -2791,7 +2795,7 @@ async function refreshKeywords() {
 function exportCSV() {
   if (!allCampaigns.length) { alert('No data to export'); return; }
   const headers = ['Campaign','Portfolio','Agent','Type','State','Daily Budget','Spend','Revenue','ACOS','Impressions','Clicks','CTR','Conversions','Budget Remaining','Budget %'];
-  const rows = allCampaigns.map(c => [c.name,c.portfolio||'',c.agent||'',c.targetingType||'',c.state,c.dailyBudget,c.spend||0,c.sales||0,c.acos+'%',c.impressions||0,c.clicks||0,(c.ctr||'0')+'%',c.conversions||0,c.budgetRemaining,c.budgetPct+'%']);
+  const rows = allCampaigns.map(c => [c.name,c.portfolio||'',c.agent||'',c.targetingType||'',c.state,c.dailyBudget,c.spend||0,c.sales||0,c.acos+'%',c.impressions||0,c.clicks||0,realCtr(c)+'%',c.conversions||0,c.budgetRemaining,c.budgetPct+'%']);
   const exportDate = document.getElementById('history-date-select')?.value || new Date().toISOString().split('T')[0];
   downloadCSV(headers, rows, 'fksports-campaigns-' + exportDate + '.csv');
 }
@@ -2831,6 +2835,17 @@ function downloadCSV(headers, rows, filename) {
 
 function escHtml(str) {
   return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// r32: compute CTR directly from clicks/impressions at display time.
+// The stored c.ctr value can be stale or incorrectly multiplied (we saw 100+%
+// values in screenshots). Computing from primary sources guarantees correctness.
+// Returns string like "1.93" (without % sign — caller adds it).
+function realCtr(c) {
+  const clicks = parseInt(c.clicks || 0);
+  const impressions = parseInt(c.impressions || 0);
+  if (impressions <= 0) return '0.00';
+  return ((clicks / impressions) * 100).toFixed(2);
 }
 
 // r14b: Format an incoming date string (often UTC ISO from Postgres DATE) as YYYY-MM-DD in London time.
@@ -3043,7 +3058,7 @@ function renderHistoryCampaignsTable(camps) {
   });
   tbody.innerHTML = sorted.map(function(c) {
     const acosClass = c.acos > 35 ? 'acos-high' : c.acos > 25 ? 'acos-warn' : c.acos > 0 ? 'acos-ok' : '';
-    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td class="mono" style="color:var(--green)">£' + (c.sales||0) + '</td><td class="mono">£' + (c.spend||0) + '</td><td class="mono ' + acosClass + '">' + (c.acos>0?c.acos+'%':'—') + '</td><td>' + (c.budgetRemaining<=0.01&&c.dailyBudget>0?'<span class="badge badge-red">Out of budget</span>':c.acos>35&&c.spend>5?'<span class="badge badge-red">ACOS high</span>':'<span class="badge badge-green">Healthy</span>') + '</td></tr>';
+    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + realCtr(c) + '%</td><td class="mono">' + (c.conversions||0) + '</td><td class="mono" style="color:var(--green)">£' + (c.sales||0) + '</td><td class="mono">£' + (c.spend||0) + '</td><td class="mono ' + acosClass + '">' + (c.acos>0?c.acos+'%':'—') + '</td><td>' + (c.budgetRemaining<=0.01&&c.dailyBudget>0?'<span class="badge badge-red">Out of budget</span>':c.acos>35&&c.spend>5?'<span class="badge badge-red">ACOS high</span>':'<span class="badge badge-green">Healthy</span>') + '</td></tr>';
   }).join('') || '<tr><td colspan="12"><div class="empty">No campaign data</div></td></tr>';
 }
 
@@ -3053,7 +3068,7 @@ function renderHistorySNRTable(camps) {
   document.getElementById('history-snr-insight').textContent = snr.length + ' campaigns spent £' + snr.reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2) + ' with zero attributed revenue on this day.';
   const snrTbody = document.getElementById('history-snr-table');
   snrTbody.innerHTML = snr.sort(function(a,b){ return (b.spend||0)-(a.spend||0); }).map(function(c) {
-    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono" style="color:var(--red);font-weight:600">£' + (c.spend||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td><span class="badge badge-red">Wasted spend</span></td></tr>';
+    return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono" style="color:var(--red);font-weight:600">£' + (c.spend||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + realCtr(c) + '%</td><td class="mono">' + (c.conversions||0) + '</td><td><span class="badge badge-red">Wasted spend</span></td></tr>';
   }).join('') || '<tr><td colspan="9"><div class="empty">No wasted spend on this day</div></td></tr>';
 }
 
@@ -3109,7 +3124,7 @@ async function loadHistoryDate() {
     const tbody = document.getElementById('history-table');
     tbody.innerHTML = sorted.map(function(c) {
       const acosClass = c.acos > 35 ? 'acos-high' : c.acos > 25 ? 'acos-warn' : c.acos > 0 ? 'acos-ok' : '';
-      return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td class="mono" style="color:var(--green)">£' + (c.sales||0) + '</td><td class="mono">£' + (c.spend||0) + '</td><td class="mono ' + acosClass + '">' + (c.acos>0?c.acos+'%':'—') + '</td><td>' + (c.budgetRemaining<=0.01&&c.dailyBudget>0?'<span class="badge badge-red">Out of budget</span>':c.acos>35&&c.spend>5?'<span class="badge badge-red">ACOS high</span>':'<span class="badge badge-green">Healthy</span>') + '</td></tr>';
+      return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono">£' + (c.dailyBudget||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + realCtr(c) + '%</td><td class="mono">' + (c.conversions||0) + '</td><td class="mono" style="color:var(--green)">£' + (c.sales||0) + '</td><td class="mono">£' + (c.spend||0) + '</td><td class="mono ' + acosClass + '">' + (c.acos>0?c.acos+'%':'—') + '</td><td>' + (c.budgetRemaining<=0.01&&c.dailyBudget>0?'<span class="badge badge-red">Out of budget</span>':c.acos>35&&c.spend>5?'<span class="badge badge-red">ACOS high</span>':'<span class="badge badge-green">Healthy</span>') + '</td></tr>';
     }).join('') || '<tr><td colspan="12"><div class="empty">No campaign data</div></td></tr>';
     // Spend no revenue table
     const snr = camps.filter(function(c){ return c.spend > 0 && (c.sales === 0 || c.sales === null); });
@@ -3117,7 +3132,7 @@ async function loadHistoryDate() {
     document.getElementById('h-snr-badge').textContent = snr.length;
     const snrTbody = document.getElementById('history-snr-table');
     snrTbody.innerHTML = snr.sort(function(a,b){ return (b.spend||0)-(a.spend||0); }).map(function(c) {
-      return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono" style="color:var(--red);font-weight:600">£' + (c.spend||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + (c.ctr||'0') + '%</td><td class="mono">' + (c.conversions||0) + '</td><td><span class="badge badge-red">Wasted spend</span></td></tr>';
+      return '<tr><td><div class="camp-name">' + escHtml(c.name) + '</div></td><td style="font-size:12px">' + escHtml(c.portfolio||'—') + '</td><td>' + (c.targetingType==='auto'?'<span class="badge badge-blue" style="font-size:10px">Auto</span>':'<span class="badge" style="background:var(--surface3);color:var(--text3);font-size:10px">Manual</span>') + '</td><td class="mono" style="color:var(--red);font-weight:600">£' + (c.spend||0) + '</td><td class="mono">' + (c.impressions||0).toLocaleString() + '</td><td class="mono">' + (c.clicks||0) + '</td><td class="mono">' + realCtr(c) + '%</td><td class="mono">' + (c.conversions||0) + '</td><td><span class="badge badge-red">Wasted spend</span></td></tr>';
     }).join('') || '<tr><td colspan="9"><div class="empty">No wasted spend on this day</div></td></tr>';
     // No activity table
     const noAct = camps.filter(function(c){ return c.impressions === 0 && (c.spend === 0 || c.spend === null); });
@@ -7129,7 +7144,17 @@ async function loadActionCentre(force) {
     document.getElementById('ac-p1-count').textContent = _acState.fixnow.length;
     document.getElementById('ac-p2-count').textContent = _acState.lookat.length;
     document.getElementById('ac-p3-count').textContent = _acState.scale.length;
-    document.getElementById('ac-wasted').textContent = '£' + (j.totalWasted || 0).toFixed(0);
+    // r32: Wasted today (Definition A) + Margin leak 7d (Definition C)
+    const wastedToday = parseFloat(j.wastedToday || 0);
+    const wastedTodayCount = j.wastedTodayCount || 0;
+    document.getElementById('ac-wasted-today').textContent = '£' + wastedToday.toFixed(0);
+    const wastedTodaySub = document.getElementById('ac-wasted-today-sub');
+    if (wastedTodaySub) wastedTodaySub.textContent = wastedTodayCount > 0 ? (wastedTodayCount + ' campaigns, no sales') : 'No waste today';
+    const marginLeak = parseFloat(j.marginLeak7d || 0);
+    const marginLeakCount = j.marginLeak7dCount || 0;
+    document.getElementById('ac-margin-leak').textContent = '£' + marginLeak.toFixed(0);
+    const marginLeakSub = document.getElementById('ac-margin-leak-sub');
+    if (marginLeakSub) marginLeakSub.textContent = marginLeakCount > 0 ? (marginLeakCount + ' campaigns over 16% target') : 'All within target';
 
     // Tab counts
     document.getElementById('ac-fixnow-count').textContent = _acState.fixnow.length;
@@ -7272,11 +7297,26 @@ function renderAcRow(item) {
         '</div>' +
         (item.problem ? '<div style="font-size:13px;color:var(--text2);line-height:1.5;margin-bottom:6px">' + escHtml(item.problem) + '</div>' : '') +
         (item.evidence ? '<div style="font-size:12px;color:var(--text3);font-family:var(--mono)">' + escHtml(item.evidence) + '</div>' : '') +
+        // r32: linked task chip — small badge showing existing open task ID + status
+        (item.linkedTask ? renderTaskChip(item.linkedTask) : '') +
         hint +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start">' + actions + ' ' + aiButton + '</div>' +
     '</div>' +
     '<div id="' + aiId + '" style="display:none;margin-top:10px" onclick="event.stopPropagation()"></div>' +
+  '</div>';
+}
+
+// r32: small chip showing the existing task for this campaign+problem
+function renderTaskChip(t) {
+  if (!t || !t.id) return '';
+  const isEscalated = t.status === 'escalated';
+  const bg = isEscalated ? '#501313' : 'var(--surface2)';
+  const fg = isEscalated ? '#FCEBEB' : 'var(--text3)';
+  const linkColor = isEscalated ? '#FCEBEB' : 'var(--blue)';
+  return '<div style="margin-top:6px;display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:4px 8px;background:' + bg + ';border-radius:4px;color:' + fg + '">' +
+    '<span>📋 Task #' + t.id + ' · ' + escHtml(t.status) + '</span>' +
+    '<a href="#" onclick="event.stopPropagation();openTaskDetailModal(' + t.id + ');return false;" style="color:' + linkColor + ';text-decoration:underline;margin-left:4px">View</a>' +
   '</div>';
 }
 

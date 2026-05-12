@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-12 r31b (r31 + new 7-day SUMMARY advertised-product report stream. Adds amazon_asin_ad_perf_7d table populated by a single Amazon Ads SUMMARY report covering last 7 days. Modal Top Products query prefers this over the old daily-summed table which had the same overlapping-windows bug we fixed for campaigns. After deploy + first 7d report download (5-15 min), modal ASIN sales should match Amazon Seller Centrals Advertised Product report for the same date range. Falls back to daily-sum table if 7d snapshot empty.)
+// CampaignPulse — deploy marker 2026-05-12 r32 (Ground rule: 16% breakeven ACOS. SIX changes: (1) Action Centre chronic_acos lowered to >25% AND spend>10 (was >40% AND >20). (2) Action Centre high_acos band 16-25% on >10 spend (was 25-40%). (3) Action Centre scale candidate at <=13% (was <=15%). (4) Two new headline cards: Wasted today=spend with no sale today, Margin leak 7d=spend above 16% target across all profitable campaigns. (5) Each Action Centre row enriched with linkedTask {id,status} from campaign_tasks lookup — UI shows Task #X · status · View chip. (6) fetchCampaigns now pulls ENABLED+PAUSED states (was ENABLED only) so Portfolio not delivering campaigns are visible. Also: Campaign Health badges match new thresholds; CTR displayed via realCtr() from clicks/impressions (stored value unreliable); CTR diagnostic log added.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1102,13 +1102,17 @@ async function fetchCampaigns() {
     'Content-Type': 'application/vnd.spCampaign.v3+json',
     'Accept': 'application/vnd.spCampaign.v3+json'
   });
+  // r32: include PAUSED campaigns too. Amazon's "Portfolio not delivering" state shows
+  // up as ENABLED campaign in a paused/issue-state portfolio — campaigns can still have
+  // spend/sales while in this state. Previously filtered to ENABLED only, missing
+  // active-but-not-delivering campaigns. ARCHIVED stays excluded (truly dead).
   const res = await axios.post(
     'https://advertising-api-eu.amazon.com/sp/campaigns/list',
-    { stateFilter: { include: ['ENABLED'] } },
+    { stateFilter: { include: ['ENABLED', 'PAUSED'] } },
     { headers: headers }
   );
   const campaigns = res.data.campaigns || res.data || [];
-  console.log('Campaigns fetched: ' + campaigns.length);
+  console.log('[r32] Campaigns fetched: ' + campaigns.length + ' (ENABLED + PAUSED)');
   return campaigns;
 }
 
@@ -1448,14 +1452,28 @@ async function syncCampaigns() {
       };
     });
 
-    // Build per-campaign lookups
+    // r32: store raw clickThroughRate so we can recompute CTR from clicks/impressions
+    // at display time and diagnose if Amazon's value is unreliable
     const stats7d = {};
+    let _ctrSampleLogged = false;
     summary7d.forEach(function(s) {
+      const rawCtr = parseFloat(s.clickThroughRate || 0);
+      const clicks = parseInt(s.clicks || 0);
+      const impr = parseInt(s.impressions || 0);
+      const computedCtr = impr > 0 ? (clicks / impr) : 0;
+      // Log one sample per sync where Amazon's CTR diverges from computed
+      if (!_ctrSampleLogged && impr > 100 && Math.abs(rawCtr - computedCtr) > 0.001) {
+        console.log('[r32 CTR-diag] campaign ' + s.campaignId + ' (' + (s.campaignName||'').slice(0,40) + ')'
+          + ' Amazon raw: ' + rawCtr
+          + ' · clicks/impr: ' + clicks + '/' + impr + ' = ' + (computedCtr*100).toFixed(2) + '%'
+          + ' · 100×raw: ' + (rawCtr*100).toFixed(2) + '%');
+        _ctrSampleLogged = true;
+      }
       stats7d[s.campaignId] = {
         spend: parseFloat(s.cost || 0),
         sales: parseFloat(s.sales7d || 0),
-        clicks: parseInt(s.clicks || 0),
-        impressions: parseInt(s.impressions || 0),
+        clicks: clicks,
+        impressions: impr,
         conversions: parseInt(s.purchases7d || 0),
         units: parseInt(s.unitsSoldClicks7d || 0),
         ctr: parseFloat(s.clickThroughRate || 0),
@@ -4747,35 +4765,63 @@ app.post('/api/admin/backfill-snapshot', async function(req, res) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return res.status(400).json({ error: 'date=YYYY-MM-DD required' });
   if (!db) return res.status(500).json({ error: 'db not connected' });
   try {
-    const liveCampaigns = state.campaigns || [];
-    if (!liveCampaigns.length) return res.status(503).json({ error: 'no campaigns in memory — wait for first sync' });
-    let foundForDate = 0;
-    const dayCampaigns = liveCampaigns.map(function(c) {
-      const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
-      const row = days.find(function(d){ return String(d.date).slice(0, 10) === targetDate; });
-      if (!row) {
-        // Campaign existed but no row for that date — emit zero metrics so it still
-        // appears in the snapshot
-        return Object.assign({}, c, {
-          spend: 0, sales: 0, acos: 0, clicks: 0, impressions: 0, conversions: 0
-        });
-      }
-      foundForDate++;
-      const sp = parseFloat(row.spend || 0);
-      const sa = parseFloat(row.sales || 0);
-      const ac = sa > 0 ? Math.round((sp / sa) * 1000) / 10 : 0;
-      return Object.assign({}, c, {
-        spend: Math.round(sp * 100) / 100,
-        sales: Math.round(sa * 100) / 100,
-        acos: ac,
-        clicks: parseInt(row.clicks || 0),
-        impressions: parseInt(row.impressions || 0),
-        conversions: parseInt(row.conversions || 0)
-      });
-    });
-    if (foundForDate === 0) {
-      return res.status(404).json({ error: 'no daily7d rows match date ' + targetDate + ' — Amazon may not have data for this day yet, or it falls outside the 7-day window' });
+    // r31c: read daily7d report data directly — survives Railway restarts even if
+    // state.campaigns hasn't repopulated yet. Need both:
+    //   1) daily7d stream data (to know per-day metrics on target date)
+    //   2) state.campaigns (to know campaign names/portfolios/budgets)
+    // If state.campaigns is empty, we can still produce a basic snapshot from
+    // daily7d alone using campaign_id keys.
+    const daily7dData = (reportState.daily7d && reportState.daily7d.data) || null;
+    if (!daily7dData || !daily7dData.length) {
+      return res.status(503).json({ error: 'daily7d report not yet downloaded — wait ~15 min after deploy then try again' });
     }
+    // Filter to target date's rows
+    const dateRows = daily7dData.filter(function(d){ return String(d.date).slice(0, 10) === targetDate; });
+    if (!dateRows.length) {
+      return res.status(404).json({ error: 'no daily7d rows match date ' + targetDate + ' — outside 7-day window or no activity that day' });
+    }
+    // Group by campaignId, sum within that day (should be 1 row per campaign per day, but be safe)
+    const byCampaign = {};
+    dateRows.forEach(function(r) {
+      const cid = String(r.campaignId);
+      if (!byCampaign[cid]) byCampaign[cid] = {
+        campaignId: cid,
+        name: r.campaignName || cid,
+        spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0
+      };
+      byCampaign[cid].spend += parseFloat(r.cost || 0);
+      byCampaign[cid].sales += parseFloat(r.sales1d || 0);
+      byCampaign[cid].clicks += parseInt(r.clicks || 0);
+      byCampaign[cid].impressions += parseInt(r.impressions || 0);
+      byCampaign[cid].conversions += parseInt(r.purchases1d || 0);
+    });
+    // Enrich with live campaign metadata where available
+    const liveById = {};
+    (state.campaigns || []).forEach(function(c){ liveById[String(c.campaignId)] = c; });
+    const dayCampaigns = Object.values(byCampaign).map(function(row) {
+      const live = liveById[row.campaignId] || {};
+      const sp = +row.spend.toFixed(2);
+      const sa = +row.sales.toFixed(2);
+      const ac = sa > 0 ? Math.round((sp / sa) * 1000) / 10 : 0;
+      return {
+        campaignId: row.campaignId,
+        name: live.name || row.name,
+        state: live.state || 'enabled',
+        targetingType: live.targetingType || '',
+        portfolio: live.portfolio || '',
+        agent: live.agent || '',
+        dailyBudget: live.dailyBudget || 0,
+        spend: sp,
+        sales: sa,
+        acos: ac,
+        clicks: row.clicks,
+        impressions: row.impressions,
+        conversions: row.conversions,
+        budgetRemaining: null,
+        budgetPct: 0
+      };
+    });
+    const foundForDate = dayCampaigns.length;
     const totalRevenue = dayCampaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
     const totalSpend = dayCampaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
     const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend/totalRevenue)*1000)/10 : 0;
@@ -4785,7 +4831,7 @@ app.post('/api/admin/backfill-snapshot', async function(req, res) {
       blendedAcos: blendedAcos,
       activeCampaigns: dayCampaigns.filter(function(c){ return c.state==='enabled'; }).length,
       totalCampaigns: dayCampaigns.length,
-      outOfBudget: 0,  // not derivable from per-day rows alone
+      outOfBudget: 0,
       spendNoRevenue: dayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0); }).length,
       totalWastedSpend: dayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0); }).reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2),
       backfilled: true,
@@ -4795,7 +4841,7 @@ app.post('/api/admin/backfill-snapshot', async function(req, res) {
       'INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, created_at=NOW()',
       [targetDate, JSON.stringify(metrics), JSON.stringify(dayCampaigns), JSON.stringify([]), JSON.stringify([])]
     );
-    console.log('[r31 backfill-snapshot] ' + targetDate + ': ' + foundForDate + ' campaign rows · revenue £' + totalRevenue.toFixed(2) + ' · spend £' + totalSpend.toFixed(2));
+    console.log('[r31c backfill-snapshot] ' + targetDate + ': ' + foundForDate + ' campaign rows · revenue £' + totalRevenue.toFixed(2) + ' · spend £' + totalSpend.toFixed(2));
     res.json({
       ok: true,
       date: targetDate,
@@ -4805,7 +4851,7 @@ app.post('/api/admin/backfill-snapshot', async function(req, res) {
       blendedAcos: blendedAcos
     });
   } catch(e) {
-    console.error('[r31 backfill-snapshot] error: ' + e.message);
+    console.error('[r31c backfill-snapshot] error: ' + e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8369,13 +8415,17 @@ app.get('/api/amazon/action-centre', async function(req, res) {
       }
 
       // P1 — chronic high ACOS (7-day, sustained, real spend)
-      if (!placed && acos7d != null && acos7d > 40 && spend7 > 20) {
-        const wastedAmount = spend7 - sales7 * 0.12;
-        totalWasted += Math.max(0, wastedAmount > 0 ? wastedAmount : 0);
+      // r32: 16% is Bobby's breakeven. Anything >25% loses money on every sale → P1.
+      // Spend floor lowered to £10 so we catch smaller campaigns burning margin.
+      if (!placed && acos7d != null && acos7d > 25 && spend7 > 10) {
+        // Margin leak = spend above what would have been profitable at 16% target ACOS
+        const profitableSpend = sales7 * 0.16;
+        const marginLeak = Math.max(0, spend7 - profitableSpend);
+        totalWasted += marginLeak;
         fixnow.push(Object.assign({}, baseRow, {
           kind: 'chronic_acos', severity: 'p1',
-          problem: 'ACOS at ' + acos7d.toFixed(0) + '% over the last 7 days on £' + spend7.toFixed(0) + ' spend. Sustained underperformance.',
-          evidence: '7d: spend £' + spend7.toFixed(2) + ' · sales £' + sales7.toFixed(2) + ' · ACOS ' + acos7d.toFixed(1) + '%',
+          problem: 'ACOS at ' + acos7d.toFixed(0) + '% over 7 days on £' + spend7.toFixed(0) + ' spend. Losing money on every sale (breakeven 16%).',
+          evidence: '7d: spend £' + spend7.toFixed(2) + ' · sales £' + sales7.toFixed(2) + ' · ACOS ' + acos7d.toFixed(1) + '% · margin leak £' + marginLeak.toFixed(2),
           actions: [
             { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
             snoozeBtn,
@@ -8435,11 +8485,12 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         }
       }
 
-      // P2 — high ACOS 25-40% (not yet chronic)
-      if (!placed && acos7d != null && acos7d > 25 && acos7d <= 40 && spend7 > 10) {
+      // P2 — high ACOS, above 16% breakeven but not yet chronic (>25%)
+      // r32: 16-25% = eroding margin but still some profit. Worth flagging early.
+      if (!placed && acos7d != null && acos7d > 16 && acos7d <= 25 && spend7 > 10) {
         lookat.push(Object.assign({}, baseRow, {
           kind: 'high_acos', severity: 'p2',
-          problem: 'ACOS ' + acos7d.toFixed(1) + '% over 7 days on £' + spend7.toFixed(2) + ' spend. Above target — watch.',
+          problem: 'ACOS ' + acos7d.toFixed(1) + '% over 7 days on £' + spend7.toFixed(2) + ' spend. Above 16% breakeven.',
           evidence: '7d: ACOS ' + acos7d.toFixed(1) + '% · £' + spend7.toFixed(2) + ' spend · £' + sales7.toFixed(2) + ' sales',
           actions: [ snoozeBtn, viewBtn ]
         }));
@@ -8461,8 +8512,9 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         placed = true;
       }
 
-      // P3 — scale candidate (low ACOS, real spend, budget headroom)
-      if (!placed && acos7d != null && acos7d <= 15 && spend7 > 20 && budgetPct < 90) {
+      // P3 — scale candidate (well below 16% breakeven, real spend, budget headroom)
+      // r32: ≤13% gives buffer below breakeven so scaling stays profitable
+      if (!placed && acos7d != null && acos7d <= 13 && spend7 > 20 && budgetPct < 90) {
         scale.push(Object.assign({}, baseRow, {
           kind: 'scale', severity: 'p3',
           problem: 'Healthy ACOS ' + acos7d.toFixed(1) + '% on £' + spend7.toFixed(0) + ' over 7 days. Room to grow.',
@@ -8562,12 +8614,76 @@ app.get('/api/amazon/action-centre', async function(req, res) {
       }
     } catch(e) { console.error('[r26 action-centre] insight error: ' + e.message); }
 
+    // r32: for each row with a campaignId, look up if there's an open task in campaign_tasks
+    // for the same campaign + problem_type. Shows "Task #X · status · View" chip in UI.
+    // Only enrich rows that have campaignId (skip keyword-only rows).
+    async function enrichWithTasks(rows) {
+      for (const row of rows) {
+        if (!row.campaignId) continue;
+        try {
+          const tRes = await db.query(
+            "SELECT id, status FROM campaign_tasks " +
+            "WHERE campaign_id = $1 AND problem_type = $2 AND status IN ('open','in_progress','escalated') " +
+            "ORDER BY created_date DESC LIMIT 1",
+            [row.campaignId, row.kind]
+          );
+          if (tRes.rows.length > 0) {
+            row.linkedTask = { id: tRes.rows[0].id, status: tRes.rows[0].status };
+          }
+        } catch(e) {}
+      }
+    }
+    await enrichWithTasks(fixnow);
+    await enrichWithTasks(lookat);
+    await enrichWithTasks(scale);
+
+    // r32: compute both "Wasted £" definitions across ALL live campaigns (not just rule matches)
+    // Definition A: today spend > 0 AND today sales = £0 (literal wasted money — no sale)
+    // Definition C: spend7d above what would be profitable at 16% breakeven (margin leak)
+    let wastedToday = 0;       // Definition A
+    let wastedTodayCount = 0;
+    let marginLeak7d = 0;      // Definition C
+    let marginLeak7dCount = 0;
+    const BREAKEVEN_ACOS = 0.16;
+    liveCampaigns.forEach(function(c) {
+      const tSpend = parseFloat(c.todaySpend || 0);
+      const tSales = parseFloat(c.todaySales || 0);
+      const s7 = parseFloat(c.spend7d || 0);
+      const sa7 = parseFloat(c.sales7d || 0);
+      // Definition A: today spend with no sale
+      if (tSpend > 0 && tSales === 0) {
+        wastedToday += tSpend;
+        wastedTodayCount++;
+      }
+      // Definition C: margin leak above 16% breakeven
+      // Either zero sales (full spend wasted) or ACOS above 16%
+      if (s7 > 0) {
+        if (sa7 === 0) {
+          marginLeak7d += s7;
+          marginLeak7dCount++;
+        } else {
+          const profitableSpend = sa7 * BREAKEVEN_ACOS;
+          if (s7 > profitableSpend) {
+            marginLeak7d += s7 - profitableSpend;
+            marginLeak7dCount++;
+          }
+        }
+      }
+    });
+
     const payload = {
       fixnow: fixnow,
       lookat: lookat,
       scale: scale,
       strategicInsight: strategicInsight,
+      // r32: legacy totalWasted (rule-match-driven) kept for back-compat
       totalWasted: +totalWasted.toFixed(2),
+      // r32: new explicit fields — Definition A and C side by side
+      wastedToday: +wastedToday.toFixed(2),
+      wastedTodayCount: wastedTodayCount,
+      marginLeak7d: +marginLeak7d.toFixed(2),
+      marginLeak7dCount: marginLeak7dCount,
+      breakevenAcos: BREAKEVEN_ACOS * 100,
       keywordWasteCount: keywordWasteCount,
       generatedAt: new Date().toISOString()
     };
