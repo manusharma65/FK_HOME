@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-13 r33a (No frontend logic changes. Ships alongside server.js data-correctness updates: product cards now read fresh 7d ASIN snapshot (real numbers), CTR computed cleanly server-side, Google task dedup fixed, agent_name corruption resolved, wasted-spend formula unified to spend>0 AND sales=0. realCtr() helper already in place and now consistent with what server provides.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-14 r33c (Frontend changes: Action Centre Margin leak (7d) tile is now clickable — switches to All tab, filters to campaigns with marginLeak > 0, sorts biggest leakers first, dismissible banner with Reset button. Two new JS handlers: acFilterByMarginLeak() and acClearMarginLeakFilter(). Other tab clicks clear the filter so it doesn't persist across tabs. Ships alongside server.js r33c which adds the Amazon agent users-table lookup and keyword AI trending rewrite.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -622,8 +622,14 @@ tbody tr:hover { background: var(--surface2); }
       <div class="metric-card success"><div class="metric-label">Scale (P3)</div><div class="metric-value" id="ac-p3-count">—</div><div class="metric-delta delta-up" id="ac-p3-sub">Working — could grow</div></div>
       <!-- r32: Definition A (spend with no sale today) -->
       <div class="metric-card alert"><div class="metric-label">Wasted today</div><div class="metric-value" id="ac-wasted-today">—</div><div class="metric-delta delta-down" id="ac-wasted-today-sub">No sales</div></div>
-      <!-- r32: Definition C (spend above 16% breakeven over 7d) -->
-      <div class="metric-card alert"><div class="metric-label">Margin leak (7d)</div><div class="metric-value" id="ac-margin-leak">—</div><div class="metric-delta delta-down" id="ac-margin-leak-sub">Over 16% breakeven</div></div>
+      <!-- r32: Definition C (spend above 16% breakeven over 7d) — r33c: clickable to filter All tab -->
+      <div class="metric-card alert" id="ac-margin-leak-card" onclick="acFilterByMarginLeak()" style="cursor:pointer" title="Click to see the campaigns leaking margin"><div class="metric-label">Margin leak (7d)</div><div class="metric-value" id="ac-margin-leak">—</div><div class="metric-delta delta-down" id="ac-margin-leak-sub">Over 16% breakeven</div></div>
+    </div>
+
+    <!-- r33c: Margin leak filter banner — appears when user has clicked the tile to drill in -->
+    <div id="ac-marginleak-banner" style="display:none;background:#fff5f5;border:1px solid rgba(192,57,43,0.2);border-left:3px solid var(--red);border-radius:10px;padding:12px 16px;margin-bottom:14px;align-items:center;justify-content:space-between;gap:12px;font-size:13px">
+      <div><strong>Showing margin leak campaigns only</strong> — sorted by margin leak £ descending. <span id="ac-marginleak-banner-count" style="color:var(--text2)"></span></div>
+      <button class="btn btn-ghost" onclick="acClearMarginLeakFilter()" style="font-size:12px">Reset</button>
     </div>
 
     <!-- Strategic insight banner — single AI paragraph at top of Fix Now -->
@@ -7197,6 +7203,9 @@ async function loadActionCentre(force) {
 
 function showActionCentreTab(tab, btnEl) {
   _acState.currentTab = tab;
+  // r33c: clear the margin-leak filter when user explicitly switches tabs.
+  // (The filter is only meaningful on the 'all' tab, set by the tile click.)
+  if (tab !== 'all') _acState.marginLeakFilter = false;
   document.querySelectorAll('#page-action-centre .tab-btn').forEach(function(b){ b.classList.remove('active'); });
   if (btnEl) btnEl.classList.add('active');
   renderActionCentreList(tab);
@@ -7235,6 +7244,24 @@ function renderActionCentreList(tab) {
   if (search) items = items.filter(function(i){ return (i.campaignName || i.title || '').toLowerCase().includes(search); });
   if (agent)  items = items.filter(function(i){ return (i.agent || '') === agent; });
 
+  // r33c: margin-leak drill-down — when the Margin leak tile was clicked, filter
+  // the All tab to only campaigns with marginLeak > 0 and sort biggest leakers first.
+  if (_acState.marginLeakFilter && useTab === 'all') {
+    items = items.filter(function(i){ return (i.marginLeak || 0) > 0; });
+    items.sort(function(a, b){ return (b.marginLeak || 0) - (a.marginLeak || 0); });
+  }
+  // Show/hide the banner based on filter state + current tab
+  const mlBanner = document.getElementById('ac-marginleak-banner');
+  if (mlBanner) {
+    if (_acState.marginLeakFilter && useTab === 'all') {
+      mlBanner.style.display = 'flex';
+      const cnt = document.getElementById('ac-marginleak-banner-count');
+      if (cnt) cnt.textContent = '· ' + items.length + ' campaigns';
+    } else {
+      mlBanner.style.display = 'none';
+    }
+  }
+
   // 'All' tab count
   const allCountEl = document.getElementById('ac-all-count');
   if (allCountEl) allCountEl.textContent = ((_acState.fixnow || []).length + (_acState.lookat || []).length + (_acState.scale || []).length);
@@ -7254,13 +7281,28 @@ function renderActionCentreList(tab) {
       fixnow: '✅ Nothing critical. Switch to "Look at" or "Scale" tabs.',
       lookat: '✅ Nothing on the watch list right now.',
       scale: 'No campaigns ready to scale. Check Fix now first.',
-      all: 'No campaigns match the current filter.'
+      all: _acState.marginLeakFilter ? 'No campaigns currently leaking margin. Reset the filter to see all campaigns.' : 'No campaigns match the current filter.'
     };
     list.innerHTML = '<div class="empty" style="padding:60px 20px;text-align:center;color:var(--text3);font-size:14px">' + (msgs[useTab] || 'Nothing to show.') + '</div>';
     return;
   }
 
   list.innerHTML = items.map(renderAcRow).join('');
+}
+
+// r33c: tile click → set filter, switch to All tab, re-render
+function acFilterByMarginLeak() {
+  _acState.marginLeakFilter = true;
+  _acState.currentTab = 'all';
+  document.querySelectorAll('#page-action-centre .tab-btn').forEach(function(b){ b.classList.remove('active'); });
+  const allBtn = document.getElementById('ac-tab-all');
+  if (allBtn) allBtn.classList.add('active');
+  renderActionCentreList('all');
+}
+// r33c: clear filter (banner Reset button)
+function acClearMarginLeakFilter() {
+  _acState.marginLeakFilter = false;
+  renderActionCentreList(_acState.currentTab);
 }
 
 function renderAcRow(item) {

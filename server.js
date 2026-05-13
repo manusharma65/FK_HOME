@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-14 r33b (PLUMBING SHIP. Three changes on top of r33a: (1) End-of-day snapshot capture at 23:45 London — runs saveDailySnapshot one last time before Amazon today-stream rolls over at midnight, locking in the day's final figures cleanly. Previously snapshots only saved during live sync; if last sync was 18:00 the snapshot ended up missing 6 hours of late activity; (2) AGENT_ALIASES hardcoded dict replaced with users-table lookup, cached 5 min, refreshed in background. First-name-only canonical form ('Kunal Sharma' → 'Kunal'). Hardcoded {aryan, aryan tomar, satyam} kept as last-resort fallback if users table query fails or returns empty. Adding a new agent to user management now gives canonicalisation for free within 5 minutes, no restart; (3) 04:30 r22 cron removed — nothing reads amazon_asin_ad_performance any more after r33a switched 4 read sites to amazon_asin_ad_perf_7d. Table left in DB for now, can be dropped manually. fetchAdvertisedProductReport() function preserved for the admin backfill endpoint.)
+// CampaignPulse — deploy marker 2026-05-14 r33c (FEATURES SHIP. Three changes on top of r33b: (1) Amazon daily scheduler now reads active agents from users table (department in amazon/manager, is_active=true, role in agent/manager/owner) — was hardcoded ['Aryan','Satyam']. Hardcoded fallback retained if DB lookup fails. Same swap applied to /api/tasks list, /api/tasks/:id/reopen log, and status-update log. Adding new agents like Kunal to user management is enough; (2) Keyword AI prompt rewritten for trending. Pulls TWO 7-day windows (current and prior), computes per-term week-over-week deltas, sends AI three sorted lists: top-50-by-spend, top-30-by-growth among returning terms, top-30 newcomers, top-20 declining. No magic thresholds — AI decides what's signal. New prompt asks about rising winners / new wasters / hidden opportunities / budget free-up. Legacy response shape preserved for existing UI; (3) Action Centre Margin leak (7d) tile is now clickable — adds per-campaign marginLeak field to baseRow, frontend filters All tab to leakers only, sorted biggest first, with dismissible banner. The earlier '14d ACOS' relabel idea was cancelled after code audit — existing labels accurately describe their data, no mislabel exists.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1150,6 +1150,37 @@ async function getActiveAgentPrefixes() {
   _activeAgentPrefixesCache = { prefixes: prefixes, expiresAt: now + 5 * 60 * 1000 };
   console.log('[r32b agent-prefixes] resolved: ' + prefixes.join(', '));
   return prefixes;
+}
+
+// r33c: list of canonical agent names eligible for daily Amazon task assignment.
+// Used by runDailyScheduler — was hardcoded ['Aryan','Satyam']. Now reads the
+// same users table as getActiveAgentPrefixes so adding an Amazon agent to user
+// management (e.g. Kunal) automatically gives them daily-task coverage.
+// Falls back to ['Aryan','Satyam'] if DB lookup fails or returns empty.
+async function getActiveAmazonAgents() {
+  if (!db) return ['Aryan', 'Satyam'];
+  try {
+    const r = await db.query(
+      "SELECT name FROM users " +
+      "WHERE is_active = TRUE " +
+      "  AND LOWER(department) IN ('amazon','manager') " +
+      "  AND LOWER(role) IN ('agent','manager','owner','admin') " +
+      "  AND name IS NOT NULL AND TRIM(name) <> ''"
+    );
+    const names = r.rows
+      .map(function(u){ return u.name.trim().split(/\s+/)[0]; })
+      .map(function(f){ return f.charAt(0).toUpperCase() + f.slice(1).toLowerCase(); })
+      .filter(function(s){ return s.length >= 2; });
+    const unique = Array.from(new Set(names));
+    if (unique.length === 0) {
+      console.warn('[r33c amazon-agents] no agents found — using hardcoded fallback');
+      return ['Aryan', 'Satyam'];
+    }
+    return unique;
+  } catch(e) {
+    console.error('[r33c amazon-agents] DB query error: ' + e.message + ' — using hardcoded fallback');
+    return ['Aryan', 'Satyam'];
+  }
 }
 
 async function fetchCampaigns() {
@@ -3297,6 +3328,11 @@ async function runDailyTaskScheduler() {
   console.log('Running daily task scheduler...');
   const dashUrl = process.env.DASHBOARD_URL || 'https://campaignpulse-setup-production.up.railway.app';
 
+  // r33c: agent eligibility list now comes from users table, not hardcoded ['Aryan','Satyam'].
+  // Adding a new Amazon agent in user management gives them daily-task coverage automatically.
+  const eligibleAgents = await getActiveAmazonAgents();
+  console.log('[r33c] daily scheduler eligible agents: ' + eligibleAgents.join(', '));
+
   try {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
@@ -3318,7 +3354,7 @@ async function runDailyTaskScheduler() {
       camps.forEach(function(c) {
         if (!c.campaignId) return;
         const agent = extractAgentFromCampaign(c.name) || 'Unassigned';
-        if (!['Aryan','Satyam'].includes(agent)) return;
+        if (!eligibleAgents.includes(agent)) return;
         if (!campHistory[c.campaignId]) {
           campHistory[c.campaignId] = { campaignId: c.campaignId, name: c.name || '', agent: agent, portfolio: c.portfolio || '', targetingType: c.targetingType || '', days: [] };
         }
@@ -3949,7 +3985,14 @@ app.post('/api/ai/analyse', async function(req, res) {
 });
 
 // ── Keyword Intelligence ─────────────────────────────────────────────────
-let keywordState = { reportId: null, requested: 0, data: null, analysis: null, lastAnalysed: 0 };
+// r33c: now tracks TWO 7-day windows. `data` = current week (today-7 → today),
+// `priorData` = prior week (today-14 → today-7). Analysis runs only when both
+// arrive. Comparison feeds the AI a richer "what's changed" picture for trending.
+let keywordState = {
+  reportId: null, requested: 0, data: null,
+  priorReportId: null, priorRequested: 0, priorData: null,
+  analysis: null, lastAnalysed: 0
+};
 
 async function requestSearchTermReport() {
   const now = Date.now();
@@ -3965,6 +4008,32 @@ async function requestSearchTermReport() {
     keywordState.requested = now;
     console.log('Search term report requested: ' + keywordState.reportId);
   } catch(e) { console.error('Search term report error: ' + e.message); }
+}
+
+// r33c: pull the PRIOR 7-day window (days 7-14 ago) for week-over-week comparison.
+// Same columns and shape as current week. Cached for 24h since it's historical.
+async function requestPriorSearchTermReport() {
+  const now = Date.now();
+  if (keywordState.priorReportId || (now - keywordState.priorRequested) < 24 * 60 * 60 * 1000) return;
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  const sevenAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const fourteenAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  try {
+    const res = await axios.post('https://advertising-api-eu.amazon.com/reporting/reports', {
+      name: 'CampaignPulse Search Terms PRIOR ' + sevenAgo,
+      startDate: fourteenAgo, endDate: sevenAgo,
+      configuration: {
+        adProduct: 'SPONSORED_PRODUCTS', groupBy: ['searchTerm'],
+        columns: ['campaignId', 'campaignName', 'adGroupId', 'adGroupName', 'keywordId', 'keyword', 'matchType', 'searchTerm', 'cost', 'clicks', 'impressions', 'purchases14d', 'sales14d'],
+        reportTypeId: 'spSearchTerm', timeUnit: 'SUMMARY', format: 'GZIP_JSON'
+      }
+    }, { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) });
+    keywordState.priorReportId = res.data.reportId;
+    keywordState.priorRequested = now;
+    console.log('[r33c] PRIOR search term report requested: ' + keywordState.priorReportId);
+  } catch(e) { console.error('[r33c] PRIOR search term report error: ' + e.message); }
 }
 
 async function checkSearchTermReport() {
@@ -3983,9 +4052,46 @@ async function checkSearchTermReport() {
       keywordState.data = JSON.parse(decompressed.toString());
       keywordState.reportId = null;
       console.log('Search term report downloaded: ' + keywordState.data.length + ' records');
-      await analyseKeywords();
+      // r33c: now waits for prior-week data too before analysing
+      await maybeAnalyseKeywords();
     } else if (status === 'FAILED') { console.log('Search term report failed'); keywordState.reportId = null; }
   } catch(e) { console.error('Search term check error: ' + e.message); keywordState.reportId = null; }
+}
+
+// r33c: poll the prior-week report. Mirrors checkSearchTermReport.
+async function checkPriorSearchTermReport() {
+  if (!keywordState.priorReportId) return;
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  try {
+    const statusRes = await axios.get('https://advertising-api-eu.amazon.com/reporting/reports/' + keywordState.priorReportId, { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) });
+    const status = statusRes.data.status;
+    console.log('[r33c] PRIOR search term report status: ' + status);
+    if (status === 'COMPLETED') {
+      const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+      const zlib = require('zlib');
+      const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+      keywordState.priorData = JSON.parse(decompressed.toString());
+      keywordState.priorReportId = null;
+      console.log('[r33c] PRIOR search term report downloaded: ' + keywordState.priorData.length + ' records');
+      await maybeAnalyseKeywords();
+    } else if (status === 'FAILED') { console.log('[r33c] PRIOR search term report failed'); keywordState.priorReportId = null; }
+  } catch(e) { console.error('[r33c] PRIOR search term check error: ' + e.message); keywordState.priorReportId = null; }
+}
+
+// r33c: run analysis only when both current and prior windows are loaded.
+// Falls back to current-only analysis if prior is missing (e.g. first boot).
+async function maybeAnalyseKeywords() {
+  if (!keywordState.data) return;
+  if (!keywordState.priorData) {
+    console.log('[r33c] current week ready but prior not yet — kicking off prior pull');
+    requestPriorSearchTermReport().catch(function(){});
+    // Run with current-only data for now; will re-analyse when prior arrives
+    await analyseKeywords();
+    return;
+  }
+  await analyseKeywords();
 }
 
 // ─── r22: Sponsored Products advertisedProduct report ───────────────────────
@@ -4303,14 +4409,73 @@ async function analyseKeywords() {
   if (!process.env.ANTHROPIC_API_KEY) { keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); return; }
   try {
     const data = keywordState.data;
-    const wasters = data.filter(function(r){ return parseFloat(r.cost||0) > 5 && parseInt(r.purchases14d||0) === 0 && parseInt(r.clicks||0) > 3; }).sort(function(a,b){ return parseFloat(b.cost||0) - parseFloat(a.cost||0); }).slice(0, 20);
-    const converters = data.filter(function(r){ return parseInt(r.purchases14d||0) > 0 && r.matchType !== 'EXACT'; }).sort(function(a,b){ return parseInt(b.purchases14d||0) - parseInt(a.purchases14d||0); }).slice(0, 20);
-    const autoWasters = wasters.filter(function(r){ return (r.campaignName||'').toLowerCase().includes('auto'); });
-    const manualWasters = wasters.filter(function(r){ return !(r.campaignName||'').toLowerCase().includes('auto'); });
-    const autoConverters = converters.filter(function(r){ return (r.campaignName||'').toLowerCase().includes('auto'); });
-    const manualConverters = converters.filter(function(r){ return !(r.campaignName||'').toLowerCase().includes('auto'); });
-    const totalWastedSpend = wasters.reduce(function(s,r){ return s+parseFloat(r.cost||0); }, 0);
-    const totalConvValue = converters.reduce(function(s,r){ return s+parseFloat(r.sales14d||0); }, 0);
+    const priorData = keywordState.priorData || [];
+    const havePrior = priorData.length > 0;
+
+    // r33c: build per-term week-over-week comparison map keyed by searchTerm
+    // (normalised lower-case to merge case variants). Each entry holds current
+    // and prior totals so the AI can see what's changed.
+    const termIndex = {};
+    function ingest(rows, slot) {
+      rows.forEach(function(r){
+        const term = String(r.searchTerm || '').trim().toLowerCase();
+        if (!term) return;
+        if (!termIndex[term]) {
+          termIndex[term] = {
+            searchTerm: r.searchTerm,
+            current: { cost: 0, clicks: 0, impressions: 0, purchases: 0, sales: 0 },
+            prior:   { cost: 0, clicks: 0, impressions: 0, purchases: 0, sales: 0 },
+            campaigns: new Set(), matchTypes: new Set()
+          };
+        }
+        const t = termIndex[term];
+        t[slot].cost += parseFloat(r.cost || 0);
+        t[slot].clicks += parseInt(r.clicks || 0);
+        t[slot].impressions += parseInt(r.impressions || 0);
+        t[slot].purchases += parseInt(r.purchases14d || 0);
+        t[slot].sales += parseFloat(r.sales14d || 0);
+        if (r.campaignName) t.campaigns.add(r.campaignName);
+        if (r.matchType) t.matchTypes.add(r.matchType);
+      });
+    }
+    ingest(data, 'current');
+    if (havePrior) ingest(priorData, 'prior');
+
+    // Sorted views the AI will reason over. No hand-picked thresholds — pass the AI
+    // the top of each list and let it decide what's worth flagging.
+    const allTerms = Object.values(termIndex);
+
+    // List 1: top-by-current-spend (overall budget weight)
+    const topBySpend = allTerms.slice().sort(function(a,b){ return b.current.cost - a.current.cost; }).slice(0, 50);
+
+    // List 2: returning terms sorted by impression-growth ratio (current/prior).
+    // Skip terms with zero prior impressions (those go in newcomers list).
+    const returning = allTerms.filter(function(t){ return t.prior.impressions > 0 && t.current.impressions > 0; });
+    returning.forEach(function(t){ t._growth = t.current.impressions / t.prior.impressions; });
+    const topByGrowth = returning.slice().sort(function(a,b){ return (b._growth||0) - (a._growth||0); }).slice(0, 30);
+
+    // List 3: top newcomers — present this week, absent prior week. Sorted by
+    // current impressions (volume of demand).
+    const newcomers = havePrior
+      ? allTerms.filter(function(t){ return t.prior.impressions === 0 && t.current.impressions > 0; })
+                .sort(function(a,b){ return b.current.impressions - a.current.impressions; }).slice(0, 30)
+      : [];
+
+    // List 4: declining — present last week, much smaller this week
+    const decliningPool = havePrior
+      ? returning.filter(function(t){ return (t._growth || 0) < 0.7; })
+      : [];
+    const declining = decliningPool.slice().sort(function(a,b){ return (a._growth||1) - (b._growth||1); }).slice(0, 20);
+
+    function fmtTerm(t) {
+      const c = t.current, p = t.prior;
+      const growth = (p.impressions > 0) ? ((c.impressions / p.impressions) * 100 - 100).toFixed(0) + '%' : 'NEW';
+      const matchType = Array.from(t.matchTypes).join(',') || '-';
+      const campaigns = Array.from(t.campaigns).slice(0,2).join(' / ') || '-';
+      return t.searchTerm + ' | now £' + c.cost.toFixed(2) + ' / ' + c.impressions + ' impr / ' + c.purchases + ' sales' +
+        (havePrior ? (' | prior £' + p.cost.toFixed(2) + ' / ' + p.impressions + ' impr / ' + p.purchases + ' sales') : '') +
+        ' | Δimpr: ' + growth + ' | ' + matchType + ' | ' + campaigns;
+    }
 
     let dismissedLines = '';
     try {
@@ -4318,13 +4483,46 @@ async function analyseKeywords() {
       if (dismissed.rows.length > 0) dismissedLines = 'PREVIOUSLY DISMISSED KEYWORDS (do NOT recommend these again):\n' + dismissed.rows.map(function(d){ return d.search_term + ' | Campaign: ' + d.campaign + ' | Reason: ' + d.reason; }).join('\n') + '\n';
     } catch(e) {}
 
+    const totalCurrentSpend = allTerms.reduce(function(s,t){ return s + t.current.cost; }, 0);
+    const totalCurrentSales = allTerms.reduce(function(s,t){ return s + t.current.sales; }, 0);
+
     const NL = '\n';
-    const wasteAutoLines = autoWasters.slice(0,25).map(function(r){ return r.searchTerm + ' | £' + parseFloat(r.cost||0).toFixed(2) + ' | ' + (r.clicks||0) + ' clicks | ' + r.campaignName; }).join(NL);
-    const wasteManualLines = manualWasters.slice(0,25).map(function(r){ return r.searchTerm + ' | £' + parseFloat(r.cost||0).toFixed(2) + ' | ' + (r.clicks||0) + ' clicks | ' + r.campaignName; }).join(NL);
-    const convAutoLines = autoConverters.slice(0,25).map(function(r){ return r.searchTerm + ' | ' + r.purchases14d + ' purchases | £' + parseFloat(r.sales14d||0).toFixed(2) + ' | ' + (r.matchType||'') + ' | ' + r.campaignName; }).join(NL);
-    const convManualLines = manualConverters.slice(0,25).map(function(r){ return r.searchTerm + ' | ' + r.purchases14d + ' purchases | £' + parseFloat(r.sales14d||0).toFixed(2) + ' | ' + (r.matchType||'') + ' | ' + r.campaignName; }).join(NL);
-    const jsonFmt = '{"wasteReduction":{"totalWasted":"£X","estimatedSaving":"£X/week","topWasters":[{"searchTerm":"","campaign":"","campaignType":"auto or manual","spend":"£X","clicks":0,"recommendation":"","reason":""}]},"newKeywords":{"totalOpportunities":0,"estimatedRevenue":"£X/week","topOpportunities":[{"searchTerm":"","campaign":"","campaignType":"auto or manual","purchases":0,"sales":"£X","matchType":"","recommendation":"","estimatedImpact":""}]},"patterns":{"wastePatterns":"","keyInsight":""},"structuralChange":{"recommendation":"","expectedImpact":"","priority":"high"},"summary":"","estimatedWeeklyImpact":"£X"}';
-    const prompt = ['You are an Amazon Advertising expert for FK Sports UK (fitness equipment).', 'Analyse 7-day search term data. Total: ' + data.length + ' terms. Wasted: £' + totalWastedSpend.toFixed(2) + '. Converting value: £' + totalConvValue.toFixed(2), '', 'WASTING TERMS AUTO (' + autoWasters.length + '):', wasteAutoLines, 'WASTING TERMS MANUAL (' + manualWasters.length + '):', wasteManualLines, '', 'CONVERTING NOT EXACT - AUTO (' + autoConverters.length + '):', convAutoLines, 'CONVERTING NOT EXACT - MANUAL (' + manualConverters.length + '):', convManualLines, '', dismissedLines, 'Q1: Which terms need NEGATIVE KEYWORDS?', 'Q2: Which converting terms become EXACT MATCH?', 'Q3: Patterns in wasting terms?', 'Q4: Single most impactful structural change?', '', 'Return ONLY valid JSON, no other text:', jsonFmt].join(NL);
+    const sections = [];
+    sections.push('You are an Amazon Advertising expert for FK Sports UK (fitness equipment).');
+    sections.push('Analyse search-term TRENDING data. Goal: identify rising opportunities, new wasters, and declining terms — NOT just generic negative-keyword suggestions.');
+    sections.push('');
+    sections.push('CURRENT 7-DAY WINDOW: ' + data.length + ' raw rows, ' + allTerms.length + ' unique terms. Total spend £' + totalCurrentSpend.toFixed(2) + ', sales £' + totalCurrentSales.toFixed(2) + '.');
+    if (havePrior) {
+      sections.push('PRIOR 7-DAY WINDOW (for week-over-week comparison): ' + priorData.length + ' raw rows.');
+    } else {
+      sections.push('PRIOR WEEK DATA NOT YET AVAILABLE — treat all analysis as current-week only.');
+    }
+    sections.push('');
+    sections.push('LIST 1 — TOP 50 BY CURRENT SPEND (where the money is going):');
+    sections.push(topBySpend.map(fmtTerm).join(NL));
+    sections.push('');
+    if (havePrior) {
+      sections.push('LIST 2 — TOP 30 RETURNING TERMS BY IMPRESSION GROWTH (week-over-week rising demand on terms we already see):');
+      sections.push(topByGrowth.map(fmtTerm).join(NL));
+      sections.push('');
+      sections.push('LIST 3 — TOP 30 NEWCOMERS (terms with impressions this week but zero last week — new demand we may not have targeted yet):');
+      sections.push(newcomers.map(fmtTerm).join(NL));
+      sections.push('');
+      sections.push('LIST 4 — TOP 20 DECLINING (returning terms with significant impression drop — may no longer need budget):');
+      sections.push(declining.map(fmtTerm).join(NL));
+      sections.push('');
+    }
+    sections.push(dismissedLines);
+    sections.push('Answer these 4 questions, every answer grounded in specific terms from the lists above:');
+    sections.push('Q1: RISING WINNERS — Which terms from LIST 2 (or LIST 1 with positive growth) are gaining demand AND already converting? These are exact-match candidates to capture more of the growth.');
+    sections.push('Q2: NEW WASTERS — Which terms from LIST 3 (newcomers) are already burning spend with no sales? Negative-keyword these now before they grow.');
+    sections.push('Q3: HIDDEN OPPORTUNITIES — Which rising/new terms hint at theme shifts (seasonal, new product category demand, competitor brand searches we should respond to)?');
+    sections.push('Q4: BUDGET FREE-UP — Which declining terms can we let go of to redirect budget?');
+    sections.push('');
+    const jsonFmt = '{"risingWinners":{"summary":"","items":[{"searchTerm":"","weekOverWeekGrowth":"","currentImpressions":0,"currentSales":"£X","action":"","reason":""}]},"newWasters":{"summary":"","items":[{"searchTerm":"","currentSpend":"£X","clicks":0,"action":"add as negative","reason":""}]},"hiddenOpportunities":{"summary":"","items":[{"theme":"","examples":[""],"recommendation":""}]},"budgetFreeup":{"summary":"","items":[{"searchTerm":"","priorImpressions":0,"currentImpressions":0,"action":"","reason":""}]},"keyInsight":"","estimatedWeeklyImpact":"£X"}';
+    sections.push('Return ONLY valid JSON, no other text:');
+    sections.push(jsonFmt);
+    const prompt = sections.join(NL);
 
     const aiRes = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 4000, messages: [{ role: 'user', content: prompt }] }, { headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' } });
     const text = aiRes.data.content[0].text;
@@ -4333,9 +4531,44 @@ async function analyseKeywords() {
     const jsonEnd = clean.lastIndexOf('}');
     if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found in response');
     const parsed = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
-    keywordState.analysis = { wasteReduction: parsed.wasteReduction || {}, newKeywords: parsed.newKeywords || {}, bidChanges: parsed.bidChanges || [], portfolioInsights: { patterns: (parsed.patterns && parsed.patterns.keyInsight) || (parsed.portfolioInsights && parsed.portfolioInsights.patterns) || '', topPerforming: (parsed.portfolioInsights && parsed.portfolioInsights.topPerforming) || '', needsAttention: (parsed.portfolioInsights && parsed.portfolioInsights.needsAttention) || '' }, structuralChange: parsed.structuralChange || null, summary: parsed.summary || '', estimatedWeeklyImpact: parsed.estimatedWeeklyImpact || '' };
+
+    // r33c: keep the legacy field names (wasteReduction/newKeywords/etc) populated
+    // for backward compatibility with the existing index.html keyword tab. Map the
+    // new trending output into the old structure so the UI keeps rendering. New
+    // fields (risingWinners/etc) are added alongside for any future UI work.
+    keywordState.analysis = {
+      // New trending shape
+      risingWinners: parsed.risingWinners || { summary:'', items:[] },
+      newWasters: parsed.newWasters || { summary:'', items:[] },
+      hiddenOpportunities: parsed.hiddenOpportunities || { summary:'', items:[] },
+      budgetFreeup: parsed.budgetFreeup || { summary:'', items:[] },
+      keyInsight: parsed.keyInsight || '',
+      estimatedWeeklyImpact: parsed.estimatedWeeklyImpact || '',
+      windowsAvailable: havePrior ? 'current+prior' : 'current-only',
+      // Legacy shape for existing UI
+      wasteReduction: {
+        totalWasted: '£' + (parsed.newWasters && parsed.newWasters.items || []).reduce(function(s,i){ return s + parseFloat(String(i.currentSpend||'0').replace(/[£,]/g,'')); }, 0).toFixed(2),
+        topWasters: (parsed.newWasters && parsed.newWasters.items || []).map(function(i){
+          return { searchTerm: i.searchTerm, campaign: '', spend: i.currentSpend, clicks: i.clicks, recommendation: i.action || 'Add as negative keyword', reason: i.reason };
+        })
+      },
+      newKeywords: {
+        totalOpportunities: ((parsed.risingWinners && parsed.risingWinners.items) || []).length,
+        topOpportunities: (parsed.risingWinners && parsed.risingWinners.items || []).map(function(i){
+          return { searchTerm: i.searchTerm, campaign: '', purchases: 0, sales: i.currentSales, matchType: 'EXACT', recommendation: i.action || 'Add as exact match', estimatedImpact: i.reason };
+        })
+      },
+      portfolioInsights: {
+        patterns: parsed.keyInsight || '',
+        topPerforming: ((parsed.risingWinners && parsed.risingWinners.items && parsed.risingWinners.items[0]) || {}).searchTerm || '',
+        needsAttention: ((parsed.newWasters && parsed.newWasters.items && parsed.newWasters.items[0]) || {}).searchTerm || ''
+      },
+      structuralChange: parsed.hiddenOpportunities ? { recommendation: parsed.hiddenOpportunities.summary, expectedImpact: '', priority: 'high' } : null,
+      summary: parsed.keyInsight || '',
+      bidChanges: []
+    };
     keywordState.lastAnalysed = Date.now();
-    console.log('Keyword AI analysis complete');
+    console.log('[r33c] Keyword AI analysis complete (' + keywordState.analysis.windowsAvailable + ')');
   } catch(e) { console.error('Keyword analysis error: ' + e.message); keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); }
 }
 
@@ -4348,7 +4581,16 @@ function ruleBasedKeywordAnalysis(data) {
 
 app.get('/api/keywords/status', function(req, res) { res.json({ reportId: keywordState.reportId, hasData: !!keywordState.data, dataSize: keywordState.data ? keywordState.data.length : 0, hasAnalysis: !!keywordState.analysis, lastAnalysed: keywordState.lastAnalysed, requested: keywordState.requested }); });
 app.get('/api/keywords/analysis', function(req, res) { res.json({ analysis: keywordState.analysis, dataSize: keywordState.data ? keywordState.data.length : 0 }); });
-app.post('/api/keywords/refresh', async function(req, res) { keywordState.requested = 0; keywordState.reportId = null; await requestSearchTermReport(); res.json({ success: true, reportId: keywordState.reportId }); });
+app.post('/api/keywords/refresh', async function(req, res) {
+  keywordState.requested = 0;
+  keywordState.reportId = null;
+  // r33c: also kick off prior-week pull when manually refreshing
+  keywordState.priorRequested = 0;
+  keywordState.priorReportId = null;
+  await requestSearchTermReport();
+  await requestPriorSearchTermReport();
+  res.json({ success: true, reportId: keywordState.reportId, priorReportId: keywordState.priorReportId });
+});
 
 app.post('/api/keywords/dismiss', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
@@ -8017,7 +8259,9 @@ app.post('/api/tasks/:id/reopen', async function(req, res) {
     if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
     const task = taskRes.rows[0];
     await db.query('UPDATE campaign_tasks SET status=$1, resolved_at=NULL, updated_at=NOW() WHERE id=$2', ['open', req.params.id]);
-    const agentName = (task.agent_name && ['Aryan','Satyam'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
+    // r33c: agent eligibility from users table, not hardcoded list.
+    const eligibleAgents = await getActiveAmazonAgents();
+    const agentName = (task.agent_name && eligibleAgents.includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
     await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', agentName, 'reopened', 'Task reopened — moved back to Due', task.status, 'open', parseInt(req.params.id)]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -8480,6 +8724,19 @@ app.get('/api/amazon/action-centre', async function(req, res) {
 
       // Check rules in priority order; assign FIRST match only (don't double-list)
       let placed = false;
+      // r33c: per-campaign margin leak — same 16% breakeven formula as the
+      // headline marginLeak7d aggregate. Exposed on every row (not just P1
+      // chronic_acos pushes) so the frontend can filter/sort the All tab by it
+      // when the Margin leak tile is clicked.
+      let rowMarginLeak = 0;
+      if (spend7 > 0) {
+        if (sales7 === 0) {
+          rowMarginLeak = spend7;
+        } else {
+          const profitable = sales7 * 0.16;
+          if (spend7 > profitable) rowMarginLeak = spend7 - profitable;
+        }
+      }
       const baseRow = {
         campaignId: id,
         campaignName: c.name,
@@ -8489,7 +8746,8 @@ app.get('/api/amazon/action-centre', async function(req, res) {
         sales7d: +sales7.toFixed(2),
         acos7d: acos7d,
         agent: c.agent || '',
-        targetingType: c.targetingType || ''
+        targetingType: c.targetingType || '',
+        marginLeak: +rowMarginLeak.toFixed(2)
       };
       const viewBtn = { label: 'View', handler: 'acViewCampaign(\'' + id + '\')', style: 'ghost' };
       const snoozeBtn = { label: 'Snooze 7d', handler: 'acSnoozeCampaign(\'' + id + '\', 7)', style: 'ghost' };
@@ -8843,7 +9101,12 @@ app.post('/api/settings', async function(req, res) {
 app.get('/api/tasks', async function(req, res) {
   if (!db) return res.json({ tasks: [] });
   try {
-    const result = await db.query("SELECT * FROM campaign_tasks WHERE agent_name IN ('Aryan','Satyam') ORDER BY score DESC, created_date DESC LIMIT 500");
+    // r33c: was hardcoded ('Aryan','Satyam'). Now dynamic from users table.
+    const eligibleAgents = await getActiveAmazonAgents();
+    const result = await db.query(
+      "SELECT * FROM campaign_tasks WHERE agent_name = ANY($1::text[]) ORDER BY score DESC, created_date DESC LIMIT 500",
+      [eligibleAgents]
+    );
     // r21: bulk-fetch subtask counts for all tasks in one query — no N+1
     const taskIds = result.rows.map(function(r){ return r.id; });
     const subtaskCounts = {};
@@ -8932,7 +9195,9 @@ app.post('/api/tasks/:id/status', async function(req, res) {
     else { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW() WHERE id=$3'; params = [status, notes||'', req.params.id]; }
     await db.query(query, params);
     try {
-      const logAgent = (task.agent_name && ['Aryan','Satyam'].includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
+      // r33c: agent eligibility from users table, not hardcoded list.
+      const eligibleAgents = await getActiveAmazonAgents();
+      const logAgent = (task.agent_name && eligibleAgents.includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
       await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', logAgent, status, notes||'', statusBefore, status, parseInt(req.params.id)]);
     } catch(logErr) { console.error('Activity log error: ' + logErr.message); }
     res.json({ success: true });
@@ -11571,6 +11836,9 @@ cron.schedule('0 8,13,18 * * *', function() {
   console.log('Scheduled keyword report fetch...');
   requestSearchTermReport().catch(function(e){ console.error('Scheduled KW request error: ' + e.message); });
   checkSearchTermReport().catch(function(e){ console.error('Scheduled KW check error: ' + e.message); });
+  // r33c: also pull/poll the prior-week window for week-over-week trending
+  requestPriorSearchTermReport().catch(function(e){ console.error('[r33c] PRIOR KW request error: ' + e.message); });
+  checkPriorSearchTermReport().catch(function(e){ console.error('[r33c] PRIOR KW check error: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 cron.schedule('0 8 * * *', function() {
