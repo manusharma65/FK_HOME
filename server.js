@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-12 r32b (Filter campaigns to active-agent-owned only. fetchCampaigns now drops campaigns whose name doesnt start with an active agent prefix. Active prefixes auto-discovered from users table (department=amazon/manager, is_active=true, role agent/manager/owner) plus optional ACTIVE_AGENT_PREFIXES env var override. 5-min cache so new agents added to user management appear within minutes without restart. Hardcoded Aryan/Satyam fallback if DB and env both empty. Fixes r32 regression where ENABLED+PAUSED filter pulled in 20+ months of dead campaigns.)
+// CampaignPulse — deploy marker 2026-05-13 r33a (DATA CORRECTNESS SHIP. Five fixes: (1) Product card aggregator and 3 sibling reads now use the fresh amazon_asin_ad_perf_7d snapshot table instead of the stale daily amazon_asin_ad_performance table — fixes product card showing 1/10 of real spend; (2) stop storing/trusting Amazon clickThroughRate field, ctr always computed from clicks/impressions at display time — fixes Daily History 146 percent CTRs; (3) delete boot-time UPDATE that was overwriting agent_name with parsed campaign name on every restart — fixes Google tasks showing campaign names as agents; (4) fix r29l created_at typo + harden r29f Guard B with explicit type cast and success logging — fixes Google task duplicates like Eva Mats; (5) dashboard 7d wasted threshold from greater than 5 to greater than 0 — unifies wasted-spend formula across surfaces. Plus one-off boot cleanup that resets Google agent_name to Unassigned for any row not naming a real agent. Old r22 daily cron left running for one ship as safety net; retired in Ship 2.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1512,36 +1512,26 @@ async function syncCampaigns() {
         clicks: parseInt(s.clicks || 0),
         impressions: parseInt(s.impressions || 0),
         conversions: parseInt(s.purchases1d || 0),
-        ctr: parseFloat(s.clickThroughRate || 0),
+        // r33a: ctr deliberately not stored — Amazon's clickThroughRate is unreliable
+        // (returns the value already as %, but old code paths multiplied by 100,
+        // producing 146% etc in Daily History). Always compute clicks/impressions×100
+        // at display time. UI uses realCtr() helper.
+        ctr: null,
         cpc: parseFloat(s.costPerClick || 0)
       };
     });
 
-    // r32: store raw clickThroughRate so we can recompute CTR from clicks/impressions
-    // at display time and diagnose if Amazon's value is unreliable
+    // r33a: stats7d — same CTR cleanup as today. Diagnostic log removed (root cause confirmed).
     const stats7d = {};
-    let _ctrSampleLogged = false;
     summary7d.forEach(function(s) {
-      const rawCtr = parseFloat(s.clickThroughRate || 0);
-      const clicks = parseInt(s.clicks || 0);
-      const impr = parseInt(s.impressions || 0);
-      const computedCtr = impr > 0 ? (clicks / impr) : 0;
-      // Log one sample per sync where Amazon's CTR diverges from computed
-      if (!_ctrSampleLogged && impr > 100 && Math.abs(rawCtr - computedCtr) > 0.001) {
-        console.log('[r32 CTR-diag] campaign ' + s.campaignId + ' (' + (s.campaignName||'').slice(0,40) + ')'
-          + ' Amazon raw: ' + rawCtr
-          + ' · clicks/impr: ' + clicks + '/' + impr + ' = ' + (computedCtr*100).toFixed(2) + '%'
-          + ' · 100×raw: ' + (rawCtr*100).toFixed(2) + '%');
-        _ctrSampleLogged = true;
-      }
       stats7d[s.campaignId] = {
         spend: parseFloat(s.cost || 0),
         sales: parseFloat(s.sales7d || 0),
-        clicks: clicks,
-        impressions: impr,
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
         conversions: parseInt(s.purchases7d || 0),
         units: parseInt(s.unitsSoldClicks7d || 0),
-        ctr: parseFloat(s.clickThroughRate || 0),
+        ctr: null,
         cpc: parseFloat(s.costPerClick || 0),
         portfolio: s.portfolioName || '',
         portfolioId: s.portfolioId || ''
@@ -1556,7 +1546,7 @@ async function syncCampaigns() {
         impressions: parseInt(s.impressions || 0),
         conversions: parseInt(s.purchases30d || 0),
         units: parseInt(s.unitsSoldClicks30d || 0),
-        ctr: parseFloat(s.clickThroughRate || 0),
+        ctr: null,
         cpc: parseFloat(s.costPerClick || 0)
       };
     });
@@ -1639,7 +1629,10 @@ async function syncCampaigns() {
         impressions: s7.impressions || 0,
         conversions: s7.conversions || 0,
         units: s7.units || 0,
-        ctr: s7.ctr ? (s7.ctr * 100).toFixed(2) : '0.00',
+        // r33a: CTR computed from primary fields, never trusted from Amazon's clickThroughRate
+        // value (which arrived inconsistent — sometimes as ratio, sometimes as %).
+        // clicks/impressions × 100 always produces correct % regardless of source quirks.
+        ctr: s7.impressions > 0 ? +((s7.clicks / s7.impressions) * 100).toFixed(2) : 0,
         cpc: s7.cpc || 0,
         // Explicit 7d block
         spend7d: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
@@ -1649,7 +1642,8 @@ async function syncCampaigns() {
         impressions7d: s7.impressions || 0,
         conversions7d: s7.conversions || 0,
         units7d: s7.units || 0,
-        ctr7d: s7.ctr ? +(s7.ctr * 100).toFixed(2) : 0,
+        // r33a: 7d CTR computed from primary fields
+        ctr7d: s7.impressions > 0 ? +((s7.clicks / s7.impressions) * 100).toFixed(2) : 0,
         cpc7d: s7.cpc || 0,
         costPerConv7d: cpcv7,
         // 30d block
@@ -1660,7 +1654,7 @@ async function syncCampaigns() {
         impressions30d: s30.impressions || 0,
         conversions30d: s30.conversions || 0,
         units30d: s30.units || 0,
-        ctr30d: s30.ctr ? +(s30.ctr * 100).toFixed(2) : 0,
+        ctr30d: s30.impressions > 0 ? +((s30.clicks / s30.impressions) * 100).toFixed(2) : 0,
         cpc30d: s30.cpc || 0,
         costPerConv30d: cpcv30,
         // Per-day 7d series (sparklines + consecutive-day rules)
@@ -2558,20 +2552,20 @@ async function initTasksTable() {
       console.error('[INIT] google_state_snapshots error: ' + e.message);
     }
 
+    // r33a: removed the boot-time UPDATE that parsed campaign_name and wrote
+    // the first token as agent_name on every restart. That logic was an early
+    // Amazon migration step that long outlived its purpose and was actively
+    // corrupting Google task data — every restart it overwrote agent_name='Unassigned'
+    // with things like 'Eva Mats' or 'May' parsed from campaign names. Replaced
+    // with a one-shot Google-only cleanup that resets bogus values to 'Unassigned'.
     try {
-      const tasks = await db.query('SELECT id, campaign_name FROM campaign_tasks WHERE campaign_name IS NOT NULL');
-      let fixed = 0;
-      for (const row of tasks.rows) {
-        const parts = (row.campaign_name||'').split(/[|@]/);
-        const name = parts[0].trim();
-        const agentName = (name.length > 0 && name.length < 30) ? name : null;
-        if (agentName) {
-          await db.query('UPDATE campaign_tasks SET agent_name=$1 WHERE id=$2', [agentName, row.id]);
-          fixed++;
-        }
-      }
-      if (fixed > 0) console.log('Fixed ' + fixed + ' task agent names');
-    } catch(e) { console.error('Agent name fix error: ' + e.message); }
+      const res = await db.query(
+        "UPDATE campaign_tasks SET agent_name='Unassigned' " +
+        "WHERE department='google' " +
+        "AND agent_name NOT IN ('Rahul','Anuj','Unassigned')"
+      );
+      if (res.rowCount > 0) console.log('[r33a] reset agent_name to Unassigned on ' + res.rowCount + ' Google tasks');
+    } catch(e) { console.error('[r33a agent-name cleanup] ' + e.message); }
   } catch(e) {
     console.error('Tasks table error: ' + e.message);
   }
@@ -2892,21 +2886,32 @@ async function createGoogleTask(taskRow) {
   const exists = await googleTaskAlreadyExistsToday(taskRow.campaignId, taskRow.problemType, taskRow.productKey);
   if (exists) return false;
 
-  // r29f: if there's an OPEN task on this exact target (any age), append a
+  // r29f + r33a: if there's an OPEN task on this exact target (any age), append a
   // "fired again" note to the existing task instead of creating a duplicate.
   // After 2 re-fires while still open, mark the existing task as repeat offender.
-  // This makes the task description evolve as the situation persists, instead
-  // of silently failing on the unique constraint or creating duplicate tasks.
+  //
+  // r33a hardening:
+  //   - Explicit $2::text cast prevents Postgres parameter-type inference issues
+  //     when productKey is null (root cause hypothesis for Eva Mats duplicates).
+  //   - Explicit IS NULL pair check replaces nested COALESCE for clearer semantics.
+  //   - status NOT IN (closed-states) replaces status IN (open-states) so future
+  //     status values (e.g. 'scaling') count as active by default.
+  //   - Always log the result so Railway logs show whether match happened.
   try {
+    const productKeyParam = taskRow.productKey || null;
     const openCheck = await db.query(
       "SELECT id, problem_detail, failure_count, created_date " +
       "FROM campaign_tasks " +
       "WHERE department='google' AND campaign_id=$1 " +
-      "  AND COALESCE(product_key, '')=COALESCE($2, '') " +
-      "  AND status IN ('open','in_progress','discussion','paused') " +
+      "  AND ((product_key IS NULL AND $2::text IS NULL) OR product_key = $2::text) " +
+      "  AND status NOT IN ('complete','archived','dismissed','cancelled') " +
       "ORDER BY created_date DESC LIMIT 1",
-      [String(taskRow.campaignId), taskRow.productKey || null]
+      [String(taskRow.campaignId), productKeyParam]
     );
+    console.log('[r33a GTASK openCheck] campaign=' + taskRow.campaignId +
+      ' productKey=' + (productKeyParam || 'null') +
+      ' problemType=' + taskRow.problemType +
+      ' → ' + (openCheck.rows.length ? 'found existing task #' + openCheck.rows[0].id : 'NONE — will create new'));
     if (openCheck.rows.length) {
       const existing = openCheck.rows[0];
       const daysSinceCreate = Math.floor((Date.now() - new Date(existing.created_date).getTime()) / 86400000);
@@ -2918,11 +2923,11 @@ async function createGoogleTask(taskRow) {
         "UPDATE campaign_tasks SET problem_detail=$1, failure_count=$2, is_repeat_offender=$3, updated_at=NOW() WHERE id=$4",
         [newDetail, newCount, becomeRepeat, existing.id]
       );
-      console.log('[r29f GTASK refire] ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') +
+      console.log('[r33a GTASK refire] ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') +
         ' — existing OPEN task #' + existing.id + ' updated (failure_count=' + newCount + ', repeat=' + becomeRepeat + ')');
       return false;  // didn't create new — updated existing
     }
-  } catch(e) { console.error('[r29f open-task check] ' + e.message); }
+  } catch(e) { console.error('[r33a GTASK openCheck] ' + e.message); }
 
   // r29: read previous task context BEFORE deciding whether to create
   const prevCtx = await getPreviousTaskContext('google', taskRow.campaignId, taskRow.productKey);
@@ -3604,7 +3609,11 @@ app.get('/api/dashboard', async function(req, res) {
   const totalRevenue7d = campaigns.reduce(function(s, c) { return s + (c.sales7d || 0); }, 0);
   const totalSpend7d = campaigns.reduce(function(s, c) { return s + (c.spend7d || 0); }, 0);
   const blendedAcos7d = totalRevenue7d > 0 ? Math.round((totalSpend7d / totalRevenue7d) * 1000) / 10 : 0;
-  const totalWasted7d = campaigns.filter(function(c){ return (c.spend7d||0) > 5 && (c.sales7d||0) === 0; }).reduce(function(s,c){ return s + (c.spend7d || 0); }, 0);
+  // r33a: 7-day wasted now uses the same formula as today's wasted and per-agent wasted —
+  // any spend > 0 with sales = 0 counts as wasted. Previously had a £5 floor which made
+  // the 7d tile under-report vs the daily snapshot which used no floor. One canonical
+  // formula across all "wasted" surfaces now.
+  const totalWasted7d = campaigns.filter(function(c){ return (c.spend7d||0) > 0 && (c.sales7d||0) === 0; }).reduce(function(s,c){ return s + (c.spend7d || 0); }, 0);
   const spendNoRevenue7dCount = campaigns.filter(function(c){ return (c.spend7d||0) > 0 && (c.sales7d||0) === 0; }).length;
 
   // Headline = 7-day (matches table totals and Amazon Seller Central). Keep totalRevenue/Spend/blendedAcos
@@ -5574,15 +5583,17 @@ app.get('/api/amazon/products', async function(req, res) {
       });
     });
 
-    // r25b: ALSO mark any ASIN with actual ad spend in last 7 days as "in a campaign".
+    // r25b + r33a: ALSO mark any ASIN with actual ad spend in last 7 days as "in a campaign".
     // This catches auto-targeted campaigns where the ASIN isn't listed as a target
     // but Amazon's ad report still shows spend on it. Without this, kettlebell-style
     // products show "0 of N ASINs in ads" even when they're getting active ad spend
     // from auto campaigns — and coverage shows 0% misleadingly.
+    //
+    // r33a: switched source from amazon_asin_ad_performance (stale daily table, often
+    // missing days) to amazon_asin_ad_perf_7d (fresh 7d snapshot refreshed every 2h).
     try {
       const adPerfRes = await db.query(
-        "SELECT DISTINCT asin FROM amazon_asin_ad_performance " +
-        "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' AND spend > 0"
+        "SELECT DISTINCT asin FROM amazon_asin_ad_perf_7d WHERE spend > 0"
       );
       adPerfRes.rows.forEach(function(r) {
         if (r.asin && /^B[0-9A-Z]{9}$/.test(r.asin)) advertisedAsins.add(r.asin);
@@ -5719,8 +5730,15 @@ app.get('/api/amazon/products', async function(req, res) {
     // ASIN, aggregated per parent product. See r22 cron block.
     const groupCampaignStats = {};
     try {
-      // Pull last-7-day per-ASIN ad metrics from r22 advertisedProduct table.
+      // r22 + r33a: Pull last-7-day per-ASIN ad metrics from the r31b SUMMARY table.
       // Each ASIN's spend gets attributed to its parent product.
+      //
+      // r33a: switched from amazon_asin_ad_performance (daily table that depends on
+      // the 04:30 cron landing 7 separate days of rows for each ASIN — was only
+      // returning 1 day of data due to cron gaps, causing product cards to show
+      // ~1/10 of real spend) to amazon_asin_ad_perf_7d (single 7d SUMMARY pulled
+      // every 2 hours, always fresh, always complete). Matches what Amazon Seller
+      // Central's Advertised Product report shows for a 7-day window.
       const adRes = await db.query(
         "SELECT asin, " +
         "       SUM(spend) AS spend, SUM(sales) AS sales, " +
@@ -5728,8 +5746,7 @@ app.get('/api/amazon/products', async function(req, res) {
         "       SUM(units) AS conversions, " +
         "       COUNT(DISTINCT campaign_id) AS campaign_count, " +
         "       array_agg(DISTINCT campaign_id) AS campaign_ids " +
-        "FROM amazon_asin_ad_performance " +
-        "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+        "FROM amazon_asin_ad_perf_7d " +
         "GROUP BY asin"
       );
       // Build parent-level aggregates by walking each parent's children ASINs
@@ -5752,9 +5769,10 @@ app.get('/api/amazon/products', async function(req, res) {
         if (g.count > 0 || g.spend > 0) groupCampaignStats[parentSku] = g;
       });
     } catch(e) {
-      // If amazon_asin_ad_performance doesn't exist yet (pre-r22 boot), table
-      // creation hasn't run — fall through to empty stats. Cards will show £0.
-      if (!/does not exist/.test(e.message)) console.error('[r22] ASIN ad perf aggregation: ' + e.message);
+      // r33a: If amazon_asin_ad_perf_7d doesn't exist yet (very fresh boot, first
+      // 7d report still being requested), table creation hasn't run — fall through
+      // to empty stats. Cards will show £0 until the 2-hourly cycle completes.
+      if (!/does not exist/.test(e.message)) console.error('[r33a] ASIN ad perf aggregation: ' + e.message);
     }
 
     // r22: pre-fetch active tasks keyed by parent_sku so cards can show
@@ -6154,10 +6172,13 @@ async function runListingCritique(asin, groupKey, modelId) {
       }
     } catch(e) { console.error('[amz-critique] signals context error: ' + e.message); }
 
-    // r22: Per-ASIN ad performance — pulled from amazon_asin_ad_performance.
+    // r22 + r33a: Per-ASIN ad performance — pulled from amazon_asin_ad_perf_7d.
     // This is the core "are we wasting money?" signal. Summed across child ASINs
     // for the family card, last 7 days. Does NOT explode response size — it
     // adds one summary block to the prompt, not per-ASIN-bullets.
+    //
+    // r33a: switched from amazon_asin_ad_performance (stale daily table) to
+    // amazon_asin_ad_perf_7d (fresh 7d snapshot, refreshed every 2h).
     let adPerfContext = '';
     try {
       if (childAsins.length > 0) {
@@ -6167,8 +6188,8 @@ async function runListingCritique(asin, groupKey, modelId) {
           "       SUM(clicks) AS clicks, SUM(impressions) AS impressions, " +
           "       SUM(orders) AS orders, " +
           "       COUNT(DISTINCT campaign_id) AS campaign_count " +
-          "FROM amazon_asin_ad_performance " +
-          "WHERE asin = ANY($1) AND report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+          "FROM amazon_asin_ad_perf_7d " +
+          "WHERE asin = ANY($1) " +
           "GROUP BY asin",
           [childAsins]
         );
@@ -7612,48 +7633,11 @@ app.get('/api/amazon/campaign-detail/:campaignId', async function(req, res) {
     } catch(e) {
       if (!/does not exist/.test(e.message)) console.error('[r31b] asin 7d lookup: ' + e.message);
     }
-    // Fallback: if 7d snapshot table is empty (not yet pulled, fresh boot), use the
-    // daily-summed legacy table. Less accurate due to overlapping windows but better
-    // than nothing.
-    if (topAsins.length === 0) {
-      try {
-        const asinRows = await db.query(
-          "SELECT a.asin, " +
-          "       SUM(a.spend)::numeric AS spend, " +
-          "       SUM(a.sales)::numeric AS sales, " +
-          "       SUM(a.clicks)::int AS clicks, " +
-          "       SUM(a.impressions)::int AS impressions, " +
-          "       SUM(a.units)::int AS units, " +
-          "       MAX(p.title) AS title, " +
-          "       MAX(p.image_url) AS image_url " +
-          "FROM amazon_asin_ad_performance a " +
-          "LEFT JOIN amazon_products p ON p.asin = a.asin " +
-          "WHERE a.campaign_id = $1 AND a.report_date >= CURRENT_DATE - INTERVAL '7 days' " +
-          "GROUP BY a.asin " +
-          "ORDER BY spend DESC " +
-          "LIMIT 8",
-          [campaignId]
-        );
-        topAsins = asinRows.rows.map(function(r) {
-          const sp = parseFloat(r.spend || 0);
-          const sa = parseFloat(r.sales || 0);
-          return {
-            asin: r.asin,
-            title: r.title || null,
-            image_url: r.image_url || null,
-            spend: +sp.toFixed(2),
-            sales: +sa.toFixed(2),
-            acos: sa > 0 ? +(100 * sp / sa).toFixed(1) : null,
-            clicks: r.clicks || 0,
-            impressions: r.impressions || 0,
-            units: r.units || 0,
-            source: 'daily_sum_fallback'
-          };
-        });
-      } catch(e) {
-        if (!/does not exist/.test(e.message)) console.error('[r24] top-asins lookup: ' + e.message);
-      }
-    }
+    // r33a: removed the daily-table fallback block. Was: "if 7d snapshot empty,
+    // fall back to summing amazon_asin_ad_performance daily rows". That fallback
+    // produced wrong numbers (daily-summed overlapping attribution windows) and
+    // depended on the same 04:30 cron that's been failing. With the primary path
+    // now solidly on the 2h-refreshed snapshot, the fallback only added risk.
 
     // 3) Recent tasks on this campaign — last 30 days, any status
     const taskRows = await db.query(
@@ -9322,19 +9306,22 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
   const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
 
-  // r29l: prevent duplicate open task on same target. If an open/in_progress/discussion/
-  // paused task already exists on this campaign+product combo, refuse with a useful
-  // message pointing the user to the existing task. Manager bypass — they may have
-  // valid reasons. Agent: must cancel/complete the existing task first.
+  // r29l + r33a: prevent duplicate open task on same target. If an open task already
+  // exists on this campaign+product combo, refuse with a useful message pointing the
+  // user to the existing task. Manager bypass — they may have valid reasons.
+  //
+  // r33a fixes: created_at → created_date (column was misnamed, query threw every call).
+  // Also hardened with explicit $2::text cast and IS NULL pair check for safety.
   if (!isPrivileged) {
     try {
+      const productKeyParam = productKey || null;
       const existingOpen = await db.query(
         "SELECT id, status, agent_name FROM campaign_tasks " +
         "WHERE department='google' AND campaign_id=$1 " +
-        "  AND COALESCE(product_key, '')=COALESCE($2, '') " +
-        "  AND status IN ('open','in_progress','discussion','paused') " +
-        "ORDER BY created_at DESC LIMIT 1",
-        [String(campaignId), productKey || null]
+        "  AND ((product_key IS NULL AND $2::text IS NULL) OR product_key = $2::text) " +
+        "  AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+        "ORDER BY created_date DESC LIMIT 1",
+        [String(campaignId), productKeyParam]
       );
       if (existingOpen.rows.length) {
         const exTask = existingOpen.rows[0];
@@ -11611,9 +11598,13 @@ cron.schedule('0 4 * * *', function() {
   fetchSalesAndTrafficReport(dateStr).catch(function(e){ console.error('[r20-cron] traffic: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
-// r22: Sponsored Products advertisedProduct Report — 04:30 London. Pulls
-// yesterday's per-ASIN per-campaign spend. Each product card aggregates from
-// amazon_asin_ad_performance keyed by ASIN — true per-ASIN attribution.
+// r22 + r33a: Sponsored Products advertisedProduct Report — 04:30 London. Pulls
+// yesterday's per-ASIN per-campaign spend into amazon_asin_ad_performance.
+//
+// DEPRECATED in r33a: nothing reads this table any more. The 4 read sites were
+// switched to amazon_asin_ad_perf_7d (fresh 7d SUMMARY snapshot, refreshed every
+// 2h, populated by r31b). Cron left running for one ship as safety net — Ship 2
+// will remove the cron and drop the table cleanly once r33a is verified live.
 cron.schedule('30 4 * * *', function() {
   // Yesterday in London time
   const now = new Date();
