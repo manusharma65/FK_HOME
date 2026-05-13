@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-14 r33c (FEATURES SHIP. Three changes on top of r33b: (1) Amazon daily scheduler now reads active agents from users table (department in amazon/manager, is_active=true, role in agent/manager/owner) — was hardcoded ['Aryan','Satyam']. Hardcoded fallback retained if DB lookup fails. Same swap applied to /api/tasks list, /api/tasks/:id/reopen log, and status-update log. Adding new agents like Kunal to user management is enough; (2) Keyword AI prompt rewritten for trending. Pulls TWO 7-day windows (current and prior), computes per-term week-over-week deltas, sends AI three sorted lists: top-50-by-spend, top-30-by-growth among returning terms, top-30 newcomers, top-20 declining. No magic thresholds — AI decides what's signal. New prompt asks about rising winners / new wasters / hidden opportunities / budget free-up. Legacy response shape preserved for existing UI; (3) Action Centre Margin leak (7d) tile is now clickable — adds per-campaign marginLeak field to baseRow, frontend filters All tab to leakers only, sorted biggest first, with dismissible banner. The earlier '14d ACOS' relabel idea was cancelled after code audit — existing labels accurately describe their data, no mislabel exists.)
+// CampaignPulse — deploy marker 2026-05-14 r33c (FEATURES SHIP + r33b HOTFIX. Four changes: (HOTFIX) Fixed runaway agent alias cache refresh seen in r33b prod — every concurrent call to canonicalAgent was firing its own DB query when the cache was stale, producing hundreds of parallel "[r33b] agent alias cache refreshed" log lines per second. Added in-flight promise guard so only ONE refresh runs at a time, all other callers reuse the same promise. (1) Amazon daily scheduler now reads active agents from users table (department in amazon/manager, is_active=true, role in agent/manager/owner) — was hardcoded ['Aryan','Satyam']. Hardcoded fallback retained if DB lookup fails. Same swap applied to /api/tasks list, /api/tasks/:id/reopen log, and status-update log. Adding new agents like Kunal to user management is enough; (2) Keyword AI prompt rewritten for trending. Pulls TWO 7-day windows (current and prior), computes per-term week-over-week deltas, sends AI three sorted lists: top-50-by-spend, top-30-by-growth among returning terms, top-30 newcomers, top-20 declining. No magic thresholds — AI decides what's signal. New prompt asks about rising winners / new wasters / hidden opportunities / budget free-up. Legacy response shape preserved for existing UI; (3) Action Centre Margin leak (7d) tile is now clickable — adds per-campaign marginLeak field to baseRow, frontend filters All tab to leakers only, sorted biggest first, with dismissible banner. The earlier '14d ACOS' relabel idea was cancelled after code audit — existing labels accurately describe their data, no mislabel exists.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2066,6 +2066,12 @@ function getAgentWebhook(agentName) {
 //
 // Hardcoded fallback retained for safety: if the users table is unreachable
 // or returns empty, canonicalAgent still maps Aryan/Satyam correctly.
+//
+// r33c hotfix: an in-flight promise guard prevents the runaway refresh bug
+// observed in r33b prod — every call to canonicalAgent saw the cache as stale,
+// each fired its own async refresh, and hundreds of parallel DB queries ran
+// before any of them landed. Now: while one refresh is in flight, all other
+// callers see the in-flight promise as "fresh enough" and skip.
 const AGENT_ALIASES_FALLBACK = {
   'aryan': 'Aryan',
   'aryan tomar': 'Aryan',
@@ -2073,29 +2079,39 @@ const AGENT_ALIASES_FALLBACK = {
 };
 let _agentAliasCache = null;
 let _agentAliasCacheUntil = 0;
+let _agentAliasRefreshInFlight = null;  // r33c: promise guard
 
 async function refreshAgentAliasCache() {
+  // r33c: if a refresh is already in flight, return that same promise. Prevents
+  // the runaway refresh storm seen in r33b prod.
+  if (_agentAliasRefreshInFlight) return _agentAliasRefreshInFlight;
   if (!db) return;
-  try {
-    const r = await db.query(
-      "SELECT name FROM users WHERE is_active=true AND name IS NOT NULL AND TRIM(name) <> ''"
-    );
-    const map = {};
-    r.rows.forEach(function(u) {
-      const fullName = u.name.trim();
-      const firstName = fullName.split(/\s+/)[0];
-      // Canonical form: First letter uppercase, rest lowercase. So "kunal" → "Kunal",
-      // "ARYAN" → "Aryan", "Satyam" stays "Satyam".
-      const canonical = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
-      map[fullName.toLowerCase()] = canonical;
-      map[firstName.toLowerCase()] = canonical;
-    });
-    _agentAliasCache = map;
-    _agentAliasCacheUntil = Date.now() + 5 * 60 * 1000;
-    console.log('[r33b] agent alias cache refreshed: ' + Object.keys(map).length + ' aliases (' + r.rows.length + ' users)');
-  } catch(e) {
-    console.error('[r33b] alias cache refresh failed: ' + e.message);
-  }
+  _agentAliasRefreshInFlight = (async function() {
+    try {
+      const r = await db.query(
+        "SELECT name FROM users WHERE is_active=true AND name IS NOT NULL AND TRIM(name) <> ''"
+      );
+      const map = {};
+      r.rows.forEach(function(u) {
+        const fullName = u.name.trim();
+        const firstName = fullName.split(/\s+/)[0];
+        // Canonical form: First letter uppercase, rest lowercase.
+        const canonical = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+        map[fullName.toLowerCase()] = canonical;
+        map[firstName.toLowerCase()] = canonical;
+      });
+      _agentAliasCache = map;
+      _agentAliasCacheUntil = Date.now() + 5 * 60 * 1000;
+      console.log('[r33b] agent alias cache refreshed: ' + Object.keys(map).length + ' aliases (' + r.rows.length + ' users)');
+    } catch(e) {
+      console.error('[r33b] alias cache refresh failed: ' + e.message);
+      // On failure, push the next attempt out by 30s so we don't hammer DB on persistent errors
+      _agentAliasCacheUntil = Date.now() + 30 * 1000;
+    } finally {
+      _agentAliasRefreshInFlight = null;
+    }
+  })();
+  return _agentAliasRefreshInFlight;
 }
 
 function canonicalAgent(raw) {
@@ -2103,8 +2119,10 @@ function canonicalAgent(raw) {
   const trimmed = String(raw).trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
-  // Background refresh if stale — does not block this call
-  if (!_agentAliasCache || Date.now() > _agentAliasCacheUntil) {
+  // r33c: only kick off a background refresh if no refresh is currently in flight.
+  // The in-flight guard inside refreshAgentAliasCache also catches this, but
+  // skipping the call entirely is cheaper.
+  if ((!_agentAliasCache || Date.now() > _agentAliasCacheUntil) && !_agentAliasRefreshInFlight) {
     refreshAgentAliasCache().catch(function(){});
   }
   // Use DB-backed cache if populated; otherwise fall back to hardcoded dict
