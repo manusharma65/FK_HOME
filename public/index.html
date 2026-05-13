@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-14 r33c (Frontend changes: Action Centre Margin leak (7d) tile is now clickable — switches to All tab, filters to campaigns with marginLeak > 0, sorts biggest leakers first, dismissible banner with Reset button. Two new JS handlers: acFilterByMarginLeak() and acClearMarginLeakFilter(). Other tab clicks clear the filter so it doesn't persist across tabs. Ships alongside server.js r33c which adds the Amazon agent users-table lookup and keyword AI trending rewrite.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-15 r33d (AI cost control: five AI calls that fired automatically are now manual buttons. Dashboard "💡 Get strategic insight" button replaces auto-fire on every sync. Keyword Intelligence "🔄 Run keyword analysis" button replaces 3x/day cron. Action Centre "💡 Get pattern insight" button on Fix Now tab. Task card "🤖 Sharpen with AI" button on repeat-offender tasks. Stuck-task modal "🤖 Analyse" button. All five share a 2-hour cache per surface so re-clicks reuse the answer.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2417,19 +2417,20 @@ async function renderActivity() {
 // ── AI Analysis ────────────────────────────────────────────────────────────
 let aiCache = { suggestions: null, lastRun: 0 };
 
-async function runAI() {
+async function runAI(force) {
   const container = document.getElementById('ai-container');
   if (!allCampaigns.length) { container.innerHTML = '<div class="empty">No campaign data available.</div>'; return; }
 
-  // Use cache if less than 30 minutes old
-  if (aiCache.result && (Date.now() - aiCache.lastRun) < 30 * 60 * 1000) {
+  // Use cache if less than 30 minutes old (unless force regenerate)
+  if (!force && aiCache.result && (Date.now() - aiCache.lastRun) < 30 * 60 * 1000) {
     renderAIResult(container, aiCache.result);
     return;
   }
 
   container.innerHTML = '<div class="loading"><div class="spinner"></div> Analysing FK Sports campaign history with Claude AI...<br><span style="font-size:11px;color:var(--text3);margin-top:8px;display:block">Reviewing 7 days of data · Results cached for 30 minutes</span></div>';
   try {
-    const res = await fetch('/api/ai/analyse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    // r33d: pass force flag to server so cache is bypassed on Regenerate clicks
+    const res = await fetch('/api/ai/analyse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: !!force }) });
     const data = await res.json();
     if (!data.result) throw new Error(data.error || 'No result');
     aiCache = { result: data.result, lastRun: Date.now() };
@@ -2448,7 +2449,7 @@ function renderAIResult(container, result) {
   document.getElementById('ai-waste').textContent = result.reduceList?.length || 0;
   document.getElementById('ai-gain').textContent = result.pauseList?.length || 0;
 
-  const refreshBtn = '<div style="font-size:11px;color:var(--text3);margin-bottom:16px">' + daysLabel + ' · Last run: ' + lastRun + ' · <button onclick="aiCache.lastRun=0;runAI()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;font-family:inherit">Refresh</button></div>';
+  const refreshBtn = '<div style="font-size:11px;color:var(--text3);margin-bottom:16px">' + daysLabel + ' · Last run: ' + lastRun + ' · <button onclick="aiCache.lastRun=0;runAI(true)" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;font-family:inherit">Regenerate</button></div>';
 
   const strategicBox = result.strategicInsight ? '<div class="insight-box" style="margin-bottom:20px"><div class="insight-title">✦ Strategic insight from Claude AI</div><div class="insight-text">' + escHtml(result.strategicInsight) + '</div></div>' : '';
 
@@ -7266,11 +7267,19 @@ function renderActionCentreList(tab) {
   const allCountEl = document.getElementById('ac-all-count');
   if (allCountEl) allCountEl.textContent = ((_acState.fixnow || []).length + (_acState.lookat || []).length + (_acState.scale || []).length);
 
-  // Strategic insight banner — only on Fix Now tab
+  // Strategic insight banner — only on Fix Now tab. r33d: now manual.
   if (insightEl) {
-    if (useTab === 'fixnow' && _acState.insight) {
+    if (useTab === 'fixnow') {
       insightEl.style.display = 'block';
-      insightEl.innerHTML = '<strong style="color:#92400e">Pattern across the account:</strong> ' + escHtml(_acState.insight);
+      if (_acState.insight) {
+        insightEl.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px"><div><strong style="color:#92400e">Pattern across the account:</strong> ' + escHtml(_acState.insight) + '</div><button onclick="loadAcInsight(true)" style="background:none;border:none;color:#92400e;cursor:pointer;font-size:11px;font-family:inherit;text-decoration:underline;flex-shrink:0">Regenerate</button></div>';
+      } else if (_acState.insightLoading) {
+        insightEl.innerHTML = '<div class="loading"><div class="spinner"></div> Generating account-level insight…</div>';
+      } else if ((_acState.fixnow || []).length > 0) {
+        insightEl.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div style="color:#92400e">💡 Want an AI pattern check across these problems?</div><button class="btn" style="background:#f59e0b;color:white;border:0;font-size:12px;padding:6px 14px" onclick="loadAcInsight(false)">Get pattern insight</button></div>';
+      } else {
+        insightEl.style.display = 'none';
+      }
     } else {
       insightEl.style.display = 'none';
     }
@@ -7302,6 +7311,23 @@ function acFilterByMarginLeak() {
 // r33c: clear filter (banner Reset button)
 function acClearMarginLeakFilter() {
   _acState.marginLeakFilter = false;
+  renderActionCentreList(_acState.currentTab);
+}
+
+// r33d: manual "Get pattern insight" — fetches Action Centre with withInsight=true.
+// Server returns the AI-generated insight (or serves from its 2h cache).
+async function loadAcInsight(force) {
+  _acState.insightLoading = true;
+  renderActionCentreList(_acState.currentTab);
+  try {
+    const url = '/api/amazon/action-centre?withInsight=true' + (force ? '&force=1' : '');
+    const r = await fetch(url, { headers: getAuthHeaders() });
+    const j = await r.json();
+    _acState.insight = j.strategicInsight || '(No notable pattern detected.)';
+  } catch(e) {
+    _acState.insight = 'Could not generate insight: ' + e.message;
+  }
+  _acState.insightLoading = false;
   renderActionCentreList(_acState.currentTab);
 }
 

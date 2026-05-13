@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-14 r33c (FEATURES SHIP + r33b HOTFIX. Four changes: (HOTFIX) Fixed runaway agent alias cache refresh seen in r33b prod — every concurrent call to canonicalAgent was firing its own DB query when the cache was stale, producing hundreds of parallel "[r33b] agent alias cache refreshed" log lines per second. Added in-flight promise guard so only ONE refresh runs at a time, all other callers reuse the same promise. (1) Amazon daily scheduler now reads active agents from users table (department in amazon/manager, is_active=true, role in agent/manager/owner) — was hardcoded ['Aryan','Satyam']. Hardcoded fallback retained if DB lookup fails. Same swap applied to /api/tasks list, /api/tasks/:id/reopen log, and status-update log. Adding new agents like Kunal to user management is enough; (2) Keyword AI prompt rewritten for trending. Pulls TWO 7-day windows (current and prior), computes per-term week-over-week deltas, sends AI three sorted lists: top-50-by-spend, top-30-by-growth among returning terms, top-30 newcomers, top-20 declining. No magic thresholds — AI decides what's signal. New prompt asks about rising winners / new wasters / hidden opportunities / budget free-up. Legacy response shape preserved for existing UI; (3) Action Centre Margin leak (7d) tile is now clickable — adds per-campaign marginLeak field to baseRow, frontend filters All tab to leakers only, sorted biggest first, with dismissible banner. The earlier '14d ACOS' relabel idea was cancelled after code audit — existing labels accurately describe their data, no mislabel exists.)
+// CampaignPulse — deploy marker 2026-05-15 r33d (AI COST CONTROL SHIP. Five AI calls that fired automatically are now manual button-driven, each with a 2-hour per-surface cache so accidental double-clicks reuse the cached answer. Conversions: (1) Repeat-offender task description AI-rewrite — was firing on every task creation that was repeat #2+. Now a "🤖 Sharpen with AI" button on the task; (2) Dashboard strategic insight — was firing on every dashboard sync. Now a "💡 Get strategic insight" button at top of dashboard; (3) Keyword AI analysis — was firing 3x/day automatically. Now manual via "🔄 Run keyword analysis" button on the Keyword Intelligence tab. Both 7d window pulls become manual too — no more scheduled API report requests; (4) Stuck-task critique — was firing when task crossed 3-failure threshold or 7-day scaling requested. Now manual button in stuck-task modal; (5) Action Centre strategic insight — was firing on every Action Centre payload build. Now manual button on the Fix Now tab. Estimated saving: previously £5-10/day in unread AI calls, now £0.50-1/day pay-per-click. Per-surface cache key prevents the same surface generating twice within 2h.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3059,19 +3059,14 @@ async function createGoogleTask(taskRow) {
     }
   }
 
-  // r29: for repeat offenders, run AI ONCE to generate a sharper description
-  // that reads the previous agent note. Replaces rule-text. Falls back to original.
+  // r29 + r33d: repeat offender description.
+  // r33d: AI rewrite is no longer auto. Always use the plain fallback (rule text +
+  // previous agent note). Agent can click "🤖 Sharpen with AI" in the task UI to
+  // get an Opus rewrite on demand (cached 2h).
   let finalProblemDetail = taskRow.problemDetail;
   if (isRepeatOffender && prevCtx) {
-    const aiText = await aiEnhanceRepeatTaskDescription('google', taskRow, prevCtx);
-    if (aiText) {
-      finalProblemDetail = '🔁 Repeat (failure #' + failureCount + '). ' + aiText +
-        '\n\n— Previous agent note: "' + (prevCtx.previousNote || '').slice(0, 200) + '"';
-    } else {
-      // fallback: still prepend agent note context
-      finalProblemDetail = '🔁 Repeat (failure #' + failureCount + '). ' + taskRow.problemDetail +
-        '\n\n— Previous agent note: "' + (prevCtx.previousNote || '').slice(0, 200) + '"';
-    }
+    finalProblemDetail = '🔁 Repeat (failure #' + failureCount + '). ' + taskRow.problemDetail +
+      '\n\n— Previous agent note: "' + (prevCtx.previousNote || '').slice(0, 200) + '"';
   }
 
   try {
@@ -3473,22 +3468,12 @@ async function runDailyTaskScheduler() {
           console.log('[REPEAT OFFENDER] ' + c.name + ' (failure #' + failureCount + ')');
         }
 
-        // r29: AI-enhance repeat-offender problem_detail (one-shot, Haiku)
+        // r29 + r33d: repeat offender description. AI rewrite no longer auto;
+        // agent can click "🤖 Sharpen with AI" in the task UI for on-demand rewrite.
         let finalProblemDetailAmz = item.problemDetail;
         if (isRepeatOffender && prevCtxAmz) {
-          const aiText = await aiEnhanceRepeatTaskDescription('amazon', {
-            campaignName: c.name,
-            productTitle: null,
-            problemType: item.problemType,
-            problemDetail: item.problemDetail
-          }, prevCtxAmz);
-          if (aiText) {
-            finalProblemDetailAmz = '🔁 Repeat (failure #' + failureCount + '). ' + aiText +
-              '\n\n— Previous agent note: "' + (prevCtxAmz.previousNote || '').slice(0, 200) + '"';
-          } else {
-            finalProblemDetailAmz = '🔁 Repeat (failure #' + failureCount + '). ' + item.problemDetail +
-              '\n\n— Previous agent note: "' + (prevCtxAmz.previousNote || '').slice(0, 200) + '"';
-          }
+          finalProblemDetailAmz = '🔁 Repeat (failure #' + failureCount + '). ' + item.problemDetail +
+            '\n\n— Previous agent note: "' + (prevCtxAmz.previousNote || '').slice(0, 200) + '"';
         }
 
         await db.query(
@@ -3773,6 +3758,27 @@ app.get('/api/dashboard', async function(req, res) {
   });
 });
 
+// r33d: AI insight cache. Five surfaces (dashboard insight, action-centre insight,
+// keyword analysis, stuck-task critique, repeat-offender description) all share
+// this cache. Each surface has its own key. 2-hour TTL. The button handlers
+// return cached output if fresh; the agent can pass force=true to regenerate.
+// Why a cache: these calls cost £0.05-0.15 each. Double-clicking or refreshing
+// the page shouldn't double-charge. 2 hours matches how often the underlying
+// data meaningfully changes.
+const AI_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const _aiCache = {};  // key → { value, generatedAt }
+
+function aiCacheGet(key) {
+  const entry = _aiCache[key];
+  if (!entry) return null;
+  if (Date.now() - entry.generatedAt > AI_CACHE_TTL_MS) return null;
+  return entry;
+}
+function aiCacheSet(key, value) {
+  _aiCache[key] = { value: value, generatedAt: Date.now() };
+}
+function aiCacheClear(key) { delete _aiCache[key]; }
+
 // r25b: Haiku-then-Opus AI helper. Tries Haiku first; if the response looks
 // thin/error-like, escalates to Opus. The whole thing is wrapped in a single
 // try/catch so callers don't need to handle it. Returns { text, modelUsed }.
@@ -3991,11 +3997,24 @@ app.post('/api/ai/analyse', async function(req, res) {
 
     let strategicInsight = '';
     if (apiKey && (scaleList.length || pauseList.length || reduceList.length)) {
-      const prompt = ['You are an Amazon Advertising expert for FK Sports UK (sports equipment). ACOS target is ' + acosTarget + '%.', historicalSummary, 'Scale candidates (' + scaleList.length + '): ' + scaleList.slice(0,5).map(function(c){ return c.name + ' (' + c.acos + ')'; }).join(', '), 'Pause candidates (' + pauseList.length + '): ' + pauseList.slice(0,5).map(function(c){ return c.name; }).join(', '), 'Reduce budget candidates (' + reduceList.length + '): ' + reduceList.slice(0,5).map(function(c){ return c.name + ' (' + c.acos + ')'; }).join(', '), 'In 3-4 sentences give ONE strategic insight about FK Sports campaign performance that would not be obvious from looking at individual campaigns. Focus on patterns, seasonality, or structural issues. Be specific and actionable.'].join(' ');
-      try {
-        const aiRes = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 500, messages: [{ role: 'user', content: prompt }] }, { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } });
-        strategicInsight = aiRes.data.content[0].text;
-      } catch(e) { console.error('AI insight error: ' + e.message); }
+      // r33d: cache 2h per "scale/pause/reduce signature" so repeated dashboard
+      // refreshes don't keep re-paying Opus. Pass force=true in the POST body to
+      // bypass the cache and regenerate (used by the manual "Regenerate" link).
+      const cacheKey = 'dashboard_insight:' + scaleList.length + ':' + pauseList.length + ':' + reduceList.length;
+      const force = req.body && req.body.force === true;
+      const cached = force ? null : aiCacheGet(cacheKey);
+      if (cached) {
+        strategicInsight = cached.value;
+        console.log('[r33d] dashboard insight served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+      } else {
+        const prompt = ['You are an Amazon Advertising expert for FK Sports UK (sports equipment). ACOS target is ' + acosTarget + '%.', historicalSummary, 'Scale candidates (' + scaleList.length + '): ' + scaleList.slice(0,5).map(function(c){ return c.name + ' (' + c.acos + ')'; }).join(', '), 'Pause candidates (' + pauseList.length + '): ' + pauseList.slice(0,5).map(function(c){ return c.name; }).join(', '), 'Reduce budget candidates (' + reduceList.length + '): ' + reduceList.slice(0,5).map(function(c){ return c.name + ' (' + c.acos + ')'; }).join(', '), 'In 3-4 sentences give ONE strategic insight about FK Sports campaign performance that would not be obvious from looking at individual campaigns. Focus on patterns, seasonality, or structural issues. Be specific and actionable.'].join(' ');
+        try {
+          const aiRes = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 500, messages: [{ role: 'user', content: prompt }] }, { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } });
+          strategicInsight = aiRes.data.content[0].text;
+          aiCacheSet(cacheKey, strategicInsight);
+          console.log('[r33d] dashboard insight generated fresh, cached for 2h');
+        } catch(e) { console.error('AI insight error: ' + e.message); }
+      }
     }
 
     res.json({ result: { scaleList, pauseList, reduceList, strategicInsight, acosTarget, daysOfData: Object.values(campHistory)[0]?.days?.length || 0 } });
@@ -4422,9 +4441,24 @@ async function fetchAdvertisedProductReport(targetDate) {
   return { ok: false, reason: 'timeout', message: 'Report did not complete within 10 minutes' };
 }
 
-async function analyseKeywords() {
+async function analyseKeywords(opts) {
+  opts = opts || {};
   if (!keywordState.data || !keywordState.data.length) return;
   if (!process.env.ANTHROPIC_API_KEY) { keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); return; }
+
+  // r33d: 2-hour cache. The "signature" key uses data sizes so the cache invalidates
+  // when fresh data arrives but reuses the AI answer if called repeatedly on same data.
+  const havePriorForKey = keywordState.priorData && keywordState.priorData.length > 0;
+  const cacheKey = 'keyword_ai:' + keywordState.data.length + ':' + (havePriorForKey ? keywordState.priorData.length : 'no-prior');
+  if (!opts.force) {
+    const cached = aiCacheGet(cacheKey);
+    if (cached) {
+      keywordState.analysis = cached.value;
+      keywordState.lastAnalysed = cached.generatedAt;
+      console.log('[r33d] keyword AI served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+      return;
+    }
+  }
   try {
     const data = keywordState.data;
     const priorData = keywordState.priorData || [];
@@ -4586,7 +4620,9 @@ async function analyseKeywords() {
       bidChanges: []
     };
     keywordState.lastAnalysed = Date.now();
-    console.log('[r33c] Keyword AI analysis complete (' + keywordState.analysis.windowsAvailable + ')');
+    // r33d: persist to 2-hour cache so repeat clicks within 2h get cached answer
+    aiCacheSet(cacheKey, keywordState.analysis);
+    console.log('[r33c+r33d] Keyword AI analysis complete (' + keywordState.analysis.windowsAvailable + '), cached 2h');
   } catch(e) { console.error('Keyword analysis error: ' + e.message); keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); }
 }
 
@@ -4600,14 +4636,19 @@ function ruleBasedKeywordAnalysis(data) {
 app.get('/api/keywords/status', function(req, res) { res.json({ reportId: keywordState.reportId, hasData: !!keywordState.data, dataSize: keywordState.data ? keywordState.data.length : 0, hasAnalysis: !!keywordState.analysis, lastAnalysed: keywordState.lastAnalysed, requested: keywordState.requested }); });
 app.get('/api/keywords/analysis', function(req, res) { res.json({ analysis: keywordState.analysis, dataSize: keywordState.data ? keywordState.data.length : 0 }); });
 app.post('/api/keywords/refresh', async function(req, res) {
+  // r33d: fully manual now. Each click triggers fresh report pulls + analysis.
+  // Force flag bypasses the 2h AI cache on the analyseKeywords side.
+  const force = req.body && req.body.force === true;
   keywordState.requested = 0;
   keywordState.reportId = null;
-  // r33c: also kick off prior-week pull when manually refreshing
   keywordState.priorRequested = 0;
   keywordState.priorReportId = null;
+  if (force) {
+    aiCacheClear('keyword_ai:' + (keywordState.data ? keywordState.data.length : 0) + ':' + (keywordState.priorData && keywordState.priorData.length ? keywordState.priorData.length : 'no-prior'));
+  }
   await requestSearchTermReport();
   await requestPriorSearchTermReport();
-  res.json({ success: true, reportId: keywordState.reportId, priorReportId: keywordState.priorReportId });
+  res.json({ success: true, reportId: keywordState.reportId, priorReportId: keywordState.priorReportId, force: force });
 });
 
 app.post('/api/keywords/dismiss', async function(req, res) {
@@ -8252,6 +8293,19 @@ app.post('/api/tasks/:id/escalation-analysis', async function(req, res) {
     const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
     const task = taskRes.rows[0];
     if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    // r33d: 2h cache. Key includes failure_count + updated_at minute so it
+    // invalidates if the agent adds notes or task progresses.
+    const force = req.body && req.body.force === true;
+    const cacheKey = 'stuck_critique:' + task.id + ':' + (task.failure_count || 0) + ':' + (task.days_persisted || 0);
+    if (!force) {
+      const cached = aiCacheGet(cacheKey);
+      if (cached) {
+        console.log('[r33d] stuck-task critique served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+        return res.json({ analysis: cached.value, cached: true });
+      }
+    }
+
     const history = await db.query('SELECT action, notes, logged_at FROM activity_log WHERE task_id=$1 ORDER BY logged_at ASC', [task.id]);
     const snapshots = await db.query("SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date > NOW() - INTERVAL '7 days' ORDER BY snapshot_date DESC LIMIT 7");
     let campHistory = [];
@@ -8261,7 +8315,51 @@ app.post('/api/tasks/:id/escalation-analysis', async function(req, res) {
     });
     const prompt = 'You are analyzing an Amazon PPC campaign task escalated after ' + task.days_persisted + ' days.\n\nCAMPAIGN: ' + task.campaign_name + '\nAGENT: ' + task.agent_name + '\nPROBLEM: ' + task.problem_detail + '\nDAYS OPEN: ' + task.days_persisted + '\nSCORE: ' + task.score + '\nREPEAT OFFENDER: ' + (task.is_repeat_offender ? 'YES - has failed ' + task.failure_count + ' times' : 'No') + '\n\nAGENT NOTES HISTORY:\n' + JSON.stringify(history.rows, null, 2) + '\n\nCAMPAIGN PERFORMANCE (last 7 days):\n' + JSON.stringify(campHistory, null, 2) + '\n\nProvide:\n1. Root cause analysis\n2. Is the agent\'s approach working?\n3. Specific recommended fix\n4. If agent requests 7-day scaling window - justified? Yes/No with reason.\n\nBe direct, specific, actionable. 3-4 sentences max per point.';
     const response = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 800, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
-    res.json({ analysis: response.data.content[0].text });
+    const analysis = response.data.content[0].text;
+    aiCacheSet(cacheKey, analysis);
+    console.log('[r33d] stuck-task critique generated fresh, cached 2h');
+    res.json({ analysis: analysis });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// r33d: NEW endpoint for "Sharpen with AI" on a repeat-offender task. Reuses
+// aiEnhanceRepeatTaskDescription, returns the rewritten description text.
+// 2h cache so re-clicks return the same answer cheaply.
+app.post('/api/tasks/:id/sharpen-description', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    const task = taskRes.rows[0];
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (!task.is_repeat_offender) {
+      return res.status(400).json({ error: 'Task is not a repeat offender — AI sharpening is only useful when previous attempts have failed.' });
+    }
+    const force = req.body && req.body.force === true;
+    const cacheKey = 'sharpen:' + task.id + ':' + (task.failure_count || 0);
+    if (!force) {
+      const cached = aiCacheGet(cacheKey);
+      if (cached) {
+        console.log('[r33d] sharpen-description served from cache');
+        return res.json({ analysis: cached.value, cached: true });
+      }
+    }
+    // Build prevContext shape that aiEnhanceRepeatTaskDescription expects
+    const prevContext = {
+      previousNote: task.agent_notes || '',
+      previousResolvedAt: task.updated_at,
+      failureCount: task.failure_count || 1
+    };
+    const taskRow = {
+      campaignName: task.campaign_name,
+      productTitle: task.product_title || null,
+      problemType: task.problem_type,
+      problemDetail: task.problem_detail
+    };
+    const department = task.department || 'amazon';
+    const aiText = await aiEnhanceRepeatTaskDescription(department, taskRow, prevContext);
+    if (!aiText) return res.status(500).json({ error: 'AI could not generate a sharper description' });
+    aiCacheSet(cacheKey, aiText);
+    res.json({ analysis: aiText });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -8693,9 +8791,17 @@ const AC_CACHE_TTL = 5 * 60 * 1000;  // 5 min — cheap to recompute, no AI in d
 app.get('/api/amazon/action-centre', async function(req, res) {
   if (!db) return res.json({ fixnow: [], lookat: [], scale: [] });
   const force = req.query.force === '1' || req.query.force === 'true';
-  // Cache the data computation, but always re-include strategic insight from cache too.
+  const wantInsight = req.query.withInsight === 'true' || req.query.withInsight === '1';
+  // r33d: payload cache reused on default load, but insight is handled separately
+  // (rebuilt below only when wantInsight). When serving from cache without
+  // insight requested, strip any cached insight so we don't return stale text.
   if (!force && _acCachePayload && (Date.now() - _acCacheMs) < AC_CACHE_TTL) {
-    return res.json(_acCachePayload);
+    if (wantInsight) {
+      // wantInsight=true means full rebuild so the insight cache key reflects
+      // current fixnow state. Don't serve cached payload.
+    } else {
+      return res.json(Object.assign({}, _acCachePayload, { strategicInsight: '' }));
+    }
   }
 
   try {
@@ -8964,26 +9070,41 @@ app.get('/api/amazon/action-centre', async function(req, res) {
     lookat.sort(sortByImpact);
     scale.sort(function(a, b){ return (b.spend7d || 0) - (a.spend7d || 0); });
 
-    // ── 7. Strategic insight — re-use the existing AI helper (cached short-text) ──
+    // ── 7. Strategic insight — r33d: NOT auto-generated. Returns empty string
+    // unless query parameter ?withInsight=true. Agent clicks the "💡 Get pattern
+    // insight" button on the Fix Now tab which calls /api/action-centre?withInsight=true.
+    // 2-hour cache keyed by fix-now item signature. Saves £5+/day vs old auto-fire
+    // on every Action Centre payload build.
     let strategicInsight = '';
+    const wantInsight = req.query.withInsight === 'true' || req.query.withInsight === '1';
+    const forceInsight = req.query.force === 'true' || req.query.force === '1';
     try {
       const apiKey = process.env.ANTHROPIC_API_KEY;
-      if (apiKey && fixnow.length > 0) {
-        const summary = {
-          totalCampaigns: liveCampaigns.length,
-          fixNowCount: fixnow.length,
-          totalWasted: totalWasted.toFixed(0),
-          topProblems: fixnow.slice(0, 5).map(function(r){ return r.kind + ': ' + r.title; })
-        };
-        const prompt = 'You are an Amazon PPC expert reviewing FK Sports UK (fitness equipment seller). ' +
-          'Account-level summary across last 7 days:\n' + JSON.stringify(summary, null, 2) + '\n\n' +
-          'In ONE sentence (max 25 words), describe the SINGLE biggest pattern across the account that the team should know about today. ' +
-          'Be specific — name a problem type, a campaign type (auto vs manual), or a £ figure. ' +
-          'No generic advice ("monitor your campaigns"). If nothing notable, say so plainly.';
-        const aiRes = await aiHaikuThenOpus(prompt, { max_tokens: 100, min_useful_chars: 30 });
-        strategicInsight = (aiRes.text || '').trim();
+      if (apiKey && wantInsight && fixnow.length > 0) {
+        const cacheKey = 'ac_insight:' + fixnow.length + ':' + (fixnow.map(function(r){ return r.kind + r.campaignId; }).slice(0, 10).join('|'));
+        const cached = forceInsight ? null : aiCacheGet(cacheKey);
+        if (cached) {
+          strategicInsight = cached.value;
+          console.log('[r33d] action-centre insight served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+        } else {
+          const summary = {
+            totalCampaigns: liveCampaigns.length,
+            fixNowCount: fixnow.length,
+            totalWasted: totalWasted.toFixed(0),
+            topProblems: fixnow.slice(0, 5).map(function(r){ return r.kind + ': ' + r.title; })
+          };
+          const prompt = 'You are an Amazon PPC expert reviewing FK Sports UK (fitness equipment seller). ' +
+            'Account-level summary across last 7 days:\n' + JSON.stringify(summary, null, 2) + '\n\n' +
+            'In ONE sentence (max 25 words), describe the SINGLE biggest pattern across the account that the team should know about today. ' +
+            'Be specific — name a problem type, a campaign type (auto vs manual), or a £ figure. ' +
+            'No generic advice ("monitor your campaigns"). If nothing notable, say so plainly.';
+          const aiRes = await aiHaikuThenOpus(prompt, { max_tokens: 100, min_useful_chars: 30 });
+          strategicInsight = (aiRes.text || '').trim();
+          aiCacheSet(cacheKey, strategicInsight);
+          console.log('[r33d] action-centre insight generated fresh, cached 2h');
+        }
       }
-    } catch(e) { console.error('[r26 action-centre] insight error: ' + e.message); }
+    } catch(e) { console.error('[r33d action-centre] insight error: ' + e.message); }
 
     // r32: for each row with a campaignId, look up if there's an open task in campaign_tasks
     // for the same campaign + problem_type. Shows "Task #X · status · View" chip in UI.
@@ -11850,14 +11971,13 @@ app.get('/api/google/all-products', async function(req, res) {
 });
 
 // ── Cron Jobs ─────────────────────────────────────────────────────────────
-cron.schedule('0 8,13,18 * * *', function() {
-  console.log('Scheduled keyword report fetch...');
-  requestSearchTermReport().catch(function(e){ console.error('Scheduled KW request error: ' + e.message); });
-  checkSearchTermReport().catch(function(e){ console.error('Scheduled KW check error: ' + e.message); });
-  // r33c: also pull/poll the prior-week window for week-over-week trending
-  requestPriorSearchTermReport().catch(function(e){ console.error('[r33c] PRIOR KW request error: ' + e.message); });
-  checkPriorSearchTermReport().catch(function(e){ console.error('[r33c] PRIOR KW check error: ' + e.message); });
-}, { timezone: 'Europe/London' });
+
+// r33d: REMOVED the 8/13/18 keyword cron. Search-term reports + AI analysis are
+// now fully manual — fired only when an agent clicks the "🔄 Run keyword analysis"
+// button on the Keyword Intelligence tab. This stops the 3x-per-day Opus calls
+// (~£0.30/day) when often no one reads the result. The /api/keywords/refresh
+// endpoint still kicks off both windows + analysis on demand. Server-side
+// 2-hour cache on the AI result prevents accidental double-clicks costing twice.
 
 cron.schedule('0 8 * * *', function() {
   console.log('Running scheduled daily tasks at 8am UK time');

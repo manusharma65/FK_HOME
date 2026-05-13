@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-11 r29q (Shows "Stale >24h" tag on AI critique meta when cache is older than 24h. Cached critique no longer vanishes from modal after 24h.) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-15 r33d (Adds the long-promised archive UI for Google tasks: "📦 Archive" button on closed tasks in the detail modal (next to Reopen), a "📦 Archived" status filter button on the Tasks page to view archived tasks, and a server-side improvement to /api/tasks/:id/archive that accepts an optional reason, appends actor+date+reason to agent_notes, and writes an activity_log entry. Existing /api/google/tasks endpoint already filters status=archived correctly so no server filter change needed. No other behaviour change.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -409,6 +409,8 @@ table.activity tr:last-child td { border-bottom: none; }
       <button class="btn btn-ghost task-filter" data-filter-status="discussion" onclick="setTaskFilter('status','discussion',this)">Discussion</button>
       <button class="btn btn-ghost task-filter" data-filter-status="complete" onclick="setTaskFilter('status','complete',this)">Complete</button>
       <button class="btn btn-ghost task-filter" data-filter-status="cancelled" onclick="setTaskFilter('status','cancelled',this)" title="Tasks cancelled by agents (mistakes) or managers — kept for audit, excluded from main views">🗑 Cancelled</button>
+      <!-- r33d: Archived filter — view tasks that have been put away for tidying. Different from cancelled (mistake) or dismissed (agent decision) — archive is just "out of view". -->
+      <button class="btn btn-ghost task-filter" data-filter-status="archived" onclick="setTaskFilter('status','archived',this)" title="Tasks archived for tidiness — closed but not deleted, kept for reference">📦 Archived</button>
       <button class="btn btn-ghost task-filter" data-filter-status="all" onclick="setTaskFilter('status','all',this)">All</button>
       <!-- r25b: Repeat Offenders filter — campaigns/products that failed multiple times despite agent intervention -->
       <button class="btn btn-ghost task-filter" data-filter-repeat="true" onclick="setTaskFilter('repeat','true',this)" title="Tasks for campaigns/products that have failed multiple times despite agent intervention">🔁 Repeat Offenders <span id="g-tab-repeat-count" style="background:#dc2626;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
@@ -2285,6 +2287,26 @@ async function pauseTask(id)   { return setTaskStatus(id, 'paused'); }
 async function reopenTask(id)  { return setTaskStatus(id, 'reopened'); }
 async function promoteToScale(id) { return setTaskStatus(id, 'scale_promoted'); }
 
+// r33d: archive a closed task. Optional reason (agent can press OK without typing).
+// Archived tasks disappear from default views but stay in DB — visible under the
+// "📦 Archived" filter. Different from cancel (mistake) and dismiss (decision).
+async function archiveTaskFromUI(id) {
+  const reason = prompt('Archive this task?\n\n(Optional: a short note for the audit trail. Press OK to archive with no note, or Cancel to keep the task.)') ;
+  if (reason === null) return;  // user cancelled
+  try {
+    const r = await authedFetch('/api/tasks/' + id + '/archive', {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason || '' })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    closeBigModal();
+    refreshTaskViews(id);
+  } catch(e) {
+    alert('Could not archive: ' + e.message);
+  }
+}
+
 // r29k: cancel task — soft delete with reason. Used for mistaken or wrong-description
 // tasks. Cancelled tasks are excluded from repeat-detection so the agent can immediately
 // recreate. Manager can cancel any; agent can cancel own tasks within 30 min.
@@ -2518,6 +2540,12 @@ function _openTaskDetailRender(task, taskId, history) {
   // Reopen button for closed tasks
   if (isClosed) {
     actions.push('<button class="btn btn-primary" onclick="reopenTask(' + taskId + ')" style="font-size:13px;padding:8px 16px">↻ Reopen</button>');
+    // r33d: Archive button — moves closed task out of view but keeps history. Only
+    // shown on closed-but-not-archived tasks. Distinct from Cancel (mistake) and
+    // Dismiss (agent decision). Archive is just "tidy this away — I'm done with it".
+    if (status !== 'archived') {
+      actions.push('<button class="btn btn-ghost" onclick="archiveTaskFromUI(' + taskId + ')" style="font-size:13px;padding:8px 14px;color:#6b7280" title="Move out of the main view. Kept in DB for reference — visible under the Archived filter.">📦 Archive</button>');
+    }
   }
   // r29k/l/m: Cancel button — for tasks created by mistake. Manager always sees it;
   // agent only sees it if task is theirs and <60 min old. Server enforces same rules.
