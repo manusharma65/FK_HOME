@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-13 r33a (DATA CORRECTNESS SHIP. Five fixes: (1) Product card aggregator and 3 sibling reads now use the fresh amazon_asin_ad_perf_7d snapshot table instead of the stale daily amazon_asin_ad_performance table — fixes product card showing 1/10 of real spend; (2) stop storing/trusting Amazon clickThroughRate field, ctr always computed from clicks/impressions at display time — fixes Daily History 146 percent CTRs; (3) delete boot-time UPDATE that was overwriting agent_name with parsed campaign name on every restart — fixes Google tasks showing campaign names as agents; (4) fix r29l created_at typo + harden r29f Guard B with explicit type cast and success logging — fixes Google task duplicates like Eva Mats; (5) dashboard 7d wasted threshold from greater than 5 to greater than 0 — unifies wasted-spend formula across surfaces. Plus one-off boot cleanup that resets Google agent_name to Unassigned for any row not naming a real agent. Old r22 daily cron left running for one ship as safety net; retired in Ship 2.)
+// CampaignPulse — deploy marker 2026-05-14 r33b (PLUMBING SHIP. Three changes on top of r33a: (1) End-of-day snapshot capture at 23:45 London — runs saveDailySnapshot one last time before Amazon today-stream rolls over at midnight, locking in the day's final figures cleanly. Previously snapshots only saved during live sync; if last sync was 18:00 the snapshot ended up missing 6 hours of late activity; (2) AGENT_ALIASES hardcoded dict replaced with users-table lookup, cached 5 min, refreshed in background. First-name-only canonical form ('Kunal Sharma' → 'Kunal'). Hardcoded {aryan, aryan tomar, satyam} kept as last-resort fallback if users table query fails or returns empty. Adding a new agent to user management now gives canonicalisation for free within 5 minutes, no restart; (3) 04:30 r22 cron removed — nothing reads amazon_asin_ad_performance any more after r33a switched 4 read sites to amazon_asin_ad_perf_7d. Table left in DB for now, can be dropped manually. fetchAdvertisedProductReport() function preserved for the admin backfill endpoint.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2027,32 +2027,69 @@ function getAgentWebhook(agentName) {
 
 // r21: Agent name canonicalisation. Campaign prefixes and stored agent values
 // can drift (full names, lowercase, typos). All extraction goes through
-// canonicalAgent() so "Aryan", "aryan", "Aryan Tomar", "ARYAN TOMAR" all map
-// to "Aryan". Hardcoded for now — only two active agents. Move to a DB table
-// when the team grows or aliases multiply.
-const AGENT_ALIASES = {
-  // Aryan
+// r33b: agent canonicalisation now driven by the users table. Adding a user
+// in the management UI gives you alias coverage automatically — no code change,
+// no restart. First name only ("Kunal Sharma" → "Kunal"). 5-minute cache so
+// new users propagate within minutes; background refresh on stale read so calls
+// never block on DB.
+//
+// Hardcoded fallback retained for safety: if the users table is unreachable
+// or returns empty, canonicalAgent still maps Aryan/Satyam correctly.
+const AGENT_ALIASES_FALLBACK = {
   'aryan': 'Aryan',
   'aryan tomar': 'Aryan',
-  // Satyam
   'satyam': 'Satyam'
 };
+let _agentAliasCache = null;
+let _agentAliasCacheUntil = 0;
+
+async function refreshAgentAliasCache() {
+  if (!db) return;
+  try {
+    const r = await db.query(
+      "SELECT name FROM users WHERE is_active=true AND name IS NOT NULL AND TRIM(name) <> ''"
+    );
+    const map = {};
+    r.rows.forEach(function(u) {
+      const fullName = u.name.trim();
+      const firstName = fullName.split(/\s+/)[0];
+      // Canonical form: First letter uppercase, rest lowercase. So "kunal" → "Kunal",
+      // "ARYAN" → "Aryan", "Satyam" stays "Satyam".
+      const canonical = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+      map[fullName.toLowerCase()] = canonical;
+      map[firstName.toLowerCase()] = canonical;
+    });
+    _agentAliasCache = map;
+    _agentAliasCacheUntil = Date.now() + 5 * 60 * 1000;
+    console.log('[r33b] agent alias cache refreshed: ' + Object.keys(map).length + ' aliases (' + r.rows.length + ' users)');
+  } catch(e) {
+    console.error('[r33b] alias cache refresh failed: ' + e.message);
+  }
+}
+
 function canonicalAgent(raw) {
   if (!raw) return null;
   const trimmed = String(raw).trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
-  // Direct match (whole string)
-  if (AGENT_ALIASES[lower]) return AGENT_ALIASES[lower];
+  // Background refresh if stale — does not block this call
+  if (!_agentAliasCache || Date.now() > _agentAliasCacheUntil) {
+    refreshAgentAliasCache().catch(function(){});
+  }
+  // Use DB-backed cache if populated; otherwise fall back to hardcoded dict
+  const map = (_agentAliasCache && Object.keys(_agentAliasCache).length > 0)
+    ? _agentAliasCache
+    : AGENT_ALIASES_FALLBACK;
+  // Direct match
+  if (map[lower]) return map[lower];
   // Prefix match — "Aryan-something", "aryan_xyz", "Satyam tasks" etc.
-  // Iterate longest alias first so "aryan tomar" wins over "aryan".
-  const aliases = Object.keys(AGENT_ALIASES).sort(function(a, b){ return b.length - a.length; });
+  // Longest alias first so "aryan tomar" wins over "aryan".
+  const aliases = Object.keys(map).sort(function(a, b){ return b.length - a.length; });
   for (const alias of aliases) {
-    if (lower === alias) return AGENT_ALIASES[alias];
+    if (lower === alias) return map[alias];
     if (lower.indexOf(alias) === 0) {
-      // Make sure the alias is a whole word (followed by space, punctuation, end)
       const next = lower.charAt(alias.length);
-      if (!next || /[\s\-_|@.,:;\/]/.test(next)) return AGENT_ALIASES[alias];
+      if (!next || /[\s\-_|@.,:;\/]/.test(next)) return map[alias];
     }
   }
   // Unknown — return original trimmed (caller decides how to bucket)
@@ -7239,7 +7276,12 @@ function parseCampaignName(name) {
   const beforeSep = str.split(/[|@]/)[0].trim();
   if (beforeSep) {
     const canon = canonicalAgent(beforeSep);
-    if (canon && Object.values(AGENT_ALIASES).indexOf(canon) !== -1) {
+    // r33b: check against live agent alias map (DB-backed) instead of dead AGENT_ALIASES dict.
+    // Falls back to hardcoded set if cache empty.
+    const liveMap = (_agentAliasCache && Object.keys(_agentAliasCache).length > 0)
+      ? _agentAliasCache : AGENT_ALIASES_FALLBACK;
+    const knownCanonicals = new Set(Object.values(liveMap));
+    if (canon && knownCanonicals.has(canon)) {
       const rest = str.split(/[|@]/).slice(1).join('|') || '';
       const hint = rest.split(/[|@]/)[0].trim();
       return { agent: canon, productHint: hint };
@@ -7703,10 +7745,14 @@ app.get('/api/amazon/unknown-agents', async function(req, res) {
       "SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE"
     );
     const knownNames = new Set(ur.rows.map(function(r){ return (r.name || '').toLowerCase(); }));
-    // r21: also seed every alias and canonical from AGENT_ALIASES so "Aryan Tomar"
-    // and "aryan" are never flagged as unknown even if a user record is missing.
-    Object.keys(AGENT_ALIASES).forEach(function(k){ knownNames.add(k); });
-    Object.values(AGENT_ALIASES).forEach(function(v){ knownNames.add(v.toLowerCase()); });
+    // r21 + r33b: also seed every alias and canonical from the live agent alias map
+    // (DB-backed cache, falls back to hardcoded {aryan, aryan tomar, satyam}) so
+    // "Aryan Tomar" and "aryan" are never flagged as unknown even if a user record
+    // is somehow missing.
+    const liveMap = (_agentAliasCache && Object.keys(_agentAliasCache).length > 0)
+      ? _agentAliasCache : AGENT_ALIASES_FALLBACK;
+    Object.keys(liveMap).forEach(function(k){ knownNames.add(k); });
+    Object.values(liveMap).forEach(function(v){ knownNames.add(v.toLowerCase()); });
     // Recent campaign names from snapshots
     const sr = await db.query(
       "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days'"
@@ -11598,20 +11644,23 @@ cron.schedule('0 4 * * *', function() {
   fetchSalesAndTrafficReport(dateStr).catch(function(e){ console.error('[r20-cron] traffic: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
-// r22 + r33a: Sponsored Products advertisedProduct Report — 04:30 London. Pulls
-// yesterday's per-ASIN per-campaign spend into amazon_asin_ad_performance.
-//
-// DEPRECATED in r33a: nothing reads this table any more. The 4 read sites were
-// switched to amazon_asin_ad_perf_7d (fresh 7d SUMMARY snapshot, refreshed every
-// 2h, populated by r31b). Cron left running for one ship as safety net — Ship 2
-// will remove the cron and drop the table cleanly once r33a is verified live.
-cron.schedule('30 4 * * *', function() {
-  // Yesterday in London time
-  const now = new Date();
-  const ldn = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
-  ldn.setDate(ldn.getDate() - 1);
-  const dateStr = ldn.toISOString().slice(0, 10);
-  fetchAdvertisedProductReport(dateStr).catch(function(e){ console.error('[r22-cron] advertisedProduct: ' + e.message); });
+// r33b: REMOVED the 04:30 r22 advertisedProduct cron. After r33a all 4 read sites
+// switched to amazon_asin_ad_perf_7d (fresh every 2h), so the daily writes to
+// amazon_asin_ad_performance fed nothing. The fetchAdvertisedProductReport()
+// function is preserved for the admin backfill endpoint /api/admin/backfill-ad-performance
+// in case historical per-day rows are ever needed. The table is also left in place;
+// drop manually with `DROP TABLE amazon_asin_ad_performance;` whenever desired.
+
+// r33b: End-of-day snapshot capture at 23:45 London. saveDailySnapshot stores
+// the current day's actuals (c.todaySpend/Sales/etc from the live todayOnly
+// Amazon Ads stream). Around midnight Amazon's "today" rolls over and those
+// fields reset to zero — running at 23:45 freezes the day's final figures in
+// daily_snapshots before that happens. ON CONFLICT (snapshot_date) DO UPDATE
+// in saveDailySnapshot means this idempotently overwrites whatever the last
+// sync-time snapshot was with the most-complete end-of-day version.
+cron.schedule('45 23 * * *', function() {
+  console.log('[r33b] End-of-day snapshot capture starting');
+  saveDailySnapshot().catch(function(e){ console.error('[r33b] EOD snapshot: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
 async function advanceTaskStages() {
@@ -12911,6 +12960,11 @@ app.listen(PORT, '0.0.0.0', async function() {
       if (settings.budgetLowPct) process.env.BUDGET_LOW_PERCENT = String(settings.budgetLowPct);
       if (Object.keys(settings).length) console.log('Settings loaded from DB: ' + JSON.stringify(settings));
     } catch(e) { console.error('Settings load error: ' + e.message); }
+
+    // r33b: warm the agent alias cache on boot so first request doesn't pay
+    // the DB round-trip. If this fails, canonicalAgent falls back to the
+    // hardcoded {aryan, aryan tomar, satyam} dict — no functional break.
+    refreshAgentAliasCache().catch(function(){});
 
     // Hydrate googleState from the most recent snapshot in DB.
     // Prevents the "dashboard goes blank after every deploy" problem — agents see
