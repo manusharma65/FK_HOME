@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-15 r33d (AI cost control: five AI calls that fired automatically are now manual buttons. Dashboard "💡 Get strategic insight" button replaces auto-fire on every sync. Keyword Intelligence "🔄 Run keyword analysis" button replaces 3x/day cron. Action Centre "💡 Get pattern insight" button on Fix Now tab. Task card "🤖 Sharpen with AI" button on repeat-offender tasks. Stuck-task modal "🤖 Analyse" button. All five share a 2-hour cache per surface so re-clicks reuse the answer.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-16 r33e (Task scheduler + data integrity: (1) "🤖 Sharpen with AI" button now wired on repeat-offender task cards in the detail modal — calls /api/tasks/:id/sharpen-description for an on-demand AI rewrite of the problem detail. Displays under the repeat-offender banner; (2) loadEscalationAnalysis updated to accept force=true via Regenerate link when AI returns cached output; (3) Receives the rebuilt server-side scheduler (AI note interpretation, paused-campaign filter, 16% no_revenue guard, product owner orphan-SKU fix). No other UI changes.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3552,19 +3552,26 @@ function showScalingModal(taskId) {
 }
 
 // ── AI Escalation Analysis ────────────────────────────────────────────────
-async function loadEscalationAnalysis(taskId, btn) {
+async function loadEscalationAnalysis(taskId, btn, force) {
   const container = document.getElementById('ai-analysis-' + taskId);
   if (!container) return;
   const isVisible = container.style.display !== 'none';
-  if (isVisible) { container.style.display = 'none'; if(btn) btn.textContent = '🤖 Get AI analysis'; return; }
+  // r33e: if user clicks the toggle button while output is visible, hide it.
+  // Regenerate clicks come in with force=true and skip the hide-toggle.
+  if (isVisible && !force) { container.style.display = 'none'; if(btn) btn.textContent = '🤖 Get AI analysis'; return; }
   container.style.display = 'block';
   container.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><div class="spinner" style="width:16px;height:16px;border-width:2px"></div> Claude is analyzing this campaign...</div>';
   if (btn) btn.textContent = '🤖 Hide analysis';
   try {
-    const res = await fetch('/api/tasks/' + taskId + '/escalation-analysis', { method: 'POST' });
+    const res = await fetch('/api/tasks/' + taskId + '/escalation-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: force === true })
+    });
     const data = await res.json();
     if (data.analysis) {
-      container.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:14px">🤖 Claude Analysis</div>' +
+      const cachedNote = data.cached ? '<span style="font-size:11px;color:var(--text3);font-weight:normal">  (cached — <a href="javascript:void(0)" onclick="loadEscalationAnalysis(' + taskId + ', null, true)" style="color:var(--text3);text-decoration:underline">regenerate</a>)</span>' : '';
+      container.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:14px">🤖 Claude Analysis' + cachedNote + '</div>' +
         '<div style="white-space:pre-wrap;font-size:14px;line-height:1.7">' + escHtml(data.analysis) + '</div>';
     } else {
       container.innerHTML = '<div style="color:#e53e3e">Analysis failed: ' + escHtml(data.error||'Unknown error') + '</div>';
@@ -3581,6 +3588,31 @@ async function reopenTask(taskId) {
     await fetch('/api/tasks/' + taskId + '/reopen', { method: 'POST' });
     await loadTasks();
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+// r33e: Sharpen with AI — on-demand rewrite of a repeat-offender task
+// description. The endpoint /api/tasks/:id/sharpen-description was added in
+// r33d (auto-fire removed to save AI cost). This handler invokes it on click,
+// then displays the rewritten suggestion under the repeat-offender banner.
+// Doesn't overwrite the stored problem_detail — just shows a sharper take.
+async function sharpenWithAI(taskId, btn) {
+  const out = document.getElementById('sharpen-out-' + taskId);
+  if (!out) return;
+  out.style.display = 'inline';
+  out.textContent = '✨ Thinking...';
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/tasks/' + taskId + '/sharpen-description', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.sharpened) {
+      out.innerHTML = '<div style="margin-top:8px;background:white;border:1px solid #fca5a5;border-radius:6px;padding:10px 12px;font-size:13px;color:#7f1d1d;white-space:pre-wrap;line-height:1.5"><strong>🤖 Sharper take:</strong> ' + escHtml(data.sharpened) + '</div>';
+    } else {
+      out.textContent = 'Error: ' + (data.error || 'No suggestion returned');
+    }
+  } catch(e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+  if (btn) btn.disabled = false;
 }
 
 // ── Toggle Note Ignored (strike-through for AI) ────────────────────────
@@ -3886,7 +3918,12 @@ async function openTaskDetailModal(taskId) {
   // Body — problem detail, score, dates, notes
   const sections = [];
   if (isRepeat) {
-    sections.push('<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:15px;color:#dc2626"><strong>🚨 REPEAT OFFENDER</strong> — This campaign has failed ' + (t.failure_count||2) + ' time(s) in the last 14 days. A different approach is needed, not the same quick fix.</div>');
+    sections.push('<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:15px;color:#dc2626"><div><strong>🚨 REPEAT OFFENDER</strong> — This campaign has failed ' + (t.failure_count||2) + ' time(s) in the last 14 days. A different approach is needed, not the same quick fix.</div>'
+      // r33e: Sharpen with AI button — calls /api/tasks/:id/sharpen-description
+      // for an on-demand AI rewrite. Was auto-firing for every repeat task in
+      // r29; turned off in r33d to save AI cost, now button-driven only.
+      + '<div style="margin-top:8px"><button class="btn btn-ghost" style="font-size:12px;background:white" onclick="sharpenWithAI(' + t.id + ', this)">🤖 Sharpen with AI</button> <span id="sharpen-out-' + t.id + '" style="display:none;font-size:13px;color:var(--text2);margin-left:8px"></span></div>'
+      + '</div>');
   }
   // r22: Day-7 review banner inside the detail modal
   if (t.at_day7) {

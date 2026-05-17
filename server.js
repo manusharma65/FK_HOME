@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-15 r33d (AI COST CONTROL SHIP. Five AI calls that fired automatically are now manual button-driven, each with a 2-hour per-surface cache so accidental double-clicks reuse the cached answer. Conversions: (1) Repeat-offender task description AI-rewrite — was firing on every task creation that was repeat #2+. Now a "🤖 Sharpen with AI" button on the task; (2) Dashboard strategic insight — was firing on every dashboard sync. Now a "💡 Get strategic insight" button at top of dashboard; (3) Keyword AI analysis — was firing 3x/day automatically. Now manual via "🔄 Run keyword analysis" button on the Keyword Intelligence tab. Both 7d window pulls become manual too — no more scheduled API report requests; (4) Stuck-task critique — was firing when task crossed 3-failure threshold or 7-day scaling requested. Now manual button in stuck-task modal; (5) Action Centre strategic insight — was firing on every Action Centre payload build. Now manual button on the Fix Now tab. Estimated saving: previously £5-10/day in unread AI calls, now £0.50-1/day pay-per-click. Per-surface cache key prevents the same surface generating twice within 2h.)
+// CampaignPulse — deploy marker 2026-05-16 r33e (TASK SCHEDULER + DATA INTEGRITY SHIP. (1) AI note-aware deferral: scheduler now uses Haiku to read agent resolution notes (from agent_notes column, where they actually live — resolution_note was always empty) and decides per-task whether to FIRE or SKIP based on whether the agent's note already addresses today's flag. Replaces the old regex that only matched specific words like "wait"/"monitor" and missed real agent language like "ACOS under 20%, leave it"; (2) Paused-campaign filter: scheduler now filters historical daily_snapshot rows against the live state.campaigns set so campaigns paused 20+ days ago stop firing tasks. Has empty-set safety fallback if state.campaigns hasn't loaded yet on boot; (3) no_revenue 16% guard: scheduler no longer flags campaigns with one zero-sales day if overall 7d ACOS ≤16% (Bobby's breakeven). Only fires when totalSales=0 or overall ACOS > 16%; (4) Product owner save fix: PUT /api/amazon/products/:groupKey/owner now catches sibling SKUs sharing an ASIN with the primary match (B0DV5J386N orphan case where parent_sku-linked sibling kept stale Satyam ownership and aggregator picked it randomly). Plus aggregator now lets owner_manual=TRUE always win over auto-derived regardless of row iteration order; (5) Diagnostic logging on Google ingest: verbose hostname + payload-delta + DB-verify log lines so URL-misconfigured-script bugs surface within an hour, not 56h; (6) "Regenerate" link on stuck-task AI analysis (frontend sends force=true); (7) UI button "🤖 Sharpen with AI" wired on repeat-offender task cards calling existing /api/tasks/:id/sharpen-description endpoint. Cart-rate label changed to "Cart events / session" on Google product card to stop the >100% appearance.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2871,13 +2871,103 @@ function previousNoteSaysWait(note) {
   return /\b(wait|monitor|monitoring|7 days|7d|ten days|2 weeks|two weeks|let it run|see if|after another week|give it time|pending)\b/.test(n);
 }
 
+// r33e: AI-driven note interpretation. The old regex previousNoteSaysWait
+// missed real agent language like "ACOS under 20%, leave it" or "performing
+// well now". Agents write resolution comments in their own words, not in
+// the specific vocabulary the regex was tuned for. This function asks
+// Haiku to read the previous note + the new problem and decide whether
+// the new problem is already addressed by the note. Cost: ~£0.001/check,
+// only fires when scheduler is about to create a task with a non-empty
+// previous note. Cached for 24h per (taskKey, noteHash) so repeat checks
+// on the same data are free.
+const _noteVerdictCache = {};
+function _hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  return String(h);
+}
+async function aiAgentNoteResolvesNewProblem(opts) {
+  // opts: { campaignName, previousProblemDetail, previousNote, newProblemDetail, newProblemType }
+  const note = String(opts.previousNote || '').trim();
+  if (!note) return { skip: false, reason: 'no previous note to interpret' };
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { skip: false, reason: 'no API key' };
+
+  // Cache key: campaign + note content + new problem type. Same combination = same answer.
+  const cacheKey = (opts.campaignName || '') + '|' + _hashStr(note) + '|' + (opts.newProblemType || '');
+  const cached = _noteVerdictCache[cacheKey];
+  if (cached && Date.now() - cached.at < 24 * 3600 * 1000) {
+    return { skip: cached.skip, reason: cached.reason + ' (cached)' };
+  }
+
+  const prompt =
+    "An agent resolved a previous task with a written note. Today a new task is about to be created on the same campaign. Decide whether the agent's note already addresses the new problem so the new task should be SKIPPED, or whether it's a genuinely new issue that should FIRE.\n\n" +
+    "═══ CAMPAIGN ═══\n" +
+    (opts.campaignName || '(unknown)') + "\n\n" +
+    "═══ PREVIOUS PROBLEM (already resolved) ═══\n" +
+    String(opts.previousProblemDetail || '(not recorded)').slice(0, 400) + "\n\n" +
+    "═══ AGENT'S RESOLUTION NOTE ═══\n" +
+    note.slice(0, 600) + "\n\n" +
+    "═══ NEW PROBLEM DETECTED TODAY ═══\n" +
+    String(opts.newProblemDetail || '').slice(0, 400) + "\n\n" +
+    "═══ JUDGEMENT RULES ═══\n" +
+    "• Our Amazon breakeven ACOS is 16%. If the new problem is something like 'no revenue 1 of 3 days' but the agent's note says the campaign is performing OK (ACOS under 16-20%, working well, leave it), then SKIP — the agent has already judged it as acceptable.\n" +
+    "• If the note says wait / monitor / give it time / pending / let it run, SKIP.\n" +
+    "• If the note describes a fix that should resolve the new problem type (e.g. 'paused bad keywords' resolves a repeat 'high_acos' on the same campaign), SKIP.\n" +
+    "• If the note is dismissive ('not relevant', 'ignore') and the new problem is the same type, SKIP.\n" +
+    "• If the note resolved a DIFFERENT problem type than today's, FIRE — it's a new issue.\n" +
+    "• If the note is vague, empty, or doesn't address the new problem, FIRE.\n\n" +
+    "Return ONLY two lines in this exact format:\n" +
+    "VERDICT: SKIP\n" +
+    "REASON: <one short sentence>\n\n" +
+    "or\n\n" +
+    "VERDICT: FIRE\n" +
+    "REASON: <one short sentence>";
+
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 20000
+    });
+    const text = String((aiResp.data.content[0] && aiResp.data.content[0].text) || '').trim();
+    const verdictMatch = /VERDICT:\s*(SKIP|FIRE)/i.exec(text);
+    const reasonMatch = /REASON:\s*(.+)/i.exec(text);
+    if (!verdictMatch) {
+      // Couldn't parse — be conservative, fire the task so agents aren't blind
+      console.log('[r33e ai-note] unparseable verdict for ' + (opts.campaignName||'?') + ': "' + text.slice(0,100) + '" — defaulting to FIRE');
+      return { skip: false, reason: 'AI verdict unparseable' };
+    }
+    const skip = verdictMatch[1].toUpperCase() === 'SKIP';
+    const reason = (reasonMatch ? reasonMatch[1] : '(no reason given)').trim();
+    _noteVerdictCache[cacheKey] = { skip: skip, reason: reason, at: Date.now() };
+    return { skip: skip, reason: reason };
+  } catch(e) {
+    console.error('[r33e ai-note] ' + e.message);
+    // On API error, be conservative — fire the task so agents aren't blind
+    return { skip: false, reason: 'AI error: ' + e.message };
+  }
+}
+
 // r29: parse most recent resolved task on this target. Returns { failureCount,
 // previousNote, previousResolvedAt, previousProblemDetail } or null if none.
 async function getPreviousTaskContext(department, campaignId, productKey) {
   if (!db) return null;
   try {
+    // r33e: agents write their resolution comments into agent_notes (the
+    // free-text field on the task UI), NOT resolution_note (which exists in
+    // the schema but is never written). Reading from resolution_note meant
+    // previousNote was always empty and every "note-aware deferral" check
+    // silently failed, so tasks kept re-firing despite agents leaving
+    // detailed notes like "ACOS under 20%, leave it". Now reads agent_notes
+    // first, falls back to resolution_note for any future writers.
     const r = await db.query(
-      "SELECT id, failure_count, resolution_note, last_resolved_date, problem_detail " +
+      "SELECT id, failure_count, " +
+      "       COALESCE(NULLIF(TRIM(agent_notes), ''), NULLIF(TRIM(resolution_note), '')) AS effective_note, " +
+      "       last_resolved_date, problem_detail " +
       "FROM campaign_tasks " +
       "WHERE department = $1 AND campaign_id = $2 " +
       "  AND COALESCE(product_key, '') = COALESCE($3, '') " +
@@ -2890,7 +2980,7 @@ async function getPreviousTaskContext(department, campaignId, productKey) {
     const row = r.rows[0];
     return {
       failureCount: row.failure_count || 1,
-      previousNote: row.resolution_note || '',
+      previousNote: row.effective_note || '',
       previousResolvedAt: row.last_resolved_date,
       previousProblemDetail: row.problem_detail || ''
     };
@@ -3036,12 +3126,26 @@ async function createGoogleTask(taskRow) {
       return false;
     }
 
-    // r29 note-aware deferral: if previous agent note says "wait" / "monitor", and the
-    // resolution was within the last 7 days, skip this new task
+    // r33e: AI-driven note-aware deferral. Was regex (previousNoteSaysWait)
+    // that only matched specific words like "wait"/"monitor". Now Haiku reads
+    // the previous agent note + new problem and decides whether the agent's
+    // note already addresses today's flag. Catches real agent language like
+    // "ACOS under 20%, leave it" or "performing well now". Still bounded by
+    // 7-day staleness check — old notes can't suppress new tasks forever.
     const daysSince = (Date.now() - new Date(prevCtx.previousResolvedAt).getTime()) / 86400000;
-    if (previousNoteSaysWait(prevCtx.previousNote) && daysSince < 7) {
-      console.log('[r29 GTASK defer] ' + taskRow.campaignName + ' — previous note says wait, only ' + daysSince.toFixed(1) + 'd ago. Skipping.');
-      return false;
+    if (prevCtx.previousNote && daysSince < 7) {
+      const verdict = await aiAgentNoteResolvesNewProblem({
+        campaignName: taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : ''),
+        previousProblemDetail: prevCtx.previousProblemDetail,
+        previousNote: prevCtx.previousNote,
+        newProblemDetail: taskRow.problemDetail,
+        newProblemType: taskRow.problemType
+      });
+      if (verdict.skip) {
+        console.log('[r33e GTASK ai-defer] ' + taskRow.campaignName + ' — SKIP: ' + verdict.reason + ' (note ' + daysSince.toFixed(1) + 'd old)');
+        return false;
+      }
+      console.log('[r33e GTASK ai-defer] ' + taskRow.campaignName + ' — FIRE: ' + verdict.reason);
     }
 
     isRepeatOffender = true;
@@ -3359,13 +3463,38 @@ async function runDailyTaskScheduler() {
     if (!result.rows.length) { console.log('No historical snapshots yet for task scheduler'); return; }
     console.log('Task scheduler using ' + result.rows.length + ' days of history');
 
+    // r33e: Build a set of currently-ENABLED campaign IDs from the live Amazon sync.
+    // state.campaigns is populated by syncCampaigns() and only contains campaigns
+    // returned by Amazon's report (which excludes archived) AND with our agent-prefix
+    // filter applied. A campaign paused 20 days ago will be ABSENT from state.campaigns,
+    // so the scheduler should skip it. Without this guard, daily_snapshots retains
+    // historical rows for paused campaigns for 3 days and the scheduler kept scoring
+    // them — Aryan reported tasks firing for campaigns paused 20+ days ago.
+    //
+    // Safety fallback: if state.campaigns is empty (e.g. server just booted and
+    // sync hasn't completed yet), skip the filter entirely so we don't block ALL
+    // tasks. Log a warning so this is visible if it persists.
+    const liveEnabledIds = new Set((state.campaigns || []).map(function(c){ return String(c.campaignId); }));
+    const useEnabledFilter = liveEnabledIds.size > 0;
+    if (!useEnabledFilter) {
+      console.log('[r33e] WARNING: state.campaigns empty — scheduler running WITHOUT enabled-filter this cycle. Will retry next run.');
+    } else {
+      console.log('[r33e] scheduler filtering to ' + liveEnabledIds.size + ' currently-enabled campaigns');
+    }
+
     const agentCampaigns = {};
     const campHistory = {};
+    let skippedPaused = 0;
 
     result.rows.forEach(function(snap) {
       const camps = snap.campaigns || [];
       camps.forEach(function(c) {
         if (!c.campaignId) return;
+        // r33e: skip campaigns no longer enabled on Amazon
+        if (useEnabledFilter && !liveEnabledIds.has(String(c.campaignId))) {
+          skippedPaused++;
+          return;
+        }
         const agent = extractAgentFromCampaign(c.name) || 'Unassigned';
         if (!eligibleAgents.includes(agent)) return;
         if (!campHistory[c.campaignId]) {
@@ -3378,6 +3507,9 @@ async function runDailyTaskScheduler() {
         }
       });
     });
+    if (useEnabledFilter && skippedPaused > 0) {
+      console.log('[r33e] scheduler skipped ' + skippedPaused + ' historical snapshot rows for paused/disabled campaigns');
+    }
 
     // r14 timezone fix: London date, not UTC.
     const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
@@ -3402,7 +3534,24 @@ async function runDailyTaskScheduler() {
         let problemType = 'investigation';
         let problemDetail = '';
         if (scoring.noActivityDays >= 1) { problemType = 'no_activity'; problemDetail = scoring.noActivityDays + ' day(s) zero impressions'; }
-        else if (scoring.noRevDays >= 1) { problemType = 'no_revenue'; problemDetail = '£' + scoring.totalSpend + ' spent over ' + camp.days.length + ' day(s) with zero revenue'; }
+        else if (scoring.noRevDays >= 1) {
+          // r33e: only fire 'no_revenue' when overall ACOS is also bad (>16% breakeven).
+          // Aryan reported the scheduler flagging campaigns with ACOS under 20% just
+          // because one of the 3 days had zero sales. If the campaign is profitable
+          // overall (totalSpend / totalSales <= 16%), one quiet day isn't a problem.
+          // If sales are completely zero across the window, still fire.
+          const totalSales = parseFloat(scoring.totalSales) || 0;
+          const totalSpend = parseFloat(scoring.totalSpend) || 0;
+          const overallAcos = totalSales > 0 ? (totalSpend / totalSales) : Infinity;
+          if (totalSales === 0 || overallAcos > 0.16) {
+            problemType = 'no_revenue';
+            problemDetail = '£' + scoring.totalSpend + ' spent over ' + camp.days.length + ' day(s) with zero revenue';
+          } else {
+            // Skip — overall ACOS is healthy (≤16% breakeven), don't flag as problem
+            console.log('[r33e] ' + camp.name + ' — skipping no_revenue, overall ACOS ' + (overallAcos*100).toFixed(1) + '% under 16% breakeven');
+            return;
+          }
+        }
         else if (parseFloat(scoring.avgAcos) > 35) { problemType = 'high_acos'; problemDetail = scoring.avgAcos + '% avg ACOS over ' + camp.days.length + ' day(s), spend £' + scoring.totalSpend; }
         scored.push({ camp: camp, score: scoring.score, problemType: problemType, problemDetail: problemDetail, scoring: scoring });
       });
@@ -3457,11 +3606,24 @@ async function runDailyTaskScheduler() {
             continue;
           }
 
-          // r29 note-aware deferral
+          // r33e: AI-driven note-aware deferral (replaces regex). Haiku reads
+          // the agent's previous note + today's flagged problem and decides
+          // whether the note already addresses it. Catches "ACOS under 20%"
+          // and similar agent-language the regex missed.
           const daysSinceAmz = (Date.now() - new Date(prevCtxAmz.previousResolvedAt).getTime()) / 86400000;
-          if (previousNoteSaysWait(prevCtxAmz.previousNote) && daysSinceAmz < 7) {
-            console.log('[r29 AMZ defer] ' + c.name + ' — previous note says wait, only ' + daysSinceAmz.toFixed(1) + 'd ago. Skipping.');
-            continue;
+          if (prevCtxAmz.previousNote && daysSinceAmz < 7) {
+            const verdict = await aiAgentNoteResolvesNewProblem({
+              campaignName: c.name,
+              previousProblemDetail: prevCtxAmz.previousProblemDetail,
+              previousNote: prevCtxAmz.previousNote,
+              newProblemDetail: item.problemDetail,
+              newProblemType: item.problemType
+            });
+            if (verdict.skip) {
+              console.log('[r33e AMZ ai-defer] ' + c.name + ' — SKIP: ' + verdict.reason + ' (note ' + daysSinceAmz.toFixed(1) + 'd old)');
+              continue;
+            }
+            console.log('[r33e AMZ ai-defer] ' + c.name + ' — FIRE: ' + verdict.reason);
           }
 
           isRepeatOffender = true;
@@ -5976,8 +6138,21 @@ app.get('/api/amazon/products', async function(req, res) {
         if (p.image_url && !g.image_url) g.image_url = p.image_url;
         if (p.status) g.statuses.add(String(p.status).toUpperCase());
         if (p.parent_sku) g.parent_skus.add(p.parent_sku);
-        if (p.owner_agent && !g.owner_agent) g.owner_agent = p.owner_agent;
-        if (p.owner_manual) g.owner_manual = true;
+        // r33e: manual ownership always wins over auto-derived. Without this guard
+        // the first iterated SKU's owner took the slot, so if two SKUs shared an
+        // ASIN and one had owner_manual=TRUE (a deliberate reassignment) and the
+        // other had stale auto-derived owner_agent, the result depended on row
+        // iteration order which is random. Bobby's B0DV5J386N case: save persisted
+        // for the parent-linked row but the parent_sku=NULL sibling kept its stale
+        // 'Satyam' value, and the aggregator picked whichever loaded first.
+        if (p.owner_agent) {
+          if (p.owner_manual) {
+            g.owner_agent = p.owner_agent;
+            g.owner_manual = true;
+          } else if (!g.owner_agent) {
+            g.owner_agent = p.owner_agent;
+          }
+        }
         if (p.variation_theme && !g.variation_theme) g.variation_theme = p.variation_theme;
       } else {
         // SKU with no ASIN — treat as own row
@@ -7716,6 +7891,15 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
     //   - "<sku>"            → standalone product whose own SKU is the groupKey
     // The previous WHERE clause only handled forms 2 and 3 — form 1 silently matched
     // zero rows so the PUT looked like it succeeded but DB was unchanged.
+    //
+    // r33e: when reassigning by parent_sku (form 2), ALSO catch any sibling
+    // SKUs sharing the same ASIN whose parent_sku is NULL. Bobby found case
+    // B0DV5J386N had two rows — one parent-linked, one with parent_sku=NULL —
+    // pointing to the same physical product. Updating only the parent-linked
+    // row meant the orphan kept its old owner_agent='Satyam' from auto-derive,
+    // and the products aggregator would randomly pick whichever row iterated
+    // first. Save looked like it reverted on refresh. Now any sibling sharing
+    // an ASIN with the updated rows gets the same owner.
     let r;
     if (groupKey.indexOf('asin:') === 0) {
       const asin = groupKey.substring(5);
@@ -7729,9 +7913,14 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
     } else {
       console.log('[r26c owner-PUT] sku/parent-form key=' + groupKey + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
       r = await db.query(
+        "WITH primary_match AS (" +
+        "  SELECT id, asin FROM amazon_products " +
+        "  WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)" +
+        ") " +
         "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
-        "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)) " +
-        "RETURNING sku, asin, owner_agent, owner_manual",
+        "WHERE id IN (SELECT id FROM primary_match) " +
+        "   OR (asin IS NOT NULL AND asin IN (SELECT asin FROM primary_match WHERE asin IS NOT NULL)) " +
+        "RETURNING sku, asin, parent_sku, owner_agent, owner_manual",
         [agent, groupKey]
       );
     }
@@ -9345,7 +9534,32 @@ app.post('/api/tasks/:id/status', async function(req, res) {
 
 app.post('/api/tasks/:id/archive', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
-  try { await db.query('UPDATE campaign_tasks SET status=$1, archived_at=NOW(), updated_at=NOW() WHERE id=$2', ['archived', req.params.id]); res.json({ success: true }); } catch(e) { res.status(500).json({ error: e.message }); }
+  const id = req.params.id;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  try {
+    // r33d: capture who archived, when, and why. Also log to activity_log so
+    // archive history is auditable. Reason is optional — agents may archive
+    // dismissed/complete tasks for tidiness with no specific note.
+    const taskRes = await db.query("SELECT campaign_id, campaign_name, agent_name, status FROM campaign_tasks WHERE id=$1", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    const statusBefore = task.status;
+    const actor = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const noteAppend = reason
+      ? '\n[r33d archived by ' + actor + ' on ' + new Date().toISOString().slice(0,10) + ']: ' + reason
+      : '\n[r33d archived by ' + actor + ' on ' + new Date().toISOString().slice(0,10) + ']';
+    await db.query(
+      'UPDATE campaign_tasks SET status=$1, archived_at=NOW(), updated_at=NOW(), agent_notes=COALESCE(agent_notes,\'\') || $2 WHERE id=$3',
+      ['archived', noteAppend, id]
+    );
+    try {
+      await db.query(
+        'INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [task.campaign_id||'', task.campaign_name||'', actor, 'archived', reason || '(no reason)', statusBefore, 'archived', parseInt(id)]
+      );
+    } catch(logErr) { /* non-fatal */ }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // r29k: cancel an Amazon task — mirrors the Google endpoint pattern.
@@ -10151,6 +10365,8 @@ app.post('/api/google/ingest', async function(req, res) {
   const secret = req.headers['x-google-secret'] || req.body.secret;
   const expectedSecret = process.env.GOOGLE_INGEST_SECRET || 'fksports-google-2024';
   if (secret !== expectedSecret) {
+    // r33e: log auth failures — helps spot misconfigured scripts pushing to the wrong env
+    console.warn('[r33e INGEST] 401 unauthorized push attempt — secret mismatch');
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
@@ -10165,6 +10381,23 @@ app.post('/api/google/ingest', async function(req, res) {
 
     const products = req.body.products || [];
 
+    // r33e: diagnostic logging — verbose stamp on every successful ingest so
+    // problems like "script pushing to wrong URL" become visible from a single
+    // log line. Previously the only log was a generic "Google ingest received"
+    // and a 56-hour stale-data bug went unnoticed because nobody knew which
+    // host/env the script was pushing to. Now we log:
+    //   - the hostname this server thinks it's running on
+    //   - the bearer/auth identity of the caller (none for shared-secret)
+    //   - how the previous and new payloads differ (campaigns + products counts)
+    //   - sample row spend so it's visible at a glance whether data is fresh
+    const previousReceivedAt = googleState.lastReceivedAt;
+    const previousCampaignsCount = (googleState.campaigns || []).length;
+    const previousProductsCount = (googleState.products || []).length;
+    const hostHeader = req.headers['host'] || '?';
+    const userAgent = req.headers['user-agent'] || '?';
+    const sampleSpend = products.slice(0, 3).map(function(p){ return (p.spend != null ? '£'+p.spend : '-') + ' ' + String(p.name || p.campaignName || '').slice(0, 40); }).join(' | ');
+    const hoursSincePrev = previousReceivedAt ? ((now.getTime() - new Date(previousReceivedAt).getTime()) / 3600000).toFixed(1) : 'n/a';
+
     // Google agents (Rahul/Anuj) not yet active — default to null instead of
     // mis-extracting campaign name as agent. Re-enable when webhooks configured.
     googleState.campaigns = campaigns.map(function(c) {
@@ -10177,7 +10410,10 @@ app.post('/api/google/ingest', async function(req, res) {
     googleState.lastReceivedAt = now.toISOString();
     googleState.error = null;
     googleState.lastSnapshot = { campaigns, products, lastSync: timeStr };
-    console.log("Google ingest received: " + campaigns.length + " campaigns, " + products.length + " products");
+
+    console.log('[r33e INGEST] ✓ received on host=' + hostHeader + ' ua=' + userAgent.slice(0,50));
+    console.log('[r33e INGEST] payload: ' + campaigns.length + ' campaigns, ' + products.length + ' products (was ' + previousCampaignsCount + ' camps / ' + previousProductsCount + ' prods, ' + hoursSincePrev + 'h ago)');
+    console.log('[r33e INGEST] sample rows: ' + sampleSpend);
 
     // Persist this ingest to DB so a redeploy doesn't lose data.
     // Also prune snapshots older than 30 days to keep the table small.
@@ -10188,9 +10424,12 @@ app.post('/api/google/ingest', async function(req, res) {
           "VALUES ($1, $2, $3, $4, $5, $6)",
           [now.toISOString(), JSON.stringify(googleState.campaigns), JSON.stringify(googleState.products), campaigns.length, products.length, timeStr]
         );
+        // r33e: verify INSERT landed — query back to confirm and log size
+        const verify = await db.query("SELECT COUNT(*)::int AS c, MAX(received_at) AS latest FROM google_state_snapshots");
+        console.log('[r33e INGEST] DB snapshot persisted: total snapshots=' + verify.rows[0].c + ', latest=' + verify.rows[0].latest);
         await db.query("DELETE FROM google_state_snapshots WHERE received_at < NOW() - INTERVAL '30 days'");
       } catch(e) {
-        console.error('[INGEST] snapshot save error (non-fatal): ' + e.message);
+        console.error('[r33e INGEST] snapshot save FAILED: ' + e.message);
       }
     }
 

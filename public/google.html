@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-15 r33d (Adds the long-promised archive UI for Google tasks: "📦 Archive" button on closed tasks in the detail modal (next to Reopen), a "📦 Archived" status filter button on the Tasks page to view archived tasks, and a server-side improvement to /api/tasks/:id/archive that accepts an optional reason, appends actor+date+reason to agent_notes, and writes an activity_log entry. Existing /api/google/tasks endpoint already filters status=archived correctly so no server filter change needed. No other behaviour change.) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-16 r33e (Cart-rate label changed from "Cart rate %" to "Cart events / session" on the product detail card (modal funnel statRow + grid stat card). Removes the misleading >100% appearance — GA4 counts add-to-cart events, one session can fire multiple. Number is now displayed as a ratio not a percentage. No other UI changes.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1505,7 +1505,7 @@ function productCard(p) {
         : '—', !(p.revenue7d > 0 && p.googleSpend > 0))
     + statRow('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—')
     + (p.ga4Sessions != null ? statRow('Sessions 7d', fmtNum(p.ga4Sessions)) : '')
-    + (p.ga4CartRate != null ? statRow('Cart rate', p.ga4CartRate + '%') : '')
+    + (p.ga4CartRate != null ? statRow('Cart events / session', String(p.ga4CartRate)) : '')
     + '</div>'
     + (p.dailySales7d && p.dailySales7d.some(function(v){ return v > 0; }) ? '<div style="margin-top:10px"><div class="stat-label" style="margin-bottom:4px">Last 7 days revenue</div>' + sparklineHtml(p.dailySales7d) + '</div>' : '')
     + '<div style="margin-top:10px;text-align:right;font-size:12px;color:var(--accent);font-weight:500">Click for full details →</div>'
@@ -3734,7 +3734,7 @@ function openProductDetailFromObj(p) {
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
     stat('Sessions', fmtNum(p.ga4Sessions), 'sessions') +
     stat('Cart adds', fmtNum(p.ga4CartAdditions)) +
-    stat('Cart rate', p.ga4CartRate != null ? p.ga4CartRate + '%' : '—', 'cart_rate') +
+    stat('Cart events / session', p.ga4CartRate != null ? String(p.ga4CartRate) : '—', 'cart_rate') +
     stat('Checkouts', fmtNum(p.ga4Checkouts)) +
     stat('Checkout rate', p.ga4CheckoutRate != null ? p.ga4CheckoutRate + '%' : '—') +
     stat('Bounce', p.ga4BounceRate != null ? (p.ga4BounceRate * 100).toFixed(0) + '%' : '—', 'bounce_pct') +
