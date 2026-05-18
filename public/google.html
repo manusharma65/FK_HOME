@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Google dashboard — deploy 2026-05-18 r35.2 (Adds "➕ New general task" button on Tasks page header — opens modal for ad-hoc work not tied to a campaign or product. Title + description + agent (self for agents, picker for manager/owner restricted to google dept) + priority + optional deadline. POSTs to /api/tasks/general-create. New helper openGeneralTaskModal() + submitGeneralTask() inserted above loadGoogleTasks. No other UI changes — filter strip, task list, modal flows, archive flow all unchanged per "don't break what's working".) -->
+<!-- CampaignPulse Google dashboard — deploy 2026-05-18 r35.3 (Filter strip simplified to single status row matching Amazon's pattern. Removed: TYPE/STATUS uppercase labels (clutter), Discussion filter (Amazon doesn't have), Cancelled filter (folded into Archived/All), duplicate "All" button. New default: Open (was Active). Order: Open · In progress · Scale · Problems · Repeat Offenders · Complete · Archived · All. Agent sub-row unchanged. WORKFLOW NOTE: agents who relied on "Active" showing both open + in_progress will need to click "In progress" tab for their working tasks — same as Amazon. Inherits server-side r35.3 alert fixes.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -403,24 +403,22 @@ table.activity tr:last-child td { border-bottom: none; }
     <!-- Workload summary cards -->
     <div id="tasks-workload" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px"></div>
 
-    <!-- Filter row -->
+    <!-- Filter row — r35.3 simplified to match Amazon's single-row pattern. Removed:
+         · TYPE/STATUS uppercase labels (clutter)
+         · Discussion filter (Amazon doesn't have it, not actively used)
+         · Cancelled filter (closed tasks fold into Archived/All)
+         · Duplicate "All" (one All only, at end)
+         New default: Open (was Active). Order matches the natural workflow. -->
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
-      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700">Type</span>
-      <button class="btn btn-ghost task-filter active" data-filter-type="all" onclick="setTaskFilter('type','all',this)">All</button>
-      <button class="btn btn-ghost task-filter" data-filter-type="problem" onclick="setTaskFilter('type','problem',this)">⚠ Problems</button>
-      <button class="btn btn-ghost task-filter" data-filter-type="scale" onclick="setTaskFilter('type','scale',this)">🚀 Scale</button>
-      <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-left:14px">Status</span>
-      <button class="btn btn-ghost task-filter active" data-filter-status="active" onclick="setTaskFilter('status','active',this)">Active</button>
-      <button class="btn btn-ghost task-filter" data-filter-status="open" onclick="setTaskFilter('status','open',this)">Open</button>
+      <button class="btn btn-ghost task-filter active" data-filter-status="open" onclick="setTaskFilter('status','open',this)">Open</button>
       <button class="btn btn-ghost task-filter" data-filter-status="in_progress" onclick="setTaskFilter('status','in_progress',this)">In progress</button>
-      <button class="btn btn-ghost task-filter" data-filter-status="discussion" onclick="setTaskFilter('status','discussion',this)">Discussion</button>
-      <button class="btn btn-ghost task-filter" data-filter-status="complete" onclick="setTaskFilter('status','complete',this)">Complete</button>
-      <button class="btn btn-ghost task-filter" data-filter-status="cancelled" onclick="setTaskFilter('status','cancelled',this)" title="Tasks cancelled by agents (mistakes) or managers — kept for audit, excluded from main views">🗑 Cancelled</button>
-      <!-- r33d: Archived filter — view tasks that have been put away for tidying. Different from cancelled (mistake) or dismissed (agent decision) — archive is just "out of view". -->
-      <button class="btn btn-ghost task-filter" data-filter-status="archived" onclick="setTaskFilter('status','archived',this)" title="Tasks archived for tidiness — closed but not deleted, kept for reference">📦 Archived</button>
-      <button class="btn btn-ghost task-filter" data-filter-status="all" onclick="setTaskFilter('status','all',this)">All</button>
+      <button class="btn btn-ghost task-filter" data-filter-type="scale" onclick="setTaskFilter('type','scale',this)">🚀 Scale</button>
+      <button class="btn btn-ghost task-filter" data-filter-type="problem" onclick="setTaskFilter('type','problem',this)">⚠ Problems</button>
       <!-- r25b: Repeat Offenders filter — campaigns/products that failed multiple times despite agent intervention -->
       <button class="btn btn-ghost task-filter" data-filter-repeat="true" onclick="setTaskFilter('repeat','true',this)" title="Tasks for campaigns/products that have failed multiple times despite agent intervention">🔁 Repeat Offenders <span id="g-tab-repeat-count" style="background:#dc2626;color:white;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">0</span></button>
+      <button class="btn btn-ghost task-filter" data-filter-status="complete" onclick="setTaskFilter('status','complete',this)">Complete</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="archived" onclick="setTaskFilter('status','archived',this)" title="Tasks archived for tidiness — closed but not deleted, kept for reference">📦 Archived</button>
+      <button class="btn btn-ghost task-filter" data-filter-status="all" onclick="setTaskFilter('status','all',this)">All</button>
       <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-left:14px">Agent</span>
       <button class="btn btn-ghost task-filter active" data-filter-agent="all" onclick="setTaskFilter('agent','all',this)">All</button>
       <button class="btn btn-ghost task-filter" data-filter-agent="Unassigned" onclick="setTaskFilter('agent','Unassigned',this)">Unassigned</button>
@@ -1979,7 +1977,7 @@ function _campaignUrgency(c) {
 // ─── Google Tasks page ───────────────────────────────────────────────────
 // Mirrors Amazon's task workflow but for Google. Self-allocate, 7-day cycle,
 // Day 7 forces decision (carry_on / archive / stop).
-const TASK_FILTERS = { status: 'active', agent: 'all', type: 'all', repeat: false };
+const TASK_FILTERS = { status: 'open', agent: 'all', type: 'all', repeat: false };
 let LAST_TASKS_RESPONSE = null;
 
 function setTaskFilter(kind, value, btn) {

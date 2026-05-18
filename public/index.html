@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-18 r35.2 (Adds "➕ New general task" button on Tasks page header — opens modal for ad-hoc work not tied to a campaign or product. Title + description + agent (self for agents, picker for manager/owner restricted to amazon dept) + priority + optional deadline. POSTs to /api/tasks/general-create. New helper openGeneralTaskModal() + submitGeneralTask() added above showUnknownAgentsModal. No other UI changes — Tasks tabs, filters, agent panes, modal flows all unchanged.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-18 r35.3 (One small bug fix on this file: Repeat Offenders tab (line ~3307) now excludes archived/cancelled/dismissed tasks. Previously included them and showed misleading old rows. Inherits server-side r35.3 fixes for alert auto-close + dedupe. No other UI changes.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3304,7 +3304,15 @@ function renderTasks(tab) {
   else if (tab === 'inprogress') filtered = daily.filter(function(t){ return t.status === 'in_progress'; });
   else if (tab === 'escalated') filtered = daily.filter(function(t){ return t.status === 'open' && t.days_persisted >= 3; });
   else if (tab === 'scaling') filtered = daily.filter(function(t){ return t.status === 'scaling'; });
-  else if (tab === 'repeat') filtered = daily.filter(function(t){ return t.is_repeat_offender; });
+  else if (tab === 'repeat') filtered = daily.filter(function(t){
+    // r35.3 — exclude closed states. Was showing archived/cancelled/dismissed
+    // repeat-offender rows from history, cluttering the tab.
+    return t.is_repeat_offender
+      && t.status !== 'archived'
+      && t.status !== 'cancelled'
+      && t.status !== 'dismissed'
+      && !t.archived_at;
+  });
   else if (tab === 'complete') filtered = daily.filter(function(t){ return (t.status === 'complete' || t.status === 'dismissed' || t.status === 'paused' || t.status === 'cancelled') && !t.archived_at; });
   else if (tab === 'archived') filtered = daily.filter(function(t){ return t.status === 'archived'; });
   else filtered = daily.filter(function(t){ return t.status === 'open'; });

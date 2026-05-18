@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-18 r35.2 (TWO FIXES TO MAIN. (1) r35.1 duplicate task hotfix: Amazon scheduler was creating a fresh task every morning even when an open task already existed on the campaign (Satyam ended up with 3+ open tasks on "Baby Stroler KT manual"). Root cause: scheduler updated days_persisted on the previous task BUT also fell through to INSERT a new row. Fix: Amazon now mirrors Google's behaviour — if any open daily task exists on campaign, append "🔁 Fired again Day N" note + bump failure_count + mark is_repeat_offender + refresh updated_at, then CONTINUE (skip insert). Plus owner-only admin endpoint /api/admin/merge-duplicate-tasks for one-time cleanup of pre-fix backlog (dry-run by default, POST {confirm:true} to merge — keeps oldest as canonical, closes duplicates with "🔀 Merged into #X" note). (2) r35.2 general task feature: new "➕ New general task" button on both Amazon and Google dashboard task pages. Opens modal for title + description + agent (self for agents, picker for manager) + priority + optional deadline. POST to /api/tasks/general-create — stores in campaign_tasks with task_source='general', campaign_id='', problem_type='general', department=$1, optional deadline column. r34 scoring (backfill + nightly) updated to exclude task_source='general' since there's no campaign to measure. New DB column: campaign_tasks.deadline DATE (optional). Auth: agents self-only, manager/owner any agent. No schema breaking changes. Google task page UI untouched per "don't break what's working".)
+// CampaignPulse — deploy marker 2026-05-18 r35.3 (FOUR FIXES TO MAIN. (1) Alert auto-close on budget-add now scoped to TODAY only (line ~10981) — was wiping historical out-of-budget records in bulk; one budget add closed 7 alert tasks across 9 days in a single UPDATE. Now filters by created_date = today. (2) Alert dedupe check now ignores closed tasks (line ~1473) — was blocking re-firing after today's alert was closed by budget-add even if campaign ran out again. Now filters by status IN open/in_progress. Together these two ensure: budget added → alert closes → campaign runs out again → fresh alert fires same day. (3) Amazon Repeat Offenders tab (index.html line ~3307) excludes archived/cancelled/dismissed tasks — was showing historical noise. (4) Google task filter strip simplified to single row matching Amazon's pattern (google.html). Removed: TYPE/STATUS uppercase labels, Discussion filter (Amazon doesn't have, not actively used per Bobby), Cancelled filter (folded into Archived/All), duplicate "All" button. New default tab: Open (was Active). Order: Open · In progress · Scale · Problems · Repeat Offenders · Complete · Archived · All. Agent row stays as separate sub-row. TASK_FILTERS default status updated to "open" to match new active button. WORKFLOW NOTE: Google agents who relied on "Active" showing both open + in_progress will need to click "In progress" tab for their working tasks — same as Amazon.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1472,8 +1472,12 @@ async function analyseCampaigns(campaigns) {
     });
     if (!alreadyAlerted && db) {
       try {
+        // r35.3 — dedupe must only count OPEN alerts. Previously this would
+        // see a closed alert task (e.g. budget added → alert closed; budget
+        // ran out again later) and refuse to re-fire, leaving the campaign
+        // invisibly out-of-budget for the rest of the day with no banner.
         const dbAlert = await db.query(
-          "SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND task_source='alert' AND problem_type=$2 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)",
+          "SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND task_source='alert' AND problem_type=$2 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE) AND status IN ('open','in_progress')",
           [String(c.campaignId), alertType]
         );
         if (dbAlert.rows.length > 0) alreadyAlerted = true;
@@ -10978,7 +10982,7 @@ app.post('/api/campaigns/:id/budget', async function(req, res) {
         );
       } catch(persistErr) { console.error('[r25a] exhaustionLog persist error: ' + persistErr.message); }
     }
-    if (db) { try { await db.query('UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW() WHERE campaign_id=$3 AND status IN ($4,$5) AND task_source=$6', ['complete', 'Budget +£' + amount + ' added', String(id), 'open', 'in_progress', 'alert']); } catch(e) { console.error('Auto-close task error: ' + e.message); } }
+    if (db) { try { await db.query("UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW() WHERE campaign_id=$3 AND status IN ($4,$5) AND task_source=$6 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)", ['complete', 'Budget +£' + amount + ' added', String(id), 'open', 'in_progress', 'alert']); } catch(e) { console.error('Auto-close task error: ' + e.message); } }
     const approvalAgent = extractAgentFromCampaign(campaign.name) || '';
     const approvalMsg = ['✅ Budget added', campaign.name, '+£' + amount + ' added. New budget: £' + newBudget.toFixed(2)].join('\n');
     if (approvalAgent) await sendToAgent(approvalAgent, approvalMsg);
