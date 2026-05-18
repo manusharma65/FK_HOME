@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-16 r33e (Task scheduler + data integrity: (1) "🤖 Sharpen with AI" button now wired on repeat-offender task cards in the detail modal — calls /api/tasks/:id/sharpen-description for an on-demand AI rewrite of the problem detail. Displays under the repeat-offender banner; (2) loadEscalationAnalysis updated to accept force=true via Regenerate link when AI returns cached output; (3) Receives the rebuilt server-side scheduler (AI note interpretation, paused-campaign filter, 16% no_revenue guard, product owner orphan-SKU fix). No other UI changes.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-18 r35.2 (Adds "➕ New general task" button on Tasks page header — opens modal for ad-hoc work not tied to a campaign or product. Title + description + agent (self for agents, picker for manager/owner restricted to amazon dept) + priority + optional deadline. POSTs to /api/tasks/general-create. New helper openGeneralTaskModal() + submitGeneralTask() added above showUnknownAgentsModal. No other UI changes — Tasks tabs, filters, agent panes, modal flows all unchanged.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -418,6 +418,11 @@ tbody tr:hover { background: var(--surface2); }
     <button class="nav-item" id="nav-users" onclick="showPage('users',this)" style="display:none">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 12c0-2.21-1.343-4-3-4S5 9.79 5 12"/><circle cx="8" cy="5" r="2.5"/><path d="M13.5 12c0-1.657-1.007-3-2.25-3M2.5 12c0-1.657 1.007-3 2.25-3"/><circle cx="12" cy="4.5" r="1.75"/><circle cx="4" cy="4.5" r="1.75"/></svg>
       User Management
+    </button>
+    <!-- r34: My Growth — agent performance page. Opens in same window (not a tab) -->
+    <button class="nav-item" onclick="window.location.href='/performance.html'">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 13l4-4 3 3 5-6"/><path d="M11 6h3v3"/></svg>
+      My Growth
     </button>
     <button class="nav-item" onclick="showPage('settings',this)">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
@@ -968,6 +973,8 @@ tbody tr:hover { background: var(--surface2); }
         <div class="section-sub">Daily tasks at 8am · Auto-archived after 3 working days · 7-day scaling window available from Escalation</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
+        <!-- r35.2: General task button — for ad-hoc work not tied to a campaign -->
+        <button class="btn btn-primary" onclick="openGeneralTaskModal('amazon')" style="font-size:13px">➕ New general task</button>
         <!-- r21: surfaces orphaned tasks + unknown agent prefixes for owner/manager -->
         <button id="btn-unknown-agents" class="btn btn-ghost" onclick="showUnknownAgentsModal()" style="font-size:13px;display:none" title="Tasks assigned to agents who are not active users">⚠ Unknown agents</button>
         <button class="btn btn-ghost" onclick="showPage('agent-performance')" style="font-size:13px">📊 Agent Performance</button>
@@ -6311,6 +6318,140 @@ async function submitReassignTask(taskId) {
 //     in the last 14 days that don't match any active user. Heads-up so the
 //     owner can either onboard the agent or rename the campaigns.
 // Owner/manager only — the button visibility is gated in updateUnknownAgentsBadge().
+
+// r35.2 — General task modal. Used by the "➕ New general task" button on
+// the Tasks page. For agents: creates a task for themselves. For manager/
+// owner: pick any agent. Optional deadline. POSTs to /api/tasks/general-create
+// which is department-agnostic (works for amazon + google identically).
+async function openGeneralTaskModal(department) {
+  const existing = document.getElementById('general-task-modal');
+  if (existing) existing.remove();
+  // Determine current user — show agent picker only for manager/owner
+  let me = null;
+  try {
+    const r = await fetch('/api/auth/me', { headers: { 'x-auth-token': localStorage.getItem('cp_token') || '' } });
+    if (r.ok) me = await r.json();
+  } catch(e) {}
+  if (!me || !me.name) { alert('Not signed in.'); return; }
+  const myName = me.name;
+  const myRole = String(me.role || '').toLowerCase();
+  const myDept = String(me.department || '').toLowerCase();
+  const isPrivileged = ['owner','manager','admin'].indexOf(myRole) !== -1 || myDept === 'manager';
+
+  // Build agent list. For manager/owner, fetch active users from server-side
+  // list. For agents, list only themselves.
+  let agentOptions = '<option value="' + escHtml(myName) + '" selected>' + escHtml(myName) + '</option>';
+  if (isPrivileged) {
+    try {
+      const r = await fetch('/api/auth/users', { headers: { 'x-auth-token': localStorage.getItem('cp_token') || '' } });
+      if (r.ok) {
+        const j = await r.json();
+        const list = (j.users || []).filter(function(u){
+          if (u.is_active === false) return false;
+          const d = String(u.department || '').toLowerCase();
+          const r2 = String(u.role || '').toLowerCase();
+          return d === department || d === 'manager' || r2 === 'owner';
+        });
+        if (list.length) {
+          agentOptions = list.map(function(u){
+            return '<option value="' + escHtml(u.name) + '"' + (u.name === myName ? ' selected' : '') + '>' + escHtml(u.name) + (u.department ? ' (' + escHtml(u.department) + ')' : '') + '</option>';
+          }).join('');
+        }
+      }
+    } catch(e) { /* fall back to self only */ }
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'general-task-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(13,18,30,0.6);z-index:1300;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.onclick = function(e){ if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML =
+    '<div style="background:white;width:100%;max-width:540px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.3);padding:24px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px">' +
+        '<div>' +
+          '<div style="font-size:18px;font-weight:700;color:var(--text)">New general task</div>' +
+          '<div style="font-size:12px;color:var(--text3);margin-top:2px">For work not tied to a specific campaign or product</div>' +
+        '</div>' +
+        '<button onclick="document.getElementById(\'general-task-modal\').remove()" style="background:transparent;border:0;font-size:22px;cursor:pointer;color:var(--text3);line-height:1">×</button>' +
+      '</div>' +
+
+      '<div style="display:flex;flex-direction:column;gap:14px">' +
+        '<div>' +
+          '<label style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px">Title <span style="color:var(--red)">*</span></label>' +
+          '<input id="gtask-title" type="text" maxlength="200" placeholder="e.g. Audit Sponsored Display portfolios for orphan keywords" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit">' +
+        '</div>' +
+        '<div>' +
+          '<label style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px">Description</label>' +
+          '<textarea id="gtask-desc" rows="4" maxlength="4000" placeholder="What needs to be done? (Optional)" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>' +
+        '</div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+          '<div>' +
+            '<label style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px">Agent</label>' +
+            '<select id="gtask-agent" ' + (isPrivileged ? '' : 'disabled style="opacity:0.7;cursor:not-allowed"') + ' style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:white;font-family:inherit">' + agentOptions + '</select>' +
+          '</div>' +
+          '<div>' +
+            '<label style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px">Priority</label>' +
+            '<select id="gtask-priority" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:white;font-family:inherit">' +
+              '<option value="low">Low</option>' +
+              '<option value="normal" selected>Normal</option>' +
+              '<option value="high">High</option>' +
+            '</select>' +
+          '</div>' +
+        '</div>' +
+        '<div>' +
+          '<label style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px">Deadline <span style="text-transform:none;letter-spacing:normal;font-weight:400;color:var(--text3)">(optional)</span></label>' +
+          '<input id="gtask-deadline" type="date" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit">' +
+        '</div>' +
+        '<div id="gtask-error" style="display:none;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 12px;font-size:13px;color:#991b1b"></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">' +
+          '<button onclick="document.getElementById(\'general-task-modal\').remove()" class="btn btn-ghost" style="font-size:13px">Cancel</button>' +
+          '<button id="gtask-submit" onclick="submitGeneralTask(\'' + escHtml(department) + '\')" class="btn btn-primary" style="font-size:13px">Create task</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+  setTimeout(function(){ const titleInput = document.getElementById('gtask-title'); if (titleInput) titleInput.focus(); }, 50);
+}
+
+async function submitGeneralTask(department) {
+  const title = (document.getElementById('gtask-title').value || '').trim();
+  const desc = (document.getElementById('gtask-desc').value || '').trim();
+  const agent = document.getElementById('gtask-agent').value;
+  const priority = document.getElementById('gtask-priority').value;
+  const deadline = (document.getElementById('gtask-deadline').value || '').trim();
+  const err = document.getElementById('gtask-error');
+  err.style.display = 'none';
+  if (!title) { err.textContent = 'Title is required.'; err.style.display = 'block'; return; }
+  if (!agent) { err.textContent = 'Pick an agent.'; err.style.display = 'block'; return; }
+  const btn = document.getElementById('gtask-submit');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const r = await fetch('/api/tasks/general-create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-auth-token': localStorage.getItem('cp_token') || '' },
+      body: JSON.stringify({ department: department, agentName: agent, title: title, description: desc, priority: priority, deadline: deadline || null })
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      err.textContent = j.error || ('HTTP ' + r.status);
+      err.style.display = 'block';
+      btn.disabled = false; btn.textContent = 'Create task';
+      return;
+    }
+    document.getElementById('general-task-modal').remove();
+    // Refresh the task list — different function names on each dashboard
+    try {
+      if (typeof loadTasks === 'function') await loadTasks();
+      else if (typeof refreshTasks === 'function') await refreshTasks();
+    } catch(e) {}
+  } catch(e) {
+    err.textContent = 'Error: ' + e.message;
+    err.style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Create task';
+  }
+}
 
 async function showUnknownAgentsModal() {
   const existing = document.getElementById('unknown-agents-modal');

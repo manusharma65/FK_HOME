@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-16 r33e (TASK SCHEDULER + DATA INTEGRITY SHIP. (1) AI note-aware deferral: scheduler now uses Haiku to read agent resolution notes (from agent_notes column, where they actually live — resolution_note was always empty) and decides per-task whether to FIRE or SKIP based on whether the agent's note already addresses today's flag. Replaces the old regex that only matched specific words like "wait"/"monitor" and missed real agent language like "ACOS under 20%, leave it"; (2) Paused-campaign filter: scheduler now filters historical daily_snapshot rows against the live state.campaigns set so campaigns paused 20+ days ago stop firing tasks. Has empty-set safety fallback if state.campaigns hasn't loaded yet on boot; (3) no_revenue 16% guard: scheduler no longer flags campaigns with one zero-sales day if overall 7d ACOS ≤16% (Bobby's breakeven). Only fires when totalSales=0 or overall ACOS > 16%; (4) Product owner save fix: PUT /api/amazon/products/:groupKey/owner now catches sibling SKUs sharing an ASIN with the primary match (B0DV5J386N orphan case where parent_sku-linked sibling kept stale Satyam ownership and aggregator picked it randomly). Plus aggregator now lets owner_manual=TRUE always win over auto-derived regardless of row iteration order; (5) Diagnostic logging on Google ingest: verbose hostname + payload-delta + DB-verify log lines so URL-misconfigured-script bugs surface within an hour, not 56h; (6) "Regenerate" link on stuck-task AI analysis (frontend sends force=true); (7) UI button "🤖 Sharpen with AI" wired on repeat-offender task cards calling existing /api/tasks/:id/sharpen-description endpoint. Cart-rate label changed to "Cart events / session" on Google product card to stop the >100% appearance.)
+// CampaignPulse — deploy marker 2026-05-18 r35.2 (TWO FIXES TO MAIN. (1) r35.1 duplicate task hotfix: Amazon scheduler was creating a fresh task every morning even when an open task already existed on the campaign (Satyam ended up with 3+ open tasks on "Baby Stroler KT manual"). Root cause: scheduler updated days_persisted on the previous task BUT also fell through to INSERT a new row. Fix: Amazon now mirrors Google's behaviour — if any open daily task exists on campaign, append "🔁 Fired again Day N" note + bump failure_count + mark is_repeat_offender + refresh updated_at, then CONTINUE (skip insert). Plus owner-only admin endpoint /api/admin/merge-duplicate-tasks for one-time cleanup of pre-fix backlog (dry-run by default, POST {confirm:true} to merge — keeps oldest as canonical, closes duplicates with "🔀 Merged into #X" note). (2) r35.2 general task feature: new "➕ New general task" button on both Amazon and Google dashboard task pages. Opens modal for title + description + agent (self for agents, picker for manager) + priority + optional deadline. POST to /api/tasks/general-create — stores in campaign_tasks with task_source='general', campaign_id='', problem_type='general', department=$1, optional deadline column. r34 scoring (backfill + nightly) updated to exclude task_source='general' since there's no campaign to measure. New DB column: campaign_tasks.deadline DATE (optional). Auth: agents self-only, manager/owner any agent. No schema breaking changes. Google task page UI untouched per "don't break what's working".)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -2334,6 +2334,10 @@ async function initTasksTable() {
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_at TIMESTAMP");
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_from TEXT");
     await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS notes_ignored BOOLEAN DEFAULT FALSE");
+    // r35.2: deadline column — optional, used by general tasks (task_source='general')
+    // for "do this by date X". Distinct from scaling_deadline which is for the
+    // r7b scaling-window flow on campaign tasks.
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS deadline DATE");
 
     // r21: subtasks table — populated when a product card is assigned as a task.
     // Each subtask = one bullet point from the AI critique. Agent can complete or
@@ -2718,6 +2722,69 @@ async function ensureCriticalColumns() {
     `);
     console.log('[r29o] ga4_account_funnel_snapshot table ready');
   } catch(e) { console.error('[r29o] ga4_account_funnel_snapshot init: ' + e.message); }
+
+  // r34: task_outcomes — for the Agent Performance page. One row per completed
+  // task whose 7-day after-window has elapsed. Computed nightly. Stores before/
+  // after campaign metrics and the £ impact so the agent's scorecard is just
+  // a SELECT — no recompute on page load. Outcomes:
+  //   breakthrough = before > 16% ACOS, after ≤ 16% (crossed breakeven)
+  //   improved     = ACOS dropped by 5+ points
+  //   flat         = within ±5 points
+  //   worsened     = ACOS rose by 5+ points
+  //   unscoreable  = no spend in either window, or campaign now paused with no after data
+  //   disqualified = backfill-only: task was a bogus scheduler firing (paused campaign,
+  //                  duplicate, or AI judged the resolution note as "this wasn't a real problem")
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS task_outcomes (
+        task_id INTEGER PRIMARY KEY REFERENCES campaign_tasks(id) ON DELETE CASCADE,
+        agent_name TEXT,
+        department TEXT,
+        task_source TEXT,
+        campaign_id TEXT,
+        campaign_name TEXT,
+        problem_type TEXT,
+        product_key TEXT,
+        before_window_start DATE,
+        before_window_end DATE,
+        before_spend NUMERIC DEFAULT 0,
+        before_sales NUMERIC DEFAULT 0,
+        before_acos NUMERIC,
+        after_window_start DATE,
+        after_window_end DATE,
+        after_spend NUMERIC DEFAULT 0,
+        after_sales NUMERIC DEFAULT 0,
+        after_acos NUMERIC,
+        acos_delta NUMERIC,
+        outcome TEXT,
+        disqualified_reason TEXT,
+        weight NUMERIC DEFAULT 1,
+        efficiency_gain_gbp NUMERIC,
+        worsened_waste_gbp NUMERIC,
+        repeat_gap_waste_gbp NUMERIC,
+        scored_at TIMESTAMP DEFAULT NOW(),
+        mistake_mirror_note TEXT,
+        mistake_mirror_at TIMESTAMP
+      )
+    `);
+    await db.query("CREATE INDEX IF NOT EXISTS idx_outcomes_agent_period ON task_outcomes(agent_name, scored_at DESC)");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_outcomes_dept ON task_outcomes(department)");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_outcomes_outcome ON task_outcomes(outcome)");
+    console.log('[r34] task_outcomes table ready');
+  } catch(e) { console.error('[r34] task_outcomes init: ' + e.message); }
+
+  // r34: system_meta — tiny key/value table to track one-off jobs. Used right
+  // now to gate the backfill so it runs exactly once across all deploys.
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS system_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('[r34] system_meta table ready');
+  } catch(e) { console.error('[r34] system_meta init: ' + e.message); }
 }
 
 function scoreCampaignDays(days) {
@@ -2989,6 +3056,465 @@ async function getPreviousTaskContext(department, campaignId, productKey) {
     return null;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// r34: Agent Performance — outcome scoring engine
+// ─────────────────────────────────────────────────────────────────────────
+// Computes the £ impact of every completed task once 7 days have elapsed
+// after completion. Writes to task_outcomes. Read by the Performance page.
+
+const R34_BREAKEVEN_ACOS = 0.16;          // FK Sports breakeven
+const R34_DELTA_THRESHOLD = 0.05;         // 5 ACOS points = real change (not noise)
+
+// Pull a campaign's spend/sales aggregate for a date range, from daily_snapshots
+// (Amazon) or google_state_snapshots (Google). Returns { spend, sales } both as
+// numbers. Returns nulls if no data found in the window.
+async function r34_campaignWindowMetrics(department, campaignId, productKey, startDate, endDate) {
+  if (!db) return null;
+  try {
+    if (department === 'amazon') {
+      const r = await db.query(
+        "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= $1 AND snapshot_date <= $2",
+        [startDate, endDate]
+      );
+      let spend = 0, sales = 0, daysWithData = 0;
+      r.rows.forEach(function(row){
+        const camps = row.campaigns || [];
+        const match = camps.find(function(c){ return String(c.campaignId) === String(campaignId); });
+        if (match) {
+          spend += parseFloat(match.spend) || 0;
+          sales += parseFloat(match.sales) || 0;
+          daysWithData++;
+        }
+      });
+      return { spend: spend, sales: sales, daysWithData: daysWithData };
+    } else if (department === 'google') {
+      // For Google we have snapshot rows in google_state_snapshots, one per
+      // ingest (multiple per day historically). For each calendar day in window,
+      // pick the LAST snapshot of that day to avoid double-counting; sum across
+      // days. Match campaign at campaign level, or filter to product level if
+      // productKey present.
+      const r = await db.query(
+        "WITH daily_snapshots_g AS ( " +
+        "  SELECT DATE(received_at AT TIME ZONE 'Europe/London') AS d, " +
+        "         products, " +
+        "         ROW_NUMBER() OVER (PARTITION BY DATE(received_at AT TIME ZONE 'Europe/London') ORDER BY received_at DESC) AS rn " +
+        "  FROM google_state_snapshots " +
+        "  WHERE DATE(received_at AT TIME ZONE 'Europe/London') >= $1 AND DATE(received_at AT TIME ZONE 'Europe/London') <= $2 " +
+        ") SELECT d, products FROM daily_snapshots_g WHERE rn = 1",
+        [startDate, endDate]
+      );
+      let spend = 0, sales = 0, daysWithData = 0;
+      r.rows.forEach(function(row){
+        const prods = row.products || [];
+        let dayHadMatch = false;
+        prods.forEach(function(p){
+          if (String(p.campaignId) !== String(campaignId)) return;
+          if (productKey) {
+            // product-level task — only sum rows whose shopifyItemId matches
+            // the product_key (which typically embeds the Shopify product ID).
+            const parts = String(p.shopifyItemId || '').split('_');
+            const partsKey = String(productKey || '').split('_');
+            const shopId = parts.length >= 3 ? parts[2] : null;
+            const keyShop = partsKey.length >= 3 ? partsKey[2] : null;
+            if (!shopId || !keyShop || shopId !== keyShop) return;
+          }
+          spend += parseFloat(p.spend) || 0;
+          sales += parseFloat(p.sales) || 0;
+          dayHadMatch = true;
+        });
+        if (dayHadMatch) daysWithData++;
+      });
+      return { spend: spend, sales: sales, daysWithData: daysWithData };
+    }
+  } catch(e) {
+    console.error('[r34 windowMetrics] ' + e.message);
+    return null;
+  }
+  return null;
+}
+
+// Compute the outcome row for one task. Returns the row object (not yet persisted)
+// or null if not scoreable (e.g. completion was less than 7 days ago).
+async function r34_computeOutcomeForTask(task) {
+  // task = full row from campaign_tasks
+  const completedAt = task.completed_at || task.resolved_at;
+  if (!completedAt) return null;
+  const completedDate = new Date(completedAt);
+  const now = new Date();
+  const daysSinceComplete = (now.getTime() - completedDate.getTime()) / 86400000;
+  if (daysSinceComplete < 7) return null;     // after-window not elapsed yet
+
+  // Before window: 7 days ending the day before created_date (so we capture
+  // pre-task state). After window: 7 days starting the day AFTER completed_at
+  // (excluding completion day itself which mixes pre + post state).
+  const createdDate = new Date(task.created_date || task.created_at || completedAt);
+  const beforeEnd = new Date(createdDate); beforeEnd.setDate(beforeEnd.getDate() - 1);
+  const beforeStart = new Date(beforeEnd); beforeStart.setDate(beforeStart.getDate() - 6);
+  const afterStart = new Date(completedDate); afterStart.setDate(afterStart.getDate() + 1);
+  const afterEnd = new Date(afterStart); afterEnd.setDate(afterEnd.getDate() + 6);
+  const fmt = function(d){ return d.toISOString().slice(0, 10); };
+
+  const before = await r34_campaignWindowMetrics(task.department, task.campaign_id, task.product_key, fmt(beforeStart), fmt(beforeEnd));
+  const after  = await r34_campaignWindowMetrics(task.department, task.campaign_id, task.product_key, fmt(afterStart), fmt(afterEnd));
+
+  if (!before || !after) {
+    return { task_id: task.id, agent_name: task.agent_name, department: task.department, task_source: task.task_source,
+             campaign_id: String(task.campaign_id||''), campaign_name: task.campaign_name, problem_type: task.problem_type, product_key: task.product_key,
+             outcome: 'unscoreable', disqualified_reason: 'no_data' };
+  }
+  if (before.spend < 0.5 && after.spend < 0.5) {
+    return { task_id: task.id, agent_name: task.agent_name, department: task.department, task_source: task.task_source,
+             campaign_id: String(task.campaign_id||''), campaign_name: task.campaign_name, problem_type: task.problem_type, product_key: task.product_key,
+             before_window_start: fmt(beforeStart), before_window_end: fmt(beforeEnd),
+             before_spend: before.spend, before_sales: before.sales,
+             after_window_start: fmt(afterStart), after_window_end: fmt(afterEnd),
+             after_spend: after.spend, after_sales: after.sales,
+             outcome: 'unscoreable', disqualified_reason: 'no_spend_either_window' };
+  }
+
+  const beforeAcos = before.sales > 0 ? (before.spend / before.sales) : (before.spend > 0 ? 99 : null);
+  const afterAcos  = after.sales > 0  ? (after.spend  / after.sales)  : (after.spend  > 0 ? 99 : null);
+  const acosDelta = (beforeAcos != null && afterAcos != null) ? (beforeAcos - afterAcos) : null;
+
+  // Outcome categorisation
+  let outcome = 'flat';
+  if (beforeAcos != null && afterAcos != null) {
+    if (beforeAcos > R34_BREAKEVEN_ACOS && afterAcos <= R34_BREAKEVEN_ACOS) outcome = 'breakthrough';
+    else if (acosDelta >= R34_DELTA_THRESHOLD) outcome = 'improved';
+    else if (acosDelta <= -R34_DELTA_THRESHOLD) outcome = 'worsened';
+    else outcome = 'flat';
+  } else if (afterAcos === null && before.spend > 0) {
+    // campaign now has zero spend (probably paused successfully)
+    outcome = 'flat';     // can't measure but agent likely did the right thing
+  }
+
+  // £ impact maths — the "better" formula:
+  // efficiency_gain = (beforeSales * afterAcos/beforeAcos) - afterSpend
+  // i.e. "what would today's sales have cost at yesterday's efficiency, vs what they actually cost"
+  // Positive = money saved. Only meaningful when both ACOSes exist.
+  let efficiencyGain = null;
+  if (beforeAcos > 0 && afterAcos != null) {
+    const hypotheticalAfterSpend = before.sales * (afterAcos / beforeAcos);
+    efficiencyGain = hypotheticalAfterSpend - after.spend;
+  }
+
+  // Worsened waste = extra spend caused by higher ACOS in after-window
+  let worsenedWaste = null;
+  if (outcome === 'worsened' && beforeAcos > 0) {
+    // What WOULD the campaign have spent at beforeAcos to generate after.sales?
+    const expectedSpend = after.sales * beforeAcos;
+    worsenedWaste = Math.max(0, after.spend - expectedSpend);
+  }
+
+  // Weight by log10 of the larger spend — a £1000 campaign matters more than a £10 one
+  const maxSpend = Math.max(before.spend, after.spend, 1);
+  const weight = Math.log10(maxSpend + 10);
+
+  return {
+    task_id: task.id,
+    agent_name: task.agent_name,
+    department: task.department,
+    task_source: task.task_source,
+    campaign_id: String(task.campaign_id||''),
+    campaign_name: task.campaign_name,
+    problem_type: task.problem_type,
+    product_key: task.product_key,
+    before_window_start: fmt(beforeStart), before_window_end: fmt(beforeEnd),
+    before_spend: before.spend, before_sales: before.sales, before_acos: beforeAcos,
+    after_window_start: fmt(afterStart), after_window_end: fmt(afterEnd),
+    after_spend: after.spend, after_sales: after.sales, after_acos: afterAcos,
+    acos_delta: acosDelta,
+    outcome: outcome,
+    weight: weight,
+    efficiency_gain_gbp: efficiencyGain,
+    worsened_waste_gbp: worsenedWaste,
+    repeat_gap_waste_gbp: null    // filled in by a separate pass below if applicable
+  };
+}
+
+// Compute the "repeat gap waste" for an outcome — the spend on the campaign
+// between this task's completion and the next failure (if any within 14 days).
+async function r34_repeatGapWasteForTask(task) {
+  if (!db) return null;
+  const completedAt = task.completed_at || task.resolved_at;
+  if (!completedAt) return null;
+  try {
+    // Find the next task on the same (campaign_id, problem_type) created within
+    // 14 days after this one was completed. If found = repeat offender; the gap
+    // spend is "waste".
+    const r = await db.query(
+      "SELECT id, created_date FROM campaign_tasks " +
+      "WHERE campaign_id = $1 AND problem_type = $2 AND department = $3 " +
+      "  AND COALESCE(product_key,'') = COALESCE($4,'') " +
+      "  AND created_date > $5 " +
+      "  AND created_date <= ($5::timestamp + INTERVAL '14 days') " +
+      "  AND id != $6 " +
+      "ORDER BY created_date ASC LIMIT 1",
+      [String(task.campaign_id||''), task.problem_type, task.department, task.product_key || null, completedAt, task.id]
+    );
+    if (!r.rows.length) return null;
+    const nextCreated = new Date(r.rows[0].created_date);
+    const fmt = function(d){ return d.toISOString().slice(0, 10); };
+    const gapStart = new Date(completedAt); gapStart.setDate(gapStart.getDate() + 1);
+    if (gapStart >= nextCreated) return 0;
+    const gapEnd = new Date(nextCreated); gapEnd.setDate(gapEnd.getDate() - 1);
+    if (gapEnd < gapStart) return 0;
+    const gap = await r34_campaignWindowMetrics(task.department, task.campaign_id, task.product_key, fmt(gapStart), fmt(gapEnd));
+    if (!gap) return null;
+    // Wasted = spend during the gap (since the fix didn't stick)
+    return gap.spend;
+  } catch(e) {
+    console.error('[r34 repeatGap] ' + e.message);
+    return null;
+  }
+}
+
+// Haiku-aided "is this a real task or a bogus scheduler firing?" check.
+// Used during the one-time backfill. Returns 'REAL' or 'BOGUS'.
+async function r34_aiClassifyHistoricalTask(task) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return 'REAL';   // fail safe — don't disqualify if we can't check
+  const note = String(task.agent_notes || '').trim();
+  if (!note) return 'REAL';     // no note = no obvious dismissal signal, assume real
+  const prompt =
+    "You are classifying historical Amazon/Google PPC tasks. The scheduler that created them had bugs (it was firing on healthy campaigns and on paused campaigns). An agent has marked the task 'complete' with a note.\n\n" +
+    "Decide whether this was a REAL problem the agent actually fixed, or a BOGUS firing the agent correctly dismissed.\n\n" +
+    "═══ TASK ═══\n" +
+    "Campaign: " + (task.campaign_name || '?') + "\n" +
+    "Problem flagged: " + (task.problem_detail || task.problem_type || '?') + "\n" +
+    "Agent's resolution note: " + note.slice(0, 400) + "\n\n" +
+    "═══ JUDGMENT ═══\n" +
+    "• If the note says the campaign was actually fine / under target / performing well / already healthy → BOGUS\n" +
+    "• If the note says the campaign was paused / disabled / archived → BOGUS\n" +
+    "• If the note says 'duplicate', 'already done', 'closed by mistake' → BOGUS\n" +
+    "• If the note describes an actual fix (paused keywords, lowered bids, changed budget, etc.) → REAL\n" +
+    "• If the note is empty or unclear → REAL (give benefit of the doubt)\n\n" +
+    "Return ONLY one word: REAL or BOGUS";
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 10,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 15000
+    });
+    const text = String((aiResp.data.content[0] && aiResp.data.content[0].text) || '').trim().toUpperCase();
+    return text.indexOf('BOGUS') === 0 ? 'BOGUS' : 'REAL';
+  } catch(e) {
+    console.error('[r34 aiClassify] ' + e.message);
+    return 'REAL';
+  }
+}
+
+// AI mistakes-mirror — one specific sentence on what the agent missed.
+// Cost: ~£0.001. Called for repeat-failure tasks only.
+async function r34_aiMistakesMirror(task, repeatGapWaste) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+  const prompt =
+    "You are coaching an Amazon/Google PPC agent. Their previous fix did not stick — the same problem returned within 14 days.\n\n" +
+    "═══ TASK ═══\n" +
+    "Campaign: " + (task.campaign_name || '?') + "\n" +
+    "Problem they fixed: " + (task.problem_detail || task.problem_type || '?') + "\n" +
+    "Their fix note: " + String(task.agent_notes || '(no note)').slice(0, 400) + "\n" +
+    "What happened: same problem returned " + (repeatGapWaste ? '(£' + Math.round(repeatGapWaste) + ' spent in the gap)' : '') + "\n\n" +
+    "═══ COACHING ═══\n" +
+    "In 2-3 sentences, what specifically did the agent miss? What action would have stuck?\n" +
+    "Be specific to THIS campaign and THIS problem. No generic advice.";
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 20000
+    });
+    return String((aiResp.data.content[0] && aiResp.data.content[0].text) || '').trim();
+  } catch(e) {
+    console.error('[r34 mistakesMirror] ' + e.message);
+    return null;
+  }
+}
+
+// Persist one outcome row. Uses UPSERT — safe if backfill is re-run.
+async function r34_persistOutcome(row) {
+  if (!db || !row) return;
+  try {
+    await db.query(
+      "INSERT INTO task_outcomes (" +
+      "  task_id, agent_name, department, task_source, campaign_id, campaign_name, problem_type, product_key, " +
+      "  before_window_start, before_window_end, before_spend, before_sales, before_acos, " +
+      "  after_window_start, after_window_end, after_spend, after_sales, after_acos, " +
+      "  acos_delta, outcome, disqualified_reason, weight, " +
+      "  efficiency_gain_gbp, worsened_waste_gbp, repeat_gap_waste_gbp, " +
+      "  mistake_mirror_note, mistake_mirror_at, scored_at " +
+      ") VALUES (" +
+      "  $1,$2,$3,$4,$5,$6,$7,$8, $9,$10,$11,$12,$13, $14,$15,$16,$17,$18, $19,$20,$21,$22, $23,$24,$25, $26,$27, NOW()" +
+      ") ON CONFLICT (task_id) DO UPDATE SET " +
+      "  outcome = EXCLUDED.outcome, disqualified_reason = EXCLUDED.disqualified_reason, " +
+      "  before_spend = EXCLUDED.before_spend, before_sales = EXCLUDED.before_sales, before_acos = EXCLUDED.before_acos, " +
+      "  after_spend = EXCLUDED.after_spend, after_sales = EXCLUDED.after_sales, after_acos = EXCLUDED.after_acos, " +
+      "  acos_delta = EXCLUDED.acos_delta, weight = EXCLUDED.weight, " +
+      "  efficiency_gain_gbp = EXCLUDED.efficiency_gain_gbp, worsened_waste_gbp = EXCLUDED.worsened_waste_gbp, " +
+      "  repeat_gap_waste_gbp = EXCLUDED.repeat_gap_waste_gbp, " +
+      "  mistake_mirror_note = EXCLUDED.mistake_mirror_note, mistake_mirror_at = EXCLUDED.mistake_mirror_at, " +
+      "  scored_at = NOW()",
+      [row.task_id, row.agent_name, row.department, row.task_source, row.campaign_id, row.campaign_name, row.problem_type, row.product_key,
+       row.before_window_start, row.before_window_end, row.before_spend, row.before_sales, row.before_acos,
+       row.after_window_start, row.after_window_end, row.after_spend, row.after_sales, row.after_acos,
+       row.acos_delta, row.outcome, row.disqualified_reason, row.weight,
+       row.efficiency_gain_gbp, row.worsened_waste_gbp, row.repeat_gap_waste_gbp,
+       row.mistake_mirror_note, row.mistake_mirror_note ? new Date().toISOString() : null]
+    );
+  } catch(e) {
+    console.error('[r34 persistOutcome] task_id=' + row.task_id + ': ' + e.message);
+  }
+}
+
+// Score one task fully: compute outcome, add repeat-gap waste if applicable,
+// generate mistakes-mirror note if it was a repeat failure, persist.
+async function r34_scoreOneTask(task, opts) {
+  opts = opts || {};
+  const doDisqualifyCheck = opts.doDisqualifyCheck === true;
+  const row = await r34_computeOutcomeForTask(task);
+  if (!row) return null;
+
+  // Detect duplicate-chain: another task by same agent on same (campaign_id, problem_type)
+  // closed within 24h of this one. If so AND this isn't the latest, mark disqualified.
+  if (doDisqualifyCheck && db) {
+    try {
+      const dupCheck = await db.query(
+        "SELECT id FROM campaign_tasks WHERE agent_name = $1 AND campaign_id = $2 AND problem_type = $3 " +
+        "  AND department = $4 AND status = 'complete' " +
+        "  AND resolved_at IS NOT NULL " +
+        "  AND ABS(EXTRACT(EPOCH FROM (resolved_at - $5::timestamp))) < 86400 " +
+        "  AND id != $6 AND id > $6",
+        [task.agent_name, String(task.campaign_id||''), task.problem_type, task.department, task.completed_at || task.resolved_at, task.id]
+      );
+      if (dupCheck.rows.length > 0) {
+        row.outcome = 'disqualified';
+        row.disqualified_reason = 'duplicate_chain';
+      }
+    } catch(e) { /* non-fatal */ }
+  }
+
+  // Repeat-gap waste — applies whether or not the outcome is improved/worsened.
+  // The repeat IS the signal that the fix didn't stick.
+  const gapWaste = await r34_repeatGapWasteForTask(task);
+  if (gapWaste != null && gapWaste > 0) {
+    row.repeat_gap_waste_gbp = gapWaste;
+    // Generate mistakes-mirror note for this repeat
+    if (opts.runMistakesMirror !== false) {
+      row.mistake_mirror_note = await r34_aiMistakesMirror(task, gapWaste);
+    }
+  }
+
+  // Backfill-only: AI disqualify check on REAL-vs-BOGUS via resolution note
+  if (doDisqualifyCheck && row.outcome !== 'disqualified') {
+    const verdict = await r34_aiClassifyHistoricalTask(task);
+    if (verdict === 'BOGUS') {
+      row.outcome = 'disqualified';
+      row.disqualified_reason = 'bogus_scheduler_firing';
+      // Don't keep the £ impact numbers — would be misleading
+      row.efficiency_gain_gbp = null;
+      row.worsened_waste_gbp = null;
+      row.repeat_gap_waste_gbp = null;
+    }
+  }
+
+  await r34_persistOutcome(row);
+  return row;
+}
+
+// One-time backfill — runs ONCE across all deploys, gated by system_meta key.
+// Scores all completed tasks from the last 30 days. Includes Haiku-aided
+// disqualify check (REAL vs BOGUS) since this period had buggy scheduler.
+async function r34_runBackfillIfNeeded() {
+  if (!db) return;
+  try {
+    const flag = await db.query("SELECT value FROM system_meta WHERE key = 'r34_backfill_completed_at'");
+    if (flag.rows.length > 0) {
+      console.log('[r34 backfill] already completed at ' + flag.rows[0].value + ' — skipping');
+      return;
+    }
+    console.log('[r34 backfill] starting one-time backfill of historical task outcomes...');
+    const tasks = await db.query(
+      "SELECT * FROM campaign_tasks " +
+      "WHERE status = 'complete' " +
+      "  AND resolved_at IS NOT NULL " +
+      "  AND resolved_at < NOW() - INTERVAL '7 days' " +
+      "  AND resolved_at > NOW() - INTERVAL '30 days' " +
+      "  AND task_source != 'general' " +
+      "  AND id NOT IN (SELECT task_id FROM task_outcomes) " +
+      "ORDER BY resolved_at ASC"
+    );
+    console.log('[r34 backfill] ' + tasks.rows.length + ' eligible tasks to score');
+    let scored = 0, disqualified = 0, unscoreable = 0, errors = 0;
+    for (const task of tasks.rows) {
+      try {
+        const row = await r34_scoreOneTask(task, { doDisqualifyCheck: true, runMistakesMirror: true });
+        if (!row) { unscoreable++; continue; }
+        if (row.outcome === 'disqualified') disqualified++;
+        else if (row.outcome === 'unscoreable') unscoreable++;
+        else scored++;
+      } catch(e) {
+        errors++;
+        console.error('[r34 backfill] task_id=' + task.id + ' error: ' + e.message);
+      }
+    }
+    console.log('[r34 backfill] complete: scored=' + scored + ' disqualified=' + disqualified + ' unscoreable=' + unscoreable + ' errors=' + errors);
+    await db.query(
+      "INSERT INTO system_meta (key, value) VALUES ('r34_backfill_completed_at', NOW()::text) " +
+      "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+    );
+  } catch(e) {
+    console.error('[r34 backfill] outer error: ' + e.message);
+  }
+}
+
+// Going-forward nightly scoring — for tasks completed 7-14 days ago that
+// aren't yet scored. No disqualify check (r33e scheduler shouldn't be firing
+// bogus tasks anymore).
+async function r34_runNightlyScoring() {
+  if (!db) return;
+  try {
+    const tasks = await db.query(
+      "SELECT * FROM campaign_tasks " +
+      "WHERE status = 'complete' " +
+      "  AND resolved_at IS NOT NULL " +
+      "  AND resolved_at < NOW() - INTERVAL '7 days' " +
+      "  AND resolved_at > NOW() - INTERVAL '14 days' " +
+      "  AND task_source != 'general' " +
+      "  AND id NOT IN (SELECT task_id FROM task_outcomes) " +
+      "ORDER BY resolved_at ASC"
+    );
+    if (!tasks.rows.length) {
+      console.log('[r34 nightly] no new tasks to score');
+      return;
+    }
+    console.log('[r34 nightly] scoring ' + tasks.rows.length + ' tasks');
+    let scored = 0;
+    for (const task of tasks.rows) {
+      try {
+        const row = await r34_scoreOneTask(task, { doDisqualifyCheck: false, runMistakesMirror: true });
+        if (row && row.outcome && row.outcome !== 'unscoreable') scored++;
+      } catch(e) {
+        console.error('[r34 nightly] task_id=' + task.id + ' error: ' + e.message);
+      }
+    }
+    console.log('[r34 nightly] complete: ' + scored + ' scored');
+  } catch(e) {
+    console.error('[r34 nightly] outer error: ' + e.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// End r34 scoring engine
+// ─────────────────────────────────────────────────────────────────────────
+
 
 // r29: mark a target as stuck — manager review surface. Idempotent (UPSERT).
 async function markStuck(department, campaignId, productKey, payload) {
@@ -3568,21 +4094,47 @@ async function runDailyTaskScheduler() {
         );
         if (existingToday.rows.length > 0) continue;
 
-        const prevTask = await db.query(
-          'SELECT id, days_persisted FROM campaign_tasks WHERE campaign_id=$1 AND status IN ($2,$3) AND task_source=$4 ORDER BY created_date DESC LIMIT 1',
-          [String(c.campaignId), 'open', 'in_progress', 'daily']
+        // r35.1 — match Google's behaviour: if ANY open daily task exists on
+        // this campaign (any age, not just today), append a "fired again" note
+        // and bump days_persisted + updated_at on it. Do NOT create a new task.
+        //
+        // Before this fix, the Amazon scheduler updated the previous task's
+        // days_persisted but then ALSO inserted a new row, so a campaign with
+        // an unresolved 7-day-old task would accumulate a fresh task every
+        // morning. Satyam ended up with 3+ open tasks on the same campaign
+        // (Baby Stroler KT manual: 6 May + 7 May + 18 May all open).
+        const existingOpen = await db.query(
+          "SELECT id, days_persisted, problem_detail, failure_count, created_date " +
+          "FROM campaign_tasks " +
+          "WHERE campaign_id=$1 AND task_source='daily' " +
+          "  AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+          "ORDER BY created_date ASC LIMIT 1",
+          [String(c.campaignId)]
         );
 
         let daysPersisted = 1;
         let isSuperUrgent = false;
 
-        if (prevTask.rows.length > 0) {
-          daysPersisted = (prevTask.rows[0].days_persisted || 1) + 1;
+        if (existingOpen.rows.length > 0) {
+          const existing = existingOpen.rows[0];
+          daysPersisted = (existing.days_persisted || 1) + 1;
           isSuperUrgent = daysPersisted >= 3;
-          await db.query('UPDATE campaign_tasks SET days_persisted=$1, score=$2, updated_at=NOW() WHERE id=$3', [daysPersisted, item.score, prevTask.rows[0].id]);
+          const daysSinceCreate = Math.floor((Date.now() - new Date(existing.created_date).getTime()) / 86400000);
+          const refireNote = '\n\n— 🔁 Fired again Day ' + daysSinceCreate + ' (' + new Date().toISOString().slice(0, 10) + '): ' + (item.problemDetail || '');
+          const newDetail = (existing.problem_detail || '') + refireNote;
+          const newFailureCount = (existing.failure_count || 1) + 1;
+          const becomeRepeat = newFailureCount >= 2;
+          await db.query(
+            "UPDATE campaign_tasks SET problem_detail=$1, days_persisted=$2, score=$3, " +
+            "  failure_count=$4, is_repeat_offender=$5, updated_at=NOW() WHERE id=$6",
+            [newDetail, daysPersisted, item.score, newFailureCount, becomeRepeat, existing.id]
+          );
+          console.log('[r35.1 AMZ] ' + c.name + ' — appended fired-again to existing task #' + existing.id + ' (now day ' + daysPersisted + ', failure_count ' + newFailureCount + ')');
           if (isSuperUrgent) {
             await sendGoogleChat(['🚨 SUPER URGENT - Day ' + daysPersisted + ' UNRESOLVED', 'Campaign: ' + c.name, 'Agent: ' + agentName, 'Problem: ' + item.problemDetail, 'Score: ' + item.score, 'This has been unresolved for ' + daysPersisted + ' days - manager action needed'].join('\n'));
           }
+          // CRITICAL: skip the new-task creation below. We updated the existing one.
+          continue;
         }
 
         // r29: hard-cap + note-aware repeat detection (same logic as Google)
@@ -9954,6 +10506,96 @@ app.post('/api/google/tasks/:id/cancel', async function(req, res) {
 });
 
 
+// r35.2 — General task creation. For tasks that aren't tied to a specific
+// campaign or product: ad-hoc work like "research competitor X", "audit
+// portfolio for orphan keywords", "review reporting setup". Stores in the
+// same campaign_tasks table with task_source='general', campaign_id='',
+// problem_type='general'. The title acts as the campaign_name for display.
+// Scoring engine (r34) ignores general tasks since there's no ACOS to measure.
+//
+// Auth: agents can create for themselves only. Manager/owner for any agent.
+app.post('/api/tasks/general-create', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { department, agentName, title, description, priority, deadline } = req.body || {};
+
+  // Validate
+  if (!department || !['amazon','google'].includes(String(department).toLowerCase())) {
+    return res.status(400).json({ error: 'department must be amazon or google' });
+  }
+  if (!agentName || !String(agentName).trim()) {
+    return res.status(400).json({ error: 'agentName required' });
+  }
+  if (!title || !String(title).trim()) {
+    return res.status(400).json({ error: 'title required' });
+  }
+  const cleanTitle = String(title).trim().slice(0, 200);
+  const cleanDesc = String(description || '').trim().slice(0, 4000);
+  const dept = String(department).toLowerCase();
+
+  // Priority: low | normal | high. Maps to a score for sort order.
+  const validPriorities = { low: 50, normal: 100, high: 200 };
+  const priorityKey = validPriorities[String(priority || '').toLowerCase()] != null
+    ? String(priority).toLowerCase() : 'normal';
+  const score = validPriorities[priorityKey];
+
+  // Deadline (optional). Must parse as YYYY-MM-DD if provided.
+  let deadlineParam = null;
+  if (deadline) {
+    const d = String(deadline).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      return res.status(400).json({ error: 'deadline must be YYYY-MM-DD' });
+    }
+    deadlineParam = d;
+  }
+
+  // Auth: agent can create for themselves only; manager/owner for anyone
+  const myName = (req.user && req.user.name) || '';
+  const myRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const myDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
+  const canonMe = (typeof canonicalAgent === 'function' ? canonicalAgent(myName) : myName) || myName;
+  const canonTarget = (typeof canonicalAgent === 'function' ? canonicalAgent(agentName) : agentName) || agentName;
+  if (!isPrivileged && canonMe.toLowerCase() !== canonTarget.toLowerCase()) {
+    return res.status(403).json({ error: 'You can only create general tasks for yourself.' });
+  }
+
+  // Build problem_detail = description + (optional deadline line). Keep title
+  // separate as campaign_name so the existing task UI renders it as the headline.
+  let problemDetail = cleanDesc || cleanTitle;
+  if (deadlineParam) {
+    problemDetail = '📅 Deadline: ' + deadlineParam + '\n\n' + problemDetail;
+  }
+
+  try {
+    const insertRes = await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, " +
+      " days_persisted, total_wasted, score, task_source, department, deadline, is_repeat_offender, failure_count) " +
+      "VALUES ('', $1, $2, '', 'general', $3, 1, 0, $4, 'general', $5, $6, FALSE, 1) " +
+      "RETURNING id",
+      [cleanTitle, agentName, problemDetail, score, dept, deadlineParam]
+    );
+    const newId = insertRes.rows[0].id;
+
+    // Activity log
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) " +
+        "VALUES ('', $1, $2, $3, 'general_task_created', $4, $5, $6)",
+        [cleanTitle, agentName, myName || 'System',
+         'Created general task — priority ' + priorityKey + (deadlineParam ? ', deadline ' + deadlineParam : ''),
+         newId, dept]
+      );
+    } catch(_e) { /* non-fatal */ }
+
+    res.json({ success: true, taskId: newId, agent: agentName, title: cleanTitle });
+  } catch(e) {
+    console.error('[r35.2 general-create] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // Manual task creation — used by the "Assign" buttons on campaign rows / product cards / product modal.
 // The manager picks an agent and writes a brief, server creates a task with task_source='manual'.
 app.post('/api/google/tasks/manual-create', async function(req, res) {
@@ -12308,6 +12950,14 @@ cron.schedule('45 23 * * *', function() {
   saveDailySnapshot().catch(function(e){ console.error('[r33b] EOD snapshot: ' + e.message); });
 }, { timezone: 'Europe/London' });
 
+// r34: Nightly task outcome scoring at 23:50 London (5 min after EOD snapshot).
+// Scores tasks completed 7+ days ago that don't yet have an outcome row.
+// Skips disqualify-check (r33e scheduler doesn't fire bogus tasks).
+cron.schedule('50 23 * * *', function() {
+  console.log('[r34] Nightly outcome scoring starting');
+  r34_runNightlyScoring().catch(function(e){ console.error('[r34] nightly: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
 async function advanceTaskStages() {
   if (!db) return;
   try {
@@ -13568,6 +14218,639 @@ cron.schedule('30 3 * * *', async function() {
   }
 }, { timezone: 'Europe/London' });
 
+// ═══════════════════════════════════════════════════════════════════════
+// r34: Agent Performance — read endpoints + admin trigger
+// ═══════════════════════════════════════════════════════════════════════
+
+// Authorisation helper: only the agent themselves OR manager/owner can read
+// any agent's data. Returns true if allowed.
+function r34_canAccess(req, requestedAgent) {
+  if (!req.user) return false;
+  const myName = (req.user.name || req.user.username || '').trim();
+  const myRole = (req.user.role || '').toLowerCase();
+  const myDept = (req.user.department || '').toLowerCase();
+  const isManagerOrOwner = ['manager','owner','admin'].indexOf(myRole) !== -1 || myDept === 'manager';
+  if (isManagerOrOwner) return true;
+  // canonicalAgent equates "Aryan Tomar" with "Aryan" etc.
+  const canonMe = (typeof canonicalAgent === 'function' ? canonicalAgent(myName) : myName) || myName;
+  const canonReq = (typeof canonicalAgent === 'function' ? canonicalAgent(requestedAgent) : requestedAgent) || requestedAgent;
+  return canonMe.toLowerCase() === canonReq.toLowerCase();
+}
+
+function r34_periodToDays(p) {
+  if (p === '7d') return 7;
+  if (p === '90d') return 90;
+  return 30;
+}
+
+// r35: Tier calculation. Pure function — given a success rate and the number
+// of scored tasks, returns { tier, label, color, calibrating, needed }.
+// Thresholds: ≥80% Excellent, 60-79% Good, 50-59% Average, <50% Poor.
+// Below 10 scored tasks the tier is suppressed and "calibrating" is set.
+const R35_TIER_MIN_TASKS = 10;
+function r35_computeTier(successRate, scoredCount) {
+  if (scoredCount < R35_TIER_MIN_TASKS) {
+    return { tier: 'calibrating', label: 'Calibrating', color: 'grey', calibrating: true, needed: R35_TIER_MIN_TASKS - scoredCount };
+  }
+  if (successRate == null) {
+    return { tier: 'calibrating', label: 'Calibrating', color: 'grey', calibrating: true, needed: R35_TIER_MIN_TASKS };
+  }
+  const pct = successRate * 100;
+  if (pct >= 80) return { tier: 'excellent', label: 'Excellent', color: 'green', calibrating: false };
+  if (pct >= 60) return { tier: 'good',      label: 'Good',      color: 'blue',  calibrating: false };
+  if (pct >= 50) return { tier: 'average',   label: 'Average',   color: 'amber', calibrating: false };
+  return { tier: 'poor', label: 'Poor', color: 'red', calibrating: false };
+}
+
+// r35: Tier endpoint — the headline number for the new simplified page.
+// Returns current tier + prior-period tier so we can show the up/down arrow.
+// Pure SQL aggregation; reuses task_outcomes table.
+app.get('/api/performance/:agent/tier', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  try {
+    // Current period: rolling 30 days
+    const cur = await db.query(
+      "SELECT outcome, COUNT(*)::int AS n, " +
+      "       COALESCE(SUM(efficiency_gain_gbp), 0) AS efficiency_total, " +
+      "       COALESCE(SUM(worsened_waste_gbp), 0) AS worsened_total, " +
+      "       COALESCE(SUM(repeat_gap_waste_gbp), 0) AS repeat_gap_total " +
+      "FROM task_outcomes " +
+      "WHERE agent_name = $1 AND scored_at > NOW() - INTERVAL '30 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+    // Prior period: 30-60 days ago (the month before)
+    const prior = await db.query(
+      "SELECT outcome, COUNT(*)::int AS n " +
+      "FROM task_outcomes " +
+      "WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - INTERVAL '60 days' " +
+      "  AND scored_at <= NOW() - INTERVAL '30 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+
+    const summarise = function(rows) {
+      let scored = 0, wins = 0, efficiency = 0, worsened = 0, repeatGap = 0;
+      rows.forEach(function(r){
+        const o = r.outcome;
+        const n = parseInt(r.n) || 0;
+        if (['breakthrough','improved','flat','worsened'].includes(o)) {
+          scored += n;
+          if (o === 'breakthrough' || o === 'improved') wins += n;
+        }
+        if (o !== 'disqualified') {
+          efficiency += parseFloat(r.efficiency_total) || 0;
+          worsened += parseFloat(r.worsened_total) || 0;
+          repeatGap += parseFloat(r.repeat_gap_total) || 0;
+        }
+      });
+      const successRate = scored > 0 ? wins / scored : null;
+      const netImpact = efficiency - worsened - repeatGap;
+      return { scored: scored, successRate: successRate, netImpact: netImpact };
+    };
+
+    const curStats = summarise(cur.rows);
+    const priorStats = summarise(prior.rows);
+    const curTier = r35_computeTier(curStats.successRate, curStats.scored);
+    const priorTier = r35_computeTier(priorStats.successRate, priorStats.scored);
+
+    // Movement direction: only meaningful if both periods have a real tier
+    let movement = 'flat';
+    if (!curTier.calibrating && !priorTier.calibrating) {
+      const order = { poor: 0, average: 1, good: 2, excellent: 3 };
+      const diff = order[curTier.tier] - order[priorTier.tier];
+      if (diff > 0) movement = 'up';
+      else if (diff < 0) movement = 'down';
+    }
+
+    res.json({
+      agent: agent,
+      tier: curTier,
+      priorTier: priorTier,
+      movement: movement,
+      successRate: curStats.successRate,
+      netImpactGbp: Math.round(curStats.netImpact * 100) / 100,
+      scoredCount: curStats.scored
+    });
+  } catch(e) {
+    console.error('[r35 /tier] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// GET /api/performance/:agent/scorecard?period=7d|30d|90d
+// Returns the headline numbers: counts by outcome, success rate, £ impact summary.
+app.get('/api/performance/:agent/scorecard', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const days = r34_periodToDays(req.query.period);
+  try {
+    const r = await db.query(
+      "SELECT outcome, task_source, COUNT(*) AS n, " +
+      "       COALESCE(SUM(efficiency_gain_gbp), 0) AS efficiency_total, " +
+      "       COALESCE(SUM(worsened_waste_gbp), 0) AS worsened_total, " +
+      "       COALESCE(SUM(repeat_gap_waste_gbp), 0) AS repeat_gap_total " +
+      "FROM task_outcomes " +
+      "WHERE agent_name = $1 AND scored_at > NOW() - ($2 || ' days')::interval " +
+      "GROUP BY outcome, task_source",
+      [agent, String(days)]
+    );
+
+    const buckets = { breakthrough: 0, improved: 0, flat: 0, worsened: 0, unscoreable: 0, disqualified: 0 };
+    const sources = { daily: 0, manual: 0 };
+    let efficiencyTotal = 0, worsenedTotal = 0, repeatGapTotal = 0;
+    r.rows.forEach(function(row) {
+      const o = row.outcome || 'flat';
+      const n = parseInt(row.n) || 0;
+      if (buckets[o] != null) buckets[o] += n; else buckets.flat += n;
+      const src = row.task_source === 'manual' ? 'manual' : 'daily';
+      sources[src] += n;
+      // £ totals: exclude disqualified from impact maths
+      if (o !== 'disqualified') {
+        efficiencyTotal += parseFloat(row.efficiency_total) || 0;
+        worsenedTotal += parseFloat(row.worsened_total) || 0;
+        repeatGapTotal += parseFloat(row.repeat_gap_total) || 0;
+      }
+    });
+    const scoredTotal = buckets.breakthrough + buckets.improved + buckets.flat + buckets.worsened;
+    const wins = buckets.breakthrough + buckets.improved;
+    const successRate = scoredTotal >= 5 ? (wins / scoredTotal) : null;   // need ≥5 for a meaningful %
+    const wastedTotal = worsenedTotal + repeatGapTotal;
+    const netImpact = efficiencyTotal - wastedTotal;
+
+    res.json({
+      agent: agent,
+      period: req.query.period || '30d',
+      totalCompleted: scoredTotal + buckets.unscoreable + buckets.disqualified,
+      scored: scoredTotal,
+      outcomes: buckets,
+      sources: sources,
+      successRate: successRate,
+      needsMoreTasks: scoredTotal < 5,
+      efficiencyGainGbp: Math.round(efficiencyTotal * 100) / 100,
+      worsenedWasteGbp: Math.round(worsenedTotal * 100) / 100,
+      repeatGapWasteGbp: Math.round(repeatGapTotal * 100) / 100,
+      totalWastedGbp: Math.round(wastedTotal * 100) / 100,
+      netImpactGbp: Math.round(netImpact * 100) / 100
+    });
+  } catch(e) {
+    console.error('[r34 /scorecard] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/scored-tasks?outcome=&period=
+// Drill-down — task-by-task list for one outcome category.
+app.get('/api/performance/:agent/scored-tasks', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const days = r34_periodToDays(req.query.period);
+  const outcome = String(req.query.outcome || '');
+  const validOutcomes = ['breakthrough','improved','flat','worsened','unscoreable','disqualified'];
+  if (!validOutcomes.includes(outcome)) return res.status(400).json({ error: 'invalid outcome' });
+  try {
+    const r = await db.query(
+      "SELECT o.task_id, o.campaign_id, o.campaign_name, o.problem_type, o.task_source, o.department, " +
+      "       o.before_spend, o.before_sales, o.before_acos, " +
+      "       o.after_spend, o.after_sales, o.after_acos, " +
+      "       o.acos_delta, o.efficiency_gain_gbp, o.worsened_waste_gbp, o.repeat_gap_waste_gbp, " +
+      "       o.scored_at, o.disqualified_reason, " +
+      "       t.agent_notes, t.problem_detail, t.resolved_at AS completed_at, t.created_date " +
+      "FROM task_outcomes o LEFT JOIN campaign_tasks t ON t.id = o.task_id " +
+      "WHERE o.agent_name = $1 AND o.outcome = $2 " +
+      "  AND o.scored_at > NOW() - ($3 || ' days')::interval " +
+      "ORDER BY o.scored_at DESC LIMIT 50",
+      [agent, outcome, String(days)]
+    );
+    res.json({ agent: agent, outcome: outcome, period: req.query.period || '30d', tasks: r.rows });
+  } catch(e) {
+    console.error('[r34 /scored-tasks] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/mistakes-mirror?limit=10
+app.get('/api/performance/:agent/mistakes-mirror', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const limit = Math.min(50, parseInt(req.query.limit, 10) || 10);
+  try {
+    const r = await db.query(
+      "SELECT o.task_id, o.campaign_name, o.problem_type, o.repeat_gap_waste_gbp, o.mistake_mirror_note, " +
+      "       o.scored_at, o.department, " +
+      "       t.agent_notes, t.problem_detail " +
+      "FROM task_outcomes o LEFT JOIN campaign_tasks t ON t.id = o.task_id " +
+      "WHERE o.agent_name = $1 " +
+      "  AND o.mistake_mirror_note IS NOT NULL " +
+      "  AND o.outcome != 'disqualified' " +
+      "ORDER BY o.scored_at DESC LIMIT $2",
+      [agent, limit]
+    );
+    res.json({ agent: agent, repeats: r.rows });
+  } catch(e) {
+    console.error('[r34 /mistakes-mirror] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r35: Wins — meaningful breakthroughs and improvements. Mirror of mistakes-mirror
+// but on the positive side. Filtered to £200+ £ impact OR breakthrough outcome.
+// Max 3 by default. Sorted by impact descending. For the new simple page.
+app.get('/api/performance/:agent/wins', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const limit = Math.min(10, parseInt(req.query.limit, 10) || 3);
+  const days = r34_periodToDays(req.query.period);
+  try {
+    const r = await db.query(
+      "SELECT o.task_id, o.campaign_name, o.problem_type, o.outcome, " +
+      "       o.efficiency_gain_gbp, o.before_acos, o.after_acos, o.scored_at, o.department, " +
+      "       t.agent_notes, t.problem_detail " +
+      "FROM task_outcomes o LEFT JOIN campaign_tasks t ON t.id = o.task_id " +
+      "WHERE o.agent_name = $1 " +
+      "  AND o.outcome IN ('breakthrough','improved') " +
+      "  AND (o.outcome = 'breakthrough' OR COALESCE(o.efficiency_gain_gbp, 0) >= 200) " +
+      "  AND o.scored_at > NOW() - ($2 || ' days')::interval " +
+      "ORDER BY (CASE WHEN o.outcome = 'breakthrough' THEN 1 ELSE 0 END) DESC, " +
+      "         COALESCE(o.efficiency_gain_gbp, 0) DESC " +
+      "LIMIT $3",
+      [agent, String(days), limit]
+    );
+    res.json({ agent: agent, wins: r.rows });
+  } catch(e) {
+    console.error('[r35 /wins] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/daily-brief
+app.get('/api/performance/:agent/daily-brief', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  try {
+    // Yesterday's wins — tasks completed within last 48h that were scored
+    // breakthrough or improved.
+    const wins = await db.query(
+      "SELECT campaign_name, outcome, efficiency_gain_gbp, before_acos, after_acos " +
+      "FROM task_outcomes WHERE agent_name = $1 AND outcome IN ('breakthrough','improved') " +
+      "  AND scored_at > NOW() - INTERVAL '2 days' " +
+      "ORDER BY efficiency_gain_gbp DESC NULLS LAST LIMIT 5",
+      [agent]
+    );
+
+    // Needs attention today — open tasks owned by agent that are flagged repeat
+    // OR have been around for 6+ days. working_days_open is a COMPUTED field
+    // (not a DB column) — we use a simple created_date age in DB and let frontend
+    // refine if it cares about exact working days. The 6-day threshold here uses
+    // calendar days (6 calendar days roughly = 5 working days).
+    const needsAttention = await db.query(
+      "SELECT id, campaign_name, problem_detail, is_repeat_offender, failure_count, " +
+      "       EXTRACT(EPOCH FROM (NOW() - created_date)) / 86400 AS days_open_calendar, " +
+      "       task_stage " +
+      "FROM campaign_tasks " +
+      "WHERE agent_name = $1 AND status IN ('open','in_progress') " +
+      "  AND (is_repeat_offender = TRUE OR created_date < NOW() - INTERVAL '6 days') " +
+      "ORDER BY created_date ASC LIMIT 5",
+      [agent]
+    );
+
+    // 7-day trend: this week vs prior week — success rate, avg ACOS, repeat-failure rate
+    const trendsThisWeek = await db.query(
+      "SELECT outcome, COUNT(*) AS n, AVG(after_acos) AS avg_after_acos, " +
+      "       SUM(CASE WHEN repeat_gap_waste_gbp > 0 THEN 1 ELSE 0 END) AS repeats " +
+      "FROM task_outcomes WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - INTERVAL '7 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+    const trendsPrior = await db.query(
+      "SELECT outcome, COUNT(*) AS n, AVG(after_acos) AS avg_after_acos, " +
+      "       SUM(CASE WHEN repeat_gap_waste_gbp > 0 THEN 1 ELSE 0 END) AS repeats " +
+      "FROM task_outcomes WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - INTERVAL '14 days' AND scored_at <= NOW() - INTERVAL '7 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+
+    const summarise = function(rows) {
+      let scored = 0, wins = 0, repeats = 0, acosSum = 0, acosN = 0;
+      rows.forEach(function(r){
+        const o = r.outcome;
+        const n = parseInt(r.n) || 0;
+        if (['breakthrough','improved','flat','worsened'].includes(o)) {
+          scored += n;
+          if (o === 'breakthrough' || o === 'improved') wins += n;
+          if (r.avg_after_acos != null) { acosSum += parseFloat(r.avg_after_acos) * n; acosN += n; }
+        }
+        repeats += parseInt(r.repeats) || 0;
+      });
+      return {
+        scored: scored,
+        successRate: scored > 0 ? wins / scored : null,
+        avgAcos: acosN > 0 ? acosSum / acosN : null,
+        repeatRate: scored > 0 ? repeats / scored : null
+      };
+    };
+    res.json({
+      agent: agent,
+      yesterdayWins: wins.rows,
+      needsAttention: needsAttention.rows,
+      trendThisWeek: summarise(trendsThisWeek.rows),
+      trendPrior: summarise(trendsPrior.rows)
+    });
+  } catch(e) {
+    console.error('[r34 /daily-brief] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/trajectory?weeks=12
+app.get('/api/performance/:agent/trajectory', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const weeks = Math.min(26, Math.max(2, parseInt(req.query.weeks, 10) || 12));
+  try {
+    const r = await db.query(
+      "SELECT date_trunc('week', scored_at) AS week_start, outcome, COUNT(*) AS n, " +
+      "       AVG(after_acos) AS avg_after_acos, " +
+      "       SUM(CASE WHEN outcome = 'breakthrough' THEN 1 ELSE 0 END) AS bt, " +
+      "       COALESCE(SUM(efficiency_gain_gbp), 0) AS gain, " +
+      "       COALESCE(SUM(worsened_waste_gbp), 0) AS worsened, " +
+      "       COALESCE(SUM(repeat_gap_waste_gbp), 0) AS repeat_gap " +
+      "FROM task_outcomes WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - ($2 || ' weeks')::interval " +
+      "GROUP BY week_start, outcome ORDER BY week_start ASC",
+      [agent, String(weeks)]
+    );
+    // Bucket per week
+    const byWeek = {};
+    r.rows.forEach(function(row){
+      const k = row.week_start.toISOString().slice(0,10);
+      if (!byWeek[k]) byWeek[k] = { week_start: k, scored: 0, wins: 0, breakthroughs: 0, sumAcos: 0, nAcos: 0, gain: 0, worsened: 0, repeat_gap: 0 };
+      const bk = byWeek[k];
+      const n = parseInt(row.n) || 0;
+      if (['breakthrough','improved','flat','worsened'].includes(row.outcome)) {
+        bk.scored += n;
+        if (row.outcome === 'breakthrough' || row.outcome === 'improved') bk.wins += n;
+        if (row.outcome === 'breakthrough') bk.breakthroughs += parseInt(row.bt) || 0;
+        if (row.avg_after_acos != null) { bk.sumAcos += parseFloat(row.avg_after_acos) * n; bk.nAcos += n; }
+      }
+      bk.gain += parseFloat(row.gain) || 0;
+      bk.worsened += parseFloat(row.worsened) || 0;
+      bk.repeat_gap += parseFloat(row.repeat_gap) || 0;
+    });
+    const weeksOut = Object.values(byWeek).map(function(w){
+      return {
+        week_start: w.week_start,
+        scored: w.scored,
+        successRate: w.scored > 0 ? Math.round((w.wins / w.scored) * 1000) / 1000 : null,
+        avgAcos: w.nAcos > 0 ? Math.round((w.sumAcos / w.nAcos) * 1000) / 1000 : null,
+        breakthroughs: w.breakthroughs,
+        netImpactGbp: Math.round((w.gain - w.worsened - w.repeat_gap) * 100) / 100
+      };
+    });
+    res.json({ agent: agent, weeks: weeksOut });
+  } catch(e) {
+    console.error('[r34 /trajectory] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin: list agents eligible for PPC performance scoring. Pulls from
+// task_outcomes (agents who actually have scored rows) OR from the users
+// table filtered to Amazon/Google departments only — agents in other
+// departments (logistics, accounts, supply_chain) don't run PPC campaigns
+// and shouldn't appear here. Their work has different KPIs.
+app.get('/api/performance/_agents', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  const myDept = req.user ? (req.user.department||'').toLowerCase() : '';
+  const isManagerOrOwner = ['manager','owner','admin'].indexOf(myRole) !== -1 || myDept === 'manager';
+  if (!isManagerOrOwner) return res.status(403).json({ error: 'Not authorised' });
+  try {
+    // Union of:
+    //   - agents who have task_outcomes rows (regardless of current dept — for
+    //     audit if an agent moved teams; their historical scores still show)
+    //   - active users whose CURRENT department is amazon or google (so the
+    //     dropdown is populated pre-backfill, and so newly-added PPC agents
+    //     appear immediately even before they've completed any task)
+    // Plus owner role (Bobby), since you own tasks for verification purposes.
+    const r = await db.query(
+      "WITH outcome_agents AS ( " +
+      "  SELECT agent_name, COUNT(*)::int AS n FROM task_outcomes " +
+      "  WHERE agent_name IS NOT NULL AND agent_name != '' " +
+      "  GROUP BY agent_name " +
+      "), user_agents AS ( " +
+      "  SELECT DISTINCT name AS agent_name, 0::int AS n FROM users " +
+      "  WHERE name IS NOT NULL AND name != '' " +
+      "    AND COALESCE(is_active, TRUE) = TRUE " +
+      "    AND ( " +
+      "      LOWER(COALESCE(department, '')) IN ('amazon', 'google') " +
+      "      OR LOWER(COALESCE(role, '')) = 'owner' " +
+      "    ) " +
+      ") " +
+      "SELECT agent_name, MAX(n) AS n FROM ( " +
+      "  SELECT * FROM outcome_agents UNION ALL SELECT * FROM user_agents " +
+      ") combined " +
+      "GROUP BY agent_name ORDER BY MAX(n) DESC, agent_name ASC"
+    );
+    res.json({ agents: r.rows });
+  } catch(e) {
+    // Fallback: if users table query fails for any reason, return just outcome agents
+    try {
+      const r2 = await db.query("SELECT agent_name, COUNT(*)::int AS n FROM task_outcomes WHERE agent_name IS NOT NULL AND agent_name != '' GROUP BY agent_name ORDER BY n DESC");
+      res.json({ agents: r2.rows });
+    } catch(e2) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+});
+
+// r34 diagnostic — owner only. Returns the counts needed to understand why
+// the performance page shows zeros. No data leak risk since it's aggregate.
+app.get('/api/admin/r34/diagnose', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  if (myRole !== 'owner') return res.status(403).json({ error: 'Owner only' });
+  try {
+    const out = {};
+    const q = async function(label, sql) {
+      try {
+        const r = await db.query(sql);
+        out[label] = r.rows;
+      } catch(e) {
+        out[label] = { error: e.message };
+      }
+    };
+    await q('completed_with_resolved_at', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NOT NULL");
+    await q('completed_without_resolved_at', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NULL");
+    await q('completed_in_backfill_window_7_to_30d', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NOT NULL AND resolved_at < NOW() - INTERVAL '7 days' AND resolved_at > NOW() - INTERVAL '30 days'");
+    await q('completed_in_nightly_window_7_to_14d', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NOT NULL AND resolved_at < NOW() - INTERVAL '7 days' AND resolved_at > NOW() - INTERVAL '14 days'");
+    await q('completed_last_30d_any', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND COALESCE(resolved_at, last_resolved_date, updated_at) > NOW() - INTERVAL '30 days'");
+    await q('task_outcomes_total', "SELECT COUNT(*)::int AS n FROM task_outcomes");
+    await q('task_outcomes_by_outcome', "SELECT outcome, COUNT(*)::int AS n FROM task_outcomes GROUP BY outcome ORDER BY n DESC");
+    await q('task_outcomes_by_agent', "SELECT agent_name, COUNT(*)::int AS n FROM task_outcomes GROUP BY agent_name ORDER BY n DESC LIMIT 20");
+    await q('sample_recent_completed', "SELECT id, agent_name, campaign_name, status, resolved_at, last_resolved_date, updated_at FROM campaign_tasks WHERE status='complete' ORDER BY COALESCE(resolved_at, last_resolved_date, updated_at) DESC LIMIT 5");
+    await q('daily_snapshots_count', "SELECT COUNT(*)::int AS n, MIN(snapshot_date) AS earliest, MAX(snapshot_date) AS latest FROM daily_snapshots");
+    res.json(out);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r35.1 Fix B — one-time cleanup tool. Finds groups of open tasks where
+// (campaign_id, agent_name) has 2+ open tasks, and merges them: keep oldest
+// as canonical, close the rest with a "merged into #X" note. Owner only.
+// Dry-run by default — must POST with { confirm: true } to actually merge.
+// Use this once to clean up the backlog from before r35.1 Fix A was deployed.
+app.post('/api/admin/merge-duplicate-tasks', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  if (myRole !== 'owner') return res.status(403).json({ error: 'Owner only' });
+  const confirm = req.body && req.body.confirm === true;
+  try {
+    // Find duplicate groups: same (campaign_id, agent_name, department) with
+    // 2+ open tasks. We DON'T group by problem_type because the duplicates
+    // we're cleaning up are about the same campaign — even if one was flagged
+    // as "no_revenue" and another as "high_acos" it's still the same campaign
+    // having problems and should be one task.
+    const groups = await db.query(
+      "SELECT campaign_id, campaign_name, agent_name, department, " +
+      "       COUNT(*) AS n, " +
+      "       MIN(id) AS canonical_id, " +
+      "       MIN(created_date) AS oldest_date, " +
+      "       MAX(created_date) AS newest_date, " +
+      "       array_agg(id ORDER BY created_date ASC) AS task_ids " +
+      "FROM campaign_tasks " +
+      "WHERE status NOT IN ('complete','archived','dismissed','cancelled') " +
+      "  AND task_source='daily' " +
+      "  AND campaign_id IS NOT NULL AND campaign_id != '' " +
+      "GROUP BY campaign_id, campaign_name, agent_name, department " +
+      "HAVING COUNT(*) >= 2 " +
+      "ORDER BY COUNT(*) DESC"
+    );
+    if (!groups.rows.length) {
+      return res.json({ found: 0, message: 'No duplicate task groups found — nothing to merge.' });
+    }
+
+    const summary = groups.rows.map(function(g){
+      return {
+        campaign: g.campaign_name,
+        agent: g.agent_name,
+        department: g.department,
+        open_tasks: parseInt(g.n),
+        canonical_id_to_keep: parseInt(g.canonical_id),
+        all_task_ids: g.task_ids.map(function(i){ return parseInt(i); }),
+        oldest: g.oldest_date,
+        newest: g.newest_date
+      };
+    });
+
+    if (!confirm) {
+      // Dry run — just report what would happen
+      const totalToClose = summary.reduce(function(s,g){ return s + g.open_tasks - 1; }, 0);
+      return res.json({
+        dry_run: true,
+        found_groups: summary.length,
+        tasks_that_would_be_closed: totalToClose,
+        groups: summary,
+        next_step: 'POST again with body {"confirm": true} to actually perform the merge.'
+      });
+    }
+
+    // CONFIRM=TRUE — actually merge
+    let mergedGroups = 0, closedTasks = 0;
+    const errors = [];
+    for (const g of groups.rows) {
+      try {
+        const canonicalId = parseInt(g.canonical_id);
+        const allIds = g.task_ids.map(function(i){ return parseInt(i); });
+        const toClose = allIds.filter(function(i){ return i !== canonicalId; });
+        const totalFailureCount = allIds.length;
+        // Close the duplicates
+        for (const id of toClose) {
+          await db.query(
+            "UPDATE campaign_tasks SET status='complete', " +
+            "  agent_notes = COALESCE(agent_notes,'') || E'\\n🔀 Merged into task #' || $2 || ' (auto-cleanup of duplicate task on same campaign). Closed by system on ' || NOW()::date, " +
+            "  resolved_at = NOW(), last_resolved_date = NOW(), updated_at = NOW() " +
+            "WHERE id = $1",
+            [id, canonicalId]
+          );
+          closedTasks++;
+        }
+        // Bump the canonical task's failure_count + mark repeat offender
+        await db.query(
+          "UPDATE campaign_tasks SET " +
+          "  failure_count = $2, " +
+          "  is_repeat_offender = ($2 >= 2), " +
+          "  problem_detail = COALESCE(problem_detail,'') || E'\\n\\n— 🔀 Auto-merged ' || $3 || ' duplicate task(s) on same campaign (IDs: ' || $4 || '). This task is now the canonical record.', " +
+          "  updated_at = NOW() " +
+          "WHERE id = $1",
+          [canonicalId, totalFailureCount, toClose.length, toClose.join(',')]
+        );
+        // Activity log
+        try {
+          await db.query(
+            "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) " +
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            [String(g.campaign_id), g.campaign_name, g.agent_name, (req.user && req.user.name) || 'System',
+             'duplicates_merged',
+             'Merged ' + toClose.length + ' duplicate(s) into canonical task #' + canonicalId + '. Closed IDs: ' + toClose.join(','),
+             canonicalId, g.department || 'amazon']
+          );
+        } catch(_e) { /* non-fatal */ }
+        mergedGroups++;
+      } catch(e) {
+        errors.push({ campaign: g.campaign_name, agent: g.agent_name, error: e.message });
+      }
+    }
+
+    res.json({
+      confirmed: true,
+      merged_groups: mergedGroups,
+      tasks_closed: closedTasks,
+      errors: errors
+    });
+  } catch(e) {
+    console.error('[r35.1 merge-duplicates] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin trigger — manually run backfill or nightly. Owner only.
+app.post('/api/admin/r34/run', async function(req, res) {
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  if (myRole !== 'owner') return res.status(403).json({ error: 'Owner only' });
+  const which = String(req.body && req.body.which || 'nightly');
+  try {
+    if (which === 'backfill') {
+      // Wipe the flag so backfill re-runs
+      if (db) await db.query("DELETE FROM system_meta WHERE key = 'r34_backfill_completed_at'");
+      r34_runBackfillIfNeeded().catch(function(){});   // async, don't await
+      return res.json({ started: 'backfill', note: 'running in background — watch logs' });
+    } else {
+      r34_runNightlyScoring().catch(function(){});
+      return res.json({ started: 'nightly', note: 'running in background — watch logs' });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// End r34 endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
 
 app.listen(PORT, '0.0.0.0', async function() {
   console.log('App running on port ' + PORT);
@@ -13610,6 +14893,14 @@ app.listen(PORT, '0.0.0.0', async function() {
     // the DB round-trip. If this fails, canonicalAgent falls back to the
     // hardcoded {aryan, aryan tomar, satyam} dict — no functional break.
     refreshAgentAliasCache().catch(function(){});
+
+    // r34: kick off one-time backfill of historical task outcomes.
+    // Delayed 60s so DB, hydration, and any catch-up syncs have settled.
+    // The function itself is gated by system_meta — won't re-run on later
+    // deploys. Safe to call on every boot.
+    setTimeout(function() {
+      r34_runBackfillIfNeeded().catch(function(e){ console.error('[r34 backfill outer] ' + e.message); });
+    }, 60000);
 
     // Hydrate googleState from the most recent snapshot in DB.
     // Prevents the "dashboard goes blank after every deploy" problem — agents see
