@@ -112,6 +112,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .amz-product-card.bucket-underperforming:hover { background: #FFF6E8; }
 .amz-product-card.bucket-working { border-left-color: #65A30D; background: var(--surface); }
 .amz-product-card.bucket-working:hover { background: #F8FBF5; }
+/* r35.8: doing_great = gold/blue for "scale candidate"; monitor = grey for "no data" */
+.amz-product-card.bucket-doing_great { border-left-color: #B7791F; background: #FFFBEB; }
+.amz-product-card.bucket-doing_great:hover { background: #FEF3C7; }
+.amz-product-card.bucket-monitor { border-left-color: #9CA3AF; background: var(--surface); }
+.amz-product-card.bucket-monitor:hover { background: #F3F4F6; }
 .amz-product-img { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: var(--surface3); flex-shrink: 0; }
 .amz-product-img-placeholder { width: 72px; height: 72px; border-radius: 8px; background: var(--surface3); display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: 11px; flex-shrink: 0; }
 .amz-product-body { flex: 1; min-width: 0; }
@@ -121,7 +126,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .amz-priority-1, .amz-bucket-urgent { background: #FCEBEB; color: #791F1F; }
 .amz-priority-2, .amz-bucket-underperforming { background: #FAEEDA; color: #854F0B; }
 .amz-priority-3, .amz-bucket-working { background: #EAF3DE; color: #3B6D11; }
-.amz-priority-4 { background: var(--surface3); color: var(--text2); }
+.amz-priority-4, .amz-bucket-monitor { background: var(--surface3); color: var(--text2); }
+/* r35.8: doing_great = warm gold pill */
+.amz-bucket-doing_great { background: #FEF3C7; color: #92400E; }
 .amz-tab-count { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .amz-evidence-line { font-size: 11px; color: var(--text2); margin-left: 6px; }
 .amz-product-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 12px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--surface3); font-family: var(--mono); }
@@ -850,11 +857,14 @@ tbody tr:hover { background: var(--surface2); }
         <div id="amz-products-count" style="font-size:12px;color:var(--text3)"></div>
       </div>
       <!-- r20c: Urgent / Underperforming / Working buckets — replaces Active/Dormant/All/Gaps. Coverage gaps folded into Underperforming. -->
+      <!-- r35.8: Doing Great + Monitor tabs added for the new diagnostic model. -->
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
         <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
         <button id="amz-filter-urgent" class="btn btn-primary amz-tab-btn amz-tab-urgent" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('urgent')">🔥 Urgent <span id="amz-count-urgent" class="amz-tab-count" style="background:#FCEBEB;color:#791F1F">0</span></button>
         <button id="amz-filter-underperforming" class="btn btn-ghost amz-tab-btn amz-tab-under" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('underperforming')">⚠ Underperforming <span id="amz-count-underperforming" class="amz-tab-count" style="background:#FAEEDA;color:#854F0B">0</span></button>
         <button id="amz-filter-working" class="btn btn-ghost amz-tab-btn amz-tab-working" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('working')">✓ Working <span id="amz-count-working" class="amz-tab-count" style="background:#EAF3DE;color:#3B6D11">0</span></button>
+        <button id="amz-filter-doing_great" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('doing_great')" title="Strong CVR — scale candidates">⭐ Doing Great <span id="amz-count-doing_great" class="amz-tab-count" style="background:#FEF3C7;color:#92400E">0</span></button>
+        <button id="amz-filter-monitor" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('monitor')" title="No sessions, no sales, no spend — not enough signal">💤 Monitor <span id="amz-count-monitor" class="amz-tab-count" style="background:#E5E7EB;color:#374151">0</span></button>
         <button id="amz-filter-all" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('all')">All</button>
         <button id="amz-filter-dormant" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('dormant')">Dormant</button>
         <button id="amz-filter-hidden" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('hidden')" title="Manually hidden products">👁 Hidden <span id="amz-hidden-count" style="font-size:10px;color:var(--text3);margin-left:3px"></span></button>
@@ -4908,7 +4918,8 @@ function populateAmzAgentFilter() {
 function setAmzProductView(view) {
   amzProductView = view;
   // r20c: six tabs — urgent / underperforming / working / all / dormant / hidden
-  ['urgent', 'underperforming', 'working', 'all', 'dormant', 'hidden'].forEach(function(v) {
+  // r35.8: + doing_great / monitor
+  ['urgent', 'underperforming', 'working', 'doing_great', 'monitor', 'all', 'dormant', 'hidden'].forEach(function(v) {
     const btn = document.getElementById('amz-filter-' + v);
     if (!btn) return;
     btn.className = (v === view) ? 'btn btn-primary amz-tab-btn' : 'btn btn-ghost amz-tab-btn';
@@ -4935,9 +4946,12 @@ async function loadAmazonProducts() {
       const s = prodData.summary;
       let label = '';
       // r20c: bucket-based counter labels
+      // r35.8: doing_great + monitor labels added
       if (amzProductView === 'urgent') label = 'Showing ' + (s.urgent_count || 0) + ' urgent (of ' + (s.total_parents_active || 0) + ' active)';
       else if (amzProductView === 'underperforming') label = 'Showing ' + (s.underperforming_count || 0) + ' underperforming (includes coverage gaps)';
       else if (amzProductView === 'working') label = 'Showing ' + (s.working_count || 0) + ' working — performing OK';
+      else if (amzProductView === 'doing_great') label = 'Showing ' + (s.doing_great_count || 0) + ' doing great — scale candidates';
+      else if (amzProductView === 'monitor') label = 'Showing ' + (s.monitor_count || 0) + ' monitor — not enough signal yet';
       else if (amzProductView === 'dormant') label = 'Showing ' + s.total_parents_dormant + ' dormant (no recent sales / no buyable listings)';
       else if (amzProductView === 'hidden') label = 'Showing ' + (s.total_parents_hidden || 0) + ' hidden products';
       else label = 'Showing all ' + (s.total_parents_active + s.total_parents_dormant) + ' products';
@@ -4947,6 +4961,8 @@ async function loadAmazonProducts() {
       setBadge('amz-count-urgent', s.urgent_count);
       setBadge('amz-count-underperforming', s.underperforming_count);
       setBadge('amz-count-working', s.working_count);
+      setBadge('amz-count-doing_great', s.doing_great_count);
+      setBadge('amz-count-monitor', s.monitor_count);
       // r16: hidden tab badge
       const hiddenCountEl = document.getElementById('amz-hidden-count');
       if (hiddenCountEl) hiddenCountEl.textContent = s.total_parents_hidden ? '(' + s.total_parents_hidden + ')' : '';
@@ -5103,11 +5119,13 @@ function amzPriorityLabel(p) {
   return 'INFO';
 }
 // r20c: bucket pill — one of urgent / underperforming / working.
-// Bucket comes from the server (priority + coverage adjustment); we just render.
+// r35.8: doing_great + monitor added (priority 0 = scale candidate, priority 4 = no signal)
 function amzBucketLabel(b) {
   if (b === 'urgent') return 'URGENT';
   if (b === 'underperforming') return 'UNDERPERFORMING';
   if (b === 'working') return 'WORKING';
+  if (b === 'doing_great') return 'DOING GREAT';
+  if (b === 'monitor') return 'MONITOR';
   return 'INFO';
 }
 function amzBucketClass(b) { return 'amz-bucket-' + (b || 'working'); }
@@ -5161,10 +5179,25 @@ function amzProductCard(p, idx, canEditOwner, agents) {
   const tacos = p.tacos_pct;
   const tacosClass = tacos == null ? 'muted' : (tacos > 30 ? 'bad' : (tacos > 15 ? 'warn' : 'good'));
   const tacosLabel = tacos == null ? '—' : tacos + '%';
+  // r35.8: sessions + CVR from parent-level traffic aggregation.
+  // CVR colour: critical <6% (red), weak <10% (warn), mild <12% (warn), good <15% (default), excellent >=15% (good)
+  const sess = (p.signals && p.signals.sessions_7d) || 0;
+  const cvr = (p.signals && p.signals.cvr_7d != null) ? p.signals.cvr_7d : null;
+  let cvrClass = 'muted', cvrLabel = '—';
+  if (sess >= 30 && cvr != null) {
+    cvrLabel = cvr + '%';
+    if (cvr < 6) cvrClass = 'bad';
+    else if (cvr < 12) cvrClass = 'warn';
+    else if (cvr >= 15) cvrClass = 'good';
+    else cvrClass = '';
+  }
+  const sessClass = sess === 0 ? 'muted' : (sess < 30 ? 'warn' : '');
   const stats =
     '<div class="amz-product-stats">' +
       amzStat('Sales 7d', '£' + (p.total_sales_7d || 0).toFixed(0)) +
       amzStat('Units 7d', String(p.total_units_7d || 0)) +
+      amzStat('Sessions', sess > 0 ? String(sess) : '—', sessClass) +
+      amzStat('CVR', cvrLabel, cvrClass) +
       amzStat('Ad spend', '£' + (p.camp_spend_7d || 0).toFixed(0), p.camp_spend_7d > 0 ? null : 'muted') +
       amzStat('Conversions', String(p.camp_conversions_7d || 0)) +
       amzStat('ACOS', acos > 0 ? acos + '%' : '—', acosClass) +

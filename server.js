@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-20 r35.6 (PRODUCT VISIBILITY HOTFIX. (A) One-time recovery: on boot, un-flag any amazon_products rows where status='REMOVED' AND last_synced_at >= NOW() - INTERVAL '7 days'. Gated by system_meta key 'r35_6_product_recovery_done' so it only runs once across deploys. Brings back 274 products (as of 2026-05-20 11:30) that got swept by the over-aggressive REMOVED sweep after only one missed sync from Amazon's SP-API listings endpoint (eventually consistent — pages can drop SKUs). The existing 60-day activity filter then correctly hides products with no recent sales, so this recovery does not bloat the dashboard. (B) Permanent fix: catalogue sync REMOVED sweep changed from INTERVAL '2 hours' to INTERVAL '3 days'. A product now needs to be missed by 3 consecutive nightly syncs (one per day at 02:30 London) before it's flagged removed. Single bad night from Amazon no longer wipes products. Genuinely deleted listings still get flagged eventually, just after 3 quiet nights. Inherits all r35.5 (consecutive-day scoring, sharpen cache-hit, amazon take, debug auth) and r35.4 (paused root cause, alert state, idempotency, etc). PREVIOUS R35.5 MARKER FOLLOWS: TASK SCORING RECALIBRATION + BUNDLED OUTSTANDING FIXES. (1) scoreCampaignDays rewritten to require 3 CONSECUTIVE bad days at the end of a 7-day window, NOT "any 1 bad day in 3-day window". no_revenue fires only when last 3 days each had spend>0 AND sales=0. no_activity fires only when last 3 days each had zero impressions. high_acos fires only when last 3 days each had ACOS>35%. (2) All three problem types gated by 7-day window ACOS check: if total_spend/total_sales <= 16% breakeven, SKIP — campaign is profitable overall, Action Centre still monitors it. (3) Scheduler now pulls 7 days of daily_snapshots (was 3). days are sorted oldest->newest before scoring. (4) Inline problem-type assignment in scheduler removed — reads problemType directly from scoring output. Unit-tested 6 cases including the Aryan|Baby Swing|SP phrase 2026-05-20 false positive (12.5% 7d ACOS but firing because of one zero-rev day in 3-day window). Confirmed it no longer fires under new rules. (5) BUNDLED: Sharpen cache-hit response now returns "sharpened" key (was missed in r35.4 — only the fresh-call path was fixed). (6) BUNDLED: /api/amazon/tasks/:id/take endpoint — mirrors Google. Amazon agents can claim a task assigned to another agent. Active-agent check via users table. UI button "Take it" added to Amazon task cards (visible when task is assigned to someone else, dept=amazon, not owner/manager). (7) BUNDLED: /google/debug/ removed from PUBLIC_PATHS — was reachable without auth. Owner/manager guards added to /api/google/debug/refund-sample, refund-audit, ga4-sample, landing-page-critique-debug, landing-page-critique-debug-list. Inherits all r35.4 (paused root cause, alert state consistency, scheduler idempotency, create-manager removal, r24 cleanup, snapshot+match-debug owner guards). NOT IN THIS SHIP (next chat): B00R2K8SZ0 multi-SKU SQL investigation, per-agent Opus quota design, state.alerts/DB unification refactor, AI cache DB persistence, frontend-backend contract enforcement, Action Centre clutter discussion (showing half of 100+ campaigns), Fix 4 keyword-level surfacing (smoking gun area), Google scheduler also needs consecutive-day rules eventually (currently uses 7d totals which is less prone to false positives but still imperfect).)
+// CampaignPulse — deploy marker 2026-05-20 r35.8 (PRODUCT CARD DIAGNOSTIC REDESIGN. Replaces the first-rule-wins cascade with a layered diagnostic model that mirrors how Pattern / MyAmazonGuy / Adverio / OBG / SellerMagnet all frame Amazon health: Layer 1 — Can people BUY it? (suspension, Buy Box, content age, price-vs-competitor). Layer 2 — Are people SEEING it? (sessions, ad coverage, organic-no-ads). Layer 3 — Do they BUY when they see it? (CVR — the missing big one). Layer 4 — Ad efficiency overlay (wasted spend ≥ £5 with no sales, ACOS over target). NEW DATA: amazon_traffic_snapshots query expanded to sum sessions + units_ordered per ASIN over 7d; parent-level aggregation adds sessions_7d, units_7d, cvr_7d to signals. CVR THRESHOLDS (agreed with Bobby): <6% critical (below ad breakeven at 16% margin), 6-10% weak, 10-12% mild (below 12-15% benchmark), 12-15% good, >15% excellent. Session minimums: 30 to flag, 50 to call urgent, 100 to call \"Doing Great\". NEW BUCKETS: priority 0 = doing_great (gold — high traffic, high CVR, low coverage = scale candidate); priority 4 = monitor (grey — no sessions, no sales, no spend, not enough signal). Old buckets unchanged: 1 urgent, 2 underperforming, 3 working. Diagnosis now returns flags{listing_issue, visibility_issue, conversion_issue, wasted_spend, over_acos} + secondary[] (up to 3 other issues for context). PRESERVES: all r35.7 (BUYABLE recovery), r35.6 (REMOVED sweep 2h→3d), r35.5 (consecutive-day scoring, sharpen, amazon take, debug auth), r35.4 (paused root cause, alert state). AOV ASSUMPTION: £50 placeholder (used only in internal commentary, not in any rule). Change WASTED_SPEND_MIN, CVR_* constants in computeAmazonDiagnosis if benchmarks shift. (1) scoreCampaignDays rewritten to require 3 CONSECUTIVE bad days at the end of a 7-day window, NOT "any 1 bad day in 3-day window". no_revenue fires only when last 3 days each had spend>0 AND sales=0. no_activity fires only when last 3 days each had zero impressions. high_acos fires only when last 3 days each had ACOS>35%. (2) All three problem types gated by 7-day window ACOS check: if total_spend/total_sales <= 16% breakeven, SKIP — campaign is profitable overall, Action Centre still monitors it. (3) Scheduler now pulls 7 days of daily_snapshots (was 3). days are sorted oldest->newest before scoring. (4) Inline problem-type assignment in scheduler removed — reads problemType directly from scoring output. Unit-tested 6 cases including the Aryan|Baby Swing|SP phrase 2026-05-20 false positive (12.5% 7d ACOS but firing because of one zero-rev day in 3-day window). Confirmed it no longer fires under new rules. (5) BUNDLED: Sharpen cache-hit response now returns "sharpened" key (was missed in r35.4 — only the fresh-call path was fixed). (6) BUNDLED: /api/amazon/tasks/:id/take endpoint — mirrors Google. Amazon agents can claim a task assigned to another agent. Active-agent check via users table. UI button "Take it" added to Amazon task cards (visible when task is assigned to someone else, dept=amazon, not owner/manager). (7) BUNDLED: /google/debug/ removed from PUBLIC_PATHS — was reachable without auth. Owner/manager guards added to /api/google/debug/refund-sample, refund-audit, ga4-sample, landing-page-critique-debug, landing-page-critique-debug-list. Inherits all r35.4 (paused root cause, alert state consistency, scheduler idempotency, create-manager removal, r24 cleanup, snapshot+match-debug owner guards). NOT IN THIS SHIP (next chat): B00R2K8SZ0 multi-SKU SQL investigation, per-agent Opus quota design, state.alerts/DB unification refactor, AI cache DB persistence, frontend-backend contract enforcement, Action Centre clutter discussion (showing half of 100+ campaigns), Fix 4 keyword-level surfacing (smoking gun area), Google scheduler also needs consecutive-day rules eventually (currently uses 7d totals which is less prone to false positives but still imperfect).)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -6317,15 +6317,30 @@ app.get('/api/admin/pricing-signals-status', async function(req, res) {
 //
 // Diagnosis = factual observation. Action = what to do.
 const ACOS_TARGET = 20; // company target — could come from settings later
+// r35.8: rewritten as a layered diagnostic model. Replaces the old
+// "first-rule-wins" cascade that produced the bug where a product with £7
+// spend, £0 sales, and zero sessions was labelled "Working" — because no
+// single old rule covered "small spend, no return, low traffic".
+//
+// New model thinks in 4 layers (as industry-standard frameworks: Pattern,
+// MyAmazonGuy, OBG, Adverio, SellerMagnet all converge on the same shape):
+//   Layer 1: Can people BUY it? (suspension, Buy Box, content, price)
+//   Layer 2: Are people SEEING it? (sessions vs ad coverage)
+//   Layer 3: Do they BUY when they see it? (CVR — the missing big one)
+//   Layer 4: Ad efficiency (overlay — flags wasted spend / over-target ACOS)
+//
+// Each layer runs all its rules and collects the priorities they hit.
+// The final priority is the WORST (lowest number) seen across all layers.
+//
+// CVR thresholds (agreed with Bobby 2026-05-20):
+//   < 6%       critical — listing converts below ad breakeven (16% margin)
+//   6-10%      weak — eats most of margin
+//   10-12%     mild — below stated 12-15% benchmark
+//   12-15%     good — typical benchmark range
+//   >15%       excellent — Doing Great, scale candidate
+// Minimum sessions before trusting CVR: 30 to flag, 50 to call urgent.
+// AOV used for sanity comments: assumed £50 — change here if real AOV differs.
 function computeAmazonDiagnosis(p) {
-  // p has: parent, totalSales, totalUnits, adCoveragePct, advertisedChildren, totalChildren,
-  //        campaignSpend, campaignSales, acos, campaignCount, autoCampaignsExist
-  // r20: also receives `signals` — buy_box_pct_7d, stock_cover_days, reviews_*, price_vs_lowest, content_age_days
-  // r20c: returns priority + diagnosis + action + evidence (short subtitle for card pill).
-  //   Note: the campaign matcher was removed in r20c, so campaignSpend/campaignCount
-  //   are always 0 currently. The cases below that depend on those values are kept
-  //   for when manual ASIN→campaign mapping returns. For now, most products fall
-  //   through to listing/signal-based cases.
   const parent = p.parent;
   const inactiveCount = parent.inactive_count || 0;
   const buyableCount = parent.buyable_count || 0;
@@ -6334,187 +6349,194 @@ function computeAmazonDiagnosis(p) {
   const hasCampaigns = p.campaignCount > 0;
   const sig = p.signals || {};
 
-  // ── URGENT cases (priority 1) ──────────────────────────────────────────────
-  // r21: Stock-cover urgency DISABLED. Amazon's SP-API returns inconsistent
-  // FBM/FBA quantities — SKU naming conventions split between "FBA" / "Amazon"
-  // suffixes, fulfillmentAvailability requires explicit includedData but even
-  // then is patchy, and FBA inventory often shows 0 for products with active
-  // warehouse stock. Result was constant false-urgent flags. Cron still
-  // populates fulfillable_qty/stock_cover_days for history, just not surfaced.
-  // Buy Box, ACOS, zero-attributed-sales remain active urgency triggers.
-  // To re-enable when data is reliable: uncomment the block below.
-  /*
-  if (sig.stock_cover_days != null && sig.stock_cover_days < 30 &&
-      (sig.velocity_30d || 0) > 0 && hasSales) {
-    const days = sig.stock_cover_days;
-    const isCritical = days < 7;
-    const channelLabel = sig.fulfillment_mode === 'fbm' ? ' (warehouse stock)'
-                       : sig.fulfillment_mode === 'mixed' ? ' (FBA + warehouse combined)'
-                       : '';
-    return {
-      priority: isCritical ? 1 : 2,
-      evidence: days + 'd cover' + (sig.fulfillment_mode === 'fbm' ? ' (FBM)' : ''),
-      diagnosis: 'Only ' + days + ' days of stock left at current sales rate (' + (sig.fulfillable_qty || 0) + ' units' + channelLabel + ', ' + (sig.velocity_30d || 0).toFixed(1) + '/day)',
-      action: sig.fulfillment_mode === 'fbm' ? 'Replenish warehouse — running low'
-            : sig.fulfillment_mode === 'mixed' ? 'Replenish stock — running low across FBA + warehouse'
-            : 'Send replenishment to FBA — running low'
-    };
+  // r35.8 constants
+  const CVR_CRITICAL = 6;
+  const CVR_WEAK = 10;
+  const CVR_MILD = 12;
+  const CVR_EXCELLENT = 15;
+  const SESSIONS_MIN_FOR_URGENT = 50;
+  const SESSIONS_MIN_FOR_FLAG = 30;
+  const SESSIONS_MIN_FOR_SCALE = 100;
+  const BUY_BOX_CRITICAL = 50;
+  const BUY_BOX_WARNING = 80;
+  const WASTED_SPEND_MIN = 5;
+
+  // Collect candidate diagnoses across all layers. Each entry =
+  // { priority, evidence, diagnosis, action, layer }
+  const candidates = [];
+  const flags = {
+    listing_issue: false,
+    visibility_issue: false,
+    conversion_issue: false,
+    wasted_spend: false,
+    over_acos: false
+  };
+  const secondary = []; // diagnoses that didn't win but are worth showing
+
+  function add(layer, priority, evidence, diagnosis, action) {
+    candidates.push({ layer: layer, priority: priority, evidence: evidence, diagnosis: diagnosis, action: action });
   }
-  */
-  // r20: Buy Box collapse — selling but losing the box more than half the time
-  if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 50 && hasSales) {
-    return {
-      priority: 1,
-      evidence: 'Buy Box ' + sig.buy_box_pct_7d + '% (last 7d)',
-      diagnosis: 'Buy Box only ' + sig.buy_box_pct_7d + '% over last 7 days — losing the offer to other sellers',
-      action: 'Check pricing vs competitors and any account/health issues'
-    };
-  }
-  // Listing suspended/inactive
+
+  // ─── LAYER 1: Listing / Buy Box / Pricing — Can people buy it? ───────
   if (inactiveCount > 0 && buyableCount === 0) {
-    return {
-      priority: 1,
-      evidence: 'all variants inactive',
-      diagnosis: 'All variants INACTIVE/SUSPENDED — listing not buyable on Amazon',
-      action: 'Investigate suspension reason in Seller Central; relist'
-    };
+    flags.listing_issue = true;
+    add(1, 1, 'all variants inactive',
+        'All variants INACTIVE/SUSPENDED — listing not buyable on Amazon',
+        'Investigate suspension reason in Seller Central; relist');
+  } else if (inactiveCount >= 2 && p.totalChildren > 2) {
+    flags.listing_issue = true;
+    add(1, 1, inactiveCount + ' of ' + p.totalChildren + ' variants suspended',
+        inactiveCount + ' of ' + p.totalChildren + ' variants suspended/inactive',
+        'Review suspended ASINs in Seller Central and reinstate');
   }
-  if (inactiveCount >= 2 && p.totalChildren > 2) {
-    return {
-      priority: 1,
-      evidence: inactiveCount + ' of ' + p.totalChildren + ' variants suspended',
-      diagnosis: inactiveCount + ' of ' + p.totalChildren + ' variants suspended/inactive',
-      action: 'Review suspended ASINs in Seller Central and reinstate'
-    };
+  if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < BUY_BOX_CRITICAL && hasSales) {
+    flags.listing_issue = true;
+    add(1, 1, 'Buy Box ' + sig.buy_box_pct_7d + '% (last 7d)',
+        'Buy Box only ' + sig.buy_box_pct_7d + '% over last 7 days — losing the offer to other sellers',
+        'Check pricing vs competitors and any account/health issues');
+  } else if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < BUY_BOX_WARNING && hasSales) {
+    flags.listing_issue = true;
+    add(1, 2, 'Buy Box ' + sig.buy_box_pct_7d + '% (target 90%+)',
+        'Buy Box ' + sig.buy_box_pct_7d + '% over last 7 days (target 90%+)',
+        'Check pricing; ensure stock is sufficient and account health is green');
   }
-  // Spending hard with zero sales — wasted budget
-  if (hasSpend && p.campaignSpend > 20 && !hasSales) {
-    return {
-      priority: 1,
-      evidence: '£' + p.campaignSpend.toFixed(0) + ' spend, zero attributed sales',
-      diagnosis: 'Spending £' + p.campaignSpend.toFixed(2) + '/wk in ' + p.campaignCount + ' campaigns — zero sales',
-      action: 'Pause campaigns or check listing for issues (image / price / reviews)'
-    };
-  }
-  // ACOS extremely high (above 2x target)
-  if (hasSales && hasSpend && p.acos > ACOS_TARGET * 2) {
-    return {
-      priority: 1,
-      evidence: 'ACOS ' + p.acos + '% (target ' + ACOS_TARGET + '%)',
-      diagnosis: 'ACOS ' + p.acos + '% — more than double target (' + ACOS_TARGET + '%) at £' + p.campaignSpend.toFixed(2) + ' spend',
-      action: 'Reduce bids or add negative keywords; review search-term report'
-    };
-  }
-
-  // ── ATTENTION cases (priority 2) ───────────────────────────────────────────
-  // Selling but no campaigns at all on this product → losing potential
-  if (hasSales && p.totalSales > 50 && !hasCampaigns) {
-    return {
-      priority: 2,
-      evidence: '£' + p.totalSales.toFixed(0) + ' organic, no ads',
-      diagnosis: '£' + p.totalSales.toFixed(0) + ' organic sales, but no advertising at all',
-      action: 'Launch a Sponsored Products campaign — already has organic demand'
-    };
-  }
-  // Coverage gap — many variants un-advertised
-  if (p.totalChildren >= 3 && p.adCoveragePct < 40 && hasSales) {
-    return {
-      priority: 2,
-      evidence: p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised',
-      diagnosis: 'Only ' + p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised (' + p.adCoveragePct + '% coverage)',
-      action: 'Add remaining variants to existing campaigns (same parent ASIN target)'
-    };
-  }
-  // ACOS above target
-  if (hasSales && hasSpend && p.acos > ACOS_TARGET) {
-    return {
-      priority: 2,
-      evidence: 'ACOS ' + p.acos + '% above ' + ACOS_TARGET + '% target',
-      diagnosis: 'ACOS ' + p.acos + '% — above ' + ACOS_TARGET + '% target on ' + p.campaignCount + ' campaigns',
-      action: 'Tune bids on top-spending keywords; check search-term waste'
-    };
-  }
-  // Owner unassigned — admin issue
-  if (!parent.owner_agent && hasSales) {
-    return {
-      priority: 2,
-      evidence: 'no agent assigned',
-      diagnosis: 'No agent assigned — sales not attributed in team breakdown',
-      action: 'Assign an owner agent from the dropdown above'
-    };
-  }
-  // No sales no spend — should we be advertising this?
-  if (!hasSales && !hasSpend && buyableCount > 0) {
-    return {
-      priority: 2,
-      evidence: 'buyable, no sales in 7 days',
-      diagnosis: 'BUYABLE listing with no sales and no advertising in 7 days',
-      action: 'Either launch test ads or de-prioritise the listing'
-    };
-  }
-  // r20d: stock cover < 30d cases are now handled in the URGENT block above
-  // (merged with the < 7d critical check) — single place, single rule.
-  // r20: Priced materially above lowest competitor — likely losing Buy Box
   if (sig.price_vs_lowest != null && sig.price_vs_lowest > 5 && hasSales) {
-    return {
-      priority: 2,
-      evidence: '£' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor',
-      diagnosis: 'Priced £' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor (£' + (sig.your_price || 0).toFixed(2) + ' vs £' + (sig.lowest_competitor_price || 0).toFixed(2) + ')',
-      action: 'Review pricing — likely losing Buy Box and conversions'
-    };
+    flags.listing_issue = true;
+    add(1, 2, '£' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor',
+        'Priced £' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor (£' + (sig.your_price || 0).toFixed(2) + ' vs £' + (sig.lowest_competitor_price || 0).toFixed(2) + ')',
+        'Review pricing — likely losing Buy Box and conversions');
   }
-  // r20: Buy Box 50-80% — not catastrophic but losing some sales
-  if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < 80 && hasSales) {
-    return {
-      priority: 2,
-      evidence: 'Buy Box ' + sig.buy_box_pct_7d + '% (target 90%+)',
-      diagnosis: 'Buy Box ' + sig.buy_box_pct_7d + '% over last 7 days (target 90%+)',
-      action: 'Check pricing; ensure stock is sufficient and account health is green'
-    };
-  }
-  // r20: Content stale > 90 days — refresh A+ for SEO + conversion lift
   if (sig.content_age_days != null && sig.content_age_days > 90 && hasSales) {
-    return {
-      priority: 2,
-      evidence: 'content ' + sig.content_age_days + ' days old',
-      diagnosis: 'Listing content not updated for ' + sig.content_age_days + ' days — Amazon SEO benefits from refresh',
-      action: 'Refresh title keywords, bullets, and A+ content'
-    };
+    flags.listing_issue = true;
+    add(1, 2, 'content ' + sig.content_age_days + ' days old',
+        'Listing content not updated for ' + sig.content_age_days + ' days — Amazon SEO benefits from refresh',
+        'Refresh title keywords, bullets, and A+ content');
   }
 
-  // ── SCALE cases (priority 3) ───────────────────────────────────────────────
-  // Healthy: ACOS at or below target with meaningful spend
-  if (hasSales && hasSpend && p.acos <= ACOS_TARGET && p.campaignSpend > 10) {
-    return {
-      priority: 3,
-      evidence: 'ACOS ' + p.acos + '%, £' + p.totalSales.toFixed(0) + ' sales',
-      diagnosis: 'ACOS ' + p.acos + '% (under ' + ACOS_TARGET + '% target) — £' + p.totalSales.toFixed(0) + ' sales, £' + p.campaignSpend.toFixed(0) + ' spend',
-      action: 'Increase budget on top-performing campaigns'
-    };
+  // ─── LAYER 2: Visibility — Are people seeing it? ─────────────────────
+  if (hasSales && p.totalSales > 50 && !hasCampaigns) {
+    flags.visibility_issue = true;
+    add(2, 2, '£' + p.totalSales.toFixed(0) + ' organic, no ads',
+        '£' + p.totalSales.toFixed(0) + ' organic sales, but no advertising at all',
+        'Launch a Sponsored Products campaign — already has organic demand');
   }
-  if (hasSales && p.totalSales > 100 && p.adCoveragePct >= 80) {
-    return {
-      priority: 3,
-      evidence: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% coverage',
-      diagnosis: '£' + p.totalSales.toFixed(0) + ' weekly sales with ' + p.adCoveragePct + '% ad coverage',
-      action: 'Strong performer — consider Sponsored Brands or Sponsored Display tests'
-    };
+  if (p.totalChildren >= 3 && p.adCoveragePct < 40 && hasSales) {
+    flags.visibility_issue = true;
+    add(2, 2, p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised',
+        'Only ' + p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised (' + p.adCoveragePct + '% coverage)',
+        'Add remaining variants to existing campaigns (same parent ASIN target)');
   }
 
-  // ── INFO (priority 4) ──────────────────────────────────────────────────────
-  if (hasSales) {
-    return {
-      priority: 4,
-      evidence: '£' + p.totalSales.toFixed(0) + ' sales',
-      diagnosis: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% ad coverage',
-      action: 'No immediate action required'
-    };
+  // ─── LAYER 3: Conversion — Do they buy when they see it? (NEW) ───────
+  const cvr = sig.cvr_7d;
+  const sess = sig.sessions_7d || 0;
+  if (cvr != null && sess >= SESSIONS_MIN_FOR_URGENT && cvr < CVR_CRITICAL) {
+    flags.conversion_issue = true;
+    add(3, 1, sess + ' sessions, CVR ' + cvr + '%',
+        sess + ' sessions but only ' + cvr + '% CVR — listing not converting at ad-profitable rate (need 6%+ at your margins)',
+        'Pause ads, fix listing first — check main image, title, price, reviews');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_WEAK) {
+    flags.conversion_issue = true;
+    add(3, 2, sess + ' sessions, CVR ' + cvr + '%',
+        'CVR ' + cvr + '% on ' + sess + ' sessions — below 10% healthy threshold, eats most of margin',
+        'Review listing quality: main image, bullets, A+ content, price competitiveness');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_MILD) {
+    flags.conversion_issue = true;
+    add(3, 2, sess + ' sessions, CVR ' + cvr + '%',
+        'CVR ' + cvr + '% on ' + sess + ' sessions — below your 12-15% benchmark',
+        'Small listing tweaks could lift CVR — A/B test main image or refresh bullets');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_SCALE && cvr > CVR_EXCELLENT) {
+    // priority 0 = doing_great. Only fires if no other priority 1/2 has been raised.
+    // We add it; aggregation below will only pick it if nothing worse hit.
+    add(3, 0, sess + ' sessions, CVR ' + cvr + '%',
+        'Strong converter — ' + cvr + '% CVR on ' + sess + ' sessions, above your 15% benchmark',
+        'Increase ad spend and add variants to ride this winner');
   }
+
+  // ─── LAYER 4: Ad efficiency — wasted spend, ACOS overlay ─────────────
+  // These set flags and contribute candidates. They run alongside Layer 3.
+  if (hasSpend && p.campaignSpend >= WASTED_SPEND_MIN && !hasSales) {
+    flags.wasted_spend = true;
+    // Tier the priority on size of waste so big spends get the urgent badge
+    const urgent = p.campaignSpend >= 20;
+    add(4, urgent ? 1 : 2,
+        '£' + p.campaignSpend.toFixed(0) + ' spend, zero attributed sales',
+        'Spending £' + p.campaignSpend.toFixed(2) + '/wk in ' + p.campaignCount + ' campaigns — zero sales',
+        'Pause campaigns or check listing for issues (image / price / reviews)');
+  }
+  if (hasSales && hasSpend && p.acos > ACOS_TARGET * 2) {
+    flags.over_acos = true;
+    add(4, 1, 'ACOS ' + p.acos + '% (target ' + ACOS_TARGET + '%)',
+        'ACOS ' + p.acos + '% — more than double target (' + ACOS_TARGET + '%) at £' + p.campaignSpend.toFixed(2) + ' spend',
+        'Reduce bids or add negative keywords; review search-term report');
+  } else if (hasSales && hasSpend && p.acos > ACOS_TARGET) {
+    flags.over_acos = true;
+    add(4, 2, 'ACOS ' + p.acos + '% above ' + ACOS_TARGET + '% target',
+        'ACOS ' + p.acos + '% — above ' + ACOS_TARGET + '% target on ' + p.campaignCount + ' campaigns',
+        'Tune bids on top-spending keywords; check search-term waste');
+  }
+
+  // ─── Owner unassigned (admin issue — surfaces as P2 even if otherwise clean) ──
+  if (!parent.owner_agent && hasSales) {
+    add(0, 2, 'no agent assigned',
+        'No agent assigned — sales not attributed in team breakdown',
+        'Assign an owner agent from the dropdown above');
+  }
+
+  // ─── Aggregate: pick the worst priority. ─────────────────────────────
+  // Note priority 0 (doing_great) only wins if nothing else fired.
+  // We sort by priority asc, with "doing_great" (0) treated as best (i.e. only
+  // if no 1/2 exists). To achieve this: filter out 0s when 1+ exists.
+  let primary = null;
+  const nonZero = candidates.filter(function(c){ return c.priority > 0; });
+  if (nonZero.length > 0) {
+    nonZero.sort(function(a, b){ return a.priority - b.priority; });
+    primary = nonZero[0];
+    // collect secondary (other distinct diagnoses)
+    nonZero.slice(1, 4).forEach(function(c) {
+      if (c.diagnosis !== primary.diagnosis) secondary.push({
+        priority: c.priority, evidence: c.evidence, diagnosis: c.diagnosis, action: c.action
+      });
+    });
+  } else {
+    const zeros = candidates.filter(function(c){ return c.priority === 0; });
+    if (zeros.length > 0) primary = zeros[0];
+  }
+
+  // No rule fired at all → fall to priority 3 (working) if has sales,
+  // priority 4 (monitor) otherwise
+  if (!primary) {
+    if (hasSales) {
+      primary = {
+        priority: 3,
+        evidence: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% coverage',
+        diagnosis: '£' + p.totalSales.toFixed(0) + ' weekly sales, ' + p.adCoveragePct + '% ad coverage' + (cvr != null ? ', CVR ' + cvr + '%' : ''),
+        action: 'No immediate action required'
+      };
+    } else if (!hasSpend && sess === 0) {
+      primary = {
+        priority: 4,
+        evidence: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ', no traffic',
+        diagnosis: 'No sessions, no sales, no spend in 7 days — not enough signal to judge',
+        action: 'Monitor — consider test ads if listing is buyable'
+      };
+    } else {
+      primary = {
+        priority: 3,
+        evidence: 'no issues flagged',
+        diagnosis: 'No issues detected',
+        action: 'Monitor — no urgent action'
+      };
+    }
+  }
+
   return {
-    priority: 4,
-    evidence: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ', no recent activity',
-    diagnosis: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ' tracked, no recent activity',
-    action: 'Monitor — no urgent action'
+    priority: primary.priority,
+    evidence: primary.evidence,
+    diagnosis: primary.diagnosis,
+    action: primary.action,
+    flags: flags,
+    secondary: secondary  // up to 3 additional issues
   };
 }
 
@@ -6662,17 +6684,26 @@ app.get('/api/amazon/products', async function(req, res) {
     });
     // Buy Box win % rolling 7-day avg per ASIN, plus days-of-data so the UI can
     // show "Building (N/7d)" until the window is full.
+    // r35.8: also sum sessions + units_ordered over the 7d window so we can
+    // compute CVR (the conversion-rate diagnostic that the new diagnosis model
+    // uses as a primary signal).
     const trafficRes = await db.query(
-      "SELECT asin, AVG(buy_box_pct) AS buy_box_avg, COUNT(*) AS days " +
+      "SELECT asin, " +
+      "AVG(buy_box_pct) FILTER (WHERE buy_box_pct IS NOT NULL) AS buy_box_avg, " +
+      "COUNT(*) FILTER (WHERE buy_box_pct IS NOT NULL) AS bb_days, " +
+      "SUM(sessions) AS sessions_7d, " +
+      "SUM(units_ordered) AS units_7d " +
       "FROM amazon_traffic_snapshots " +
-      "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' AND buy_box_pct IS NOT NULL " +
+      "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' " +
       "GROUP BY asin"
     );
     const trafficByAsin = {};
     trafficRes.rows.forEach(function(t) {
       trafficByAsin[t.asin] = {
         buy_box_pct_7d: t.buy_box_avg != null ? parseFloat(parseFloat(t.buy_box_avg).toFixed(1)) : null,
-        buy_box_days: parseInt(t.days || 0)
+        buy_box_days: parseInt(t.bb_days || 0),
+        sessions_7d: t.sessions_7d != null ? parseInt(t.sessions_7d) : 0,
+        units_7d: t.units_7d != null ? parseInt(t.units_7d) : 0
       };
     });
 
@@ -6959,6 +6990,7 @@ app.get('/api/amazon/products', async function(req, res) {
       let lastUpd = null;
       let staleCount = 0;
       let fulfillmentModes = new Set();   // r20d: collect distinct modes seen across children
+      let sessionsSum = 0, unitsSum = 0;  // r35.8: parent-level traffic aggregation
       childAsins.forEach(function(asin) {
         const sig = signalsByAsin[asin];
         const tr = trafficByAsin[asin];
@@ -6973,9 +7005,14 @@ app.get('/api/amazon/products', async function(req, res) {
           }
           if (sig.fulfillment_mode) fulfillmentModes.add(sig.fulfillment_mode);
         }
-        if (tr && tr.buy_box_pct_7d != null) {
-          bbSum += tr.buy_box_pct_7d; bbCount++;
-          if (tr.buy_box_days > bbDays) bbDays = tr.buy_box_days;
+        if (tr) {
+          if (tr.buy_box_pct_7d != null) {
+            bbSum += tr.buy_box_pct_7d; bbCount++;
+            if (tr.buy_box_days > bbDays) bbDays = tr.buy_box_days;
+          }
+          // r35.8: sessions and units sum across child ASINs of this parent
+          sessionsSum += (tr.sessions_7d || 0);
+          unitsSum += (tr.units_7d || 0);
         }
       });
       // Pick the primary child for price (the ASIN with most 7d revenue)
@@ -7017,7 +7054,11 @@ app.get('/api/amazon/products', async function(req, res) {
         lowest_competitor_price: primarySig ? primarySig.lowest_competitor_price : null,
         price_vs_lowest: primarySig ? primarySig.price_vs_lowest : null,
         fulfillment_mode: parentFulfillmentMode,     // r20d
-        signals_stale_count: staleCount
+        signals_stale_count: staleCount,
+        // r35.8: parent-level traffic + conversion
+        sessions_7d: sessionsSum || 0,
+        units_7d: unitsSum || 0,
+        cvr_7d: (sessionsSum > 0) ? parseFloat((100 * unitsSum / sessionsSum).toFixed(1)) : null
       };
 
       const dx = computeAmazonDiagnosis({
@@ -7034,19 +7075,21 @@ app.get('/api/amazon/products', async function(req, res) {
         autoCampaignsExist: autoCampaignsExist.value,
         signals: signals
       });
-      // r20c: derive bucket from priority for the new tab UI.
-      // 1 = urgent (red), 2 = underperforming (amber), 3+ = working (green).
-      // Coverage gaps are folded into underperforming (was a separate tab pre-r20c).
+      // r35.8: bucket mapping now includes 'doing_great' (priority 0). Old
+      // coverage-gap absorption logic removed — the new diagnosis function
+      // handles all visibility/coverage cases internally so no post-hoc
+      // promotion is needed.
+      //   priority 0 = doing_great (gold)
+      //   priority 1 = urgent (red)
+      //   priority 2 = underperforming (amber)
+      //   priority 3 = working (green)
+      //   priority 4 = monitor (grey)
       let bucket;
-      if (dx.priority === 1) bucket = 'urgent';
+      if (dx.priority === 0) bucket = 'doing_great';
+      else if (dx.priority === 1) bucket = 'urgent';
       else if (dx.priority === 2) bucket = 'underperforming';
+      else if (dx.priority === 4) bucket = 'monitor';
       else bucket = 'working';
-      // Coverage gap absorption — if a buyable active product has < 100% ad
-      // coverage AND has sales, it's an underperformer regardless of priority.
-      const isActive = parent.buyable_count > 0 && parent.children.some(function(c){ return c.active_60d; });
-      if (isActive && (totalSales > 50) && adCoveragePct < 100 && bucket === 'working') {
-        bucket = 'underperforming';
-      }
       return Object.assign({}, parent, {
         asins: Array.from(parent.asins),
         total_sales_7d: parseFloat(totalSales.toFixed(2)),
@@ -7074,6 +7117,11 @@ app.get('/api/amazon/products', async function(req, res) {
         diagnosis: dx.diagnosis,
         action: dx.action,
         evidence: dx.evidence || null,  // r20c: short evidence line for card subtitle
+        // r35.8: flags drive the per-section coloured pills on the card.
+        // secondary = up to 3 other issues that didn't win the primary diagnosis,
+        // so the agent can see related problems without clicking in.
+        flags: dx.flags || {},
+        secondary: dx.secondary || [],
         signals: signals,
         // r22: active task block (so card can show "🛠 Already assigned" badge)
         active_task: activeTaskByParent[parent.parent_sku] || null,
@@ -7098,6 +7146,7 @@ app.get('/api/amazon/products', async function(req, res) {
     // r20c: new bucket-based views — urgent / underperforming / working — plus
     // 'all' / 'hidden' kept. Old 'active' / 'dormant' / 'gaps' stay for any older
     // bookmarks but route to the new buckets.
+    // r35.8: 'doing_great' (gold) and 'monitor' (grey) added.
     let returnList;
     if (view === 'dormant') returnList = dormantProducts;
     else if (view === 'all') returnList = visibleParents;
@@ -7105,6 +7154,8 @@ app.get('/api/amazon/products', async function(req, res) {
     else if (view === 'urgent') returnList = activeProducts.filter(function(p){ return p.bucket === 'urgent'; });
     else if (view === 'underperforming' || view === 'gaps') returnList = activeProducts.filter(function(p){ return p.bucket === 'underperforming'; });
     else if (view === 'working') returnList = activeProducts.filter(function(p){ return p.bucket === 'working'; });
+    else if (view === 'doing_great') returnList = activeProducts.filter(function(p){ return p.bucket === 'doing_great'; });
+    else if (view === 'monitor') returnList = activeProducts.filter(function(p){ return p.bucket === 'monitor'; });
     else returnList = activeProducts;  // default 'active' = legacy alias
     returnList.sort(function(a, b) {
       if (a.priority !== b.priority) return a.priority - b.priority;
@@ -7117,10 +7168,13 @@ app.get('/api/amazon/products', async function(req, res) {
     });
 
     // r20c: per-bucket counts in summary so tabs can show badges
+    // r35.8: doing_great + monitor counts added
     const allActive = activeProducts;
     const urgentCount = allActive.filter(function(p){ return p.bucket === 'urgent'; }).length;
     const underCount = allActive.filter(function(p){ return p.bucket === 'underperforming'; }).length;
     const workingCount = allActive.filter(function(p){ return p.bucket === 'working'; }).length;
+    const doingGreatCount = allActive.filter(function(p){ return p.bucket === 'doing_great'; }).length;
+    const monitorCount = allActive.filter(function(p){ return p.bucket === 'monitor'; }).length;
 
     res.json({
       products: returnList,
@@ -7136,6 +7190,8 @@ app.get('/api/amazon/products', async function(req, res) {
         urgent_count: urgentCount,                         // r20c: bucket counts
         underperforming_count: underCount,                  // r20c
         working_count: workingCount,                        // r20c
+        doing_great_count: doingGreatCount,                 // r35.8
+        monitor_count: monitorCount,                        // r35.8
         attention_count: returnList.filter(function(p){ return p.priority === 2; }).length,  // legacy
         scale_count: returnList.filter(function(p){ return p.priority === 3; }).length,      // legacy
         view: view
@@ -15079,6 +15135,35 @@ app.listen(PORT, '0.0.0.0', async function() {
         console.log('[r35.6 recovery] already ran at ' + r356Flag.rows[0].value + ' — skipping');
       }
     } catch(e) { console.error('[r35.6 recovery] error: ' + e.message); }
+
+    // r35.7: hotfix for r35.6's recovery. r35.6 set status=NULL to un-flag
+    // products, but NULL status fails the buyable_count check at the
+    // products-endpoint level (line ~6819 — isBuyable looks for 'BUYABLE' in
+    // g.statuses, which is empty for NULL). Result: recovered products had
+    // sales and showed the right UNDERPERFORMING badge, but landed in the
+    // Dormant tab because they weren't counted as buyable. Card badge said
+    // one thing, tab routing said another. Fix: flip the NULL-status rows
+    // to 'BUYABLE'. Next overnight catalogue sync (02:30) will overwrite
+    // with the real Amazon-returned status, so this is self-healing. Gated
+    // by system_meta with a new key so it runs exactly once.
+    try {
+      const r357Flag = await db.query("SELECT value FROM system_meta WHERE key = 'r35_7_buyable_recovery_done'");
+      if (r357Flag.rows.length === 0) {
+        const fix = await db.query(
+          "UPDATE amazon_products SET status = 'BUYABLE' " +
+          "WHERE status IS NULL AND last_synced_at >= NOW() - INTERVAL '7 days' " +
+          "RETURNING sku"
+        );
+        const sampleSkus = fix.rows.slice(0, 5).map(function(r){ return r.sku; }).join(', ');
+        console.log('[r35.7 recovery] flipped ' + fix.rows.length + ' NULL-status rows to BUYABLE so they land in correct tabs. Sample: ' + sampleSkus);
+        await db.query(
+          "INSERT INTO system_meta (key, value) VALUES ('r35_7_buyable_recovery_done', NOW()::text) " +
+          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+        );
+      } else {
+        console.log('[r35.7 recovery] already ran at ' + r357Flag.rows[0].value + ' — skipping');
+      }
+    } catch(e) { console.error('[r35.7 recovery] error: ' + e.message); }
 
     // Hydrate googleState from the most recent snapshot in DB.
     // Prevents the "dashboard goes blank after every deploy" problem — agents see
