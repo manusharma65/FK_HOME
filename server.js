@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-20 r35.5 (TASK SCORING RECALIBRATION + BUNDLED OUTSTANDING FIXES. (1) scoreCampaignDays rewritten to require 3 CONSECUTIVE bad days at the end of a 7-day window, NOT "any 1 bad day in 3-day window". no_revenue fires only when last 3 days each had spend>0 AND sales=0. no_activity fires only when last 3 days each had zero impressions. high_acos fires only when last 3 days each had ACOS>35%. (2) All three problem types gated by 7-day window ACOS check: if total_spend/total_sales <= 16% breakeven, SKIP — campaign is profitable overall, Action Centre still monitors it. (3) Scheduler now pulls 7 days of daily_snapshots (was 3). days are sorted oldest->newest before scoring. (4) Inline problem-type assignment in scheduler removed — reads problemType directly from scoring output. Unit-tested 6 cases including the Aryan|Baby Swing|SP phrase 2026-05-20 false positive (12.5% 7d ACOS but firing because of one zero-rev day in 3-day window). Confirmed it no longer fires under new rules. (5) BUNDLED: Sharpen cache-hit response now returns "sharpened" key (was missed in r35.4 — only the fresh-call path was fixed). (6) BUNDLED: /api/amazon/tasks/:id/take endpoint — mirrors Google. Amazon agents can claim a task assigned to another agent. Active-agent check via users table. UI button "Take it" added to Amazon task cards (visible when task is assigned to someone else, dept=amazon, not owner/manager). (7) BUNDLED: /google/debug/ removed from PUBLIC_PATHS — was reachable without auth. Owner/manager guards added to /api/google/debug/refund-sample, refund-audit, ga4-sample, landing-page-critique-debug, landing-page-critique-debug-list. Inherits all r35.4 (paused root cause, alert state consistency, scheduler idempotency, create-manager removal, r24 cleanup, snapshot+match-debug owner guards). NOT IN THIS SHIP (next chat): B00R2K8SZ0 multi-SKU SQL investigation, per-agent Opus quota design, state.alerts/DB unification refactor, AI cache DB persistence, frontend-backend contract enforcement, Action Centre clutter discussion (showing half of 100+ campaigns), Fix 4 keyword-level surfacing (smoking gun area), Google scheduler also needs consecutive-day rules eventually (currently uses 7d totals which is less prone to false positives but still imperfect).)
+// CampaignPulse — deploy marker 2026-05-20 r35.6 (PRODUCT VISIBILITY HOTFIX. (A) One-time recovery: on boot, un-flag any amazon_products rows where status='REMOVED' AND last_synced_at >= NOW() - INTERVAL '7 days'. Gated by system_meta key 'r35_6_product_recovery_done' so it only runs once across deploys. Brings back 274 products (as of 2026-05-20 11:30) that got swept by the over-aggressive REMOVED sweep after only one missed sync from Amazon's SP-API listings endpoint (eventually consistent — pages can drop SKUs). The existing 60-day activity filter then correctly hides products with no recent sales, so this recovery does not bloat the dashboard. (B) Permanent fix: catalogue sync REMOVED sweep changed from INTERVAL '2 hours' to INTERVAL '3 days'. A product now needs to be missed by 3 consecutive nightly syncs (one per day at 02:30 London) before it's flagged removed. Single bad night from Amazon no longer wipes products. Genuinely deleted listings still get flagged eventually, just after 3 quiet nights. Inherits all r35.5 (consecutive-day scoring, sharpen cache-hit, amazon take, debug auth) and r35.4 (paused root cause, alert state, idempotency, etc). PREVIOUS R35.5 MARKER FOLLOWS: TASK SCORING RECALIBRATION + BUNDLED OUTSTANDING FIXES. (1) scoreCampaignDays rewritten to require 3 CONSECUTIVE bad days at the end of a 7-day window, NOT "any 1 bad day in 3-day window". no_revenue fires only when last 3 days each had spend>0 AND sales=0. no_activity fires only when last 3 days each had zero impressions. high_acos fires only when last 3 days each had ACOS>35%. (2) All three problem types gated by 7-day window ACOS check: if total_spend/total_sales <= 16% breakeven, SKIP — campaign is profitable overall, Action Centre still monitors it. (3) Scheduler now pulls 7 days of daily_snapshots (was 3). days are sorted oldest->newest before scoring. (4) Inline problem-type assignment in scheduler removed — reads problemType directly from scoring output. Unit-tested 6 cases including the Aryan|Baby Swing|SP phrase 2026-05-20 false positive (12.5% 7d ACOS but firing because of one zero-rev day in 3-day window). Confirmed it no longer fires under new rules. (5) BUNDLED: Sharpen cache-hit response now returns "sharpened" key (was missed in r35.4 — only the fresh-call path was fixed). (6) BUNDLED: /api/amazon/tasks/:id/take endpoint — mirrors Google. Amazon agents can claim a task assigned to another agent. Active-agent check via users table. UI button "Take it" added to Amazon task cards (visible when task is assigned to someone else, dept=amazon, not owner/manager). (7) BUNDLED: /google/debug/ removed from PUBLIC_PATHS — was reachable without auth. Owner/manager guards added to /api/google/debug/refund-sample, refund-audit, ga4-sample, landing-page-critique-debug, landing-page-critique-debug-list. Inherits all r35.4 (paused root cause, alert state consistency, scheduler idempotency, create-manager removal, r24 cleanup, snapshot+match-debug owner guards). NOT IN THIS SHIP (next chat): B00R2K8SZ0 multi-SKU SQL investigation, per-agent Opus quota design, state.alerts/DB unification refactor, AI cache DB persistence, frontend-backend contract enforcement, Action Centre clutter discussion (showing half of 100+ campaigns), Fix 4 keyword-level surfacing (smoking gun area), Google scheduler also needs consecutive-day rules eventually (currently uses 7d totals which is less prone to false positives but still imperfect).)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -459,7 +459,16 @@ async function syncAmazonCatalogue() {
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log('[SP-API catalogue sync] Done in ' + seconds + 's: ' + total + ' items pulled, ' + upserted + ' upserted, ' + withParent + ' had parent_sku, ' + errors + ' errors');
     try {
-      await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '2 hours'");
+      // r35.6: changed from INTERVAL '2 hours' to INTERVAL '3 days'.
+      // Amazon's SP-API listings endpoint is eventually consistent — a single
+      // nightly sync can silently miss SKUs. The old 2-hour window flagged
+      // those as REMOVED after just one missed sync, wiping products from CP
+      // that were perfectly fine on Amazon. With 3 days, a product has to be
+      // missed by 3 consecutive nightly syncs before being flagged. Genuinely
+      // deleted listings still get flagged eventually, just not on one bad
+      // night. Recovery for the 274 products swept on 2026-05-20 lives in the
+      // boot block (one-time, gated by system_meta).
+      await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '3 days'");
     } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
     // r26: removed automatic deriveProductOwners() call here. The TF-IDF matcher
     // was reassigning products to the most active agent (Satyam) every night,
@@ -15045,6 +15054,31 @@ app.listen(PORT, '0.0.0.0', async function() {
     setTimeout(function() {
       r34_runBackfillIfNeeded().catch(function(e){ console.error('[r34 backfill outer] ' + e.message); });
     }, 60000);
+
+    // r35.6: one-time product visibility recovery. The catalogue sync flagged
+    // 274 products as REMOVED on 2026-05-20 because Amazon's SP-API didn't
+    // return them in that night's pagination (well-known eventual consistency
+    // behaviour). The sweep rule has been changed to 3 days (from 2 hours)
+    // to prevent recurrence, but the rows already flagged need un-flagging
+    // for the team to see them again. Gated by system_meta so it only runs
+    // once across all deploys.
+    try {
+      const r356Flag = await db.query("SELECT value FROM system_meta WHERE key = 'r35_6_product_recovery_done'");
+      if (r356Flag.rows.length === 0) {
+        const recovery = await db.query(
+          "UPDATE amazon_products SET status = NULL " +
+          "WHERE status = 'REMOVED' AND last_synced_at >= NOW() - INTERVAL '7 days' " +
+          "RETURNING sku"
+        );
+        console.log('[r35.6 recovery] un-flagged ' + recovery.rows.length + ' products that were swept by the old 2-hour REMOVED rule');
+        await db.query(
+          "INSERT INTO system_meta (key, value) VALUES ('r35_6_product_recovery_done', NOW()::text) " +
+          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+        );
+      } else {
+        console.log('[r35.6 recovery] already ran at ' + r356Flag.rows[0].value + ' — skipping');
+      }
+    } catch(e) { console.error('[r35.6 recovery] error: ' + e.message); }
 
     // Hydrate googleState from the most recent snapshot in DB.
     // Prevents the "dashboard goes blank after every deploy" problem — agents see
