@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-18 r35.3 (FOUR FIXES TO MAIN. (1) Alert auto-close on budget-add now scoped to TODAY only (line ~10981) — was wiping historical out-of-budget records in bulk; one budget add closed 7 alert tasks across 9 days in a single UPDATE. Now filters by created_date = today. (2) Alert dedupe check now ignores closed tasks (line ~1473) — was blocking re-firing after today's alert was closed by budget-add even if campaign ran out again. Now filters by status IN open/in_progress. Together these two ensure: budget added → alert closes → campaign runs out again → fresh alert fires same day. (3) Amazon Repeat Offenders tab (index.html line ~3307) excludes archived/cancelled/dismissed tasks — was showing historical noise. (4) Google task filter strip simplified to single row matching Amazon's pattern (google.html). Removed: TYPE/STATUS uppercase labels, Discussion filter (Amazon doesn't have, not actively used per Bobby), Cancelled filter (folded into Archived/All), duplicate "All" button. New default tab: Open (was Active). Order: Open · In progress · Scale · Problems · Repeat Offenders · Complete · Archived · All. Agent row stays as separate sub-row. TASK_FILTERS default status updated to "open" to match new active button. WORKFLOW NOTE: Google agents who relied on "Active" showing both open + in_progress will need to click "In progress" tab for their working tasks — same as Amazon.)
+// CampaignPulse — deploy marker 2026-05-19 r35.4 (CRITICAL BUG SHIP + SAFE CLEANUP. Fixes: (1) PAUSED-CAMPAIGN ROOT CAUSE: scheduler at line ~4030 now filters state.campaigns by c.state===enabled before building liveEnabledIds. Was including PAUSED because r32 set stateFilter to include both at line 1198. Every previous "fix" addressed symptoms; this is the source. (2) Alert analyser at line ~1452 now skips paused campaigns at the top — was raising budget alerts on paused campaigns. (3) AI Sharpen response mismatch: server returns BOTH analysis and sharpened keys. Was broken since r33d. (4a) Budget-add clears state.alerts so banner disappears immediately. (4b) Alert dismiss endpoint closes the DB alert task too (was leaving DB row open). (4c) Server-boot rehydration of state.alerts now filters by status — was loading closed alerts as ghosts after restart. (5) SCHEDULER IDEMPOTENCY GUARDS on both Amazon (runDailyTaskScheduler) and Google (runGoogleTaskScheduler): second call within 5 min is a no-op. Prevents "Run now" double-click producing duplicates. (6) SECURITY: removed /api/admin/create-manager (was unauthenticated, reset Bobby password to known value); added requireOwner guards to /api/admin/snapshot (could overwrite historical data) and /api/admin/match-debug. (7) STALE CODE: removed /api/admin/r24-unmerge-trampolines and /api/admin/r24-wipe-google-tasks (marked "remove in r25" in their comments — we are at r35). PLUS inherits all r35.3 fixes (alert auto-close scoped to today, dedupe ignores closed, Amazon Repeat Offenders tab excludes archived/cancelled/dismissed, Google filter strip simplified to single row matching Amazon, Open as default). PLUS inherits r35.2 (general task feature, deadline column). PLUS inherits r34/r35 performance backend endpoints — were missing on main, causing 404s. WORKFLOW NOTE: Google agents who relied on "Active" tab showing open+in_progress will need to click "In progress" tab for working tasks. DEFERRED to next ship (see end of audit report): state.alerts/DB unification (architectural), task status helper, AI cache DB persistence, per-agent Opus quota, self-claim endpoint for Amazon, B00R2K8SZ0 multi-SKU investigation, /google/debug/ public-path review, frontend-backend contract enforcement.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -64,7 +64,7 @@ function milestoneInfo(workingDaysOpen) {
 // pre-login (login itself), or hit by external services that use a shared secret
 // (Google Ads script for ingest, OAuth callback handlers).
 const PUBLIC_PATHS = [
-  '/auth/login', '/auth/logout', '/admin/create-manager',
+  '/auth/login', '/auth/logout',     // r35.4: removed '/admin/create-manager' (endpoint deleted)
   '/google/ingest',                  // Google Ads script ingest (uses x-google-secret)
   '/google/oauth',                   // GA4 OAuth callback
   '/google/ga4-status',              // Pre-OAuth status check
@@ -1449,6 +1449,11 @@ async function analyseCampaigns(campaigns) {
 
   for (let i = 0; i < campaigns.length; i++) {
     const c = campaigns[i];
+    // r35.4: skip paused/archived campaigns. Was generating alerts on PAUSED
+    // campaigns with leftover todaySpend from before they were paused — agent
+    // gets pinged about a campaign they can't actually fix.
+    const campState = String(c.state || 'enabled').toLowerCase();
+    if (campState && campState !== 'enabled') continue;
     const budget = c.dailyBudget || 0;
     // r30d: c.todaySpend is now from the dedicated todayOnly Amazon Ads report stream
     // (90-min refresh, live within ~hours of actual). Pre-r30 code worked the same way.
@@ -2477,9 +2482,16 @@ async function initTasksTable() {
     console.log('Auth tables ready');
 
     // ── FIX: Reload today alerts using created_date (not created_at) ──────
+    // r35.4: also filter by status — was loading EVERY today's alert task
+    // including completed/dismissed ones, so server restarts resurrected
+    // closed alerts as ghosts on the dashboard banner.
     try {
       const todayAlerts = await db.query(
-        "SELECT campaign_id, campaign_name, problem_type, problem_detail, created_date FROM campaign_tasks WHERE task_source='alert' AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)"
+        "SELECT campaign_id, campaign_name, problem_type, problem_detail, created_date " +
+        "FROM campaign_tasks " +
+        "WHERE task_source='alert' " +
+        "  AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE) " +
+        "  AND status IN ('open','in_progress')"
       );
       todayAlerts.rows.forEach(function(row) {
         const existing = state.alerts.find(function(a){ return String(a.campaignId) === String(row.campaign_id) && a.type === row.problem_type; });
@@ -3739,11 +3751,22 @@ async function createGoogleTask(taskRow) {
   }
 }
 
+// r35.4: same idempotency guard as Amazon scheduler.
+let _googleSchedulerLastRanAt = 0;
+
 async function runGoogleTaskScheduler() {
   if (!db) {
     console.warn('[GTASK] no db — skipping run');
     return { created: 0 };
   }
+  // r35.4: idempotency check
+  const _grnNow = Date.now();
+  if (_grnNow - _googleSchedulerLastRanAt < 5 * 60 * 1000) {
+    const secs = Math.round((_grnNow - _googleSchedulerLastRanAt) / 1000);
+    console.log('[r35.4 GTASK] skipped — last ran ' + secs + 's ago (idempotency guard, 5min window)');
+    return { created: 0, skipped: 'idempotency' };
+  }
+  _googleSchedulerLastRanAt = _grnNow;
   await ensureGoogleTaskColumns();
 
   const candidates = [];
@@ -3970,8 +3993,22 @@ async function runGoogleTaskScheduler() {
   return { created: createdCount, candidates: candidates.length };
 }
 
+// r35.4: idempotency guard. Was vulnerable to "Run now" being clicked
+// multiple times within 5 minutes producing duplicates. Now any second
+// invocation within 5 min is a no-op. The variable lives in module scope so
+// cron + manual triggers + boot triggers all share it.
+let _amazonSchedulerLastRanAt = 0;
+
 async function runDailyTaskScheduler() {
   if (!db) { console.log('No DB - skipping task scheduler'); return; }
+  // r35.4: idempotency check
+  const now = Date.now();
+  if (now - _amazonSchedulerLastRanAt < 5 * 60 * 1000) {
+    const secs = Math.round((now - _amazonSchedulerLastRanAt) / 1000);
+    console.log('[r35.4] runDailyTaskScheduler skipped — last ran ' + secs + 's ago (idempotency guard, 5min window)');
+    return;
+  }
+  _amazonSchedulerLastRanAt = now;
   console.log('Running daily task scheduler...');
   const dashUrl = process.env.DASHBOARD_URL || 'https://campaignpulse-setup-production.up.railway.app';
 
@@ -4001,15 +4038,37 @@ async function runDailyTaskScheduler() {
     // historical rows for paused campaigns for 3 days and the scheduler kept scoring
     // them — Aryan reported tasks firing for campaigns paused 20+ days ago.
     //
+    // r35.4 ROOT CAUSE FIX: filter to ENABLED state only.
+    //
+    // History: r32 (line ~1198) changed the Amazon Ads API stateFilter to
+    // include BOTH 'ENABLED' and 'PAUSED' so that campaigns in paused
+    // portfolios remained visible. That decision pulled paused campaigns into
+    // state.campaigns. The scheduler's variable was NAMED liveEnabledIds and
+    // logged as "currently-enabled" but actually contained "enabled OR paused"
+    // because it derived from the same state.campaigns. So paused campaigns
+    // passed the filter. Agents wrote "Campaign is already paused" on tasks
+    // and the scheduler fired a new task on the same campaign the next day.
+    //
+    // Fix: filter by c.state === 'enabled' (or no state at all — be lenient
+    // if some sync paths didn't set state) when building the ID set. Per-
+    // campaign state IS preserved at line 1654 (`state: (c.state||'').toLowerCase()`).
+    //
     // Safety fallback: if state.campaigns is empty (e.g. server just booted and
     // sync hasn't completed yet), skip the filter entirely so we don't block ALL
     // tasks. Log a warning so this is visible if it persists.
-    const liveEnabledIds = new Set((state.campaigns || []).map(function(c){ return String(c.campaignId); }));
-    const useEnabledFilter = liveEnabledIds.size > 0;
+    const enabledCampaigns = (state.campaigns || []).filter(function(c){
+      // Treat missing state as enabled (lenient — better than dropping all on
+      // a sync that didn't write the field). Empty string -> include.
+      const s = String(c.state || 'enabled').toLowerCase();
+      return s === 'enabled' || s === '';
+    });
+    const liveEnabledIds = new Set(enabledCampaigns.map(function(c){ return String(c.campaignId); }));
+    const useEnabledFilter = state.campaigns && state.campaigns.length > 0;
     if (!useEnabledFilter) {
-      console.log('[r33e] WARNING: state.campaigns empty — scheduler running WITHOUT enabled-filter this cycle. Will retry next run.');
+      console.log('[r35.4] WARNING: state.campaigns empty — scheduler running WITHOUT enabled-filter this cycle. Will retry next run.');
     } else {
-      console.log('[r33e] scheduler filtering to ' + liveEnabledIds.size + ' currently-enabled campaigns');
+      const pausedCount = state.campaigns.length - enabledCampaigns.length;
+      console.log('[r35.4] scheduler filtering to ' + liveEnabledIds.size + ' ENABLED campaigns (excluded ' + pausedCount + ' paused/disabled)');
     }
 
     const agentCampaigns = {};
@@ -5604,15 +5663,10 @@ cron.schedule('0 3 * * *', async function() {
   if (db) { try { await db.query('DELETE FROM user_sessions WHERE expires_at < NOW()'); } catch(e) { console.error('Session cleanup error: ' + e.message); } }
 }, { timezone: 'Europe/London' });
 
-app.get('/api/admin/create-manager', async function(req, res) {
-  if (!db) return res.status(500).json({ error: 'No DB' });
-  try {
-    const hash = await bcrypt.hash('FKSports2024!', 10);
-    // Don't downgrade an existing owner — only seed/reset password.
-    await db.query("INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (email) DO UPDATE SET password_hash=$3, is_active=TRUE", ['Bobby', 'bobby@fksports.co.uk', hash, 'manager', 'owner']);
-    res.json({ success: true, message: 'Manager account created/reset. Email: bobby@fksports.co.uk / Password: FKSports2024!' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+// r35.4: /api/admin/create-manager removed — was an unauthenticated bootstrap
+// endpoint that reset Bobby's password to a known value. Any visitor could hit
+// it. Original purpose served (Bobby's account exists). If account recovery is
+// needed in future, do it via DB directly or add a properly authenticated reset.
 
 // ── SP-API admin/diagnostic endpoints (r8) ──────────────────────────────────
 // These let us verify SP-API credentials work without waiting for cron.
@@ -6056,114 +6110,7 @@ app.post('/api/admin/traffic-diagnose', async function(req, res) {
   }
 });
 
-// ─── r24: ONE-SHOT ADMIN ACTIONS ───────────────────────────────────────────
-// Two endpoints below are intended to be called once each, then stay dormant.
-// They will be removed in r25 (audit cleanup).
-
-// r24: POST /api/admin/r24-unmerge-trampolines — unmerge the 9 outdoor trampoline
-// ASINs Bobby flagged. Splits 5 ASINs back into standalones (parent_sku=NULL),
-// and groups the remaining 4 ASINs as one family (canonical parent_sku=B0FFH4WX84).
-// Owner-only. Safe to call more than once (idempotent — operations are absolute,
-// not relative).
-app.post('/api/admin/r24-unmerge-trampolines', async function(req, res) {
-  if (!requireOwner(req, res)) return;
-  if (!db) return res.status(500).json({ error: 'No DB' });
-
-  // ASINs to make standalone (parent_sku = NULL)
-  const standaloneAsins = ['B0DSC9QSNF', 'B0DS8VWLT9', 'B0DS8WYML2', 'B0DSJJ3NQV', 'B0DS8X2VLM'];
-  // ASINs to group as one family (parent_sku = canonicalParent)
-  const familyAsins = ['B0FFH4WX84', 'B0FFH614FH', 'B0FFH6FRK9', 'B0FFH9JTPJ'];
-  const canonicalParent = 'B0FFH4WX84'; // first of the family — used as the group key
-
-  try {
-    const summary = { standalone: [], family: [], notFound: [] };
-
-    // 1) Split standalones — set parent_sku = NULL on every SKU mapped to these ASINs
-    for (const asin of standaloneAsins) {
-      const r = await db.query(
-        'UPDATE amazon_products SET parent_sku = NULL WHERE asin = $1 RETURNING sku',
-        [asin]
-      );
-      if (r.rowCount === 0) summary.notFound.push(asin);
-      else summary.standalone.push({ asin: asin, skus: r.rows.map(function(x){ return x.sku; }) });
-    }
-
-    // 2) Group family — set parent_sku = canonicalParent on every SKU mapped to these ASINs
-    for (const asin of familyAsins) {
-      const r = await db.query(
-        'UPDATE amazon_products SET parent_sku = $1 WHERE asin = $2 RETURNING sku',
-        [canonicalParent, asin]
-      );
-      if (r.rowCount === 0) summary.notFound.push(asin);
-      else summary.family.push({ asin: asin, skus: r.rows.map(function(x){ return x.sku; }) });
-    }
-
-    // 3) Audit log
-    try {
-      const actor = (req.user && req.user.name) || 'System';
-      await db.query(
-        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'r24_unmerge_trampolines',$2)",
-        [actor, 'r24 trampoline unmerge: ' + standaloneAsins.length + ' standalones, ' + familyAsins.length + '-family under ' + canonicalParent]
-      );
-    } catch(e) {}
-
-    // r25b: previously called deriveProductOwners() here, which wiped manual-style
-    // ownership on any product with owner_manual=FALSE — silently reassigning many
-    // products to the most active agent (Satyam). Removed: the unmerge action does
-    // not change ownership semantics, so it should not retrigger auto-derive.
-    let derive = { ok: true, skipped: true, note: 'auto-derive intentionally skipped in r25b' };
-
-    res.json({ ok: true, summary: summary, canonicalParent: canonicalParent, derive: derive });
-  } catch(e) {
-    console.error('/api/admin/r24-unmerge-trampolines error: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// r24: POST /api/admin/r24-wipe-google-tasks — wipe ALL Google tasks (every status).
-// Cascades to task_subtasks via FK ON DELETE CASCADE. Use this once to clean up
-// duplicates so tomorrow's 9am cron creates a fresh, clean task list.
-// Owner-only. Will refuse if invoked outside the maintenance window flag.
-app.post('/api/admin/r24-wipe-google-tasks', async function(req, res) {
-  if (!requireOwner(req, res)) return;
-  if (!db) return res.status(500).json({ error: 'No DB' });
-
-  // Safety: require explicit confirm=YES_WIPE in body to avoid accidental hits.
-  const confirm = (req.body && req.body.confirm) || '';
-  if (confirm !== 'YES_WIPE') {
-    return res.status(400).json({ error: 'Pass {"confirm":"YES_WIPE"} in body to proceed.' });
-  }
-
-  try {
-    // Count first so we can report what was wiped
-    const countRow = await db.query(
-      "SELECT COUNT(*)::int AS c FROM campaign_tasks WHERE department = 'google'"
-    );
-    const before = countRow.rows[0].c;
-
-    // Delete — task_subtasks rows cascade away automatically
-    const del = await db.query("DELETE FROM campaign_tasks WHERE department = 'google'");
-
-    // Audit log
-    try {
-      const actor = (req.user && req.user.name) || 'System';
-      await db.query(
-        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, department) VALUES ('','',$1,$1,'r24_wipe_google_tasks',$2,'google')",
-        [actor, 'r24 wipe: deleted ' + (del.rowCount || 0) + ' Google tasks (was ' + before + ')']
-      );
-    } catch(e) {}
-
-    res.json({
-      ok: true,
-      tasks_before: before,
-      tasks_deleted: del.rowCount || 0,
-      message: 'Google tasks wiped. The 9am cron tomorrow (London time) will create fresh tasks based on current campaign data.'
-    });
-  } catch(e) {
-    console.error('/api/admin/r24-wipe-google-tasks error: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
+// r35.4: r24 one-shot endpoints removed (were marked "remove in r25", we are at r35).
 
 // POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
 // Reports come back async, so this is fire-and-forget. Owner+manager only.
@@ -6458,6 +6405,9 @@ function computeAmazonDiagnosis(p) {
 // Returns: every campaign that should match this product + why each does or doesn't.
 app.get('/api/admin/match-debug', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
+  // r35.4: owner guard added — debug endpoints shouldn't be accessible to all
+  // authenticated users.
+  if (!requireOwner(req, res)) return;
   const titleQuery = String(req.query.titleContains || '').toLowerCase();
   if (!titleQuery) return res.status(400).json({ error: 'titleContains query required' });
   try {
@@ -9104,7 +9054,11 @@ app.post('/api/tasks/:id/sharpen-description', async function(req, res) {
     const aiText = await aiEnhanceRepeatTaskDescription(department, taskRow, prevContext);
     if (!aiText) return res.status(500).json({ error: 'AI could not generate a sharper description' });
     aiCacheSet(cacheKey, aiText);
-    res.json({ analysis: aiText });
+    // r35.4: return both keys. Frontend (sharpenWithAI in index.html line 3622)
+    // expects `data.sharpened`. Server was returning `{ analysis: ... }` only,
+    // so the button has been broken since r33d. Return both for safety in case
+    // any other caller relies on `analysis`.
+    res.json({ analysis: aiText, sharpened: aiText });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -10945,6 +10899,9 @@ app.get('/api/google/tasks/by-campaign/:campaignId', async function(req, res) {
 
 app.post('/api/admin/snapshot', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
+  // r35.4: owner guard added — was unprotected. This endpoint can overwrite
+  // historical daily_snapshots rows so it needs to be locked down.
+  if (!requireOwner(req, res)) return;
   try {
     const { date, metrics, campaigns } = req.body;
     if (!date || !campaigns) return res.status(400).json({ error: 'date and campaigns required' });
@@ -10983,6 +10940,12 @@ app.post('/api/campaigns/:id/budget', async function(req, res) {
       } catch(persistErr) { console.error('[r25a] exhaustionLog persist error: ' + persistErr.message); }
     }
     if (db) { try { await db.query("UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW() WHERE campaign_id=$3 AND status IN ($4,$5) AND task_source=$6 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)", ['complete', 'Budget +£' + amount + ' added', String(id), 'open', 'in_progress', 'alert']); } catch(e) { console.error('Auto-close task error: ' + e.message); } }
+    // r35.4: also remove from in-memory state.alerts so the dashboard banner
+    // clears immediately. Without this the banner stayed visible until the
+    // next analyseCampaigns cycle (which wouldn't actually clear it because
+    // the filter at line 1446 only checks date, not whether the campaign is
+    // still problematic).
+    state.alerts = state.alerts.filter(function(a) { return String(a.campaignId) !== String(id); });
     const approvalAgent = extractAgentFromCampaign(campaign.name) || '';
     const approvalMsg = ['✅ Budget added', campaign.name, '+£' + amount + ' added. New budget: £' + newBudget.toFixed(2)].join('\n');
     if (approvalAgent) await sendToAgent(approvalAgent, approvalMsg);
@@ -10997,6 +10960,21 @@ app.post('/api/alerts/:campaignId/dismiss', async function(req, res) {
   const reason = req.body.reason || 'No reason given';
   const alert = state.alerts.find(function(a) { return String(a.campaignId) === String(id); });
   state.alerts = state.alerts.filter(function(a) { return String(a.campaignId) !== String(id); });
+  // r35.4: also close any open alert task in the DB for today. Was leaving
+  // DB rows open while state.alerts was cleared — two sources of truth diverging.
+  // Scoped to today to avoid wiping historical records (same scope as budget-add fix).
+  if (db) {
+    try {
+      await db.query(
+        "UPDATE campaign_tasks SET status='dismissed', dismissed_reason=$1, agent_notes=$2, " +
+        "  updated_at=NOW(), resolved_at=NOW() " +
+        "WHERE campaign_id=$3 AND task_source='alert' " +
+        "  AND status IN ('open','in_progress') " +
+        "  AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)",
+        [reason, 'Dismissed via banner: ' + reason, String(id)]
+      );
+    } catch(e) { console.error('[r35.4 dismiss] alert task close error: ' + e.message); }
+  }
   if (db && alert) {
     try {
       const agentName = extractAgentFromCampaign(alert.name||'') || 'Unknown';
