@@ -1,4 +1,41 @@
-// CampaignPulse — deploy marker 2026-05-20 r35.8 (PRODUCT CARD DIAGNOSTIC REDESIGN. Replaces the first-rule-wins cascade with a layered diagnostic model that mirrors how Pattern / MyAmazonGuy / Adverio / OBG / SellerMagnet all frame Amazon health: Layer 1 — Can people BUY it? (suspension, Buy Box, content age, price-vs-competitor). Layer 2 — Are people SEEING it? (sessions, ad coverage, organic-no-ads). Layer 3 — Do they BUY when they see it? (CVR — the missing big one). Layer 4 — Ad efficiency overlay (wasted spend ≥ £5 with no sales, ACOS over target). NEW DATA: amazon_traffic_snapshots query expanded to sum sessions + units_ordered per ASIN over 7d; parent-level aggregation adds sessions_7d, units_7d, cvr_7d to signals. CVR THRESHOLDS (agreed with Bobby): <6% critical (below ad breakeven at 16% margin), 6-10% weak, 10-12% mild (below 12-15% benchmark), 12-15% good, >15% excellent. Session minimums: 30 to flag, 50 to call urgent, 100 to call \"Doing Great\". NEW BUCKETS: priority 0 = doing_great (gold — high traffic, high CVR, low coverage = scale candidate); priority 4 = monitor (grey — no sessions, no sales, no spend, not enough signal). Old buckets unchanged: 1 urgent, 2 underperforming, 3 working. Diagnosis now returns flags{listing_issue, visibility_issue, conversion_issue, wasted_spend, over_acos} + secondary[] (up to 3 other issues for context). PRESERVES: all r35.7 (BUYABLE recovery), r35.6 (REMOVED sweep 2h→3d), r35.5 (consecutive-day scoring, sharpen, amazon take, debug auth), r35.4 (paused root cause, alert state). AOV ASSUMPTION: £50 placeholder (used only in internal commentary, not in any rule). Change WASTED_SPEND_MIN, CVR_* constants in computeAmazonDiagnosis if benchmarks shift. (1) scoreCampaignDays rewritten to require 3 CONSECUTIVE bad days at the end of a 7-day window, NOT "any 1 bad day in 3-day window". no_revenue fires only when last 3 days each had spend>0 AND sales=0. no_activity fires only when last 3 days each had zero impressions. high_acos fires only when last 3 days each had ACOS>35%. (2) All three problem types gated by 7-day window ACOS check: if total_spend/total_sales <= 16% breakeven, SKIP — campaign is profitable overall, Action Centre still monitors it. (3) Scheduler now pulls 7 days of daily_snapshots (was 3). days are sorted oldest->newest before scoring. (4) Inline problem-type assignment in scheduler removed — reads problemType directly from scoring output. Unit-tested 6 cases including the Aryan|Baby Swing|SP phrase 2026-05-20 false positive (12.5% 7d ACOS but firing because of one zero-rev day in 3-day window). Confirmed it no longer fires under new rules. (5) BUNDLED: Sharpen cache-hit response now returns "sharpened" key (was missed in r35.4 — only the fresh-call path was fixed). (6) BUNDLED: /api/amazon/tasks/:id/take endpoint — mirrors Google. Amazon agents can claim a task assigned to another agent. Active-agent check via users table. UI button "Take it" added to Amazon task cards (visible when task is assigned to someone else, dept=amazon, not owner/manager). (7) BUNDLED: /google/debug/ removed from PUBLIC_PATHS — was reachable without auth. Owner/manager guards added to /api/google/debug/refund-sample, refund-audit, ga4-sample, landing-page-critique-debug, landing-page-critique-debug-list. Inherits all r35.4 (paused root cause, alert state consistency, scheduler idempotency, create-manager removal, r24 cleanup, snapshot+match-debug owner guards). NOT IN THIS SHIP (next chat): B00R2K8SZ0 multi-SKU SQL investigation, per-agent Opus quota design, state.alerts/DB unification refactor, AI cache DB persistence, frontend-backend contract enforcement, Action Centre clutter discussion (showing half of 100+ campaigns), Fix 4 keyword-level surfacing (smoking gun area), Google scheduler also needs consecutive-day rules eventually (currently uses 7d totals which is less prone to false positives but still imperfect).)
+// CampaignPulse — deploy marker 2026-05-20 r35.9 (FIVE FEATURES + HYGIENE.
+// (1) D — Per-agent Opus quota on /api/tasks/:id/escalation-analysis. 24h
+// cooldown per (task, agent), broken when the agent submits non-trivial
+// notes (≥10 chars) via /api/tasks/:id/status. Cache hits don't count
+// toward quota. Owner/manager bypass entirely. Friendly lockout message
+// surfaced via HTTP 429 + quotaMessage field. New table ai_escalation_log.
+// (2) F — Display-name dedupe badge on Tasks. /api/tasks now annotates each
+// open/in_progress task with dedupe_count + dedupe_sibling_ids. Frontend
+// shows 🔗 badge on cards with siblings; click opens merge dialog.
+// (3) F-merge — POST /api/tasks/:id/merge-into endpoint (Option 2: close one,
+// point to other). Dismisses the loser task with "Merged into #X" note,
+// adds matching note to the survivor. Cross-department + cross-name merge
+// rejected. Activity-log entry recorded.
+// (4) Sessions/CVR in product modal. Mirrors the card stat-grid logic from
+// r35.8. Empty until Brand Analytics SP-API role approved (requested
+// 2026-05-20 ~14:30; awaiting Amazon).
+// (5) Product merge opened to agents. /api/amazon/products/merge previously
+// owner+manager only. Now accepts any active staff (dept in
+// amazon/google/logistics/accounts/warehouse) provided confirmed:true is
+// sent. Manager still bypasses confirmation. Audit log records role tag.
+// HYGIENE: removed dead previousNoteSaysWait regex function (no callers).
+// DROPPED FROM SHIP: G (Google consecutive-day rules — Google scheduler
+// uses 7d totals not daily snapshots; bigger work than estimated, deferred).
+// Other hygiene items (AGENT_ALIASES_FALLBACK removal, whereActiveTask
+// helper, snooze endpoint consolidation, duplicate CREATE TABLE collapse)
+// pulled — turns out they need real audits not 5-min tidy work. Next time.
+// INHERITS all of r35.8 (Product card 4-layer diagnostic, sessions/CVR
+// data path, Doing Great + Monitor buckets), r35.7 (BUYABLE recovery boot),
+// r35.6 (REMOVED sweep 2h→3d + product-status recovery), r35.5 (consecutive-
+// day scoring, Sharpen cache fix, Amazon /take endpoint, debug auth),
+// r35.4 (paused root cause, alert state consistency, scheduler idempotency,
+// admin-endpoint security cleanup).
+// NOT IN THIS SHIP (next chat): E (keyword surfacing), H (state.alerts
+// unification), I (AI cache DB persistence — measure first), P6 (Coach
+// briefing endpoint), G (Google consecutive-day), agent-side product hide
+// already works (no changes needed). Awaiting Brand Analytics approval to
+// populate amazon_traffic_snapshots — then trigger /api/admin/backfill-
+// traffic?days=22 to seed 22 days back to 28 April CP launch.)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -1943,6 +1980,23 @@ async function initDB() {
         agent_name TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       );
+
+      -- r35.9: ai_escalation_log — per-agent quota tracking for the Opus
+      -- escalation-analysis endpoint. Each row records when a given agent ran
+      -- Opus on a given entity. 24h cooldown per (entity, agent) — broken
+      -- early when that agent leaves a feedback note. Cache hits don't write
+      -- rows (so they don't count against quota). Manager/owner override
+      -- bypasses the check entirely.
+      CREATE TABLE IF NOT EXISTS ai_escalation_log (
+        id SERIAL PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        called_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        agent_feedback_at TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_esc_lookup
+        ON ai_escalation_log(entity_type, entity_id, agent_name, called_at DESC);
       CREATE INDEX IF NOT EXISTS idx_ai_feedback_scope_target ON ai_feedback(scope, target_id, created_at DESC);
 
       -- r26: gsc_daily — Google Search Console daily-per-(page,query) data.
@@ -3060,11 +3114,8 @@ function scoreGoogleTask(spend, sales, problemType) {
 
 // r29: helper — does the previous resolution note say "wait" or describe an
 // action that needs time to play out? If so we defer the new task. Heuristic only.
-function previousNoteSaysWait(note) {
-  if (!note) return false;
-  const n = String(note).toLowerCase();
-  return /\b(wait|monitor|monitoring|7 days|7d|ten days|2 weeks|two weeks|let it run|see if|after another week|give it time|pending)\b/.test(n);
-}
+// r35.9 hygiene: removed `previousNoteSaysWait` regex function (no live callers).
+// Was superseded by `aiAgentNoteResolvesNewProblem` below.
 
 // r33e: AI-driven note interpretation. The old regex previousNoteSaysWait
 // missed real agent language like "ACOS under 20%, leave it" or "performing
@@ -8696,15 +8747,33 @@ app.post('/api/admin/derive-product-owners', async function(req, res) {
 });
 
 // r18: POST /api/amazon/products/merge — merge multiple parent groups into one.
-// Body: { canonicalKey: 'Vibration Plates Grey Ama', mergeKeys: ['asin:B0...', 'Vib Plates Amazon'] }
+// Body: { canonicalKey: 'Vibration Plates Grey Ama', mergeKeys: ['asin:B0...', 'Vib Plates Amazon'], confirmed: true }
 // Effect: every SKU whose parent_sku matches any mergeKey (or sku matches a standalone)
 // gets parent_sku updated to canonicalKey. Owner can manually pick the canonical title.
-// Manager + owner only.
+// r35.9: opened to active staff (Amazon/Google/manager/logistics agents). Owner/manager
+// bypass confirmed check (legacy behaviour). Agents MUST send confirmed:true.
+// Every merge is audit-logged with actor name + source/canonical keys.
 app.post('/api/amazon/products/merge', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
   const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
-  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
-  if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+
+  // r35.9: agents can also merge, but only with explicit confirmation and only
+  // if they're active staff (have a real department).
+  if (!isManagerLevel) {
+    const allowedDepts = ['amazon', 'google', 'logistics', 'accounts', 'warehouse'];
+    if (allowedDepts.indexOf(userDept) === -1) {
+      return res.status(403).json({ error: 'You don\'t have permission to merge products. Ask a manager.' });
+    }
+    const confirmed = req.body && req.body.confirmed === true;
+    if (!confirmed) {
+      return res.status(400).json({
+        error: 'confirmation_required',
+        message: 'Tick "I confirm these are the same Amazon listing" before merging.'
+      });
+    }
+  }
 
   const canonicalKey = String((req.body && req.body.canonicalKey) || '').trim();
   const mergeKeys = Array.isArray(req.body && req.body.mergeKeys) ? req.body.mergeKeys.map(function(k){ return String(k).trim(); }).filter(Boolean) : [];
@@ -8733,9 +8802,10 @@ app.post('/api/amazon/products/merge', async function(req, res) {
     // Audit log
     try {
       const actor = (req.user && req.user.name) || 'System';
+      const actorRole = isManagerLevel ? 'manager' : ('agent:' + userDept);
       await db.query(
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'product_merge',$2)",
-        [actor, actor + ' merged [' + sources.join(', ') + '] into ' + canonicalKey + ' (' + totalUpdated + ' rows)']
+        [actor, actor + ' (' + actorRole + ') merged [' + sources.join(', ') + '] into ' + canonicalKey + ' (' + totalUpdated + ' rows)']
       );
     } catch(e) {}
     // r26: removed automatic deriveProductOwners() call. See catalogue-sync comment.
@@ -9170,9 +9240,49 @@ app.post('/api/tasks/:id/escalation-analysis', async function(req, res) {
     if (!force) {
       const cached = aiCacheGet(cacheKey);
       if (cached) {
+        // r35.9: cache hits don't count toward quota — agent gets a free re-view.
         console.log('[r33d] stuck-task critique served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
         return res.json({ analysis: cached.value, cached: true });
       }
+    }
+
+    // r35.9 D — per-agent Opus quota. 24h cooldown per (task, agent),
+    // broken by leaving a feedback note. Owner/manager bypass entirely.
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+    const userName = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const isManagerLevel =
+      ['owner', 'manager'].indexOf(userRole) !== -1 ||
+      userDept === 'manager';
+    if (!isManagerLevel) {
+      try {
+        const lastCallRes = await db.query(
+          "SELECT called_at, agent_feedback_at FROM ai_escalation_log " +
+          "WHERE entity_type = 'task' AND entity_id = $1 AND agent_name = $2 " +
+          "ORDER BY called_at DESC LIMIT 1",
+          [String(task.id), userName]
+        );
+        if (lastCallRes.rows.length > 0) {
+          const lastCall = lastCallRes.rows[0];
+          const hoursAgo = (Date.now() - new Date(lastCall.called_at).getTime()) / 3600000;
+          const cooldownBroken = lastCall.agent_feedback_at != null;
+          if (hoursAgo < 24 && !cooldownBroken) {
+            const hoursLeft = Math.max(1, Math.ceil(24 - hoursAgo));
+            return res.status(429).json({
+              error: 'quota',
+              quotaMessage:
+                'Oh, you ran this deep AI analysis ' +
+                Math.floor(hoursAgo) + 'h ago on this task. ' +
+                'Drop a quick note in the feedback box telling the AI what worked, ' +
+                'what didn\'t, or what to focus on next — then we\'ll run a fresh one ' +
+                'with that context. ' +
+                '(Or come back in ' + hoursLeft + 'h.)',
+              hoursLeft: hoursLeft,
+              feedbackBreaksCooldown: true
+            });
+          }
+        }
+      } catch(e) { console.error('[r35.9 D] quota check failed (allowing through): ' + e.message); }
     }
 
     const history = await db.query('SELECT action, notes, logged_at FROM activity_log WHERE task_id=$1 ORDER BY logged_at ASC', [task.id]);
@@ -9186,6 +9296,17 @@ app.post('/api/tasks/:id/escalation-analysis', async function(req, res) {
     const response = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 800, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     const analysis = response.data.content[0].text;
     aiCacheSet(cacheKey, analysis);
+
+    // r35.9 D — log the call against this agent's quota (skipped for managers).
+    if (!isManagerLevel) {
+      try {
+        await db.query(
+          "INSERT INTO ai_escalation_log (entity_type, entity_id, agent_name) VALUES ('task', $1, $2)",
+          [String(task.id), userName]
+        );
+      } catch(e) { console.error('[r35.9 D] quota log insert failed: ' + e.message); }
+    }
+
     console.log('[r33d] stuck-task critique generated fresh, cached 2h');
     res.json({ analysis: analysis });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -10139,6 +10260,22 @@ app.get('/api/tasks', async function(req, res) {
         });
       } catch(subErr) { console.error('[r21] subtask count fetch error: ' + subErr.message); }
     }
+    // r35.9 F — dedupe badge. Group OPEN/IN-PROGRESS tasks by normalised
+    // display name within the same department. Any task in a group of 2+
+    // gets `dedupe_count` populated, plus the sibling task IDs. Frontend
+    // shows a 🔗 badge with "merge into this" / "this is duplicate of #X"
+    // option. After r35.5's consecutive-day fix, this should fire rarely.
+    const dedupeGroups = {};
+    result.rows.forEach(function(t) {
+      if (['open', 'in_progress'].indexOf(t.status) === -1) return;
+      const name = String(t.campaign_name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (!name) return;
+      const dept = String(t.department || '').toLowerCase();
+      const groupKey = dept + '::' + name;
+      if (!dedupeGroups[groupKey]) dedupeGroups[groupKey] = [];
+      dedupeGroups[groupKey].push(t.id);
+    });
+
     // r7b: enrich each row with computed timeline fields so the frontend doesn't
     // have to know about working days. working_days_open is the canonical age count;
     // task_stage is recomputed live (the cron persists it but live computation is
@@ -10158,6 +10295,19 @@ app.get('/api/tasks', async function(req, res) {
       // The Google day7_decision columns are reused for Amazon since they're
       // on the same campaign_tasks table.
       const atDay7 = wdo >= 7 && !t.day7_decision && t.status !== 'complete' && t.status !== 'archived' && t.status !== 'dismissed';
+      // r35.9 F — populate dedupe_count + sibling IDs for the badge.
+      // Only meaningful for open/in_progress tasks (closed tasks aren't in the
+      // group map either, so any match would be coincidental).
+      let dedupe_count = 1;
+      let dedupe_sibling_ids = [];
+      if (['open', 'in_progress'].indexOf(t.status) !== -1) {
+        const dedupeName = String(t.campaign_name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const dedupeDept = String(t.department || '').toLowerCase();
+        const dedupeKey = dedupeDept + '::' + dedupeName;
+        const group = dedupeGroups[dedupeKey] || [];
+        dedupe_sibling_ids = group.filter(function(id){ return id !== t.id; });
+        dedupe_count = dedupe_sibling_ids.length + 1;
+      }
       return Object.assign({}, t, {
         working_days_open: wdo,
         task_stage: liveStage,
@@ -10166,13 +10316,91 @@ app.get('/api/tasks', async function(req, res) {
         not_started_warning: notStarted,
         created_today: createdTodayLondon,
         subtask_counts: subtaskCounts[t.id] || { open: 0, complete: 0, dismissed: 0, total: 0 },
-        at_day7: atDay7
+        at_day7: atDay7,
+        dedupe_count: dedupe_count,
+        dedupe_sibling_ids: dedupe_sibling_ids
       });
     });
     res.json({ tasks });
   } catch(e) { res.json({ tasks: [], error: e.message }); }
 });
 
+
+// r35.9 F — Option 2 task merge: "close one, point to other".
+// Agent looking at duplicate tasks (dedupe_count > 1) picks the real one
+// and dismisses the rest with a "merged into #X" reason. Both tasks remain
+// in the activity log for audit. Reversible — agent can reopen the dismissed
+// task if they change their mind.
+// Body: { canonicalId: 123 }  — the surviving task ID. The :id in the URL
+// is the task being dismissed.
+app.post('/api/tasks/:id/merge-into', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const dismissId = parseInt(req.params.id, 10);
+  const canonicalId = parseInt((req.body && req.body.canonicalId) || 0, 10);
+  if (!dismissId || !canonicalId) return res.status(400).json({ error: 'canonicalId required in body' });
+  if (dismissId === canonicalId) return res.status(400).json({ error: 'Cannot merge a task into itself' });
+  try {
+    // Verify both tasks exist and both still open/in_progress
+    const both = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, department, status FROM campaign_tasks WHERE id = ANY($1::int[])",
+      [[dismissId, canonicalId]]
+    );
+    if (both.rows.length !== 2) return res.status(404).json({ error: 'One or both tasks not found' });
+    const dismissTask = both.rows.find(function(r){ return r.id === dismissId; });
+    const canonicalTask = both.rows.find(function(r){ return r.id === canonicalId; });
+    if (['complete','dismissed','archived','cancelled'].indexOf(dismissTask.status) !== -1) {
+      return res.status(409).json({ error: 'Task #' + dismissId + ' is already ' + dismissTask.status });
+    }
+    if (['complete','dismissed','archived','cancelled'].indexOf(canonicalTask.status) !== -1) {
+      return res.status(409).json({ error: 'Canonical task #' + canonicalId + ' is already ' + canonicalTask.status + ' — pick a different one' });
+    }
+    // Soft sanity check — campaign + department should match
+    if (String(dismissTask.campaign_name || '').trim().toLowerCase() !==
+        String(canonicalTask.campaign_name || '').trim().toLowerCase()) {
+      return res.status(400).json({ error: 'Campaign names don\'t match — merge is for true duplicates only' });
+    }
+    if (String(dismissTask.department) !== String(canonicalTask.department)) {
+      return res.status(400).json({ error: 'Cannot merge tasks across departments' });
+    }
+    const actor = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const reason = 'Merged into #' + canonicalId + ' by ' + actor;
+    // Dismiss the loser. Append a note recording the merge target.
+    const endOfDay = new Date(); endOfDay.setHours(23, 59, 59, 999);
+    await db.query(
+      "UPDATE campaign_tasks SET status='dismissed', dismissed_reason=$1, " +
+      "agent_notes = COALESCE(agent_notes,'') || E'\\n🔀 ' || $1, " +
+      "updated_at=NOW(), resolved_at=NOW(), suppressed_until=$2 " +
+      "WHERE id=$3",
+      [reason, endOfDay.toISOString(), dismissId]
+    );
+    // Note on the survivor that it absorbed a duplicate
+    await db.query(
+      "UPDATE campaign_tasks SET " +
+      "agent_notes = COALESCE(agent_notes,'') || E'\\n🔀 Duplicate task #' || $1 || ' merged in by ' || $2 || ' on ' || NOW()::date, " +
+      "updated_at=NOW() WHERE id=$3",
+      [dismissId, actor, canonicalId]
+    );
+    // Audit log for both
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id) " +
+        "VALUES ($1,$2,$3,$3,'task_merge',$4,$5,'dismissed',$6)",
+        [
+          dismissTask.campaign_id || '',
+          dismissTask.campaign_name || '',
+          dismissTask.agent_name || actor,
+          'Merged into #' + canonicalId + ' (duplicate task)',
+          dismissTask.status,
+          dismissId
+        ]
+      );
+    } catch(logErr) { console.error('[r35.9 F merge] activity log: ' + logErr.message); }
+    res.json({ ok: true, dismissed: dismissId, canonical: canonicalId, message: 'Merged #' + dismissId + ' into #' + canonicalId });
+  } catch(e) {
+    console.error('[r35.9 F merge-into] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.post('/api/tasks/:id/status', async function(req, res) {
   if (!db) return res.status(500).json({ error: 'No DB' });
@@ -10209,6 +10437,26 @@ app.post('/api/tasks/:id/status', async function(req, res) {
     else if (status === 'complete') { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW(), last_resolved_date=NOW() WHERE id=$3'; params = [status, notes||'', req.params.id]; }
     else { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW() WHERE id=$3'; params = [status, notes||'', req.params.id]; }
     await db.query(query, params);
+
+    // r35.9 D — if the agent submitted non-trivial notes, mark this as
+    // feedback for any pending Opus escalation log row (breaks the 24h
+    // cooldown so the next AI run gets the fresh context).
+    try {
+      const noteStr = String(notes || '').trim();
+      if (noteStr.length >= 10) {
+        const actor = (req.user && (req.user.name || req.user.username)) || '';
+        if (actor) {
+          await db.query(
+            "UPDATE ai_escalation_log SET agent_feedback_at = NOW() " +
+            "WHERE entity_type = 'task' AND entity_id = $1 AND agent_name = $2 " +
+            "  AND agent_feedback_at IS NULL " +
+            "  AND called_at > NOW() - INTERVAL '7 days'",
+            [String(req.params.id), actor]
+          );
+        }
+      }
+    } catch(e) { console.error('[r35.9 D] feedback-break update failed: ' + e.message); }
+
     try {
       // r33c: agent eligibility from users table, not hardcoded list.
       const eligibleAgents = await getActiveAmazonAgents();

@@ -3498,6 +3498,15 @@ function renderTasks(tab) {
         '</div>' +
         '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">' +
           (isRepeat ? '<span class="badge" style="background:#dc2626;color:white;font-size:11px">🔁 Repeat #' + (t.failure_count||2) + '</span>' : '') +
+          // r35.9 F — dedupe badge. Surface when another open task in the same
+          // department shares this display name. Click opens merge dialog.
+          ((t.dedupe_count || 0) > 1 ?
+            '<span class="badge" style="background:#FEF3C7;color:#78350F;border:1px solid #FBBF24;font-size:11px;cursor:pointer" ' +
+              'onclick="event.stopPropagation();showTaskMergeDialog(' + t.id + ',' + JSON.stringify(t.dedupe_sibling_ids).replace(/"/g,'&quot;') + ')" ' +
+              'title="Another task with this same campaign name is also open. Click to merge.">' +
+              '🔗 Duplicate of ' + (t.dedupe_count - 1) + ' other' + (t.dedupe_count > 2 ? 's' : '') +
+            '</span>'
+          : '') +
           // r7b day strip — replaces the old "Day N" badge with stage-aware colour + countdown.
           // Badge colour: open=gray, discuss=amber, decide=red, overdue=red-pulse.
           (function() {
@@ -3604,6 +3613,17 @@ async function loadEscalationAnalysis(taskId, btn, force) {
       body: JSON.stringify({ force: force === true })
     });
     const data = await res.json();
+    if (res.status === 429 && data.error === 'quota') {
+      // r35.9 D — friendly lockout message when agent hits the per-agent
+      // 24h Opus quota. Feedback note breaks the cooldown automatically.
+      container.innerHTML =
+        '<div style="background:#FEF3C7;border:1px solid #FBBF24;border-radius:8px;padding:14px 16px;font-size:13px;line-height:1.6;color:#78350F">' +
+          '<div style="font-weight:700;margin-bottom:6px">🤔 Quota — feedback first</div>' +
+          escHtml(data.quotaMessage || 'You ran this recently. Add feedback to retry.') +
+        '</div>';
+      if (btn) btn.textContent = '🤖 Get AI analysis';
+      return;
+    }
     if (data.analysis) {
       const cachedNote = data.cached ? '<span style="font-size:11px;color:var(--text3);font-weight:normal">  (cached — <a href="javascript:void(0)" onclick="loadEscalationAnalysis(' + taskId + ', null, true)" style="color:var(--text3);text-decoration:underline">regenerate</a>)</span>' : '';
       container.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:14px">🤖 Claude Analysis' + cachedNote + '</div>' +
@@ -5364,6 +5384,31 @@ function buildAmzProductModalBody(p) {
       tile('Units 7d', String(p.total_units_7d || 0)),
       tile('Active', p.active_60d ? 'Yes' : 'No', p.active_60d ? 'good' : 'bad'),
       tile('Listings', (p.buyable_count + p.inactive_count) + ' total'),
+      // r35.9: Sessions + CVR in modal. Mirrors card stat-grid logic at line ~5195.
+      // Empty until amazon_traffic_snapshots populates (gated on Brand Analytics
+      // SP-API role approval — pending as of 2026-05-20).
+      (function(){
+        const sig = p.signals || {};
+        const sess = sig.sessions_7d || 0;
+        const sClass = sess === 0 ? 'muted' : (sess < 30 ? 'warn' : '');
+        return tile('Sessions 7d', sess > 0 ? sess.toLocaleString('en-GB') : '—', sClass,
+          'Detail-page sessions from Amazon Sales & Traffic Report. Empty until the Brand Analytics SP-API role is approved and the 04:00 cron populates traffic snapshots.');
+      })(),
+      (function(){
+        const sig = p.signals || {};
+        const sess = sig.sessions_7d || 0;
+        const cvr = sig.cvr_7d;
+        if (sess < 30 || cvr == null) {
+          return tile('CVR 7d', '—', 'muted',
+            'Conversion rate = units ÷ sessions over 7 days. Needs at least 30 sessions to display. Benchmark: <6% critical, 12-15% healthy, >15% excellent.');
+        }
+        let kl = '';
+        if (cvr < 6) kl = 'bad';
+        else if (cvr < 12) kl = 'warn';
+        else if (cvr >= 15) kl = 'good';
+        return tile('CVR 7d', cvr + '%', kl,
+          'Conversion rate = units ÷ sessions over 7 days. Benchmark: <6% critical, 6-12% weak, 12-15% healthy, >15% excellent.');
+      })(),
     '</div>',
 
     // Amazon Ads section
@@ -6329,6 +6374,79 @@ async function takeAmazonTask(taskId) {
   }
 }
 
+// r35.9 F — duplicate-task merge dialog (Option 2: close one, point to other).
+// Triggered from the 🔗 badge on a task card. Agent picks which sibling task
+// is the "real" one — the current task gets dismissed with "merged into #X".
+async function showTaskMergeDialog(currentTaskId, siblingIds) {
+  if (!siblingIds || !siblingIds.length) { alert('No duplicate tasks to merge with.'); return; }
+  try {
+    // Pull current task list and find the siblings to show their detail
+    const r = await fetch('/api/tasks', { headers: getAuthHeaders() });
+    const j = await r.json();
+    const tasks = j.tasks || [];
+    const current = tasks.find(function(t){ return t.id === currentTaskId; });
+    const siblings = tasks.filter(function(t){ return siblingIds.indexOf(t.id) !== -1; });
+    if (!current || !siblings.length) { alert('Could not load duplicate tasks. Reload and try again.'); return; }
+    const existing = document.getElementById('task-merge-dialog');
+    if (existing) existing.remove();
+    function rowFor(t, isCurrent) {
+      const created = t.created_date ? new Date(t.created_date).toLocaleDateString('en-GB') : '—';
+      const note = t.agent_notes ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;white-space:pre-wrap">' + escHtml(t.agent_notes).slice(0, 200) + (t.agent_notes.length > 200 ? '…' : '') + '</div>' : '';
+      const label = isCurrent ? '<span style="background:#FEF3C7;color:#78350F;padding:1px 6px;border-radius:99px;font-size:10px;margin-left:6px">this one</span>' : '';
+      return '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:600;font-size:13px">Task #' + t.id + ' · ' + escHtml(t.agent_name || 'Unassigned') + label + '</div>' +
+            '<div style="font-size:11px;color:var(--text3);margin-top:2px">Created ' + created + ' · ' + escHtml(t.problem_type || '') + ' · Day ' + (t.working_days_open || 0) + '</div>' +
+            note +
+          '</div>' +
+          (isCurrent
+            ? ''
+            : '<button class="btn btn-primary" style="font-size:12px;padding:4px 12px" onclick="confirmTaskMerge(' + currentTaskId + ',' + t.id + ')">Keep this one →</button>'
+          ) +
+        '</div>' +
+      '</div>';
+    }
+    const html =
+      '<div id="task-merge-dialog" onclick="if(event.target===this)closeTaskMergeDialog()" style="position:fixed;inset:0;background:rgba(13,18,30,0.6);z-index:1400;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto">' +
+        '<div style="background:var(--surface);width:100%;max-width:560px;border-radius:14px;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.4);padding:22px">' +
+          '<div style="font-size:16px;font-weight:600;margin-bottom:6px">🔗 Merge duplicate tasks</div>' +
+          '<div style="font-size:12px;color:var(--text3);margin-bottom:16px">These tasks share the same campaign name. Pick which one stays — the other gets dismissed with "Merged into #X". Reversible.</div>' +
+          rowFor(current, true) +
+          siblings.map(function(s){ return rowFor(s, false); }).join('') +
+          '<div style="display:flex;justify-content:flex-end;margin-top:10px">' +
+            '<button class="btn btn-ghost" style="font-size:13px" onclick="closeTaskMergeDialog()">Cancel</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    document.body.insertAdjacentHTML('beforeend', html);
+  } catch(e) {
+    alert('Could not open merge dialog: ' + e.message);
+  }
+}
+
+function closeTaskMergeDialog() {
+  const m = document.getElementById('task-merge-dialog');
+  if (m) m.remove();
+}
+
+async function confirmTaskMerge(dismissId, canonicalId) {
+  if (!confirm('Dismiss task #' + dismissId + ' and keep #' + canonicalId + ' as the real one?\n\nThe dismissed task will have a "Merged into #' + canonicalId + '" note. This is reversible — you can reopen the dismissed task if needed.')) return;
+  try {
+    const r = await fetch('/api/tasks/' + dismissId + '/merge-into', {
+      method: 'POST',
+      headers: Object.assign({}, getAuthHeaders(), { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ canonicalId: canonicalId })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { alert('Merge failed: ' + (j.error || 'unknown')); return; }
+    closeTaskMergeDialog();
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch(e) {
+    alert('Merge failed: ' + e.message);
+  }
+}
+
 // r18: Reassign existing task — opens modal with agent dropdown.
 async function showReassignTaskModal(taskId, currentAgent) {
   let agents = [];
@@ -6745,15 +6863,27 @@ async function submitMergeCluster(clusterIdx) {
   const mergeInputs = document.querySelectorAll('input[name="merge-' + clusterIdx + '"]:checked');
   const mergeKeys = Array.from(mergeInputs).map(function(i){ return i.value; }).filter(function(k){ return k !== canonicalKey; });
   if (mergeKeys.length === 0) { alert('Pick at least one parent to merge into the canonical.'); return; }
-  if (!confirm('Merge ' + mergeKeys.length + ' parent(s) into "' + canonicalKey + '"?\n\nAll their SKUs will be reparented to the canonical. Owner derivation will re-run automatically.')) return;
+  // r35.9: agents can now merge but must explicitly confirm. confirm() returning
+  // true serves as the confirmation — flag is sent so the server can re-check.
+  const msg =
+    'Merge ' + mergeKeys.length + ' parent(s) into "' + canonicalKey + '"?\n\n' +
+    'All their SKUs will be reparented to the canonical.\n\n' +
+    'ONLY do this if you are confident these are the SAME Amazon listing ' +
+    '(same ASIN / same physical product). This action is logged with your name.';
+  if (!confirm(msg)) return;
   try {
     const r = await fetch('/api/amazon/products/merge', {
       method: 'POST',
       headers: Object.assign({'Content-Type':'application/json'}, getAuthHeaders()),
-      body: JSON.stringify({ canonicalKey: canonicalKey, mergeKeys: mergeKeys })
+      body: JSON.stringify({ canonicalKey: canonicalKey, mergeKeys: mergeKeys, confirmed: true })
     });
     const j = await r.json();
-    if (!r.ok || j.error) { alert('Merge failed: ' + (j.error || 'unknown')); return; }
+    if (!r.ok || j.error) {
+      // r35.9: friendlier error surface — distinguish auth-style errors from validation.
+      const errMsg = j.message || j.error || 'unknown';
+      alert('Merge failed: ' + errMsg);
+      return;
+    }
     alert('Merged ' + mergeKeys.length + ' into "' + canonicalKey + '". ' + j.rows_updated + ' rows updated. Refreshing…');
     closeMergeProductsModal();
     if (typeof loadAmazonProducts === 'function') loadAmazonProducts();
