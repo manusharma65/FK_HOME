@@ -1,4 +1,4 @@
-// CampaignPulse — deploy marker 2026-05-19 r35.4 (CRITICAL BUG SHIP + SAFE CLEANUP. Fixes: (1) PAUSED-CAMPAIGN ROOT CAUSE: scheduler at line ~4030 now filters state.campaigns by c.state===enabled before building liveEnabledIds. Was including PAUSED because r32 set stateFilter to include both at line 1198. Every previous "fix" addressed symptoms; this is the source. (2) Alert analyser at line ~1452 now skips paused campaigns at the top — was raising budget alerts on paused campaigns. (3) AI Sharpen response mismatch: server returns BOTH analysis and sharpened keys. Was broken since r33d. (4a) Budget-add clears state.alerts so banner disappears immediately. (4b) Alert dismiss endpoint closes the DB alert task too (was leaving DB row open). (4c) Server-boot rehydration of state.alerts now filters by status — was loading closed alerts as ghosts after restart. (5) SCHEDULER IDEMPOTENCY GUARDS on both Amazon (runDailyTaskScheduler) and Google (runGoogleTaskScheduler): second call within 5 min is a no-op. Prevents "Run now" double-click producing duplicates. (6) SECURITY: removed /api/admin/create-manager (was unauthenticated, reset Bobby password to known value); added requireOwner guards to /api/admin/snapshot (could overwrite historical data) and /api/admin/match-debug. (7) STALE CODE: removed /api/admin/r24-unmerge-trampolines and /api/admin/r24-wipe-google-tasks (marked "remove in r25" in their comments — we are at r35). PLUS inherits all r35.3 fixes (alert auto-close scoped to today, dedupe ignores closed, Amazon Repeat Offenders tab excludes archived/cancelled/dismissed, Google filter strip simplified to single row matching Amazon, Open as default). PLUS inherits r35.2 (general task feature, deadline column). PLUS inherits r34/r35 performance backend endpoints — were missing on main, causing 404s. WORKFLOW NOTE: Google agents who relied on "Active" tab showing open+in_progress will need to click "In progress" tab for working tasks. DEFERRED to next ship (see end of audit report): state.alerts/DB unification (architectural), task status helper, AI cache DB persistence, per-agent Opus quota, self-claim endpoint for Amazon, B00R2K8SZ0 multi-SKU investigation, /google/debug/ public-path review, frontend-backend contract enforcement.)
+// CampaignPulse — deploy marker 2026-05-20 r35.5 (TASK SCORING RECALIBRATION + BUNDLED OUTSTANDING FIXES. (1) scoreCampaignDays rewritten to require 3 CONSECUTIVE bad days at the end of a 7-day window, NOT "any 1 bad day in 3-day window". no_revenue fires only when last 3 days each had spend>0 AND sales=0. no_activity fires only when last 3 days each had zero impressions. high_acos fires only when last 3 days each had ACOS>35%. (2) All three problem types gated by 7-day window ACOS check: if total_spend/total_sales <= 16% breakeven, SKIP — campaign is profitable overall, Action Centre still monitors it. (3) Scheduler now pulls 7 days of daily_snapshots (was 3). days are sorted oldest->newest before scoring. (4) Inline problem-type assignment in scheduler removed — reads problemType directly from scoring output. Unit-tested 6 cases including the Aryan|Baby Swing|SP phrase 2026-05-20 false positive (12.5% 7d ACOS but firing because of one zero-rev day in 3-day window). Confirmed it no longer fires under new rules. (5) BUNDLED: Sharpen cache-hit response now returns "sharpened" key (was missed in r35.4 — only the fresh-call path was fixed). (6) BUNDLED: /api/amazon/tasks/:id/take endpoint — mirrors Google. Amazon agents can claim a task assigned to another agent. Active-agent check via users table. UI button "Take it" added to Amazon task cards (visible when task is assigned to someone else, dept=amazon, not owner/manager). (7) BUNDLED: /google/debug/ removed from PUBLIC_PATHS — was reachable without auth. Owner/manager guards added to /api/google/debug/refund-sample, refund-audit, ga4-sample, landing-page-critique-debug, landing-page-critique-debug-list. Inherits all r35.4 (paused root cause, alert state consistency, scheduler idempotency, create-manager removal, r24 cleanup, snapshot+match-debug owner guards). NOT IN THIS SHIP (next chat): B00R2K8SZ0 multi-SKU SQL investigation, per-agent Opus quota design, state.alerts/DB unification refactor, AI cache DB persistence, frontend-backend contract enforcement, Action Centre clutter discussion (showing half of 100+ campaigns), Fix 4 keyword-level surfacing (smoking gun area), Google scheduler also needs consecutive-day rules eventually (currently uses 7d totals which is less prone to false positives but still imperfect).)
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -68,8 +68,10 @@ const PUBLIC_PATHS = [
   '/google/ingest',                  // Google Ads script ingest (uses x-google-secret)
   '/google/oauth',                   // GA4 OAuth callback
   '/google/ga4-status',              // Pre-OAuth status check
-  '/google/ga4-refresh',             // GA4 token refresh
-  '/google/debug/'                   // Diagnostics
+  '/google/ga4-refresh'              // GA4 token refresh
+  // r35.5: removed '/google/debug/' — was making every debug endpoint reachable
+  // without authentication. Individual debug endpoints now sit behind requireAuth
+  // (default) + an owner guard added in r35.5 for the most sensitive ones.
 ];
 
 // Endpoints that require authentication AND check that the user's department matches.
@@ -2803,30 +2805,131 @@ async function ensureCriticalColumns() {
   } catch(e) { console.error('[r34] system_meta init: ' + e.message); }
 }
 
+// r35.5 — rewritten with strict consecutive-day rules and 7d ACOS sanity gate.
+// Previous version (pre-r35.5):
+//   - Fired no_revenue on ≥1 zero-sales day anywhere in the 3-day window
+//   - Fired high_acos on >35% 3-day-average (one bad day could pull avg up)
+//   - 16% breakeven check was on the SAME 3 days that triggered the alert,
+//     so one bad day pushing window-ACOS above 16% defeated the safety net
+//
+// New rules (agreed with Bobby 2026-05-20):
+//   1. no_revenue fires only on 3 CONSECUTIVE days at the end of the window
+//      with spend > 0 AND sales = 0
+//   2. no_activity fires only on 3 CONSECUTIVE days at the end of the window
+//      with zero impressions
+//   3. high_acos fires only on 3 CONSECUTIVE days at the end of the window
+//      with ACOS > 35%
+//   4. ALL three rules gated by 7-day ACOS check: if window ACOS < 16% breakeven,
+//      skip — campaign is profitable overall, agent doesn't need a task
+//   5. Window expanded from 3 days to 7 days so "consecutive" is meaningful
+//
+// "At the end of the window" means the most recent 3 days are bad — because
+// a streak that ended 2 days ago means the campaign already recovered.
+//
+// `days` arrives sorted oldest→newest. We look at the last 3 entries.
 function scoreCampaignDays(days) {
-  let baseScore = 0;
-  let consecutiveDays = days.length;
+  if (!days || days.length === 0) return { score: 0 };
+
+  // Window-wide totals (for the 7d ACOS gate and detail strings)
   const totalSpend = days.reduce(function(s,d){ return s+(d.spend||0); }, 0);
   const totalSales = days.reduce(function(s,d){ return s+(d.sales||0); }, 0);
-  const avgAcos = days.filter(function(d){ return d.spend>0; }).reduce(function(s,d,_,a){ return s+d.acos/a.length; }, 0);
+  // Window ACOS (the "healthy campaign" gate). Use total spend / total sales,
+  // not per-day average — averaging hides variance. £244 spend / £1946 sales
+  // = 12.5% ACOS is healthy regardless of any single bad day.
+  const windowAcos = totalSales > 0 ? (totalSpend / totalSales) : Infinity;
+
+  // The last 3 days — most recent first when reading right-to-left in array
+  const recentN = 3;
+  const tail = days.slice(-recentN);
+  const tailIsThree = tail.length === recentN;
+
+  // Check the three "3-consecutive-bad-days" patterns on the tail
+  // no_revenue: every tail day has spend > 0 AND sales = 0
+  const tailAllNoRev = tailIsThree && tail.every(function(d){
+    return (d.spend||0) > 0 && (d.sales||0) === 0;
+  });
+  // no_activity: every tail day has zero impressions
+  const tailAllNoActivity = tailIsThree && tail.every(function(d){
+    return (d.impressions||0) === 0;
+  });
+  // high_acos: every tail day has ACOS > 35%. acos field may be 0 if no sales
+  // (in which case it'd already be caught by no_revenue), so we treat 0-sales-with-spend
+  // as "infinitely high ACOS" for this rule too.
+  const tailAllHighAcos = tailIsThree && tail.every(function(d){
+    const spend = d.spend || 0;
+    const sales = d.sales || 0;
+    if (spend === 0) return false; // no spend, no problem
+    const dayAcos = sales > 0 ? (spend / sales) * 100 : Infinity;
+    return dayAcos > 35;
+  });
+
+  // Window-wide stats for problem detail messages
   const noActivityDays = days.filter(function(d){ return (d.impressions||0)===0; }).length;
   const spendDays = days.filter(function(d){ return (d.spend||0)>0; });
   const noRevDays = spendDays.filter(function(d){ return (d.sales||0)===0; }).length;
+  // avgAcos kept for backwards-compat detail output (some downstream code reads it)
+  const avgAcos = days.filter(function(d){ return d.spend>0; })
+    .reduce(function(s,d,_,a){ return s+(d.acos||0)/a.length; }, 0);
 
-  if (noRevDays >= 1) {
-    if (totalSpend > 15) baseScore += 10;
-    else if (totalSpend > 10) baseScore += 7;
-    else if (totalSpend > 5) baseScore += 5;
+  // Build problem type. Priority: no_activity > no_revenue > high_acos.
+  // If multiple apply, take the most severe.
+  let problemType = null;
+  let problemDetail = null;
+
+  // 7d ACOS gate — applies to ALL problem types. If campaign is profitable
+  // over the 7-day window, don't fire any task. Action Centre can still
+  // monitor it. This is the core fix for the "1 bad day on a healthy campaign"
+  // false positive (Aryan | Baby Swing | SP phrase case 2026-05-20).
+  const BREAKEVEN_ACOS = 0.16;
+  const healthyOverall = totalSales > 0 && windowAcos <= BREAKEVEN_ACOS;
+
+  if (tailAllNoActivity) {
+    problemType = 'no_activity';
+    problemDetail = '3 consecutive days with zero impressions (' + tail.map(function(d){ return d.date; }).join(', ') + ')';
+  } else if (tailAllNoRev) {
+    if (!healthyOverall) {
+      problemType = 'no_revenue';
+      const tailSpend = tail.reduce(function(s,d){return s+(d.spend||0);},0);
+      problemDetail = '3 consecutive days with spend but zero revenue (£' + tailSpend.toFixed(2) + ' wasted, 7d ACOS ' + (windowAcos === Infinity ? '∞' : (windowAcos*100).toFixed(1)+'%') + ')';
+    }
+  } else if (tailAllHighAcos) {
+    if (!healthyOverall) {
+      problemType = 'high_acos';
+      const tailAvgAcos = tail.reduce(function(s,d){
+        const sp = d.spend||0, sa = d.sales||0;
+        return s + (sa>0 ? (sp/sa)*100 : 0);
+      },0) / tail.length;
+      problemDetail = '3 consecutive days with ACOS > 35% (avg ' + tailAvgAcos.toFixed(1) + '%, 7d ACOS ' + (windowAcos*100).toFixed(1) + '%)';
+    }
   }
-  if (avgAcos > 50 && totalSpend > 10) baseScore += 8;
-  else if (avgAcos > 35 && totalSpend > 5) baseScore += 5;
-  if (noActivityDays >= 3) baseScore += 8;
-  else if (noActivityDays >= 2) baseScore += 5;
-  else if (noActivityDays >= 1) baseScore += 2;
 
-  const multiplier = Math.min(consecutiveDays, 3);
-  const finalScore = baseScore * multiplier;
-  return { score: finalScore, noActivityDays, noRevDays, totalSpend: totalSpend.toFixed(2), totalSales: totalSales.toFixed(2), avgAcos: avgAcos.toFixed(1) };
+  // Score: only generate a score if we have a problem. Score is total wasted
+  // spend on the bad tail (used for prioritisation when there are more
+  // candidates than slots).
+  let score = 0;
+  if (problemType) {
+    if (problemType === 'no_activity') score = 5; // no spend wasted, but campaign is dead
+    else {
+      // Tail spend = wasted spend for prioritisation
+      const tailSpend = tail.reduce(function(s,d){return s+(d.spend||0);},0);
+      score = Math.round(tailSpend);
+    }
+  }
+
+  return {
+    score: score,
+    problemType: problemType,
+    problemDetail: problemDetail,
+    // Returned for downstream compat + logging
+    noActivityDays: noActivityDays,
+    noRevDays: noRevDays,
+    totalSpend: totalSpend.toFixed(2),
+    totalSales: totalSales.toFixed(2),
+    windowAcos: windowAcos === Infinity ? null : +(windowAcos*100).toFixed(1),
+    healthyOverall: healthyOverall,
+    avgAcos: avgAcos.toFixed(1),
+    tailIsThree: tailIsThree
+  };
 }
 
 async function createAlertTask(campaignId, campaignName, agentName, portfolio, problemType, problemDetail) {
@@ -4023,7 +4126,11 @@ async function runDailyTaskScheduler() {
     const yesterdayStr = yesterday.toISOString().split('T')[0];
 
     const result = await db.query(
-      'SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date <= $1 ORDER BY snapshot_date DESC LIMIT 3',
+      // r35.5: was LIMIT 3 — now 7 to support consecutive-day rules properly.
+      // The new scoreCampaignDays needs at least 3 days in sequence to fire,
+      // and we want enough history that "the most recent 3 days" can be detected
+      // even when sync timing means yesterday's row hasn't landed yet.
+      'SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date <= $1 ORDER BY snapshot_date DESC LIMIT 7',
       [yesterdayStr]
     );
 
@@ -4100,6 +4207,15 @@ async function runDailyTaskScheduler() {
       console.log('[r33e] scheduler skipped ' + skippedPaused + ' historical snapshot rows for paused/disabled campaigns');
     }
 
+    // r35.5: snapshots arrive DESC (newest first), so each camp.days is newest-first
+    // after push(). The new scoreCampaignDays uses days.slice(-3) which assumes
+    // oldest→newest. Sort each campaign's days before scoring.
+    Object.keys(campHistory).forEach(function(cid){
+      campHistory[cid].days.sort(function(a, b){
+        return String(a.date) < String(b.date) ? -1 : 1;
+      });
+    });
+
     // r14 timezone fix: London date, not UTC.
     const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
 
@@ -4119,30 +4235,23 @@ async function runDailyTaskScheduler() {
       agentCamps.forEach(function(camp) {
         if (!camp.days.length) return;
         const scoring = scoreCampaignDays(camp.days);
-        if (scoring.score === 0) return;
-        let problemType = 'investigation';
-        let problemDetail = '';
-        if (scoring.noActivityDays >= 1) { problemType = 'no_activity'; problemDetail = scoring.noActivityDays + ' day(s) zero impressions'; }
-        else if (scoring.noRevDays >= 1) {
-          // r33e: only fire 'no_revenue' when overall ACOS is also bad (>16% breakeven).
-          // Aryan reported the scheduler flagging campaigns with ACOS under 20% just
-          // because one of the 3 days had zero sales. If the campaign is profitable
-          // overall (totalSpend / totalSales <= 16%), one quiet day isn't a problem.
-          // If sales are completely zero across the window, still fire.
-          const totalSales = parseFloat(scoring.totalSales) || 0;
-          const totalSpend = parseFloat(scoring.totalSpend) || 0;
-          const overallAcos = totalSales > 0 ? (totalSpend / totalSales) : Infinity;
-          if (totalSales === 0 || overallAcos > 0.16) {
-            problemType = 'no_revenue';
-            problemDetail = '£' + scoring.totalSpend + ' spent over ' + camp.days.length + ' day(s) with zero revenue';
-          } else {
-            // Skip — overall ACOS is healthy (≤16% breakeven), don't flag as problem
-            console.log('[r33e] ' + camp.name + ' — skipping no_revenue, overall ACOS ' + (overallAcos*100).toFixed(1) + '% under 16% breakeven');
-            return;
+        // r35.5: scoring returns problemType directly. No problemType = healthy
+        // (either no 3-consecutive-bad-days, or window ACOS < 16% breakeven).
+        if (!scoring.problemType || scoring.score === 0) {
+          // Log healthy skips for visibility — agents trust the system more if they can
+          // see in logs that the scheduler considered their campaigns and chose not to fire.
+          if (scoring.healthyOverall && camp.days.length >= 3) {
+            console.log('[r35.5] ' + camp.name + ' — skip, healthy overall (7d ACOS ' + scoring.windowAcos + '% ≤ 16% breakeven)');
           }
+          return;
         }
-        else if (parseFloat(scoring.avgAcos) > 35) { problemType = 'high_acos'; problemDetail = scoring.avgAcos + '% avg ACOS over ' + camp.days.length + ' day(s), spend £' + scoring.totalSpend; }
-        scored.push({ camp: camp, score: scoring.score, problemType: problemType, problemDetail: problemDetail, scoring: scoring });
+        scored.push({
+          camp: camp,
+          score: scoring.score,
+          problemType: scoring.problemType,
+          problemDetail: scoring.problemDetail,
+          scoring: scoring
+        });
       });
 
       scored.sort(function(a,b){ return b.score - a.score; });
@@ -9035,7 +9144,10 @@ app.post('/api/tasks/:id/sharpen-description', async function(req, res) {
       const cached = aiCacheGet(cacheKey);
       if (cached) {
         console.log('[r33d] sharpen-description served from cache');
-        return res.json({ analysis: cached.value, cached: true });
+        // r35.4: must return both keys here too — frontend reads `sharpened`.
+        // Was only returning `analysis`, so first cached click failed with
+        // "Error: No suggestion returned" even though AI text was available.
+        return res.json({ analysis: cached.value, sharpened: cached.value, cached: true });
       }
     }
     // Build prevContext shape that aiEnhanceRepeatTaskDescription expects
@@ -10259,6 +10371,48 @@ app.post('/api/google/tasks/:id/take', async function(req, res) {
         ['', '', me, actor, 'Took task', parseInt(req.params.id)]
       );
     } catch(e) { console.error('[GTASK] take log error: ' + e.message); }
+    res.json({ success: true, agent: me });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r35.5: Amazon "take task" — mirrors Google's take endpoint. An Amazon agent
+// can claim a task currently assigned to a different agent (e.g. when one
+// agent is off, another picks up the work). Manager/owner can also take.
+//
+// Active-agent check uses the users table (not a hardcoded list) so adding a
+// new Amazon agent in user management gives them claim ability automatically.
+app.post('/api/amazon/tasks/:id/take', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const u = req.user || {};
+    const me = req.body.agent || u.name || u.username || '';
+    const actor = u.name || u.username || me;
+    if (!me) return res.status(400).json({ error: 'Could not determine agent name' });
+    // Allow owner/manager + any active Amazon agent
+    const role = String(u.role || '').toLowerCase();
+    const isPrivileged = role === 'owner' || role === 'manager' || role === 'admin';
+    if (!isPrivileged) {
+      const active = await getActiveAmazonAgents();
+      if (!active.includes(me)) {
+        return res.status(403).json({ error: 'Only active Amazon agents (or owner/manager) can take tasks' });
+      }
+    }
+    // Only allow taking tasks that belong to the Amazon department (department
+    // column may be empty for older Amazon rows — exclude only explicit 'google').
+    const upd = await db.query(
+      "UPDATE campaign_tasks SET agent_name=$1, updated_at=NOW() " +
+      "WHERE id=$2 AND (department IS NULL OR department <> 'google') RETURNING id, campaign_name",
+      [me, req.params.id]
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'Task not found or is not an Amazon task' });
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id) VALUES ($1,$2,$3,$4,'take',$5,$6)",
+        ['', upd.rows[0].campaign_name || '', me, actor, 'Took task', parseInt(req.params.id)]
+      );
+    } catch(e) { console.error('[r35.5 AMZ take] log error: ' + e.message); }
     res.json({ success: true, agent: me });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -13886,6 +14040,9 @@ async function runCritiqueForProduct(shopifyProduct, score, options) {
 // Debug: probe the page-fetch in isolation. Helps diagnose DNS/firewall/Cloudflare issues
 // without burning AI tokens. Usage: POST /api/google/landing-page-critique-debug { productId } or { url }
 app.post('/api/google/landing-page-critique-debug', async function(req, res) {
+  // r35.5: owner-only — this burns AI tokens (fetches a page + runs critique).
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
   try {
     let url = req.body.url;
     let productInfo = null;
@@ -14114,6 +14271,11 @@ app.post('/api/google/init-tables', async function(req, res) {
 // DEBUG: lists every row in the critique table — used to verify saves actually happen.
 // Hit this in browser to see what's in the DB. Returns minimal info so it's safe to call.
 app.get('/api/google/landing-page-critique-debug-list', async function(req, res) {
+  // r35.5: owner/manager guard
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
   if (!db) return res.json({ rows: [], note: 'no db connection' });
   try {
     const r = await db.query(
@@ -15403,6 +15565,12 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
 // Sample one refunded order — return its full structure so we can see the actual
 // fields Shopify returns for refunds (we may be reading the wrong field).
 app.get('/api/google/debug/refund-sample', async function(req, res) {
+  // r35.5: owner/manager guard added. Was reachable without auth (PUBLIC_PATHS
+  // included /google/debug/ until r35.5). Now requires login + privileged role.
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
   const token = process.env.SHOPIFY_ACCESS_TOKEN;
   const store = process.env.SHOPIFY_STORE;
   if (!token || !store) return res.status(500).json({ error: 'No Shopify credentials' });
@@ -15471,6 +15639,11 @@ app.get('/api/google/debug/refund-sample', async function(req, res) {
 // view: if Shopify Analytics shows £6.46 in Returns for Sunday and we don't,
 // the answer is in here somewhere. Defaults to last 14 days.
 app.get('/api/google/debug/refund-audit', async function(req, res) {
+  // r35.5: owner/manager guard
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
   const token = process.env.SHOPIFY_ACCESS_TOKEN;
   const store = process.env.SHOPIFY_STORE;
   if (!token || !store) return res.status(500).json({ error: 'No Shopify credentials' });
@@ -15606,6 +15779,11 @@ app.get('/api/google/debug/refund-audit', async function(req, res) {
 
 // Sample of GA4 itemNames vs Shopify titles so we can see why matching fails
 app.get('/api/google/debug/ga4-sample', async function(req, res) {
+  // r35.5: owner/manager guard
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
   if (!ga4State.refreshToken) return res.status(500).json({ error: 'GA4 not connected' });
   if (!process.env.GA4_OAUTH_CLIENT_ID || !process.env.GA4_OAUTH_CLIENT_SECRET) return res.status(500).json({ error: 'No OAuth creds' });
   try {

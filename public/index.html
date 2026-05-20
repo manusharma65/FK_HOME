@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Amazon dashboard — deploy 2026-05-19 r35.4 (No frontend changes in this file beyond inheriting earlier ones. Inherits r35.3 Repeat Offenders tab fix (excludes archived/cancelled/dismissed). The big work is all server-side: paused-campaign root cause fix, alert state consistency fixes, AI Sharpen button fix, performance backend endpoints. See server.js marker for full detail.) -->
+<!-- CampaignPulse Amazon dashboard — deploy 2026-05-20 r35.5 (Adds "✋ Take it" button on task cards: visible to active Amazon agents when a task is assigned to someone other than themselves. Calls new /api/amazon/tasks/:id/take endpoint. Server enforces active-agent guard. All server-side changes (scoring recalibration, 7-day consecutive rules, security fixes) detailed in server.js marker.) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3452,6 +3452,16 @@ function renderTasks(tab) {
     if (_canReassign) {
       actionButtons += '<div style="margin-top:6px"><button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--text3)" onclick="event.stopPropagation();showReassignTaskModal(' + t.id + ',&quot;' + escHtml(t.agent_name||'').replace(/"/g, '&quot;') + '&quot;)">↪ Reassign</button></div>';
     }
+    // r35.5: Take button — Amazon agents can claim a task that's currently
+    // assigned to someone else (e.g. covering for a colleague who's off).
+    // Owner/manager already have Reassign; this is for agent-to-agent transfer.
+    // Visible only when the task is currently assigned to someone OTHER than me,
+    // and only to active Amazon agents (the server enforces the agent list).
+    const _myName = (_me.name || '').trim();
+    const _taskAgent = String(t.agent_name || '').trim();
+    if (_myName && _taskAgent && _taskAgent !== _myName && !_canReassign && _myDept === 'amazon') {
+      actionButtons += '<div style="margin-top:6px"><button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:var(--text3)" onclick="event.stopPropagation();takeAmazonTask(' + t.id + ')">✋ Take it</button></div>';
+    }
 
     // r29k/m: Cancel button — soft delete for mistakenly-created tasks. Manager always
     // sees it; agent only if task is theirs and <60 min old. Server enforces same rules.
@@ -6262,6 +6272,28 @@ async function reopenSubtask(taskId, subtaskId) {
     await loadTaskSubtasks(taskId);
     if (typeof loadTasks === 'function') loadTasks();
   } catch(e) { alert('Could not reopen: ' + e.message); }
+}
+
+// r35.5: claim an Amazon task that's currently assigned to someone else.
+// One-click, with confirmation to prevent accidental clicks. Server enforces
+// that only active Amazon agents (and owner/manager) can take.
+async function takeAmazonTask(taskId) {
+  const me = (window._meCache && window._meCache.name) || '';
+  if (!me) { alert('Could not detect your name. Please refresh and log in again.'); return; }
+  if (!confirm('Take this task and assign it to yourself (' + me + ')?')) return;
+  try {
+    const headers = Object.assign({}, getAuthHeaders(), { 'Content-Type': 'application/json' });
+    const r = await fetch('/api/amazon/tasks/' + taskId + '/take', {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify({ agent: me })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    if (typeof loadTasks === 'function') loadTasks();
+  } catch (e) {
+    alert('Could not take task: ' + e.message);
+  }
 }
 
 // r18: Reassign existing task — opens modal with agent dropdown.
