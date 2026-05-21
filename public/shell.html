@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Shell — deploy 2026-05-04 r6 (manager/owner launcher with live alerts) -->
+<!-- CampaignPulse Shell — deploy 2026-05-19 r31l (Amazon + Google + Logistics launcher with live alerts) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -24,6 +24,10 @@
     --google: #4285F4;
     --google-bg: #ebf2fc;
     --google-text: #0C447C;
+    /* r31f — Logistics palette (FK red on light cream) */
+    --logistics: #E63946;
+    --logistics-bg: #fff5f5;
+    --logistics-text: #9b1b27;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -106,10 +110,11 @@
   /* ── Department cards ──────────────────────────────────────────── */
   .dept-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: 20px;
   }
-  @media (max-width: 800px) { .dept-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 1100px) { .dept-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 700px)  { .dept-grid { grid-template-columns: 1fr; } }
 
   .dept-card {
     background: var(--surface);
@@ -130,6 +135,9 @@
   .dept-card.amazon:hover { border-color: var(--amazon); }
   .dept-card.google { border-color: rgba(66,133,244,0.35); }
   .dept-card.google:hover { border-color: var(--google); }
+  /* r31f — Logistics card */
+  .dept-card.logistics { border-color: rgba(230,57,70,0.35); }
+  .dept-card.logistics:hover { border-color: var(--logistics); }
 
   .dept-header {
     padding: 16px 22px;
@@ -139,6 +147,7 @@
   }
   .dept-header.amazon { background: var(--amazon-bg); color: var(--amazon-text); }
   .dept-header.google { background: var(--google-bg); color: var(--google-text); }
+  .dept-header.logistics { background: var(--logistics-bg); color: var(--logistics-text); }
   .dept-header .arrow { font-size: 18px; opacity: 0.55; }
 
   .dept-body { padding: 20px 22px; }
@@ -209,6 +218,7 @@
   }
   .dept-card.amazon .open-btn { background: var(--amazon); color: white; }
   .dept-card.google .open-btn { background: var(--google); color: white; }
+  .dept-card.logistics .open-btn { background: var(--logistics); color: white; }
   .open-btn:active { transform: scale(0.98); }
 
   .loading-row {
@@ -355,6 +365,35 @@
         </div>
       </a>
 
+      <!-- ── Logistics card (r31f) ── -->
+      <a class="dept-card logistics" href="/logistics.html">
+        <div class="dept-header logistics">
+          <span>▣ Logistics</span>
+          <span class="arrow">→</span>
+        </div>
+        <div class="dept-body">
+          <div class="dept-stats">
+            <div class="stat-block">
+              <div class="stat-label">In flight</div>
+              <div class="stat-value" id="log-inflight">—</div>
+              <div class="stat-sub" id="log-inflight-sub">&nbsp;</div>
+            </div>
+            <div class="stat-block alert">
+              <div class="stat-label">Fires</div>
+              <div class="stat-value" id="log-fires">—</div>
+              <div class="stat-sub" id="log-fires-sub">&nbsp;</div>
+            </div>
+          </div>
+          <div class="alerts-list">
+            <div class="alerts-list-title">Top issues</div>
+            <div id="log-alert-rows">
+              <div class="loading-row">Loading...</div>
+            </div>
+          </div>
+          <button class="open-btn" onclick="event.preventDefault();window.location.href='/logistics.html';">Open Logistics dashboard →</button>
+        </div>
+      </a>
+
     </div>
 
     <div class="footer-note">
@@ -458,8 +497,8 @@
   async function loadOverview() {
     document.getElementById('last-refresh').textContent = 'Loading live data...';
 
-    // Pull both dashboards in parallel
-    await Promise.all([loadAmazonSummary(), loadGoogleSummary()]);
+    // Pull all three dashboards in parallel
+    await Promise.all([loadAmazonSummary(), loadGoogleSummary(), loadLogisticsSummary()]);
 
     const now = new Date();
     document.getElementById('last-refresh').textContent = 'Last updated: ' + now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
@@ -532,6 +571,40 @@
       document.getElementById('goog-spend').textContent = '—';
       document.getElementById('goog-alerts').textContent = '—';
       document.getElementById('goog-alert-rows').innerHTML =
+        '<div class="alert-row muted"><span class="alert-dot"></span><span class="alert-text">Could not load — open dashboard to view</span></div>';
+    }
+  }
+
+  // r31f — Logistics summary card
+  function fmtUSD(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    if (n >= 1000) return '$' + (Math.round(n/100)/10) + 'k';
+    return '$' + Math.round(n);
+  }
+  async function loadLogisticsSummary() {
+    try {
+      const res = await fetch('/api/logistics/summary', { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+
+      document.getElementById('log-inflight').textContent = String(data.in_flight || 0);
+      document.getElementById('log-inflight-sub').textContent =
+        fmtUSD(data.value_in_transit_usd) + ' in transit · ' + (data.at_kemballs || 0) + ' at Kemballs';
+
+      document.getElementById('log-fires').textContent = String(data.fires || 0);
+      document.getElementById('log-fires-sub').textContent =
+        (data.fires || 0) === 0 ? 'All on track' : 'plans stuck or overdue';
+
+      const rowsEl = document.getElementById('log-alert-rows');
+      if (!data.attention_message) {
+        rowsEl.innerHTML = '<div class="alert-row muted"><span class="alert-dot"></span><span class="alert-text">No active fires — all plans tracking</span></div>';
+      } else {
+        rowsEl.innerHTML = '<div class="alert-row"><span class="alert-dot"></span><span class="alert-text">' + escHtml(data.attention_message) + '</span></div>';
+      }
+    } catch(e) {
+      document.getElementById('log-inflight').textContent = '—';
+      document.getElementById('log-fires').textContent = '—';
+      document.getElementById('log-alert-rows').innerHTML =
         '<div class="alert-row muted"><span class="alert-dot"></span><span class="alert-text">Could not load — open dashboard to view</span></div>';
     }
   }

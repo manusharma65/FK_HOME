@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse login — deploy 2026-05-04 r6 (eye toggle + role-based routing) -->
+<!-- CampaignPulse login — deploy 2026-05-19 r31l (supplier thanks page, ETA inline update, kemballs simplified, button stage-gating, WhatsApp dropped) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -150,6 +150,9 @@
     if (!user) return '/index.html';
     var role = (user.role || '').toLowerCase();
     var dept = (user.department || '').toLowerCase();
+    // r31f — new logistics/accounts/warehouse roles go to the logistics module.
+    // The logistics page itself applies sidebar gating per role + auto-routes warehouse_agent to warehouse page.
+    if (role === 'logistics_agent' || role === 'accounts_agent' || role === 'warehouse_agent') return '/logistics.html';
     if (role === 'owner' || role === 'manager' || dept === 'manager') return '/shell.html';
     if (dept === 'google') return '/google.html';
     return '/index.html';

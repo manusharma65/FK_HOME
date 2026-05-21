@@ -209,6 +209,7 @@ app.use('/api', requireAuth);
 // r30a — Logistics module (self-contained router; lazy-binds db at request time)
 const logisticsRouter = require('./server/logistics')(function() { return db; });
 app.use('/api/logistics', logisticsRouter);
+app.use('/s', logisticsRouter._supplierShare);
 
 let state = {
   accessToken: null,

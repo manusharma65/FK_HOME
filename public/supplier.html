@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<!-- CampaignPulse Logistics — public supplier form (r31l) — task-scoped, claim-aware read-only, thanks-page on submit -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FK Sports — Order Update / 订单更新</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif; background: #f7f7f8; color: #111; min-height: 100vh; font-size: 14px; }
+.topbar { background: #000; color: white; padding: 8px 24px; font-size: 11px; display: flex; justify-content: space-between; align-items: center; letter-spacing: 0.02em; }
+.topbar .left { font-weight: 500; }
+.topbar .right { opacity: 0.65; }
+.logobar { background: white; padding: 14px 24px; display: flex; align-items: center; gap: 14px; border-bottom: 1px solid #ececec; }
+.logobar img { height: 52px; width: auto; }
+.logobar .tag { font-size: 11px; color: #6b7280; font-weight: 500; letter-spacing: 0.02em; padding-left: 14px; border-left: 1px solid #ececec; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 32px; }
+.plan-card { background: white; border-radius: 10px; padding: 20px 22px; margin-bottom: 16px; border: 1px solid #ececec; border-left: 4px solid #E63946; }
+.plan-card .pn { font-family: ui-monospace, "SF Mono", Monaco, monospace; font-size: 21px; font-weight: 600; letter-spacing: -0.3px; color: #111; }
+.plan-card .sn { font-size: 13px; color: #6b7280; margin-top: 4px; }
+.task-badge { background: #fff8f0; border: 1px solid #f5c8a8; border-radius: 8px; padding: 11px 14px; margin-bottom: 16px; }
+.task-badge .head { font-size: 12px; font-weight: 600; color: #9a5a1d; }
+.task-badge .sub { font-size: 11px; color: #6b7280; margin-top: 2px; }
+.card { background: white; border-radius: 10px; padding: 22px 24px; border: 1px solid #ececec; margin-bottom: 16px; }
+h1 { font-size: 19px; font-weight: 700; margin-bottom: 5px; letter-spacing: -0.2px; }
+h1 .cn { font-size: 15px; font-weight: 400; color: #6b7280; margin-left: 8px; }
+h2 { font-size: 13px; font-weight: 700; margin: 22px 0 14px; padding-top: 18px; border-top: 1px solid #ececec; text-transform: uppercase; letter-spacing: 0.04em; color: #111; }
+h2:first-of-type { padding-top: 0; border-top: 0; margin-top: 8px; }
+h2 .cn { font-size: 11px; font-weight: 400; color: #6b7280; margin-left: 8px; text-transform: none; letter-spacing: 0; }
+.intro { font-size: 13px; color: #6b7280; margin-bottom: 18px; line-height: 1.5; }
+.intro .cn { display: block; margin-top: 4px; color: #6b7280; }
+.locked-banner { background: #fef3e2; border: 1px solid #b45309; color: #92400e; padding: 13px 16px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; }
+.locked-banner strong { display: block; font-size: 14px; margin-bottom: 4px; }
+.field { margin-bottom: 14px; }
+.field label { font-size: 12px; font-weight: 600; display: block; margin-bottom: 6px; color: #111; }
+.field label .cn { font-weight: 400; color: #9ca3af; margin-left: 6px; font-size: 11px; }
+.field input, .field select, .field textarea { width: 100%; padding: 11px 14px; border: 1px solid #d6d9de; border-radius: 6px; font-size: 14px; font-family: inherit; background: white; -webkit-appearance: none; }
+.field input:focus, .field select:focus, .field textarea:focus { outline: 2px solid #E63946; outline-offset: -1px; border-color: transparent; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-help { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+.field-help .cn { color: #9ca3af; margin-left: 4px; }
+.check-field { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: #f7f7f8; border-radius: 6px; border: 1px solid #ececec; }
+.check-field input { width: 20px; height: 20px; flex-shrink: 0; }
+.check-field label { font-size: 13px; margin: 0; cursor: pointer; }
+.btn { padding: 12px 18px; border-radius: 6px; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.15s; border: 1px solid #d6d9de; font-family: inherit; background: white; color: #111; width: 100%; letter-spacing: 0.02em; }
+.btn-primary { background: #E63946; color: white; border-color: #E63946; }
+.btn-primary:hover { background: #c92e3a; border-color: #c92e3a; }
+.btn-primary:disabled { background: #d6d9de; border-color: #d6d9de; cursor: not-allowed; }
+.btn-secondary { background: #f7f7f8; }
+.btn-sm { padding: 7px 12px; font-size: 12px; width: auto; }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111; color: white; padding: 11px 22px; border-radius: 8px; font-size: 14px; z-index: 200; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
+.toast.error { background: #c0392b; }
+.toast.success { background: #117a3a; }
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(0,0,0,0.12); border-top-color: #E63946; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 8px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading { padding: 40px; text-align: center; color: #6b7280; }
+.error-box { background: #fdecea; color: #c0392b; padding: 18px; border-radius: 8px; font-size: 14px; text-align: center; }
+.upload-block { background: #f7f7f8; border: 1px dashed #d6d9de; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+.upload-block h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.upload-block h3 .cn { font-weight: 400; color: #6b7280; font-size: 11px; margin-left: 6px; }
+.file-list { font-size: 12px; color: #4a5568; margin-top: 10px; }
+.file-list .file { padding: 5px 0; border-bottom: 1px dashed rgba(0,0,0,0.06); display: flex; gap: 8px; align-items: center; }
+.file-list .file:last-child { border: none; }
+.file-tag { background: #111; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 700; text-transform: uppercase; }
+.footer { background: #000; color: rgba(255,255,255,0.7); padding: 16px 24px; font-size: 11px; display: flex; justify-content: space-between; align-items: center; }
+.footer .left .name { color: white; font-weight: 600; }
+.footer .left .contact { opacity: 0.5; margin-top: 2px; }
+.footer .ver { opacity: 0.4; }
+@media (max-width: 600px) {
+  .field-row { grid-template-columns: 1fr; }
+  .topbar, .logobar, .footer { padding-left: 16px; padding-right: 16px; }
+  .logobar img { height: 42px; }
+}
+
+/* r31j — Supplier portal thanks page (full replacement of form on submit). */
+.thanks-card { background: white; border-radius: 14px; padding: 36px 28px; margin: 16px 0; border: 1px solid #ececec; border-top: 4px solid #117a3a; text-align: center; box-shadow: 0 4px 16px rgba(0,0,0,0.04); }
+.thanks-card .thanks-tick { display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; border-radius: 50%; background: #e6f4ef; color: #117a3a; font-size: 36px; font-weight: 700; margin-bottom: 18px; }
+.thanks-card h2 { font-size: 22px; font-weight: 700; margin-bottom: 14px; color: #111; }
+.thanks-card h2 .cn { display: block; font-size: 16px; font-weight: 400; color: #6b7280; margin-top: 4px; }
+.thanks-card .thanks-body { font-size: 15px; color: #4a5568; line-height: 1.6; margin: 14px 0 18px; }
+.thanks-card .thanks-body p { margin: 6px 0; }
+.thanks-card .thanks-extra { font-size: 13px; color: #6b7280; padding-top: 8px; }
+.thanks-card .thanks-foot { font-size: 12px; color: #9ca3af; padding-top: 14px; border-top: 1px solid #f0f0f0; margin-top: 14px; line-height: 1.5; }
+
+/* r30d — claims */
+.claims-banner { background: #fdecea; border: 2px solid #E63946; border-radius: 10px; padding: 13px 16px; margin-bottom: 14px; }
+.claims-banner-head { font-size: 14px; font-weight: 700; color: #E63946; margin-bottom: 4px; }
+.claims-banner-sub { font-size: 12px; color: #4a5568; }
+.claims-section { background: #fff; border-radius: 14px; padding: 20px 22px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+.claim-card { background: #f7f8fa; border: 1px solid rgba(0,0,0,0.08); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+.claim-card-head { font-size: 14px; color: #0f1923; margin-bottom: 6px; }
+.claim-value { background: #fef3e2; color: #b45309; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; margin-left: 6px; }
+.claim-meta { font-size: 11px; color: #8a97a8; margin-bottom: 8px; }
+.claim-files-block { margin: 8px 0; }
+.claim-files-label { font-size: 11px; font-weight: 600; color: #4a5568; margin-bottom: 4px; }
+.claim-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.claim-file { background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+.claim-file:hover { background: #e8f2fb; border-color: #1a6fbd; }
+.supplier-response-form { background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.supplier-response-shown { background: #e6f4ef; border: 1px solid rgba(0,135,90,0.25); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.supplier-response-label { font-size: 11px; font-weight: 700; color: #00875a; text-transform: uppercase; margin-bottom: 4px; }
+.supplier-response-pick { font-size: 14px; color: #0f1923; margin-bottom: 4px; }
+.supplier-response-note { font-size: 12px; color: #4a5568; margin-top: 4px; }
+.claim-status-agreed { color: #00875a; font-size: 12px; font-weight: 600; margin-top: 6px; }
+.claim-status-pending { color: #b45309; font-size: 12px; margin-top: 6px; font-style: italic; }
+.response-form-inner > .field:last-of-type { margin-bottom: 8px; }
+.claim-upload-row { padding-top: 8px; border-top: 1px dashed rgba(0,0,0,0.08); }
+
+/* r30d — file viewer */
+.viewer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: none; align-items: center; justify-content: center; z-index: 200; padding: 0; }
+.viewer-overlay.active { display: flex; }
+.viewer-modal { background: #0f1923; color: white; width: 100%; height: 100%; display: flex; flex-direction: column; }
+.viewer-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 18px; background: rgba(0,0,0,0.4); border-bottom: 1px solid rgba(255,255,255,0.1); }
+.viewer-name { font-size: 14px; font-weight: 600; }
+.viewer-meta { font-size: 11px; color: rgba(255,255,255,0.6); margin-top: 2px; }
+.viewer-nav { display: flex; gap: 8px; }
+.viewer-navbtn, .viewer-close { background: rgba(255,255,255,0.1); border: none; color: white; font-size: 22px; width: 38px; height: 38px; border-radius: 50%; cursor: pointer; padding: 0; line-height: 1; }
+.viewer-navbtn:hover { background: rgba(255,255,255,0.2); }
+.viewer-close:hover { background: #c0392b; }
+.viewer-body { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.viewer-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.viewer-iframe { width: 100%; height: 100%; min-height: 70vh; border: none; background: white; }
+.viewer-fallback { background: #fff; color: #0f1923; padding: 30px; border-radius: 10px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="left">FK Sports — Logistics Partner Portal</span>
+  <span class="right">EN / 中文</span>
+</div>
+<div class="logobar">
+  <img src="/static/fk-logo.png" alt="FK Sports">
+  <span class="tag">Feel the difference</span>
+</div>
+<div class="wrap">
+  <div id="root"><div class="loading"><span class="spinner"></span>Loading… / 加载中</div></div>
+</div>
+<div class="footer">
+  <div class="left">
+    <div class="name">FK Sports</div>
+    <div class="contact">fksports.co.uk · info@fksports.co.uk</div>
+  </div>
+  <span class="ver">v31e</span>
+</div>
+
+<!-- r30d: File viewer (lightbox) -->
+<div class="viewer-overlay" id="fileViewerModal">
+  <div class="viewer-modal">
+    <div class="viewer-head">
+      <div>
+        <div class="viewer-name" id="viewerName"></div>
+        <div class="viewer-meta" id="viewerMeta"></div>
+      </div>
+      <div class="viewer-nav">
+        <button class="viewer-navbtn" id="viewerPrev" onclick="viewerPrev()">‹</button>
+        <button class="viewer-navbtn" id="viewerNext" onclick="viewerNext()">›</button>
+        <button class="viewer-close" onclick="closeSupplierFileViewer()">×</button>
+      </div>
+    </div>
+    <div class="viewer-body" id="viewerBody"></div>
+  </div>
+</div>
+
+<script>
+const token = window.location.pathname.split('/').filter(Boolean).pop();
+// r31c — task-scoped link: /s/<token>?task=loading_date|bl_docs|telex|issue_response
+// Empty (no ?task) → show everything (legacy / chooser fallback).
+const currentTask = (function(){
+  const params = new URLSearchParams(window.location.search);
+  const t = params.get('task');
+  return (t === 'loading_date' || t === 'bl_docs' || t === 'telex' || t === 'issue_response') ? t : null;
+})();
+const showTask = function(name) { return currentTask === null || currentTask === name; };
+
+let plan = null;
+let files = [];
+let claims = [];
+let pendingSlipReason = null;
+let _viewerFiles = []; let _viewerIndex = -1;
+
+function toast(msg, kind) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
+function fmtDate(iso) { if (!iso) return '—'; return String(iso).slice(0,10); }
+function todayIso() { const d = new Date(); return new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit'}).format(d); }
+
+async function load() {
+  try {
+    const r = await fetch('/s/api/' + token);
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      document.getElementById('root').innerHTML = '<div class="error-box">' + escapeHtml(j.error || 'Invalid link') + ' / 链接无效</div>';
+      return;
+    }
+    plan = await r.json();
+    const fr = await fetch('/s/api/' + token + '/files');
+    if (fr.ok) { const fj = await fr.json(); files = fj.files || []; }
+    const cr = await fetch('/s/api/' + token + '/claims');
+    if (cr.ok) { const cj = await cr.json(); claims = cj.claims || []; }
+    render();
+  } catch(e) {
+    document.getElementById('root').innerHTML = '<div class="error-box">Could not load. / 无法加载</div>';
+  }
+}
+
+function render() {
+  const r = document.getElementById('root');
+  let html = '<div class="plan-card"><div class="pn">' + escapeHtml(plan.plan_number) + '</div><div class="sn">' + escapeHtml(plan.supplier_name || '—') + '</div></div>';
+
+  // r31i — Bobby's option B: when an open claim exists, the order-update form goes READ-ONLY
+  //   while the discrepancy response form stays editable. This preserves audit integrity
+  //   (supplier can't "fix" data to suit their dispute narrative) and keeps them focused on responding.
+  //   We piggyback on the existing `plan.locked` mechanism + show a different banner.
+  if (plan.has_open_claim && !plan.locked) {
+    plan.locked = true;
+    plan._locked_by_claim = true;
+  }
+
+  if (plan.locked) {
+    if (plan._locked_by_claim) {
+      html += '<div class="locked-banner" style="background:#fff8f0;border-color:#f5c8a8;color:#9a5a1d"><strong>Order form is read-only while a discrepancy is open / 存在差异时，订单表格为只读模式</strong>You can review your previously submitted data below, but cannot edit it. Please respond to the discrepancy above first. / 您可以在下方查看之前提交的数据，但无法编辑。请先回复上方的差异。</div>';
+    } else {
+      html += '<div class="locked-banner"><strong>This form is locked / 此表单已锁定</strong>You can no longer edit this form. Please contact FK Sports if changes are needed. / 您无法再编辑此表单。如需更改，请联系 FK Sports。</div>';
+    }
+  }
+
+  // r30d: Claims banner — supplier must see and respond
+  if (claims && claims.length) {
+    const needsResponse = claims.filter(c => c.status === 'open' || c.status === 'awaiting_supplier');
+    if (needsResponse.length) {
+      html += '<div class="claims-banner"><div class="claims-banner-head">⚠ FK Sports has reported ' + needsResponse.length + ' discrepancy / FK Sports 报告了' + needsResponse.length + '项差异</div><div class="claims-banner-sub">Please review and respond below. / 请审阅并在下方回复。</div></div>';
+    }
+    html += '<div class="claims-section">';
+    html += '<h2 style="border-top:0;margin-top:0">Discrepancies & claims <span class="cn">差异与索赔</span></h2>';
+    claims.forEach(c => { html += renderSupplierClaim(c); });
+    html += '</div>';
+  }
+
+  if (currentTask) {
+    const taskLabels = {
+      loading_date: { en: 'Loading date update', cn: '装柜日期更新', icon: '📅' },
+      bl_docs:      { en: 'Bill of Lading & documents', cn: '提单与单据', icon: '📦' },
+      telex:        { en: 'Telex release declaration', cn: '电放确认', icon: '📨' },
+      issue_response: { en: 'Response to issue', cn: '问题回复', icon: '⚠️' }
+    };
+    const lbl = taskLabels[currentTask];
+    html += '<div class="task-badge"><div class="head">' + lbl.icon + ' ' + lbl.en + ' / ' + lbl.cn + '</div><div class="sub">Only the fields relevant to this task are shown. / 仅显示与此任务相关的字段。</div></div>';
+  }
+
+  html += '<div class="card">';
+  html += '<h1>Order update <span class="cn">订单更新</span></h1>';
+  html += '<div class="intro">Please fill in what you can. You can save partial information and come back later. <span class="cn">请填写您能确认的信息。您可以保存部分信息，稍后再回来。</span></div>';
+
+  // Submitter name + Your order reference (r31c)
+  html += '<div class="field-row">';
+  html += '<div class="field"><label>Your name <span class="cn">您的姓名</span></label><input type="text" id="submitted_by" value="' + escapeHtml(plan.submitted_by || '') + '"' + (plan.locked ? ' disabled' : '') + ' placeholder="For our records / 用于我们的记录"></div>';
+  html += '<div class="field"><label>Your order number <span class="cn">您的订单号</span></label><input type="text" id="supplier_order_ref" value="' + escapeHtml(plan.supplier_order_ref || '') + '"' + (plan.locked ? ' disabled' : '') + ' placeholder="Your reference / 您的参考号"></div>';
+  html += '</div>';
+
+  // ── Production / loading section ─────────────────────────────────────
+  if (showTask('loading_date')) {
+    html += '<h2>Production & loading <span class="cn">生产与装柜</span></h2>';
+    html += '<div class="field"><label>Approx loading date <span class="cn">大致装柜日期</span></label>';
+    html += '<input type="date" id="approx_loading_date" value="' + fmtDate(plan.approx_loading_date) + '"' + (plan.locked ? ' disabled' : '') + '>';
+    html += '<div class="field-help">When do you estimate goods will be loaded? <span class="cn">您估计货物大约何时装柜？</span></div></div>';
+    // r31j — actual_loading_date REMOVED from gate 2 task. Supplier only knows approx at this
+    //   stage (we ask 2 weeks after deposit, before container is even booked). Moved to gate 4
+    //   where it's confirmed alongside BL.
+    html += renderFieldHistory(['approx_loading_date']);
+  }
+
+  // ── Container & docs section ─────────────────────────────────────────
+  if (showTask('bl_docs')) {
+    html += '<h2>Container & documents <span class="cn">集装箱与单据</span></h2>';
+
+    // r31j — actual_loading_date moved here from gate 2 (correct moment: container has loaded,
+    //   supplier knows the exact date alongside BL).
+    html += '<div class="field"><label>Actual loading date <span class="cn">实际装柜日期</span></label>';
+    html += '<input type="date" id="actual_loading_date" value="' + fmtDate(plan.actual_loading_date) + '"' + (plan.locked ? ' disabled' : '') + '>';
+    html += '<div class="field-help">When was the container actually loaded? <span class="cn">货物实际何时装柜？</span></div></div>';
+
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Container number <span class="cn">集装箱编号</span></label><input type="text" id="container_number" value="' + escapeHtml(plan.container_number || '') + '"' + (plan.locked ? ' disabled' : '') + '></div>';
+    html += '<div class="field"><label>Tracking number <span class="cn">追踪号</span></label><input type="text" id="tracking_number" value="' + escapeHtml(plan.tracking_number || '') + '"' + (plan.locked ? ' disabled' : '') + '></div>';
+    html += '</div>';
+
+    // r31j — Tracking link: full URL the supplier got from the shipping line. Distinct from
+    //   tracking_number (an ID). Soft-validated (we auto-prefix https:// on submit if missing).
+    html += '<div class="field"><label>Tracking link <span class="cn">追踪链接</span></label>';
+    html += '<input type="url" id="tracking_link" value="' + escapeHtml(plan.tracking_link || '') + '" placeholder="https://www.msc.com/track/…"' + (plan.locked ? ' disabled' : '') + '>';
+    html += '<div class="field-help">URL from the shipping line (MSC, COSCO, etc.) so we can check ETA ourselves. <span class="cn">船公司的追踪链接，方便我们自行查询到港时间。</span></div></div>';
+
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>BL number <span class="cn">提单号</span></label><input type="text" id="bl_number" value="' + escapeHtml(plan.bl_number || '') + '"' + (plan.locked ? ' disabled' : '') + '></div>';
+    html += '<div class="field"><label>BL date <span class="cn">提单日期</span></label><input type="date" id="bl_date" value="' + fmtDate(plan.bl_date) + '"' + (plan.locked ? ' disabled' : '') + '></div>';
+    html += '</div>';
+
+    html += '<div class="field"><label>Final amount (USD) <span class="cn">最终金额（美元）</span></label><input type="number" step="0.01" id="final_amount_usd" value="' + (plan.final_amount_usd || '') + '"' + (plan.locked ? ' disabled' : '') + '>';
+    html += '<div class="field-help">Confirm the final invoice amount once known. <span class="cn">确认最终发票金额（如已知）。</span></div></div>';
+
+    // Upload zones
+    html += renderUploadZone('bl', 'Upload BL', '上传提单');
+    html += renderUploadZone('final_pi', 'Upload Final PI', '上传最终发票（PI）');
+    html += renderUploadZone('packing_list', 'Upload Packing List', '上传装箱单');
+    html += renderUploadZone('loading_photo', 'Upload Loading Photos', '上传装柜照片');
+    html += renderFieldHistory(['actual_loading_date','container_number','tracking_number','tracking_link','bl_number','bl_date','final_amount_usd']);
+  }
+
+  // r31k — Final payment ack moved to gate 5 (telex task). Supplier can't confirm payment
+  //   they haven't received yet. At gate 4 they're just declaring BL + loading docs.
+
+  // ── Telex declaration + final payment confirmation (both on gate 5) ──
+  if (showTask('telex')) {
+    html += '<h2>Final payment & telex release <span class="cn">尾款与电放</span></h2>';
+    // r31k — payment ack now lives here, where it actually makes sense
+    html += '<div class="check-field"><input type="checkbox" id="supplier_final_payment_acknowledged"' + (plan.supplier_final_payment_acknowledged ? ' checked' : '') + (plan.locked ? ' disabled' : '') + '>';
+    html += '<label for="supplier_final_payment_acknowledged">I confirm final payment has been received from FK Sports <span class="cn">我确认已收到 FK Sports 支付的尾款</span></label></div>';
+
+    html += '<div class="check-field" style="margin-top:10px"><input type="checkbox" id="telex_supplier_declared"' + (plan.telex_supplier_declared ? ' checked' : '') + (plan.locked ? ' disabled' : '') + ' onchange="onTelexToggle()">';
+    html += '<label for="telex_supplier_declared">I confirm telex release has been arranged with shipping line <span class="cn">我确认已与船公司办理电放</span></label></div>';
+    html += '<div class="field" style="margin-top:12px"><label>Telex release date <span class="cn">电放日期</span></label><input type="date" id="telex_supplier_declared_date" value="' + fmtDate(plan.telex_supplier_declared_date) + '"' + (plan.locked ? ' disabled' : '') + '></div>';
+    html += renderUploadZone('telex', 'Upload Telex confirmation', '上传电放确认');
+    html += renderFieldHistory(['supplier_final_payment_acknowledged','telex_supplier_declared','telex_supplier_declared_date']);
+  }
+
+  // r31c — change note: shown when any field has prior history (i.e. supplier is editing rather than first-setting)
+  const hasAnyHistory = plan.field_history && Object.keys(plan.field_history).length > 0;
+  if (!plan.locked && hasAnyHistory) {
+    html += '<div class="field" style="margin-top:14px;background:#fef3e2;border:1px solid #b45309;border-radius:8px;padding:12px 14px"><label style="color:#92400e">Reason for change <span class="cn">变更原因</span></label><input type="text" id="change_note" placeholder="Why are you changing this? / 您为什么要更改？" style="background:white"><div class="field-help" style="color:#92400e">If you\'re updating something you previously submitted, please give a short reason. / 如果您正在更新之前提交的信息，请简要说明原因。</div></div>';
+  }
+
+  // ── Save button ──────────────────────────────────────────────────────
+  if (!plan.locked) {
+    html += '<button class="btn btn-primary" onclick="submit()" style="margin-top:14px">Save / 保存</button>';
+    html += '<div class="field-help" style="text-align:center;margin-top:8px">You can save and come back later. <span class="cn">您可以保存并稍后回来继续。</span></div>';
+  }
+
+  if (plan.last_submitted_at) html += '<div class="field-help" style="margin-top:14px">Last updated: ' + escapeHtml(plan.last_submitted_at) + ' by ' + escapeHtml(plan.submitted_by || '') + '</div>';
+
+  html += '</div>';  // close .card
+
+  r.innerHTML = html;
+}
+
+// r31c — render prior values for fields the supplier has edited before (strike-through history)
+function renderFieldHistory(fieldNames) {
+  if (!plan.field_history) return '';
+  const labels = {
+    approx_loading_date: 'Approx loading date',
+    actual_loading_date: 'Actual loading date',
+    container_number: 'Container number',
+    tracking_number: 'Tracking number',
+    bl_number: 'BL number',
+    bl_date: 'BL date',
+    final_amount_usd: 'Final amount (USD)',
+    telex_supplier_declared: 'Telex declared',
+    telex_supplier_declared_date: 'Telex date',
+    supplier_order_ref: 'Your order number'
+  };
+  const blocks = [];
+  fieldNames.forEach(function(fn){
+    const hist = plan.field_history[fn];
+    if (!hist || hist.length === 0) return;
+    // Show prior entries (everything except the latest, which is the current value)
+    const priors = hist.slice(0, -1);
+    if (!priors.length) return;
+    let block = '<div style="font-size:12px;color:#4a5568;padding:6px 10px;background:#fafbfc;border-left:3px solid #b45309;margin-top:6px">';
+    block += '<div style="font-weight:600;color:#8a97a8;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:3px">' + escapeHtml(labels[fn] || fn) + ' · prior submissions</div>';
+    priors.forEach(function(p){
+      block += '<div style="text-decoration:line-through;color:#8a97a8">' + escapeHtml(p.new_value || '—') + ' <span style="text-decoration:none;font-style:italic">(' + escapeHtml(fmtDate(p.at)) + (p.change_note ? ' · ' + escapeHtml(p.change_note) : '') + ')</span></div>';
+    });
+    block += '</div>';
+    blocks.push(block);
+  });
+  return blocks.join('');
+}
+
+function renderUploadZone(slot, labelEn, labelCn) {
+  const slotFiles = files.filter(f => f.slot === slot);
+  let html = '<div class="upload-block"><h3>' + escapeHtml(labelEn) + ' <span class="cn">' + escapeHtml(labelCn) + '</span></h3>';
+  if (!plan.locked) {
+    html += '<input type="file" id="file_' + slot + '" style="font-size:13px;width:100%"><button class="btn btn-sm btn-secondary" style="margin-top:8px" onclick="uploadFile(\'' + slot + '\')">Upload / 上传</button>';
+  }
+  if (slotFiles.length) {
+    html += '<div class="file-list">';
+    slotFiles.forEach(f => {
+      html += '<div class="file"><span class="file-tag">' + escapeHtml(f.slot) + '</span><span style="flex:1">' + escapeHtml(f.filename) + '</span></div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function v(id) { const e = document.getElementById(id); if (!e) return null; if (e.type === 'checkbox') return e.checked; return e.value || null; }
+
+function onTelexToggle() {
+  // Auto-fill date when ticked
+  const declared = v('telex_supplier_declared');
+  const dateEl = document.getElementById('telex_supplier_declared_date');
+  if (declared && !dateEl.value) dateEl.value = todayIso();
+}
+
+async function submit() {
+  const submitter = v('submitted_by');
+  if (!submitter) { toast('Please enter your name / 请输入您的姓名', 'error'); return; }
+  // r31c — only send fields whose DOM elements exist on this task-scoped page
+  // r31j — actual_loading_date moved from gate 2 to gate 4 (supplier only knows approx at gate 2).
+  //        tracking_link added at gate 4 (URL distinct from tracking_number).
+  const candidates = ['approx_loading_date','actual_loading_date','container_number','tracking_number','tracking_link','bl_number','bl_date','final_amount_usd','telex_supplier_declared','telex_supplier_declared_date','supplier_final_payment_acknowledged','supplier_order_ref'];
+  const body = { submitted_by: submitter };
+  candidates.forEach(function(f){
+    if (document.getElementById(f) !== null) body[f] = v(f);
+  });
+  // r31j — soft-validate tracking_link (auto-prefix https:// if missing, no rejection)
+  if (body.tracking_link && body.tracking_link.length && !/^https?:\/\//i.test(body.tracking_link)) {
+    body.tracking_link = 'https://' + body.tracking_link;
+  }
+  // change_note: optional reason if editing previously-submitted values
+  const changeNote = v('change_note');
+  if (changeNote) body.change_note = changeNote;
+  try {
+    const r = await fetch('/s/api/' + token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.error || 'Save failed');
+    }
+    // r31j — full thanks page (was small toast that left form open, confusing supplier).
+    showSupplierThanks('Order update submitted', '订单更新已提交');
+  } catch(e) {
+    toast(e.message + ' / 保存失败', 'error');
+  }
+}
+
+// r31j — Universal thanks page for supplier portal. Replaces the form with a confirmation
+//   so the supplier knows their submission was received and they don't keep clicking submit.
+function showSupplierThanks(titleEn, titleCn, extraEn, extraCn) {
+  const root = document.getElementById('root');
+  let html = '<div class="thanks-card">';
+  html += '  <div class="thanks-tick">✓</div>';
+  html += '  <h2>' + escapeHtml(titleEn) + ' <span class="cn">' + escapeHtml(titleCn || '') + '</span></h2>';
+  html += '  <div class="thanks-body">';
+  html += '    <p>Thank you. Your submission has been received and FK Sports has been notified.</p>';
+  html += '    <p>感谢您的提交。FK Sports 已收到您的提交。</p>';
+  if (extraEn) html += '    <p class="thanks-extra">' + escapeHtml(extraEn) + '</p>';
+  if (extraCn) html += '    <p class="thanks-extra">' + escapeHtml(extraCn) + '</p>';
+  html += '  </div>';
+  html += '  <p class="thanks-foot">You can safely close this window. If you need to make further changes, FK Sports will send a new link. / 您可以安全地关闭此窗口。如需进一步修改，FK Sports 将发送新链接。</p>';
+  html += '</div>';
+  root.innerHTML = html;
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
+
+async function uploadFile(slot) {
+  const submitter = v('submitted_by');
+  if (!submitter) { toast('Please enter your name first / 请先输入您的姓名', 'error'); return; }
+  const fInput = document.getElementById('file_' + slot);
+  if (!fInput.files || !fInput.files.length) { toast('Choose a file first / 请先选择文件', 'error'); return; }
+  const fd = new FormData();
+  fd.append('file', fInput.files[0]);
+  fd.append('slot', slot);
+  fd.append('submitted_by', submitter);
+  try {
+    const r = await fetch('/s/api/' + token + '/files', { method: 'POST', body: fd });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.error || 'Upload failed');
+    }
+    toast('Uploaded / 已上传', 'success');
+    fInput.value = '';
+    await load();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ─── r30d: Claim rendering + response ────────────────────────────────────
+function renderSupplierClaim(c) {
+  const resolutionLabels = {
+    refund: 'Refund / 退款',
+    replace: 'Replace in future order / 下批补货',
+    credit: 'Credit note / 信用单',
+    dispute: 'Dispute (no fault) / 不同意'
+  };
+  const responded = !!c.supplier_proposed_resolution;
+  let html = '<div class="claim-card">';
+  html += '<div class="claim-card-head"><strong>' + escapeHtml(c.description) + '</strong>';
+  if (c.claim_value_gbp) html += ' <span class="claim-value">£' + c.claim_value_gbp + '</span>';
+  html += '</div>';
+  html += '<div class="claim-meta">Opened: ' + fmtDate(c.created_at) + ' / 提出于 ' + fmtDate(c.created_at) + '</div>';
+
+  // FK-uploaded claim files (read-only for supplier, viewable)
+  const fkFiles = (c.files || []).filter(f => f.uploaded_by_role !== 'supplier');
+  if (fkFiles.length) {
+    html += '<div class="claim-files-block"><div class="claim-files-label">Files from FK / FK 上传的文件:</div><div class="claim-files">';
+    fkFiles.forEach(f => {
+      const isImg = (f.mime_type || '').startsWith('image/');
+      html += '<div class="claim-file" onclick="openSupplierFileViewer(\'claim\',' + f.id + ',null)">' + (isImg ? '🖼' : '📄') + ' ' + escapeHtml(f.filename) + '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // Supplier-uploaded files
+  const supplierFiles = (c.files || []).filter(f => f.uploaded_by_role === 'supplier');
+  if (supplierFiles.length) {
+    html += '<div class="claim-files-block"><div class="claim-files-label">Your uploaded files / 您上传的文件:</div><div class="claim-files">';
+    supplierFiles.forEach(f => {
+      const isImg = (f.mime_type || '').startsWith('image/');
+      html += '<div class="claim-file" onclick="openSupplierFileViewer(\'claim\',' + f.id + ',null)">' + (isImg ? '🖼' : '📄') + ' ' + escapeHtml(f.filename) + '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // Response form, or show existing response
+  if (responded) {
+    html += '<div class="supplier-response-shown">';
+    html += '<div class="supplier-response-label">Your response / 您的回复:</div>';
+    html += '<div class="supplier-response-pick"><strong>' + escapeHtml(resolutionLabels[c.supplier_proposed_resolution] || c.supplier_proposed_resolution) + '</strong></div>';
+    if (c.supplier_resolution_note) html += '<div class="supplier-response-note">"' + escapeHtml(c.supplier_resolution_note) + '"</div>';
+    if (c.supplier_replacement_plan_ref) html += '<div class="supplier-response-note">Replacement order / 补货订单: <strong>' + escapeHtml(c.supplier_replacement_plan_ref) + '</strong></div>';
+    if (c.status === 'agreed') html += '<div class="claim-status-agreed">✓ FK Sports has agreed / FK Sports 已同意</div>';
+    else html += '<div class="claim-status-pending">Waiting for FK Sports to agree / 等待 FK Sports 同意</div>';
+    // Allow update
+    if (!plan.locked && c.status !== 'agreed' && c.status !== 'closed') {
+      html += '<button class="btn btn-sm" style="margin-top:8px;width:auto;padding:8px 14px" onclick="showResponseForm(' + c.id + ')">Update response / 修改回复</button>';
+    }
+    html += '</div>';
+    html += '<div id="responseForm_' + c.id + '" style="display:none;margin-top:10px">' + renderResponseForm(c) + '</div>';
+  } else if (!plan.locked) {
+    html += '<div class="supplier-response-form">' + renderResponseForm(c) + '</div>';
+  }
+
+  // Upload to this claim
+  if (!plan.locked) {
+    html += '<div class="claim-upload-row" style="margin-top:10px">';
+    html += '<input type="file" id="claimFile_' + c.id + '" accept="image/*,application/pdf" style="font-size:13px;width:100%">';
+    html += '<button class="btn btn-sm btn-secondary" style="margin-top:6px;width:auto;padding:8px 14px" onclick="uploadSupplierClaimFile(' + c.id + ')">Upload photo / 上传照片</button>';
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderResponseForm(c) {
+  let html = '<div class="response-form-inner">';
+  html += '<div class="field"><label>Your proposed resolution / 您建议的解决方案</label>';
+  html += '<select id="resp_resolution_' + c.id + '" onchange="onResolutionChange(' + c.id + ')">';
+  html += '<option value="">— Select / 请选择 —</option>';
+  html += '<option value="refund"' + (c.supplier_proposed_resolution === 'refund' ? ' selected' : '') + '>Refund / 退款</option>';
+  html += '<option value="replace"' + (c.supplier_proposed_resolution === 'replace' ? ' selected' : '') + '>Replace in future order / 下批补货</option>';
+  html += '<option value="credit"' + (c.supplier_proposed_resolution === 'credit' ? ' selected' : '') + '>Credit note / 信用单</option>';
+  html += '<option value="dispute"' + (c.supplier_proposed_resolution === 'dispute' ? ' selected' : '') + '>Dispute (no fault) / 不同意</option>';
+  html += '</select></div>';
+  html += '<div class="field" id="replacementRefField_' + c.id + '" style="display:' + (c.supplier_proposed_resolution === 'replace' ? 'block' : 'none') + '">';
+  html += '<label>Which future order will the replacement be in? / 补货将放在哪一批订单？</label>';
+  html += '<input type="text" id="resp_replacement_ref_' + c.id + '" value="' + escapeHtml(c.supplier_replacement_plan_ref || '') + '" placeholder="e.g. Next JMK order / 下一个JMK订单">';
+  html += '</div>';
+  html += '<div class="field"><label>Notes (optional) / 备注（可选）</label><textarea id="resp_note_' + c.id + '" rows="3">' + escapeHtml(c.supplier_resolution_note || '') + '</textarea></div>';
+  html += '<button class="btn btn-primary" onclick="respondClaim(' + c.id + ')">Send response / 发送回复</button>';
+  html += '</div>';
+  return html;
+}
+
+function onResolutionChange(claimId) {
+  const v = document.getElementById('resp_resolution_' + claimId).value;
+  document.getElementById('replacementRefField_' + claimId).style.display = (v === 'replace') ? 'block' : 'none';
+}
+
+function showResponseForm(claimId) {
+  const el = document.getElementById('responseForm_' + claimId);
+  if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+}
+
+async function respondClaim(claimId) {
+  const submitter = document.getElementById('submitted_by') ? document.getElementById('submitted_by').value : '';
+  if (!submitter) { toast('Please enter your name first (top of form) / 请先在表单顶部输入您的姓名', 'error'); return; }
+  const resolution = document.getElementById('resp_resolution_' + claimId).value;
+  if (!resolution) { toast('Please pick a resolution / 请选择一个方案', 'error'); return; }
+  const note = document.getElementById('resp_note_' + claimId).value;
+  const replacementRef = (resolution === 'replace') ? document.getElementById('resp_replacement_ref_' + claimId).value : null;
+  if (resolution === 'replace' && !replacementRef) { toast('Please specify which order the replacement will be in / 请指定补货将放在哪一批订单', 'error'); return; }
+  try {
+    const r = await fetch('/s/api/' + token + '/claims/' + claimId + '/respond', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proposed_resolution: resolution, note, replacement_plan_ref: replacementRef, submitted_by: submitter })
+    });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || 'Response failed'); }
+    // r31j — show thanks page (was toast that left form open)
+    showSupplierThanks('Discrepancy response sent', '差异回复已发送', 'FK Sports will review and reply.', 'FK Sports 将审阅并回复您。');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function uploadSupplierClaimFile(claimId) {
+  const submitter = document.getElementById('submitted_by') ? document.getElementById('submitted_by').value : '';
+  if (!submitter) { toast('Please enter your name first / 请先输入您的姓名', 'error'); return; }
+  const input = document.getElementById('claimFile_' + claimId);
+  if (!input.files || !input.files.length) { toast('Choose a file / 选择文件', 'error'); return; }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  fd.append('submitted_by', submitter);
+  try {
+    const r = await fetch('/s/api/' + token + '/claims/' + claimId + '/files', { method: 'POST', body: fd });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || 'Upload failed'); }
+    toast('Uploaded / 已上传', 'success');
+    input.value = '';
+    await load();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ─── r30d: File viewer (supplier side) ───────────────────────────────────
+function openSupplierFileViewer(kind, fileId) {
+  // Collect all files of the same kind
+  if (kind === 'claim') {
+    const allClaimFiles = [];
+    claims.forEach(c => (c.files || []).forEach(f => allClaimFiles.push({ ...f, _kind: 'claim' })));
+    _viewerFiles = allClaimFiles;
+  } else {
+    _viewerFiles = (files || []).map(f => ({ ...f, _kind: 'plan' }));
+  }
+  _viewerIndex = _viewerFiles.findIndex(f => f.id === fileId);
+  if (_viewerIndex < 0) _viewerIndex = 0;
+  document.getElementById('fileViewerModal').classList.add('active');
+  renderSupplierFileViewer();
+}
+function renderSupplierFileViewer() {
+  if (!_viewerFiles.length) { closeSupplierFileViewer(); return; }
+  const f = _viewerFiles[_viewerIndex];
+  const baseUrl = '/s/api/' + token + '/' + (f._kind === 'claim' ? 'claim-files' : 'files') + '/' + f.id + '/view';
+  const mime = (f.mime_type || '').toLowerCase();
+  let body = '';
+  if (mime.startsWith('image/')) {
+    body = '<img class="viewer-img" src="' + baseUrl + '" alt="">';
+  } else if (mime === 'application/pdf') {
+    body = '<iframe class="viewer-iframe" src="' + baseUrl + '"></iframe>';
+  } else {
+    body = '<div class="viewer-fallback"><p>Preview not available / 无法预览</p></div>';
+  }
+  document.getElementById('viewerName').textContent = f.filename;
+  document.getElementById('viewerMeta').textContent = (_viewerIndex + 1) + ' of ' + _viewerFiles.length;
+  document.getElementById('viewerBody').innerHTML = body;
+  document.getElementById('viewerPrev').style.display = _viewerFiles.length > 1 ? 'inline-block' : 'none';
+  document.getElementById('viewerNext').style.display = _viewerFiles.length > 1 ? 'inline-block' : 'none';
+}
+function closeSupplierFileViewer() { document.getElementById('fileViewerModal').classList.remove('active'); _viewerFiles = []; _viewerIndex = -1; }
+function viewerPrev() { if (!_viewerFiles.length) return; _viewerIndex = (_viewerIndex - 1 + _viewerFiles.length) % _viewerFiles.length; renderSupplierFileViewer(); }
+function viewerNext() { if (!_viewerFiles.length) return; _viewerIndex = (_viewerIndex + 1) % _viewerFiles.length; renderSupplierFileViewer(); }
+document.addEventListener('keydown', function(e) {
+  if (!document.getElementById('fileViewerModal').classList.contains('active')) return;
+  if (e.key === 'ArrowLeft') viewerPrev();
+  else if (e.key === 'ArrowRight') viewerNext();
+  else if (e.key === 'Escape') closeSupplierFileViewer();
+});
+
+load();
+</script>
+</body>
+</html>
