@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Logistics dashboard — r31n (Kemballs parking flow, gate-4 review task, drop-claim,
-     production check 1wk/2wk delay outcomes, modal-close after task save, 19-task assignee matrix UI) -->
+<!-- CampaignPulse Logistics dashboard — r31n.1 (Foolproof bucket model: field-driven Kemballs / warehouse incoming /
+     warehouse received; inline Book Delivery form on every bucket; Cancel booking + Switch disposition + Un-receive
+     for reversibility; aging warnings at 8w Kemballs and 7d past-delivery; gate-9 simplified) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -4618,35 +4619,31 @@ async function renderKemballsPage() {
         html += '<div class="kb-packing-list-link no-file">📦 No packing list or Final PI uploaded — agent should add at gate 4</div>';
       }
 
-      // r31n item 11 — Kemballs is now a parked state. Cards show running cost + one primary
-      //   action: "Bring to warehouse" — which releases the plan back to active and creates the
-      //   book_local_delivery task in the normal pipeline. No more "open plan to book at gate 9"
-      //   indirection. The retrieval booking is a follow-on task once released.
-      const isParked = p.status === 'kemballs_parked';
-      const alreadyBooked = p.local_delivery_booked_date || p.delivery_date;
+      // r31n.1 — Kemballs is a bucket computed from fields, not a status. Each card has:
+      //   • Inline Book delivery form (partner + date + Book button) — fires /book-delivery,
+      //     which auto-stops the storage clock and moves the plan to warehouse-incoming.
+      //   • Secondary "Send straight to warehouse" link — for the rare case where the container
+      //     bypasses Kemballs (supplier delivered direct). Flips disposition to clean, locks
+      //     storage cost at today.
+      //   • Aging warning at 8+ weeks (server-set `aging_warning` flag).
+      if (p.aging_warning) {
+        html += '<div style="background:#fef3c7;border:1px solid #f59e0b;color:#92400e;padding:10px 12px;border-radius:8px;margin:10px 0;font-size:12px;line-height:1.5">' +
+                '<strong>⚠️ 8+ weeks at Kemballs.</strong> Storage cost is mounting. Book delivery soon, or escalate to Bobby if there\'s a blocker.</div>';
+      }
       html += '<div class="kb-retrieval-form">';
-      if (alreadyBooked) {
-        html += '<div class="kb-form-title">Retrieval booked</div>';
-        const bookedLabel = p.delivery_date ? ('delivered ' + escapeHtml(fmtDate(p.delivery_date))) :
-                            ('booked ' + escapeHtml(fmtDate(p.local_delivery_booked_date)));
-        html += '<div class="kb-retrieval-status">✓ ' + bookedLabel +
-                ' · partner ' + escapeHtml(p.local_delivery_partner || '—') + '</div>';
-      } else if (isParked) {
-        html += '<div class="kb-form-title">Parked at Kemballs</div>';
-        html += '<div style="font-size:12px;color:var(--text2);line-height:1.5;margin-top:6px">' +
-                'Container is in storage. Press "Bring to warehouse" when ready — this will close the storage ' +
-                'cost clock and create a delivery booking task.</div>';
-      } else {
-        html += '<div class="kb-form-title">In transit</div>';
-        html += '<div style="font-size:12px;color:var(--text2);line-height:1.5;margin-top:6px">' +
-                'Container is at Kemballs but plan is still active (pre-r31n flow). ' +
-                'Open the plan and complete customs clearance to formally park.</div>';
-      }
-      html += '<div class="kb-retrieval-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">';
-      if (isParked && !alreadyBooked) {
-        html += '<button class="btn btn-sm btn-primary" onclick="bringToWarehouse(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\')">🚚 Bring to warehouse</button>';
-      }
-      html += '<button class="btn btn-sm" onclick="openStageDrawerFromOther(' + p.id + ')">Open plan ↗</button>';
+      html += '<div class="kb-form-title">Book delivery to warehouse</div>';
+      html += '<div style="font-size:12px;color:var(--text2);line-height:1.5;margin:6px 0 10px">' +
+              'Container ready for retrieval. Enter the delivery partner and target date. Storage clock stops on the delivery date.</div>';
+      html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">';
+      html += '<div style="flex:1;min-width:160px"><label style="font-size:11px;color:var(--text3);font-weight:600">Delivery partner</label>' +
+              '<input type="text" id="kbPartner_' + p.id + '" placeholder="e.g. Kemballs delivery / local carrier" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px"></div>';
+      html += '<div style="min-width:140px"><label style="font-size:11px;color:var(--text3);font-weight:600">Delivery date</label>' +
+              '<input type="date" id="kbDate_' + p.id + '" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px"></div>';
+      html += '<button class="btn btn-sm btn-primary" onclick="bookDeliveryFromBucket(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\', \'kb\')">🚚 Book</button>';
+      html += '</div>';
+      html += '<div style="margin-top:14px;display:flex;gap:14px;flex-wrap:wrap;font-size:12px">';
+      html += '<a href="javascript:void(0)" onclick="switchDispositionBucket(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\', \'clean\')" style="color:#475569">↩ Send straight to warehouse instead</a>';
+      html += '<a href="javascript:void(0)" onclick="openStageDrawerFromOther(' + p.id + ')" style="color:#475569">Open full plan ↗</a>';
       html += '</div>';
       html += '</div>';  // form
 
@@ -4660,16 +4657,74 @@ async function renderKemballsPage() {
 // r31j — DELETED: bookKemballsRetrieval. Retrieval booking moved to unified gate 9 flow.
 //   The Kemballs page no longer has its own inline booking form (was creating dual workflows).
 
-// r31n item 11 — Bring a parked Kemballs plan back to active. Server stamps campbells_out_date,
-//   flips status to 'active', and fires book_local_delivery task. Page reloads to reflect the move.
-async function bringToWarehouse(planId, planNumber) {
-  if (!confirm('Bring ' + planNumber + ' back from Kemballs?\n\nThis will:\n  • Stop the storage cost clock\n  • Create a "Book local delivery" task\n  • Move the plan back into the active list\n\nYou can\'t undo this from here — open the plan if you need to adjust dates.')) return;
+// r31n.1 — Book delivery from any bucket card (Kemballs or warehouse-incoming-needs-booking).
+//   `prefix` is the field-id prefix ('kb' for Kemballs page, 'wi' for warehouse-incoming page) —
+//   keeps multiple cards' input IDs unique.
+async function bookDeliveryFromBucket(planId, planNumber, prefix) {
+  const partner = (document.getElementById(prefix + 'Partner_' + planId).value || '').trim();
+  const deliveryDate = (document.getElementById(prefix + 'Date_' + planId).value || '').trim();
+  if (!partner) { toast('Enter delivery partner', 'error'); return; }
+  if (!deliveryDate) { toast('Pick a delivery date', 'error'); return; }
   try {
-    await api('/plans/' + planId + '/bring-to-warehouse', { method: 'POST', body: {} });
-    showBigSuccessBanner('✓ ' + planNumber + ' brought back from Kemballs');
-    renderKemballsPage();
+    await api('/plans/' + planId + '/book-delivery', { method: 'POST', body: { partner: partner, delivery_date: deliveryDate } });
+    showBigSuccessBanner('✓ Delivery booked for ' + planNumber);
+    // Refresh whichever page we're on
+    if (prefix === 'kb') renderKemballsPage();
+    if (prefix === 'wi') renderWarehouseIncomingPage();
     loadDashboard();
-  } catch(e) { toast(e.message || 'Failed', 'error'); }
+  } catch(e) { toast(e.message || 'Booking failed', 'error'); }
+}
+
+// r31n.1 — Switch disposition from a bucket card. Used for last-minute route changes:
+//   • Kemballs card → "Send to warehouse instead" (newDispo='clean')
+//   • Warehouse-incoming card → "Send to Kemballs instead" (newDispo='kemballs')
+//   Server clears any delivery booking (different partner usually needed) and handles the
+//   storage clock. Plan moves bucket on next page refresh.
+async function switchDispositionBucket(planId, planNumber, newDispo) {
+  const human = newDispo === 'kemballs' ? 'Send to Kemballs' : 'Send straight to warehouse';
+  if (!confirm(human + ' for ' + planNumber + '?\n\nThis will:\n  • Clear any existing delivery booking\n  • ' +
+               (newDispo === 'kemballs' ? 'Start the Kemballs storage clock' : 'Stop the Kemballs storage clock (cost locked at today)') +
+               '\n\nYou can switch back if needed.')) return;
+  try {
+    await api('/plans/' + planId + '/switch-disposition', { method: 'POST', body: { disposition: newDispo } });
+    showBigSuccessBanner('✓ Route changed to ' + (newDispo === 'kemballs' ? 'Kemballs' : 'Warehouse') + ' for ' + planNumber);
+    renderKemballsPage();
+    renderWarehouseIncomingPage();
+    loadDashboard();
+  } catch(e) { toast(e.message || 'Route change failed', 'error'); }
+}
+
+// r31n.1 — Cancel delivery booking. Used from warehouse-incoming card when delivery falls through.
+//   Clears partner + delivery_date + booked_date. For Kemballs plans, also restarts storage clock.
+//   Plan returns to its pre-booking bucket (Kemballs if disposition=kemballs, otherwise stays in
+//   warehouse-incoming as "needs booking").
+async function cancelDeliveryBooking(planId, planNumber) {
+  const reason = prompt('Why is the delivery being cancelled?\n\n(e.g. "carrier couldn\'t accommodate date", "wrong container", "changed our mind")');
+  if (reason === null) return;
+  const trimmed = reason.trim();
+  if (!trimmed) { toast('Reason required', 'error'); return; }
+  try {
+    await api('/plans/' + planId + '/cancel-delivery-booking', { method: 'POST', body: { reason: trimmed } });
+    showBigSuccessBanner('✓ Delivery cancelled for ' + planNumber);
+    renderKemballsPage();
+    renderWarehouseIncomingPage();
+    loadDashboard();
+  } catch(e) { toast(e.message || 'Cancel failed', 'error'); }
+}
+
+// r31n.1 — Un-receive. Manager only. Rare: Harp marked received but it's wrong (different container,
+//   mistake). Clears warehouse_received_date so the plan goes back to incoming.
+async function unreceiveAtWarehouse(planId, planNumber) {
+  const reason = prompt('Un-receive ' + planNumber + '?\n\nThis is a correction action — only use if the receipt was logged in error.\n\nReason:');
+  if (reason === null) return;
+  const trimmed = reason.trim();
+  if (!trimmed) { toast('Reason required', 'error'); return; }
+  try {
+    await api('/plans/' + planId + '/unreceive', { method: 'POST', body: { reason: trimmed } });
+    showBigSuccessBanner('✓ ' + planNumber + ' un-received');
+    renderWarehouseIncomingPage();
+    loadDashboard();
+  } catch(e) { toast(e.message || 'Un-receive failed', 'error'); }
 }
 
 // r30k — Large visible save confirmation that stays for ~2.5s, hard to miss
@@ -4853,10 +4908,19 @@ function whRowR31g(it, opts) {
   if (isVerified) {
     statusPills += '<span class="wh-status-pill verified" title="Verified by ' + escapeHtml(it.warehouse_verified_by || '?') + '">✅ Verified</span>';
   }
+  // r31n.1 — aging pill on pre-receipt rows where delivery date has passed by 7+ days
+  if (it.aging) {
+    statusPills += '<span class="wh-status-pill" style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b" title="Delivery date past 7+ days ago — confirm with carrier">⚠️ Delivery date passed</span>';
+  }
 
   // Action buttons
   let actionBtns = '';
-  if (!isReceived) {
+  // r31n.1 — Pre-booking state: container past customs but no delivery booked. Surface inline
+  //   Book Delivery form (same shape as Kemballs page). Otherwise show normal Mark received flow.
+  const isManager = _user && _user.is_manager;
+  if (!isReceived && it.needs_booking) {
+    // No buttons here — the inline booking form below replaces them. Empty for grid alignment.
+  } else if (!isReceived) {
     actionBtns += '<button class="wh-mark-btn received" onclick="markWarehouseReceived(' + it.plan_id + ')">📥 Mark received</button>';
   } else if (!isVerified && opts.canVerify) {
     actionBtns += '<button class="wh-mark-btn verified" onclick="markWarehouseVerified(' + it.plan_id + ')">✅ Mark verified</button>';
@@ -4865,6 +4929,10 @@ function whRowR31g(it, opts) {
   //   and to the warehouse agent if they spot a problem when marking received.
   if (isReceived) {
     actionBtns += '<button class="wh-mark-btn" style="background:#fff;color:#dc2626;border-color:#dc2626" onclick="openNewClaimModal(' + it.plan_id + ')">⚠ Raise issue</button>';
+  }
+  // r31n.1 — Un-receive (manager only) when received but not verified
+  if (isReceived && !isVerified && isManager) {
+    actionBtns += '<button class="wh-mark-btn" style="background:#fff;color:#475569;border-color:#cbd5e1" onclick="unreceiveAtWarehouse(' + it.plan_id + ',\'' + escapeHtml(it.plan_number) + '\')">↩ Un-receive</button>';
   }
 
   // Packing list button
@@ -4950,6 +5018,34 @@ function whRowR31g(it, opts) {
   row += '</div>';
 
   row += '</div></div>';
+  // r31n.1 — Pre-receipt-needs-booking: inline Book delivery form right under the row.
+  //   Same shape as Kemballs page form. Saves a click vs opening the plan modal.
+  if (!isReceived && it.needs_booking) {
+    row += '<div class="wh-expand" style="display:block;background:#f8fafc;border-top:1px dashed var(--border)" onclick="event.stopPropagation()">';
+    row += '<div style="padding:10px 14px;font-size:12px;color:var(--text2);line-height:1.5">' +
+           '<strong>Customs cleared — book delivery to warehouse.</strong> Container is ready. Enter the partner and date.</div>';
+    row += '<div style="padding:0 14px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">';
+    row +=   '<div style="flex:1;min-width:160px"><label style="font-size:11px;color:var(--text3);font-weight:600">Delivery partner</label>' +
+             '<input type="text" id="wiPartner_' + it.plan_id + '" placeholder="e.g. local carrier name" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px"></div>';
+    row +=   '<div style="min-width:140px"><label style="font-size:11px;color:var(--text3);font-weight:600">Delivery date</label>' +
+             '<input type="date" id="wiDate_' + it.plan_id + '" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px"></div>';
+    row +=   '<button class="btn btn-sm btn-primary" onclick="bookDeliveryFromBucket(' + it.plan_id + ', \'' + escapeHtml(it.plan_number) + '\', \'wi\')">🚚 Book</button>';
+    row += '</div>';
+    row += '<div style="padding:0 14px 12px;font-size:12px">';
+    row +=   '<a href="javascript:void(0)" onclick="switchDispositionBucket(' + it.plan_id + ', \'' + escapeHtml(it.plan_number) + '\', \'kemballs\')" style="color:#475569">↩ Send to Kemballs instead</a>';
+    row += '</div>';
+    row += '</div>';
+  } else if (!isReceived && it.delivery_date) {
+    // Booked but not received — show small Cancel/Switch links
+    row += '<div class="wh-expand" style="display:block;background:#fafbfc;border-top:1px dashed var(--border);padding:8px 14px;font-size:11px;color:var(--text3)" onclick="event.stopPropagation()">';
+    row += 'Booked: ' + escapeHtml(it.delivery_partner || '—') + ' on ' + escapeHtml(it.delivery_date) + ' · ';
+    row += '<a href="javascript:void(0)" onclick="cancelDeliveryBooking(' + it.plan_id + ', \'' + escapeHtml(it.plan_number) + '\')" style="color:#dc2626">Cancel booking</a>';
+    if (it.disposition !== 'kemballs' && it.disposition !== 'campbells') {
+      row += ' · <a href="javascript:void(0)" onclick="switchDispositionBucket(' + it.plan_id + ', \'' + escapeHtml(it.plan_number) + '\', \'kemballs\')" style="color:#475569">Send to Kemballs instead</a>';
+    }
+    row += '</div>';
+  }
+
   return row;
 }
 
@@ -6040,29 +6136,48 @@ function currentGateFieldsHtml(p, s, audit, targetGate) {
     html += '</div>';
     html += dateField('customs_cleared_date', 'Customs cleared date', p.customs_cleared_date, audit.customs_cleared_date);
   } else if (gate === 9) {
-    // r31h — gate 9 unified: book + complete delivery to warehouse.
-    //   Editable disposition (warehouse vs kemballs) at the top, then route-specific fields.
-    //   Freight partner dropdown drives the email button.
+    // r31n.1 — Gate 9 simplified. Three states:
+    //   • Booked (delivery_date set)        → show booking summary + Cancel link
+    //   • Not booked (post-customs, no date) → show inline Book Delivery form
+    //   • Pre-customs (shouldn't happen)    → guidance message
+    const hasBooking = !!p.delivery_date;
+    const postCustoms = !!p.customs_cleared_date;
+    const isKemballsRoute = p.disposition === 'kemballs' || p.disposition === 'campbells';
+
+    // Route switch (top) — wired to /switch-disposition. Side-effects: clears booking + clock.
     html += '<div class="field" style="grid-column: span 2;background:#fff8f0;border:1px solid #f5c8a8;border-radius:8px;padding:12px 14px">';
-    html += '<label>Destination <span style="color:#9ca3af;font-weight:400;font-size:11px">(can change route here if circumstances changed)</span></label>';
-    html += '<select id="f_disposition" style="margin-top:4px" onchange="onGate9DispoChange(' + p.id + ')">';
-    html += '<option value=""' + (!p.disposition ? ' selected' : '') + '>— not decided yet —</option>';
-    html += '<option value="clean"' + (p.disposition === 'clean' ? ' selected' : '') + '>Warehouse</option>';
-    html += '<option value="kemballs"' + ((p.disposition === 'kemballs' || p.disposition === 'campbells') ? ' selected' : '') + '>Kemballs</option>';
-    html += '</select>';
+    html += '<label>Route</label>';
+    html += '<div style="margin-top:6px;font-size:13px"><strong>' + (isKemballsRoute ? 'Kemballs (storage → retrieve)' : 'Warehouse (direct delivery)') + '</strong></div>';
+    html += '<div style="margin-top:8px;font-size:11px;color:#92400e;line-height:1.5">' +
+            'Last-minute route change? <a href="javascript:void(0)" onclick="switchDispositionBucket(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\', \'' + (isKemballsRoute ? 'clean' : 'kemballs') + '\')" style="color:#92400e;font-weight:600">Switch to ' + (isKemballsRoute ? 'Warehouse' : 'Kemballs') + '</a> (will clear current booking).' +
+            '</div>';
     html += '</div>';
 
-    // r31j — Unified gate 9 form: same local_delivery_* fields for both clean and kemballs routes.
-    //   Kemballs-specific kemballs_retrieval_* fields are deprecated (data preserved in DB but UI
-    //   no longer writes to them). The "partner" field naturally varies by route but is captured
-    //   in local_delivery_partner consistently.
-    html += dateField('local_delivery_booked_date', 'Delivery booked', p.local_delivery_booked_date, audit.local_delivery_booked_date);
-    html += textField('local_delivery_partner',
-                       ((p.disposition === 'kemballs' || p.disposition === 'campbells')
-                          ? 'Retrieval partner (Kemballs route)'
-                          : 'Local partner'),
-                       p.local_delivery_partner, audit.local_delivery_partner);
-    html += dateField('delivery_date', 'Actual delivery date', p.delivery_date, audit.delivery_date);
+    if (hasBooking) {
+      html += '<div class="field" style="grid-column: span 2;background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;padding:12px 14px">';
+      html += '<label style="color:#065f46">✓ Delivery booked</label>';
+      html += '<div style="margin-top:6px;font-size:13px">' + escapeHtml(p.local_delivery_partner || '—') + ' · delivery ' + escapeHtml(fmtDate(p.delivery_date)) + '</div>';
+      if (p.local_delivery_booked_date) html += '<div style="font-size:11px;color:#065f46;margin-top:4px">Booked on ' + escapeHtml(fmtDate(p.local_delivery_booked_date)) + '</div>';
+      html += '<div style="margin-top:10px"><a href="javascript:void(0)" onclick="cancelDeliveryBooking(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\')" style="color:#dc2626;font-size:12px">Cancel this booking</a></div>';
+      html += '</div>';
+    } else if (postCustoms) {
+      // Inline book form — same shape as the bucket forms
+      html += '<div class="field" style="grid-column: span 2;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:12px 14px">';
+      html += '<label>Book delivery to warehouse</label>';
+      html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">';
+      html +=   '<div style="flex:1;min-width:160px"><div style="font-size:11px;color:var(--text3);font-weight:600">Partner</div>' +
+                '<input type="text" id="g9Partner_' + p.id + '" placeholder="' + (isKemballsRoute ? 'Kemballs delivery / local carrier' : 'Local carrier name') + '" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px"></div>';
+      html +=   '<div style="min-width:140px"><div style="font-size:11px;color:var(--text3);font-weight:600">Date</div>' +
+                '<input type="date" id="g9Date_' + p.id + '" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px"></div>';
+      html +=   '<button class="btn btn-sm btn-primary" onclick="bookDeliveryFromBucket(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\', \'g9\')">🚚 Book</button>';
+      html += '</div>';
+      html += '</div>';
+    } else {
+      html += '<div class="field" style="grid-column: span 2;background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px 14px">';
+      html += '<label style="color:#92400e">Customs not cleared yet</label>';
+      html += '<div style="margin-top:4px;font-size:12px;color:#92400e">Complete gates 7 + 8 before booking delivery.</div>';
+      html += '</div>';
+    }
   }
   // r31h — gate 10 removed entirely. Plan auto-archives 14 days post warehouse-verify.
   html += '</div>';
@@ -7063,25 +7178,9 @@ function filterActivity(btn, mode) {
 // ─── Plan modal actions ────────────────────────────────────────────────
 function val(id) { const el = document.getElementById(id); if (!el) return null; if (el.type === 'checkbox') return el.checked; return el.value || null; }
 
-// r31h — gate 9 disposition change: save immediately + reload the gate 9 fields to show the right route's UI.
-async function onGate9DispoChange(planId) {
-  const sel = document.getElementById('f_disposition');
-  if (!sel) return;
-  const newDispo = sel.value || null;
-  try {
-    await api('/plans/' + planId, { method: 'PATCH', body: { disposition: newDispo } });
-    // Re-render the gate 9 editor
-    if (_currentPlan && _currentPlan.plan && _currentPlan.plan.id === planId) {
-      _currentPlan.plan.disposition = newDispo;
-    }
-    // If we have a stage editor open at gate 9, refresh it
-    const stageBody = document.getElementById('stageEditorBody');
-    if (stageBody && _currentPlan) {
-      stageBody.innerHTML = currentGateFieldsHtml(_currentPlan.plan, _currentPlan.supplier, _currentPlan.field_audit || {}, 9);
-    }
-    toast('Destination updated', 'success');
-  } catch(e) { toast(e.message || 'Could not update', 'error'); }
-}
+// r31n.1 — DELETED: onGate9DispoChange. Disposition changes after customs go through
+//   switchDispositionBucket() which uses /switch-disposition (handles booking clear + storage clock).
+//   Gate 5 + gate 8 still use plain PATCH (no booking exists yet pre-customs).
 
 async function savePlanFields(id) {
   const payload = {};

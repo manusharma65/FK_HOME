@@ -1,30 +1,41 @@
-// server/logistics.js — Logistics module (r31n)
+// server/logistics.js — Logistics module (r31n.1)
 //
-// r31n changes (single ship, logistics fixes before r32 architecture rebuild):
-//   • Item 2  — refresh + close plan modal after task save (frontend)
-//   • Item 4  — Day 14 + Day 28 production checks → Satyam (per-name assignee)
-//   • Items 5+6 — quote/delivery booking link token substitution fix
-//   • Item 7  — Drop-claim mechanic (separate from Close-claim) + fixed claim assignees
-//   • Item 8  — Production check delay outcome: "1 week" / "2 weeks" → push ETA
-//   • Item 9  — Supplier form: auto-upload + replace button + reason-after-resubmit
-//   • Item 10 — Gate-6 (send_docs_to_agent) due date: ETA−14d (not order_date)
-//   • Item 11 — Kemballs parking flow. Gate-8 disposition picker = mandatory confirmation
-//               of gate-5 intent. If kemballs: status → 'kemballs_parked', drops from active
-//               list, task evaluator skips rules. "Bring to warehouse" button on Kemballs
-//               page → status back to 'active' + fires book_local_delivery.
-//   • Item 12 — New Gate-4 review task → Shauraya/Neha (review & amend supplier docs)
-//   • Item 13 — Hide gate-9 freight-partner email if disposition=kemballs (covered by item 11
-//               for new plans; this guard is for plans returning from Kemballs to warehouse)
-//   • Item 14 — notify(userId, event, data) helper. Logs + writes to lg_notifications table.
-//               GChat webhook wiring INTENTIONALLY OMITTED — being killed in r32 for in-app bell.
-//   • Item 15 — 19-task assignee matrix locked (Mahima/Satyam/Shauraya/Neha/Harp).
+// r31n.1 — Foolproof bucket model. Replaces r31n's overcomplicated kemballs_parked status.
+//   Plans flow between buckets purely from field values (no status flags):
+//     • Active             = customs_cleared_date IS NULL (and status='active', not closed)
+//     • Kemballs           = customs cleared + disposition=kemballs + no delivery booked
+//     • Warehouse incoming = (clean + customs cleared) OR (kemballs + delivery booked); not received
+//     • Warehouse received = warehouse_received_date NOT NULL; not verified
+//     • Archive            = closed_at NOT NULL
+//   Every transition is reversible. Cancel delivery booking → returns to prior bucket. Switch
+//   disposition → moves bucket, storage clock handled, booking reset. Un-receive (manager only)
+//   → returns plan to incoming.
 //
-// Inherits all r30b → r31m-prep features. Header marker was stale at r30b through these.
+// New endpoints:
+//   POST /plans/:id/book-delivery           — partner + delivery_date; auto-stops Kemballs clock
+//   POST /plans/:id/cancel-delivery-booking — clears delivery fields; resumes Kemballs clock
+//   POST /plans/:id/switch-disposition      — route change w/ booking reset + clock handling
+//   POST /plans/:id/unreceive               — manager only; clears warehouse_received_date
 //
-// Mounted from server.js:
+// Removed from r31n:
+//   • kemballs_parked status (never set, never read)
+//   • /plans/:id/bring-to-warehouse endpoint (no parking, so nothing to release)
+//   • Mandatory disposition picker at gate-8 still present (correct) but no status side-effect
+//
+// Inherits r31n's items 2/4/5/6/7/8/10/12/13/14/15 (modal close, Satyam routing, /q /s /f mounts,
+//   drop claim, production check 1wk/2wk, gate-6 due, gate-4 review, hide gate-9 if Kemballs,
+//   notify() helper, 19-task assignee matrix). Item 11 redesigned per above. Item 9 (supplier
+//   form) untouched from r31n.
+//
+// Aging warnings: Kemballs cards flag at 8+ weeks; warehouse-incoming cards flag if delivery
+//   date passed by 7+ days without receipt.
+//
+// Mounted from server.js (unchanged from r31n):
 //   const logisticsRouter = require('./server/logistics')(function(){ return db; });
 //   app.use('/api/logistics', logisticsRouter);
 //   app.use('/s', logisticsRouter._supplierShare);
+//   app.use('/q', logisticsRouter._agentShare);
+//   app.use('/f', logisticsRouter._fileShare);
 //   on initDB resolved: await logisticsRouter._boot();
 
 const express = require('express');
@@ -1112,20 +1123,23 @@ const TASK_RULES = [
   // r31j — Unified delivery tasks. Previously had separate book_local_delivery (clean only)
   //   and book_kemballs_retrieval (kemballs only). Now one task fires regardless of route;
   //   the agent books delivery with whichever partner is appropriate for the disposition.
-  // r31n item 11 — Kemballs parking flow: when disposition='kemballs' at customs clearance,
-  //   status flips to 'kemballs_parked' (NOT 'active'). The condition below already gates on
-  //   status='active', so kemballs-parked plans do NOT fire book_local_delivery automatically.
-  //   When user clicks "Bring to warehouse" on Kemballs page, status flips back to 'active' and
-  //   THIS task fires (same task, same email flow). Removed the kemballs|campbells disposition
-  //   matching here — by the time a plan is back to active and ready to book, the journey from
-  //   Kemballs is over and it's a normal delivery booking.
+  // r31n.1 — Same task fires for both clean and Kemballs routes. Plan stays status='active'
+  //   throughout (no parking flag). For Kemballs plans, condition fires once customs cleared;
+  //   due date is later (7d from clearance) so it doesn't show as red immediately during storage.
+  //   For clean plans, due date = today so it surfaces urgently.
   { key: 'book_local_delivery', role: 'agent', primary: true,
     title: p => 'Book local delivery — ' + p.plan_number,
     title_cn: p => '与本地承运商预约送货 — ' + p.plan_number,
     requires: ['confirm_customs_clear'],
     condition: p => p.customs_cleared_date && !p.local_delivery_booked_date && !p.delivery_date
                  && p.status === 'active',
-    due: p => todayDate() },
+    // r31n.1 — Due dates differ by route. Clean = immediate (container needs delivery booked
+    //   right after customs clearance). Kemballs = +7 days from clearance (storage is the
+    //   buffer; no urgency until cost starts to bite, and the 8-week aging warning catches stale ones).
+    due: p => {
+      const isKemballs = p.disposition === 'kemballs' || p.disposition === 'campbells';
+      return isKemballs ? addDays(p.customs_cleared_date, 7) : todayDate();
+    } },
   { key: 'log_delivery_sheet', role: 'agent', primary: true,
     title: p => 'Upload delivery sheet — ' + p.plan_number,
     title_cn: p => '上传送货单 — ' + p.plan_number,
@@ -1139,13 +1153,11 @@ async function evaluateTasks(db, planId) {
   const r = await db.query('SELECT * FROM lg_plans WHERE id=$1', [planId]);
   if (!r.rows.length) return;
   const plan = r.rows[0];
-  // r31n item 11 — Parked plans (status='kemballs_parked') don't fire any new tasks.
-  //   They're paused until "Bring to warehouse" flips status back to 'active'. The auto-close
-  //   loop below DOES still run, so any stale open tasks get cleaned up. Cancelled / closed
-  //   plans likewise pause — existing rule conditions already check status='active', but the
-  //   early-skip here saves a full sweep.
+  // r31n.1 — Cancelled/closed plans pause task firing. Kemballs is NOT a status — it's a bucket
+  //   computed from field values, so a Kemballs plan stays status='active' and tasks fire normally.
+  //   The book_local_delivery task is what surfaces "container needs delivery booked" in both
+  //   Kemballs and warehouse-incoming views — same task, same assignee, same rule.
   if (plan.status !== 'active') {
-    // Still auto-close any leftover open tasks (e.g. if a plan was just cancelled mid-flight).
     const stale = await db.query("SELECT id FROM lg_tasks WHERE plan_id=$1 AND status IN ('open','claimed')", [planId]);
     if (stale.rows.length) {
       await db.query(
@@ -1817,8 +1829,6 @@ module.exports = function(getDb) {
       if (req.query.status === 'active')       where.push("status='active' AND closed_at IS NULL");
       else if (req.query.status === 'closed')  where.push('closed_at IS NOT NULL');
       else if (req.query.status === 'cancelled') where.push("status='cancelled'");
-      // r31n item 11 — Kemballs section fetches plans with status='kemballs_parked'.
-      else if (req.query.status === 'kemballs_parked') where.push("status='kemballs_parked'");
       else if (req.query.status === 'all')     { /* no filter */ }
       else                                     where.push("status='active' AND closed_at IS NULL");
       if (req.query.disposition) { where.push('disposition=$'+(i++)); vals.push(req.query.disposition); }
@@ -1835,24 +1845,36 @@ module.exports = function(getDb) {
   router.get('/counts', async function(req, res) {
     const db = req._db;
     try {
-      const r = await db.query("SELECT * FROM lg_plans WHERE status='active' AND closed_at IS NULL");
-      const supMap = {};
-      (await db.query('SELECT * FROM lg_suppliers')).rows.forEach(s => supMap[s.id] = s);
-      let overdue = 0;
-      r.rows.forEach(function(p){
-        const g = computeStage(p, supMap[p.supplier_id]);
-        if (g.is_overdue) overdue++;
-      });
-      // r31n item 11 — Kemballs count now = plans currently parked at Kemballs (status='kemballs_parked').
-      //   Previously was "active plans with disposition=kemballs and no out_date" — which over-counted
-      //   active in-flight plans that intended to go via Kemballs but hadn't landed yet.
-      const kemballsQ = await db.query("SELECT COUNT(*)::int AS n FROM lg_plans WHERE status='kemballs_parked'");
-      const kemballs = kemballsQ.rows[0].n;
-      // r31e.1 — plans-with-issues count = plans with at least one non-closed claim
-      const issuesQ = await db.query("SELECT COUNT(DISTINCT plan_id)::int AS n FROM lg_claims WHERE status NOT IN ('closed','archived')");
-      const issues = issuesQ.rows[0].n;
+      // r31n.1 — Bucket counts driven entirely by field values, no status flags.
+      //   Active        = customs not cleared yet, status=active, not closed
+      //   Kemballs      = customs cleared + disposition=kemballs + no delivery booked
+      //   Incoming      = (clean + customs cleared) OR (kemballs + delivery booked); not received
+      //   Issues        = plans with at least one non-closed claim
+      const activeQ = await db.query(`
+        SELECT COUNT(*)::int AS n FROM lg_plans
+        WHERE status='active' AND closed_at IS NULL AND customs_cleared_date IS NULL`);
+      const kemballsQ = await db.query(`
+        SELECT COUNT(*)::int AS n FROM lg_plans
+        WHERE status='active' AND closed_at IS NULL
+          AND customs_cleared_date IS NOT NULL
+          AND disposition IN ('kemballs','campbells')
+          AND delivery_date IS NULL`);
+      // For overdue: active plans where any task is overdue
+      const overdueQ = await db.query(`
+        SELECT COUNT(DISTINCT t.plan_id)::int AS n
+        FROM lg_tasks t JOIN lg_plans p ON p.id=t.plan_id
+        WHERE t.status IN ('open','claimed') AND t.due_date < CURRENT_DATE
+          AND p.status='active' AND p.closed_at IS NULL`);
+      const issuesQ = await db.query("SELECT COUNT(DISTINCT plan_id)::int AS n FROM lg_claims WHERE status NOT IN ('closed','archived','dropped')");
       const tasks = await db.query("SELECT COUNT(*)::int AS n FROM lg_tasks WHERE status IN ('open','claimed') AND due_date < CURRENT_DATE");
-      res.json({ open: r.rows.length, overdue, at_campbells: kemballs, at_kemballs: kemballs, with_issues: issues, overdue_tasks: tasks.rows[0].n });
+      res.json({
+        open: activeQ.rows[0].n,
+        overdue: overdueQ.rows[0].n,
+        at_campbells: kemballsQ.rows[0].n,
+        at_kemballs: kemballsQ.rows[0].n,
+        with_issues: issuesQ.rows[0].n,
+        overdue_tasks: tasks.rows[0].n
+      });
     } catch(e) { res.json({ open:0, overdue:0, at_campbells:0, at_kemballs:0, with_issues:0, overdue_tasks: 0 }); }
   });
 
@@ -2026,43 +2048,28 @@ module.exports = function(getDb) {
                           ? req.body.disposition : before.disposition;
       const isKemballs = dispoAfter === 'kemballs' || dispoAfter === 'campbells';
       // r31n item 11 — Mandatory disposition confirmation at customs clearance.
-      //   Gate-5 sets initial intent; gate-8 (customs cleared) is the point of no return.
       //   Without a disposition the plan can't progress: agent must pick clean or kemballs.
       if (isClearingNow && !dispoAfter) {
         return res.status(400).json({ error: 'Disposition required when marking customs cleared. Choose Warehouse (clean) or Kemballs.' });
       }
+      // r31n.1 — Storage clock starts when customs cleared with kemballs disposition.
+      //   No status flip (that was the r31n overengineering); bucket is computed from field values.
       if (isClearingNow && isKemballs && !before.campbells_in_date) {
         sets.push('campbells_in_date=$' + (i++));
         vals.push(req.body.customs_cleared_date);
         changes.push('campbells_in_date (auto-set from customs clearance)');
         await logFieldAudit(db, id, 'campbells_in_date', null, req.body.customs_cleared_date, 'system', 'system');
       }
-      // r31n item 11 — Kemballs parking: flip status to 'kemballs_parked' at the same time
-      //   customs clearance + disposition=kemballs is recorded. Plan drops from active list.
-      //   Task evaluator sees status!=='active' and stops firing rules until released.
-      //   The "Bring to warehouse" endpoint flips back to active later.
-      let didPark = false;
-      if (isClearingNow && isKemballs && before.status === 'active') {
-        sets.push('status=$' + (i++));
-        vals.push('kemballs_parked');
-        changes.push('status → kemballs_parked');
-        didPark = true;
-      }
 
       sets.push('updated_at=NOW()'); vals.push(id);
       const r = await db.query('UPDATE lg_plans SET ' + sets.join(',') + ' WHERE id=$' + i + ' RETURNING *', vals);
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
         [id, 'updated', 'Fields: ' + changes.join(', '), actor(req)]);
-      // r31n — auto-close any open tasks on a plan that just got parked (eta_check, anything
-      //   still in flight). They'll re-fire when the plan is brought back to active.
-      if (didPark) {
-        await db.query(
-          "UPDATE lg_tasks SET status='auto_archived', completed_at=NOW(), completion_note=COALESCE(completion_note,'') || ' [auto-archived: plan parked at Kemballs]' WHERE plan_id=$1 AND status IN ('open','claimed')",
-          [id]
-        );
-        await notify(db, { role: 'logistics_shared' }, 'kemballs_parked', {
-          title: 'Plan ' + r.rows[0].plan_number + ' parked at Kemballs',
-          body: 'Container in storage from ' + req.body.customs_cleared_date + '. Use "Bring to warehouse" when ready.',
+      // r31n.1 — notify logistics on customs clearance with Kemballs route (they'll need to act)
+      if (isClearingNow && isKemballs) {
+        await notify(db, { role: 'logistics_shared' }, 'kemballs_arrival', {
+          title: 'Container at Kemballs — ' + r.rows[0].plan_number,
+          body: 'Container cleared customs and is in Kemballs storage. Book delivery when ready.',
           plan_id: id
         });
       }
@@ -2242,32 +2249,164 @@ module.exports = function(getDb) {
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
-  // r31n item 11 — "Bring to warehouse" — releases a plan parked at Kemballs.
-  //   Flips status from 'kemballs_parked' back to 'active', stamps campbells_out_date (storage clock
-  //   stops + cost finalised), then evaluateTasks fires book_local_delivery (same flow as a clean-route
-  //   plan reaching gate 9). Anyone with logistics access can press this (per Bobby's spec).
-  router.post('/plans/:id/bring-to-warehouse', async function(req, res) {
+  // ─── r31n.1 — Field-driven bucket transitions ────────────────────────────
+  // No more parking flow. Plans move between Active / Kemballs / Warehouse Incoming /
+  // Warehouse Received purely by what fields are set:
+  //   Active             = customs_cleared_date IS NULL
+  //   Kemballs           = customs cleared + disposition=kemballs + no delivery booked
+  //   Warehouse incoming = (clean + customs cleared) OR (kemballs + delivery booked); not received
+  //   Warehouse received = warehouse_received_date NOT NULL; not verified
+  // All transitions reversible. Each endpoint below changes fields; bucket follows.
+
+  // Book delivery — used from Kemballs card AND from Warehouse incoming card. Same form, same
+  //   endpoint. Sets partner + delivery_date + booked_date. For Kemballs plans, also sets
+  //   campbells_out_date=delivery_date (storage clock stops, final cost locked).
+  router.post('/plans/:id/book-delivery', async function(req, res) {
     const db = req._db;
     try {
       const id = parseInt(req.params.id);
+      const partner = (req.body && req.body.partner || '').toString().trim();
+      const deliveryDate = (req.body && req.body.delivery_date || '').toString().trim();
+      if (!partner) return res.status(400).json({ error: 'Delivery partner required' });
+      if (!deliveryDate) return res.status(400).json({ error: 'Delivery date required' });
       const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
       if (!before) return res.status(404).json({ error: 'Plan not found' });
-      if (before.status !== 'kemballs_parked') {
-        return res.status(409).json({ error: "Plan is not parked at Kemballs (status='" + before.status + "')" });
+      if (!before.customs_cleared_date) {
+        return res.status(409).json({ error: 'Customs not cleared yet — cannot book delivery' });
       }
       const today = todayDate();
-      const r = await db.query(
-        "UPDATE lg_plans SET status='active', campbells_out_date=COALESCE(campbells_out_date, $1) WHERE id=$2 RETURNING *",
-        [today, id]
-      );
+      const isKemballs = before.disposition === 'kemballs' || before.disposition === 'campbells';
+      // For Kemballs plans, lock storage end-date to delivery_date (so cost is final).
+      const setOut = isKemballs && !before.campbells_out_date;
+      const sql = setOut
+        ? `UPDATE lg_plans SET local_delivery_partner=$1, delivery_date=$2,
+             local_delivery_booked_date=$3, campbells_out_date=$2, updated_at=NOW()
+             WHERE id=$4 RETURNING *`
+        : `UPDATE lg_plans SET local_delivery_partner=$1, delivery_date=$2,
+             local_delivery_booked_date=$3, updated_at=NOW()
+             WHERE id=$4 RETURNING *`;
+      const r = await db.query(sql, [partner, deliveryDate, today, id]);
+      await logFieldAudit(db, id, 'local_delivery_partner', before.local_delivery_partner, partner, actor(req), 'agent');
+      await logFieldAudit(db, id, 'delivery_date', before.delivery_date, deliveryDate, actor(req), 'agent');
+      if (setOut) await logFieldAudit(db, id, 'campbells_out_date', null, deliveryDate, 'system', 'system');
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
-        [id, 'kemballs_released', 'Bring to warehouse — out_date=' + today, actor(req)]);
+        [id, 'delivery_booked', partner + ' on ' + deliveryDate + (setOut ? ' (Kemballs storage closed)' : ''), actor(req)]);
       await evaluateTasks(db, id);
-      await notify(db, { role: 'logistics_shared' }, 'kemballs_released', {
-        title: 'Plan ' + before.plan_number + ' released from Kemballs',
-        body: 'Book local delivery task created. Storage closed at ' + today,
-        plan_id: id
+      await notify(db, { role: 'warehouse_agent' }, 'delivery_booked', {
+        title: 'Incoming delivery — ' + before.plan_number,
+        body: partner + ' delivering on ' + deliveryDate, plan_id: id
       });
+      res.json({ ok: true, plan: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Cancel delivery booking. Clears partner + delivery_date + booked_date. For Kemballs plans
+  //   this also re-opens campbells_out_date=NULL so storage clock resumes.
+  router.post('/plans/:id/cancel-delivery-booking', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const reason = (req.body && req.body.reason || '').toString().trim();
+      const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
+      if (!before) return res.status(404).json({ error: 'Plan not found' });
+      if (!before.local_delivery_booked_date && !before.delivery_date) {
+        return res.status(409).json({ error: 'No delivery booking to cancel' });
+      }
+      if (before.warehouse_received_date) {
+        return res.status(409).json({ error: 'Already received at warehouse — cannot cancel delivery' });
+      }
+      const isKemballs = before.disposition === 'kemballs' || before.disposition === 'campbells';
+      const sql = isKemballs
+        ? `UPDATE lg_plans SET local_delivery_partner=NULL, delivery_date=NULL,
+             local_delivery_booked_date=NULL, campbells_out_date=NULL, updated_at=NOW()
+             WHERE id=$1 RETURNING *`
+        : `UPDATE lg_plans SET local_delivery_partner=NULL, delivery_date=NULL,
+             local_delivery_booked_date=NULL, updated_at=NOW()
+             WHERE id=$1 RETURNING *`;
+      const r = await db.query(sql, [id]);
+      await logFieldAudit(db, id, 'delivery_date', before.delivery_date, null, actor(req), 'agent', reason || 'delivery cancelled');
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [id, 'delivery_cancelled', reason || '(no reason given)', actor(req)]);
+      // r31n.1 — Remove the auto-archived book_local_delivery task so evaluator re-creates it.
+      //   Without this, the task stays archived and evaluator's `existingKeys.has(rule.key)`
+      //   check at line ~1186 skips re-firing forever.
+      await db.query("DELETE FROM lg_tasks WHERE plan_id=$1 AND rule_key='book_local_delivery' AND status='auto_archived'", [id]);
+      await evaluateTasks(db, id);  // re-fires book_local_delivery task
+      res.json({ ok: true, plan: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Switch disposition — used for last-minute route changes (warehouse → kemballs or vice versa).
+  //   Handles storage clock + clears delivery booking if one exists (route change usually means
+  //   you have to re-book with a different partner/timing).
+  router.post('/plans/:id/switch-disposition', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const newDispo = (req.body && req.body.disposition || '').toString().trim();
+      if (newDispo !== 'clean' && newDispo !== 'kemballs') {
+        return res.status(400).json({ error: "disposition must be 'clean' or 'kemballs'" });
+      }
+      const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
+      if (!before) return res.status(404).json({ error: 'Plan not found' });
+      if (before.disposition === newDispo) return res.json({ ok: true, plan: before, noop: true });
+      if (before.warehouse_received_date) {
+        return res.status(409).json({ error: 'Already received at warehouse — cannot change route' });
+      }
+      const wasKemballs = before.disposition === 'kemballs' || before.disposition === 'campbells';
+      const becomingKemballs = newDispo === 'kemballs';
+      const today = todayDate();
+      const sets = ['disposition=$1'];
+      const vals = [newDispo];
+      let i = 2;
+      // Reset delivery booking on route change — different partner usually needed.
+      sets.push('local_delivery_partner=NULL', 'delivery_date=NULL', 'local_delivery_booked_date=NULL');
+      // Storage clock: switching INTO Kemballs starts it (if not already started); switching OUT
+      //   closes it (set out_date=today since container is leaving Kemballs to go direct).
+      if (becomingKemballs && !before.campbells_in_date && before.customs_cleared_date) {
+        sets.push('campbells_in_date=$' + (i++));
+        vals.push(before.customs_cleared_date);  // started when customs cleared
+      }
+      if (becomingKemballs) {
+        sets.push('campbells_out_date=NULL');  // reopened
+      } else if (wasKemballs && !before.campbells_out_date) {
+        sets.push('campbells_out_date=$' + (i++));
+        vals.push(today);
+      }
+      sets.push('updated_at=NOW()');
+      vals.push(id);
+      const sql = 'UPDATE lg_plans SET ' + sets.join(',') + ' WHERE id=$' + i + ' RETURNING *';
+      const r = await db.query(sql, vals);
+      await logFieldAudit(db, id, 'disposition', before.disposition, newDispo, actor(req), 'agent', 'route change');
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [id, 'disposition_switched', (before.disposition || '—') + ' → ' + newDispo, actor(req)]);
+      // r31n.1 — Clear any auto-archived book_local_delivery so a fresh one fires for the new route.
+      await db.query("DELETE FROM lg_tasks WHERE plan_id=$1 AND rule_key='book_local_delivery' AND status='auto_archived'", [id]);
+      await evaluateTasks(db, id);
+      res.json({ ok: true, plan: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Un-receive — manager-only. Rare correction: Harp marked received but turns out it was wrong
+  //   container, or there was a mistake. Clears warehouse_received_date + receiver. Plan returns
+  //   to warehouse_incoming bucket.
+  router.post('/plans/:id/unreceive', async function(req, res) {
+    const db = req._db;
+    if (!isManager(req.user)) return res.status(403).json({ error: 'Manager only' });
+    try {
+      const id = parseInt(req.params.id);
+      const reason = (req.body && req.body.reason || '').toString().trim();
+      if (!reason) return res.status(400).json({ error: 'Reason required for un-receive' });
+      const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
+      if (!before) return res.status(404).json({ error: 'Plan not found' });
+      if (!before.warehouse_received_date) return res.status(409).json({ error: 'Not received yet — nothing to undo' });
+      if (before.warehouse_verified_date) return res.status(409).json({ error: 'Already verified — cannot un-receive' });
+      const r = await db.query(
+        'UPDATE lg_plans SET warehouse_received_date=NULL, warehouse_received_by=NULL, updated_at=NOW() WHERE id=$1 RETURNING *',
+        [id]);
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [id, 'unreceived', reason, actor(req)]);
+      await evaluateTasks(db, id);
       res.json({ ok: true, plan: r.rows[0] });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
@@ -2853,26 +2992,37 @@ module.exports = function(getDb) {
         }
 
         // ── Pre-receipt branch ──
-        // r31k — Simplified. Prefer current-standard local_delivery_* fields; fall back to
-        //   legacy kemballs_retrieval_* for plans booked before the unified-gate-9 flow shipped.
-        //   Any plan with delivery_date set (even no booking record) shows as "delivered awaiting receipt"
-        //   so Harp can mark received even if the booking trail is incomplete.
-        let source, expected_date, action_label;
+        // r31n.1 — Simpler logic:
+        //   • Plan has delivery booked (delivery_date set) → Harp expecting it. Aging warning if past.
+        //   • Plan past customs but no delivery booked yet → "needs booking" surface. Includes both
+        //     clean-route arrivals AND Kemballs plans where delivery has been booked since
+        //     (Kemballs without booking = stays on Kemballs page, not here).
+        //   • Plan still in transit (no customs clearance) → not here, on active list instead.
+        let source, expected_date, action_label, needs_booking = false, aging = false;
         const isKemballsRoute = (p.disposition === 'kemballs' || p.disposition === 'campbells');
         const effectiveBookedDate = p.local_delivery_booked_date || p.kemballs_retrieval_booked_date || p.kemballs_retrieval_confirmed_date;
 
         if (p.delivery_date) {
-          // Delivered but not yet marked-received — surface immediately to Harp
+          // Delivered (or scheduled) but not yet marked-received — Harp's queue
           source = isKemballsRoute ? 'kemballs' : 'direct';
           expected_date = asIso(p.delivery_date);
-          action_label = isKemballsRoute ? 'From Kemballs · delivered, awaiting receipt' : 'Delivered · awaiting Mark received';
+          action_label = isKemballsRoute ? 'From Kemballs · delivery on ' + expected_date : 'Delivery on ' + expected_date;
+          // r31n.1 — aging: delivery date past + still not marked received → confirm with carrier
+          if (expected_date < addDays(today, -7)) aging = true;
         } else if (effectiveBookedDate) {
           source = isKemballsRoute ? 'kemballs' : 'direct';
           expected_date = asIso(effectiveBookedDate);
-          action_label = isKemballsRoute ? 'From Kemballs · retrieval booked' : 'Delivery booked';
+          action_label = isKemballsRoute ? 'From Kemballs · booked' : 'Delivery booked';
         } else if (isKemballsRoute && p.campbells_in_date) {
-          continue;  // Sitting at Kemballs, no retrieval booked yet — not incoming
+          continue;  // Sitting at Kemballs, no delivery booked yet → on Kemballs page
+        } else if (p.customs_cleared_date) {
+          // Clean route past customs, no delivery booked → needs Shauraya/Neha to book
+          source = 'direct';
+          expected_date = asIso(p.customs_cleared_date);
+          action_label = 'Customs cleared — book delivery';
+          needs_booking = true;
         } else if (p.new_eta || p.original_eta) {
+          // Pre-customs ETA visibility (legacy); only show if customs nominally close
           source = 'direct';
           expected_date = asIso(p.new_eta || p.original_eta);
           action_label = 'Direct · ETA (delivery not yet booked)';
@@ -2885,7 +3035,13 @@ module.exports = function(getDb) {
           source: source, expected_date: expected_date, action_label: action_label,
           delivery_partner: p.local_delivery_partner || p.kemballs_retrieval_partner || null,
           warehouse_received_date: null, warehouse_received_by: null,
-          warehouse_verified_date: null, warehouse_verified_by: null
+          warehouse_verified_date: null, warehouse_verified_by: null,
+          // r31n.1 — flags drive UI actions on the card
+          needs_booking: needs_booking,
+          aging: aging,
+          disposition: p.disposition,
+          delivery_date: p.delivery_date ? asIso(p.delivery_date) : null,
+          local_delivery_booked_date: p.local_delivery_booked_date ? asIso(p.local_delivery_booked_date) : null
         });
       }
 
@@ -3001,20 +3157,17 @@ module.exports = function(getDb) {
   router.get('/kemballs/active', async function(req, res) {
     const db = req._db;
     try {
-      // r31n item 11 — Plans at Kemballs are either:
-      //   (a) status='kemballs_parked' — the new flow, plan dropped from active list
-      //   (b) status='active' + disposition=kemballs + no out_date — legacy in-flight plans
-      //       from before parking flow shipped (defensive; shouldn't see any after r31n)
-      //   Both should appear on the Kemballs page so cost accumulates and "Bring to warehouse"
-      //   can be pressed.
+      // r31n.1 — Kemballs bucket: container has cleared customs, disposition=kemballs, no
+      //   delivery booked yet, not closed. Plan stays status='active' throughout (no parking flag).
+      //   Once delivery is booked the plan disappears from this query and shows up in
+      //   warehouse-incoming. If delivery is cancelled, plan returns here.
       const rows = (await db.query(`
         SELECT p.*, s.name AS supplier_name, s.payment_terms AS supplier_payment_terms
         FROM lg_plans p LEFT JOIN lg_suppliers s ON s.id = p.supplier_id
-        WHERE p.closed_at IS NULL
-          AND (
-            p.status='kemballs_parked'
-            OR (p.status='active' AND p.disposition IN ('kemballs','campbells') AND p.campbells_out_date IS NULL)
-          )
+        WHERE p.status='active' AND p.closed_at IS NULL
+          AND p.customs_cleared_date IS NOT NULL
+          AND p.disposition IN ('kemballs','campbells')
+          AND p.delivery_date IS NULL
         ORDER BY p.campbells_in_date ASC NULLS LAST
       `)).rows;
       // Attach packing list + final PI file refs
@@ -3041,12 +3194,17 @@ module.exports = function(getDb) {
             r.weeks_at_kemballs = Math.floor(r.days_at_kemballs / 7);
             const weekly = parseFloat(r.campbells_weekly_gbp) || 0;
             r.cost_so_far_gbp = Math.round(weekly * r.weeks_at_kemballs * 100) / 100;
+            // r31n.1 — Aging flag: 8+ weeks at Kemballs is a serious cost signal. Surfaces an
+            //   amber warning on the card prompting Shauraya to either book delivery or escalate
+            //   (e.g. clarify with Mahima if there's a payment hold-up).
+            r.aging_warning = r.weeks_at_kemballs >= 8;
           } else {
             // r31j — defensive guard: campbells_in_date may be null for very old plans before
             //   auto-set landed. Show zeros rather than "undefined days" garbage.
             r.days_at_kemballs = 0;
             r.weeks_at_kemballs = 0;
             r.cost_so_far_gbp = 0;
+            r.aging_warning = false;
           }
         });
       }
@@ -3232,7 +3390,9 @@ module.exports = function(getDb) {
       const fires = enriched.filter(p => p.is_overdue);
       // r31g — fix: column is deposit_usd, not deposit_amount_usd. Previous fallback always returned 0.
       const valueInTransit = enriched.filter(p => p.actual_loading_date && !p.delivery_date).reduce((sum, p) => sum + (parseFloat(p.final_amount_usd) || parseFloat(p.deposit_usd) || 0), 0);
-      const atKemballs = enriched.filter(p => (p.disposition === 'kemballs' || p.disposition === 'campbells') && !p.campbells_out_date);
+      // r31n.1 — Kemballs bucket = customs cleared + kemballs disposition + no delivery booked
+      const atKemballs = enriched.filter(p =>
+        p.customs_cleared_date && (p.disposition === 'kemballs' || p.disposition === 'campbells') && !p.delivery_date);
       // attention_message: most urgent fire (or null)
       let attention = null;
       if (fires.length) {
@@ -3245,7 +3405,7 @@ module.exports = function(getDb) {
         value_in_transit_usd: Math.round(valueInTransit),
         at_kemballs: atKemballs.length,
         attention_message: attention,
-        version: 'r31m-prep'
+        version: 'r31n.1'
       });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
@@ -3267,25 +3427,29 @@ module.exports = function(getDb) {
 
       const inFlight  = enriched.filter(p => p.status === 'active' && !p.closed_at);
       const overdue   = inFlight.filter(p => p.is_overdue);
-      // r30m — only count active, non-closed plans as "at Kemballs" (was incorrectly counting cancelled)
-      const atKemballs = inFlight.filter(p => (p.disposition === 'kemballs' || p.disposition === 'campbells') && !p.campbells_out_date);
+      // r31n.1 — Kemballs count = plans physically at Kemballs (customs cleared + kemballs route +
+      //   no delivery booked). Was previously "any disposition=kemballs with no campbells_out_date"
+      //   which over-counted plans that hadn't even reached customs yet.
+      const atKemballs = inFlight.filter(p =>
+        p.customs_cleared_date && (p.disposition === 'kemballs' || p.disposition === 'campbells') && !p.delivery_date);
       // r31e.1 — plans with issues = plans with at least one non-closed claim (independent of disposition)
       const planIdsWithOpenClaims = new Set(
-        (await db.query("SELECT DISTINCT plan_id FROM lg_claims WHERE status NOT IN ('closed','archived')")).rows.map(function(r){ return r.plan_id; })
+        (await db.query("SELECT DISTINCT plan_id FROM lg_claims WHERE status NOT IN ('closed','archived','dropped')")).rows.map(function(r){ return r.plan_id; })
       );
       const withIssues = inFlight.filter(p => planIdsWithOpenClaims.has(p.id));
 
-      const loadingThisWeek = inFlight.filter(p => p.approx_loading_date && asIso(p.approx_loading_date) <= wkPlus7 && !p.actual_loading_date);
-      const loadingNextWeek = inFlight.filter(p => p.approx_loading_date && asIso(p.approx_loading_date) > wkPlus7 && asIso(p.approx_loading_date) <= wkPlus14 && !p.actual_loading_date);
-      // r31f — dashboard lanes: this-week + next-2-weeks for loading and arriving
+      // r31n.1 — Lane filters only show plans STILL IN TRANSIT (pre-customs). Plans past customs
+      //   are managed on the Kemballs page or warehouse-incoming page — surfacing them here too
+      //   would double-show with conflicting actions.
+      const stillInTransit = inFlight.filter(p => !p.customs_cleared_date);
+      const loadingThisWeek = stillInTransit.filter(p => p.approx_loading_date && asIso(p.approx_loading_date) <= wkPlus7 && !p.actual_loading_date);
+      const loadingNextWeek = stillInTransit.filter(p => p.approx_loading_date && asIso(p.approx_loading_date) > wkPlus7 && asIso(p.approx_loading_date) <= wkPlus14 && !p.actual_loading_date);
       const loadingThisWeekDash = loadingThisWeek;
-      const loadingNext2WeeksDash = inFlight.filter(p => p.approx_loading_date && asIso(p.approx_loading_date) > wkPlus7 && asIso(p.approx_loading_date) <= wkPlus21 && !p.actual_loading_date);
-      // r31g — fix: dropped `!p.disposition` filter. Disposition is set at gate 5 (pre-ETA) since r30i,
-      //   so the old filter excluded every active plan from these lanes. Now we just check no delivery yet.
-      const arrivingThisWeek = inFlight.filter(p => p.new_eta && asIso(p.new_eta) <= wkPlus7 && !p.delivery_date);
-      const arrivingNextWeek = inFlight.filter(p => p.new_eta && asIso(p.new_eta) > wkPlus7 && asIso(p.new_eta) <= wkPlus14 && !p.delivery_date);
+      const loadingNext2WeeksDash = stillInTransit.filter(p => p.approx_loading_date && asIso(p.approx_loading_date) > wkPlus7 && asIso(p.approx_loading_date) <= wkPlus21 && !p.actual_loading_date);
+      const arrivingThisWeek = stillInTransit.filter(p => p.new_eta && asIso(p.new_eta) <= wkPlus7);
+      const arrivingNextWeek = stillInTransit.filter(p => p.new_eta && asIso(p.new_eta) > wkPlus7 && asIso(p.new_eta) <= wkPlus14);
       const arrivingThisWeekDash = arrivingThisWeek;
-      const arrivingNext2WeeksDash = inFlight.filter(p => p.new_eta && asIso(p.new_eta) > wkPlus7 && asIso(p.new_eta) <= wkPlus21 && !p.delivery_date);
+      const arrivingNext2WeeksDash = stillInTransit.filter(p => p.new_eta && asIso(p.new_eta) > wkPlus7 && asIso(p.new_eta) <= wkPlus21);
       const paymentsDueSoon = inFlight.filter(p => {
         if (p.final_payment_received_date) return false;
         const due = p.final_payment_due_date_computed;
@@ -3463,6 +3627,12 @@ module.exports = function(getDb) {
 
       const nextActions = [];
       inFlight.forEach(function(p){
+        // r31n.1 — Active plans bucket only. Plans in later buckets are managed from their
+        //   own pages (Kemballs page, warehouse incoming page, warehouse received page).
+        //   Showing them here too would double-surface the same plan with conflicting actions.
+        //   Bucket rule for active = customs not cleared yet AND not received at warehouse.
+        if (p.customs_cleared_date) return;          // gone past customs → Kemballs or Incoming
+        if (p.warehouse_received_date) return;       // already at warehouse
         // r30g — Build the full stage card for this plan (independent of legacy tasks)
         const planFiles = filesByPlan[p.id] || [];
         const cardData = buildStageCard(p, supMap[p.supplier_id], planFiles);
