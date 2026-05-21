@@ -1303,6 +1303,45 @@ async function dailyTaskEvaluation(db) {
       if (sweep.rows.length) console.log('[logistics daily-eval] auto-closed ' + sweep.rows.length + ' plans (14d post-verify)');
     } catch(e) { console.error('[logistics auto-close sweep] ' + e.message); }
 
+    // r31n.1 — Aging notifications for plans stuck at Kemballs ≥ 8 weeks.
+    //   Fires once per plan per threshold-crossing day so we don't spam. Uses lg_activity to
+    //   record the notification (and check we haven't already fired this week).
+    try {
+      const stuckQ = await db.query(`
+        SELECT p.id, p.plan_number, p.campbells_in_date, p.campbells_weekly_gbp
+        FROM lg_plans p
+        WHERE p.status='active' AND p.closed_at IS NULL
+          AND p.customs_cleared_date IS NOT NULL
+          AND p.disposition IN ('kemballs','campbells')
+          AND p.delivery_date IS NULL
+          AND p.campbells_in_date IS NOT NULL
+          AND p.campbells_in_date <= CURRENT_DATE - INTERVAL '56 days'
+          AND NOT EXISTS (
+            SELECT 1 FROM lg_activity a
+            WHERE a.plan_id = p.id AND a.action = 'kemballs_aging_alert'
+              AND a.created_at > NOW() - INTERVAL '7 days'
+          )
+      `);
+      for (const row of stuckQ.rows) {
+        const weeks = Math.floor((Date.now() - new Date(row.campbells_in_date).getTime()) / (7 * 86400000));
+        const weekly = parseFloat(row.campbells_weekly_gbp) || 0;
+        const incurred = Math.round(weekly * weeks);
+        await notify(db, { role: 'logistics_shared' }, 'kemballs_aging', {
+          title: row.plan_number + ' — ' + weeks + ' weeks at Kemballs',
+          body: 'Storage cost approx £' + incurred + ' so far. Book delivery or escalate to Bobby.',
+          plan_id: row.id
+        });
+        await notify(db, { user_name: 'Bobby' }, 'kemballs_aging', {
+          title: row.plan_number + ' — ' + weeks + ' weeks at Kemballs',
+          body: 'Storage cost approx £' + incurred + ' so far. Logistics has been pinged.',
+          plan_id: row.id
+        });
+        await db.query(`INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)`,
+          [row.id, 'kemballs_aging_alert', weeks + ' weeks · £' + incurred + ' incurred', 'system']);
+      }
+      if (stuckQ.rows.length) console.log('[logistics daily-eval] kemballs aging alerts fired for ' + stuckQ.rows.length + ' plans');
+    } catch(e) { console.error('[logistics aging sweep] ' + e.message); }
+
     const r = await db.query("SELECT id FROM lg_plans WHERE status='active' AND closed_at IS NULL");
     for (const row of r.rows) await evaluateTasks(db, row.id);
     console.log('[logistics daily-eval] evaluated ' + r.rows.length + ' active plans');
@@ -2782,22 +2821,20 @@ module.exports = function(getDb) {
       else if (status === 'done')       where.push("t.status IN ('done','auto_archived')");
       if (req.query.plan_id)    { where.push('t.plan_id=$'+(i++)); vals.push(parseInt(req.query.plan_id)); }
       if (req.query.claimed_by) { where.push('t.claimed_by=$'+(i++)); vals.push(req.query.claimed_by); }
-      // r31n item 15 — mine=true: filter to tasks intended for the current user.
+      // r31n.1 — mine=true: filter to tasks intended for the current user.
       //   Matches if (a) task is name-assigned to this user, OR (b) task is role-only and the
-      //   user's role matches OR is in the shared-role pool (logistics_agent sees role='agent').
-      //   Manager/owner see all (no filter).
-      if (req.query.mine === 'true' && req.user && !isManager(req.user)) {
+      //   user's role matches the user's role pool. Managers DO see the filter (so Satyam can
+      //   see his name-assigned production checks); without mine=true they see everything.
+      if (req.query.mine === 'true' && req.user) {
         const myName = req.user.name || '';
         const myRole = (req.user.role || '').toLowerCase();
-        const myDept = (req.user.department || '').toLowerCase();
-        // Build role inclusion list — what role-only tasks does this user see?
-        //   logistics_agent → sees role='agent' tasks (the shared logistics pool)
-        //   accounts_agent  → sees role='accounts' tasks
-        //   warehouse_agent → sees role='warehouse' tasks (no rules currently emit this, future-proof)
+        // r31n.1 — Role-only role visibility (no department fallback). Bobby's DB has Mahima
+        //   with department='logistics' but role='accounts_agent' — she should see accounts work
+        //   not logistics_shared. Keying off role-only avoids cross-contamination.
         const roleVisible = [];
-        if (myRole === 'logistics_agent' || myDept === 'logistics') roleVisible.push('agent');
-        if (myRole === 'accounts_agent'  || myDept === 'accounts')  roleVisible.push('accounts');
-        if (myRole === 'warehouse_agent' || myDept === 'warehouse') roleVisible.push('warehouse');
+        if (myRole === 'logistics_agent') roleVisible.push('agent');
+        if (myRole === 'accounts_agent')  roleVisible.push('accounts');
+        if (myRole === 'warehouse_agent') roleVisible.push('warehouse');
         const namePlaceholder = '$' + (i++); vals.push(myName);
         if (roleVisible.length) {
           const rolePlaceholders = roleVisible.map(function(){ return '$' + (i++); }).join(',');
@@ -2840,8 +2877,20 @@ module.exports = function(getDb) {
     try {
       const id = parseInt(req.params.id);
       const note = (req.body && req.body.completion_note) || null;
-      const r = await db.query("UPDATE lg_tasks SET status='done', completed_by=$1, completed_at=NOW(), completion_note=$2 WHERE id=$3 RETURNING *", [actor(req), note, id]);
-      if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+      // r31n.1 — Concurrency safety: only mark done if currently open/claimed. Two agents in the
+      //   same role pool (Shauraya/Neha) might both click Done simultaneously; first wins, second
+      //   gets a friendly "already done" response.
+      const r = await db.query(
+        "UPDATE lg_tasks SET status='done', completed_by=$1, completed_at=NOW(), completion_note=$2 " +
+        "WHERE id=$3 AND status IN ('open','claimed') RETURNING *",
+        [actor(req), note, id]
+      );
+      if (!r.rows.length) {
+        // Already done — check it exists
+        const existing = (await db.query('SELECT id, status, completed_by FROM lg_tasks WHERE id=$1', [id])).rows[0];
+        if (!existing) return res.status(404).json({ error: 'Not found' });
+        return res.json({ ok: true, already_done: true, completed_by: existing.completed_by });
+      }
       const task = r.rows[0];
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)', [task.plan_id, 'task_done', task.title + (note ? ' — ' + note : ''), actor(req)]);
       // r31j — renamed rule_keys: production_check_day_7 → day_14, day_21 → day_28

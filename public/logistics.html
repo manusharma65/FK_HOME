@@ -2022,10 +2022,8 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
           <div><div class="section-title">All tasks</div><div class="section-sub">Claim and complete tasks across plans</div></div>
         </div>
         <div class="filter-bar">
-          <button class="filter-tab active" onclick="setTaskFilter('open_or_claimed', event)">Open & claimed</button>
-          <button class="filter-tab" onclick="setTaskFilter('open', event)">Open only</button>
-          <button class="filter-tab" onclick="setTaskFilter('claimed', event)">Claimed only</button>
           <button class="filter-tab" onclick="setTaskFilter('mine', event)">My tasks</button>
+          <button class="filter-tab active" onclick="setTaskFilter('open_or_claimed', event)">All open</button>
           <button class="filter-tab" onclick="setTaskFilter('done', event)">Completed</button>
         </div>
         <div id="tasksPage"><div class="loading-row"><span class="spinner"></span>Loading…</div></div>
@@ -2253,6 +2251,21 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
 </div>
 
 <!-- ── SLIP REASON MODAL ───────────────────────────────────────────── -->
+<!-- r31n.1 — generic reason modal (replaces browser prompt() for drop-claim, cancel-delivery, un-receive, gate-4 review note) -->
+<div class="modal-overlay" id="reasonModal">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-head"><div class="modal-title" id="reasonModalTitle">Reason</div></div>
+    <div class="modal-body" style="padding:20px 24px">
+      <div id="reasonModalBlurb" style="font-size:13px;color:var(--text2);line-height:1.5;margin-bottom:12px"></div>
+      <div class="field"><textarea id="reasonModalText" rows="3" placeholder="Explain in a few words…" style="width:100%"></textarea></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeReasonModal(false)">Cancel</button>
+      <button class="btn btn-primary" id="reasonModalSubmit" onclick="submitReasonModal()">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="slipModal">
   <div class="modal" style="max-width:520px">
     <div class="modal-head"><div class="modal-title">Dates changed — record one reason</div></div>
@@ -2382,6 +2395,11 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
 <script>
 // ─── State ─────────────────────────────────────────────────────────────
 let _user = null;
+// r31n.1 — Role helpers
+function isManagerRole(role) {
+  const r = (role || '').toLowerCase();
+  return r === 'owner' || r === 'manager' || r === 'admin';
+}
 let _dashboard = null;
 let _filter = 'all';
 let _allPlansFilter = 'active';
@@ -2443,6 +2461,18 @@ function todayIso() { const d = new Date(); const o = new Intl.DateTimeFormat('e
     const roleLabels = { owner: 'Owner', manager: 'Manager', logistics_agent: 'Logistics agent', accounts_agent: 'Accounts', warehouse_agent: 'Warehouse', agent: 'Agent' };
     document.getElementById('userRole').textContent = roleLabels[userRole] || (_user.is_manager ? 'Manager' : 'Logistics');
     applyRoleSidebarGating(userRole);
+    // r31n.1 — Non-managers default to "My tasks" filter on tasks page. Mahima/Neha/Shauraya
+    //   each see their own assigned work first; they can switch to all-tasks if needed. Managers
+    //   stay on "Open & claimed" to see the full picture.
+    if (!isManagerRole(userRole)) {
+      _activeTaskFilter = 'mine';
+      // Update the visual filter tab when tasks page first renders
+      setTimeout(function(){
+        document.querySelectorAll('#page-tasks .filter-tab').forEach(function(t){ t.classList.remove('active'); });
+        const mineTab = Array.from(document.querySelectorAll('#page-tasks .filter-tab')).find(function(t){ return (t.textContent || '').trim() === 'My tasks'; });
+        if (mineTab) mineTab.classList.add('active');
+      }, 100);
+    }
     await loadSuppliers();
     // r31f — warehouse_agent lands directly on warehouse page, not dashboard
     if (userRole === 'warehouse_agent') {
@@ -3551,15 +3581,25 @@ function renderTaskGroup(cls, label, tasks) {
 }
 
 function renderTaskRow(t, cls) {
-  const isMine = t.claimed_by && _user && t.claimed_by === _user.name;
-  const claimedBadge = t.status === 'claimed' ? '<span class="tag ' + (isMine ? 'green' : 'amber') + '">Claimed by ' + escapeHtml(t.claimed_by || '?') + '</span>' : '';
-  let actions = '';
-  if (t.status === 'open') actions = '<button class="btn btn-sm btn-primary" onclick="claimTask(' + t.id + ')">Claim</button>';
-  else if (t.status === 'claimed' && isMine) actions = '<button class="btn btn-sm" onclick="unclaimTask(' + t.id + ')">Release</button>';
-  actions += ' <button class="btn btn-sm btn-success" onclick="completeTask(' + t.id + ', \'' + escapeHtml(t.rule_key) + '\')">Done</button>';
+  // r31n.1 — Claim/Release dropped. Tasks have an intended_assignee_name (set by rule, locked
+  //   matrix) OR are role-shared (logistics_shared = Shauraya + Neha). Either way, anyone in
+  //   the visible pool can mark Done — first to do it wins. No claim step.
+  let assigneeTag = '';
+  if (t.intended_assignee_name) {
+    const mine = _user && _user.name && t.intended_assignee_name.toLowerCase() === _user.name.toLowerCase();
+    assigneeTag = '<span class="tag ' + (mine ? 'green' : 'grey') + '">' + escapeHtml(t.intended_assignee_name) + '</span>';
+  } else if (t.intended_role === 'agent') {
+    assigneeTag = '<span class="tag blue">Shauraya / Neha</span>';
+  } else if (t.intended_role === 'accounts') {
+    assigneeTag = '<span class="tag blue">Accounts</span>';
+  } else if (t.intended_role === 'warehouse') {
+    assigneeTag = '<span class="tag blue">Warehouse</span>';
+  }
+  const claimedBadge = assigneeTag;
+  let actions = '<button class="btn btn-sm btn-success" onclick="completeTask(' + t.id + ', \'' + escapeHtml(t.rule_key) + '\')">Done</button>';
   actions += ' <button class="btn btn-sm btn-ghost" onclick="openPlan(' + t.plan_id + ')">Open plan</button>';
   const dueStr = t.due_date ? 'Due ' + fmtDate(t.due_date) : '';
-  // r30n.1 / r31c — bulk-select checkbox: actionable tasks for claim/done, done tasks for delete-cleanup
+  // r30n.1 / r31c — bulk-select checkbox
   const isActionable = (t.status === 'open' || t.status === 'claimed');
   const isDoneOrArchived = (t.status === 'done' || t.status === 'auto_archived');
   const showCheckbox = isActionable || isDoneOrArchived;
@@ -3575,7 +3615,6 @@ function renderTaskRow(t, cls) {
       (t.plan_number ? '<span class="task-meta-item">Plan: <strong>' + escapeHtml(t.plan_number) + '</strong></span>' : '') +
       (t.supplier_name ? '<span class="task-meta-item">' + escapeHtml(t.supplier_name) + '</span>' : '') +
       (dueStr ? '<span class="task-meta-item">' + dueStr + '</span>' : '') +
-      (t.intended_role ? '<span class="task-meta-item">For: ' + escapeHtml(t.intended_role) + '</span>' : '') +
       claimedBadge +
     '</div></div>' +
     '<div class="task-actions">' + actions + '</div>' +
@@ -3583,24 +3622,9 @@ function renderTaskRow(t, cls) {
   '</div>';
 }
 
-async function claimTask(id) {
-  try {
-    await api('/tasks/' + id + '/claim', { method: 'POST' });
-    toast('Claimed', 'success');
-    loadDashboard();
-    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
-    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
-  } catch(e) { toast(e.message, 'error'); }
-}
-async function unclaimTask(id) {
-  try {
-    await api('/tasks/' + id + '/unclaim', { method: 'POST' });
-    toast('Released');
-    loadDashboard();
-    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
-    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
-  } catch(e) { toast(e.message, 'error'); }
-}
+// r31n.1 — claimTask + unclaimTask removed. Tasks have assignees (by name or role pool) but
+//   no per-user claim step. First person in the pool to mark Done wins. Simpler.
+
 async function completeTask(id, ruleKey) {
   // r31j — renamed: production_check_day_7 → day_14, day_21 → day_28
   if (ruleKey === 'production_check_day_14' || ruleKey === 'production_check_day_28') {
@@ -3627,26 +3651,49 @@ async function completeTask(id, ruleKey) {
       task = (r.tasks || []).find(t => t.id === id);
     } catch(_){}
     if (!task) { toast('Task not found', 'error'); return; }
-    const note = prompt('Add a note about what you reviewed/amended (optional):') || null;
+    const note = await askReason({
+      title: 'Mark gate-4 review complete',
+      blurb: 'Briefly note what you reviewed and any amendments made (optional).',
+      placeholder: 'e.g. checked PI/BL/packing list, amended PI line 3 quantity',
+      confirmLabel: 'Mark complete'
+    });
+    // note may be null (cancelled) — treat as cancel
+    if (note === null) return;
     try {
       await api('/plans/' + task.plan_id + '/gate4-review-done', { method: 'POST', body: note ? { note: note } : {} });
-      toast('Gate 4 review marked complete', 'success');
-      if (document.getElementById('planModal').classList.contains('active')) closeModal();
-      loadDashboard();
-      if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+      showBigSuccessBanner('✓ Gate 4 review marked complete');
+      setTimeout(function(){
+        if (document.getElementById('planModal').classList.contains('active')) closeModal();
+        loadDashboard();
+        if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+      }, 1500);
     } catch(e) { toast(e.message, 'error'); }
     return;
   }
   try {
-    await api('/tasks/' + id + '/done', { method: 'POST', body: {} });
-    toast('Done', 'success');
-    // r31n item 2 — Close the plan modal after a task save (don't leave it open with stale data).
-    //   Then re-render the underlying page so the dashboard/tasks view reflects the change.
-    //   Previously: modal stayed open and re-rendered with refetched data, which was confusing —
-    //   user expects "Done" to take them back to the list, like marking an item complete elsewhere.
-    if (document.getElementById('planModal').classList.contains('active')) closeModal();
-    loadDashboard();
-    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    // Capture task title for confirmation banner (find before marking done)
+    let taskTitle = null;
+    try {
+      const r = await api('/tasks?status=open_or_claimed');
+      const t = (r.tasks || []).find(x => x.id === id);
+      if (t) taskTitle = t.title;
+    } catch(_){}
+    const resp = await api('/tasks/' + id + '/done', { method: 'POST', body: {} });
+    // r31n.1 — Big success banner names the task that was just completed. Holds for ~2s so the
+    //   agent sees confirmation BEFORE the modal closes. Without this, modal closed silently and
+    //   agents weren't sure if the task had actually been marked done.
+    //   If another agent in the same role pool got there first, show a friendly note instead of
+    //   an error toast.
+    if (resp && resp.already_done) {
+      showBigSuccessBanner('✓ Already done by ' + (resp.completed_by || 'another agent'));
+    } else {
+      showBigSuccessBanner('✓ Done: ' + (taskTitle || 'Task'));
+    }
+    setTimeout(function(){
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      loadDashboard();
+      if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    }, 1500);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -3713,10 +3760,12 @@ async function submitEtaCheck(taskId, planId, mandatory, prevEta) {
     await api('/tasks/' + taskId + '/done', { method: 'POST', body: { completion_note: note } });
     closeEtaCheckModal();
     showBigSuccessBanner('✓ ETA check logged' + (newEta && newEta !== prevEta ? ' · new ETA ' + newEta : ''));
-    // r31n item 2 — close plan modal after task save
-    if (document.getElementById('planModal').classList.contains('active')) closeModal();
-    loadDashboard();
-    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    setTimeout(function(){
+      // r31n.1 — close plan modal AFTER banner shows
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      loadDashboard();
+      if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    }, 1500);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -3728,11 +3777,16 @@ async function confirmProdCheck() {
     await api('/tasks/' + _prodCheckState.taskId + '/done', { method: 'POST', body: { outcome, completion_note: note } });
     document.getElementById('prodCheckModal').classList.remove('active');
     _prodCheckState = null;
-    showBigSuccessBanner('✓ Production check logged');
-    // r31n item 2 — close plan modal after task save
-    if (document.getElementById('planModal').classList.contains('active')) closeModal();
-    loadDashboard();
-    if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    const banner = outcome === 'on_track'
+      ? '✓ Production check logged — on track'
+      : (outcome === 'delay_1wk' ? '✓ Production check logged — 1 week delay, ETA pushed' : '✓ Production check logged — 2 weeks delay, ETA pushed');
+    showBigSuccessBanner(banner);
+    setTimeout(function(){
+      // r31n.1 — close plan modal AFTER banner shows so the agent sees confirmation
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      loadDashboard();
+      if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    }, 1500);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4228,11 +4282,15 @@ async function renderTasksPage() {
   el.innerHTML = '<div class="loading-row"><span class="spinner"></span>Loading…</div>';
   try {
     let qs = '';
-    if (_activeTaskFilter === 'mine') qs = '?status=open_or_claimed&claimed_by=' + encodeURIComponent(_user.name);
+    // r31n.1 — 'mine' uses server-side filter that matches tasks by intended_assignee_name OR
+    //   intended_role for the user's department. Previously only matched claimed_by. The change:
+    //   Mahima now sees pay_deposit / pay_final / pay_duty assigned by name automatically, even
+    //   if she hasn't yet pressed "Claim" — they're hers by design.
+    if (_activeTaskFilter === 'mine') qs = '?status=open_or_claimed&mine=true';
     else qs = '?status=' + _activeTaskFilter;
     const r = await api('/tasks' + qs);
     let tasks = r.tasks || [];
-    if (_activeTaskFilter === 'mine') tasks = tasks.filter(t => t.claimed_by === _user.name);
+    // No need for client-side filter on 'mine' — server already filtered.
     if (!tasks.length) { el.innerHTML = '<div class="loading-row">No tasks in this view</div>'; _bulkTaskIds = {}; updateBulkBar(); return; }
     // r30n.1 — drop stale selections (tasks that are no longer in view)
     const visibleIds = {}; tasks.forEach(t => { visibleIds[t.id] = true; });
@@ -4241,7 +4299,7 @@ async function renderTasksPage() {
     const overdue = tasks.filter(t => t.due_date && String(t.due_date).slice(0,10) < today && (t.status === 'open' || t.status === 'claimed'));
     const dueToday = tasks.filter(t => t.due_date && String(t.due_date).slice(0,10) === today && (t.status === 'open' || t.status === 'claimed'));
     const rest    = tasks.filter(t => !overdue.includes(t) && !dueToday.includes(t));
-    // r30n.1 — bulk action bar (sticky at top of list)
+    // r30n.1 / r31n.1 — bulk action bar (sticky at top of list). Claim dropped in r31n.1.
     const isOwner = _user && (_user.role || '').toLowerCase() === 'owner';
     let html = '<div id="bulkTaskBar" style="padding:10px 20px;background:var(--bg2);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
       '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">' +
@@ -4249,7 +4307,6 @@ async function renderTasksPage() {
       '<span>Select all visible</span></label>' +
       '<span id="bulkCount" style="font-size:12px;color:var(--text3)">0 selected</span>' +
       '<div style="flex:1"></div>' +
-      '<button id="bulkClaimBtn" class="btn btn-sm btn-primary" onclick="bulkAction(\'claim\')" disabled>Claim selected</button>' +
       '<button id="bulkDoneBtn" class="btn btn-sm btn-success" onclick="bulkAction(\'done\')" disabled>Mark done</button>' +
       (isOwner ? '<button id="bulkDeleteBtn" class="btn btn-sm btn-danger" onclick="bulkAction(\'delete\')" disabled>Delete</button>' : '') +
       '</div>';
@@ -4296,7 +4353,7 @@ function updateBulkBar() {
     const st = cb.getAttribute('data-task-status') || '';
     if (st === 'done' || st === 'auto_archived') hasDoneSelected = true;
   });
-  const cb = document.getElementById('bulkClaimBtn'); if (cb) { cb.disabled = (n === 0) || hasDoneSelected; cb.title = hasDoneSelected ? 'Cannot claim completed tasks' : ''; }
+  // r31n.1 — bulkClaimBtn removed; no claim path. Only Done + Delete remain.
   const db = document.getElementById('bulkDoneBtn');  if (db) { db.disabled = (n === 0) || hasDoneSelected; db.title = hasDoneSelected ? 'Tasks already done' : ''; }
   const xb = document.getElementById('bulkDeleteBtn'); if (xb) { xb.disabled = (n === 0); }
   // Reflect select-all checkbox state
@@ -4309,6 +4366,7 @@ function updateBulkBar() {
 async function bulkAction(action) {
   const ids = Object.keys(_bulkTaskIds || {}).map(x => parseInt(x)).filter(x => !!x);
   if (!ids.length) return;
+  if (action === 'claim') return;  // r31n.1 — claim path dropped
   let note = null;
   if (action === 'done') {
     note = prompt('Optional completion note for all ' + ids.length + ' tasks (leave blank for none):', '');
@@ -4316,9 +4374,6 @@ async function bulkAction(action) {
   }
   if (action === 'delete') {
     if (!confirm('PERMANENTLY DELETE ' + ids.length + ' task(s)?\n\nThis cannot be undone.')) return;
-  }
-  if (action === 'claim') {
-    if (!confirm('Claim ' + ids.length + ' task(s) for yourself?')) return;
   }
   try {
     const body = { action: action, ids: ids };
@@ -4654,6 +4709,41 @@ async function renderKemballsPage() {
   } catch(e) { el.innerHTML = '<div class="lane-empty">Error: ' + escapeHtml(e.message) + '</div>'; }
 }
 
+// r31n.1 — Generic "ask for reason" modal. Replaces browser prompt() across the app (mobile-hostile,
+//   ugly on desktop, no styling). Returns a promise that resolves with the trimmed reason string,
+//   or null if user cancels. Optional `required` flag enables/disables submit on empty input.
+let _reasonResolver = null;
+function askReason(opts) {
+  return new Promise(function(resolve) {
+    _reasonResolver = resolve;
+    document.getElementById('reasonModalTitle').textContent = opts.title || 'Reason';
+    document.getElementById('reasonModalBlurb').textContent = opts.blurb || '';
+    const ta = document.getElementById('reasonModalText');
+    ta.value = '';
+    ta.placeholder = opts.placeholder || 'Explain in a few words…';
+    document.getElementById('reasonModalSubmit').textContent = opts.confirmLabel || 'Confirm';
+    document.getElementById('reasonModal').classList.add('active');
+    setTimeout(function(){ try { ta.focus(); } catch(_){} }, 50);
+  });
+}
+function closeReasonModal(submitted) {
+  document.getElementById('reasonModal').classList.remove('active');
+  if (_reasonResolver) {
+    const r = _reasonResolver;
+    _reasonResolver = null;
+    if (!submitted) r(null);
+  }
+}
+function submitReasonModal() {
+  const v = (document.getElementById('reasonModalText').value || '').trim();
+  document.getElementById('reasonModal').classList.remove('active');
+  if (_reasonResolver) {
+    const r = _reasonResolver;
+    _reasonResolver = null;
+    r(v || null);
+  }
+}
+
 // r31j — DELETED: bookKemballsRetrieval. Retrieval booking moved to unified gate 9 flow.
 //   The Kemballs page no longer has its own inline booking form (was creating dual workflows).
 
@@ -4665,14 +4755,32 @@ async function bookDeliveryFromBucket(planId, planNumber, prefix) {
   const deliveryDate = (document.getElementById(prefix + 'Date_' + planId).value || '').trim();
   if (!partner) { toast('Enter delivery partner', 'error'); return; }
   if (!deliveryDate) { toast('Pick a delivery date', 'error'); return; }
+  // r31n.1 — Disable the button during request to prevent double-click double-booking.
+  const partnerInput = document.getElementById(prefix + 'Partner_' + planId);
+  const dateInput = document.getElementById(prefix + 'Date_' + planId);
+  // Find the Book button (nearest button sibling)
+  const btn = partnerInput && partnerInput.closest('div') ? partnerInput.closest('div').parentElement.querySelector('button.btn-primary') : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Booking…'; }
+  if (partnerInput) partnerInput.disabled = true;
+  if (dateInput) dateInput.disabled = true;
   try {
     await api('/plans/' + planId + '/book-delivery', { method: 'POST', body: { partner: partner, delivery_date: deliveryDate } });
     showBigSuccessBanner('✓ Delivery booked for ' + planNumber);
-    // Refresh whichever page we're on
-    if (prefix === 'kb') renderKemballsPage();
-    if (prefix === 'wi') renderWarehouseIncomingPage();
-    loadDashboard();
-  } catch(e) { toast(e.message || 'Booking failed', 'error'); }
+    setTimeout(function(){
+      if (prefix === 'kb') renderKemballsPage();
+      if (prefix === 'wi') renderWarehouseIncomingPage();
+      if (prefix === 'g9') {
+        if (document.getElementById('planModal').classList.contains('active')) closeModal();
+        if (document.getElementById('stageEditorModal').classList.contains('active')) closeStageEditor();
+      }
+      loadDashboard();
+    }, 1500);
+  } catch(e) {
+    toast(e.message || 'Booking failed', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🚚 Book'; }
+    if (partnerInput) partnerInput.disabled = false;
+    if (dateInput) dateInput.disabled = false;
+  }
 }
 
 // r31n.1 — Switch disposition from a bucket card. Used for last-minute route changes:
@@ -4699,12 +4807,15 @@ async function switchDispositionBucket(planId, planNumber, newDispo) {
 //   Plan returns to its pre-booking bucket (Kemballs if disposition=kemballs, otherwise stays in
 //   warehouse-incoming as "needs booking").
 async function cancelDeliveryBooking(planId, planNumber) {
-  const reason = prompt('Why is the delivery being cancelled?\n\n(e.g. "carrier couldn\'t accommodate date", "wrong container", "changed our mind")');
+  const reason = await askReason({
+    title: 'Cancel delivery booking — ' + planNumber,
+    blurb: 'Why is the delivery being cancelled? (e.g. carrier couldn\'t accommodate, wrong container, changed plans)',
+    confirmLabel: 'Cancel booking'
+  });
   if (reason === null) return;
-  const trimmed = reason.trim();
-  if (!trimmed) { toast('Reason required', 'error'); return; }
+  if (!reason) { toast('Reason required', 'error'); return; }
   try {
-    await api('/plans/' + planId + '/cancel-delivery-booking', { method: 'POST', body: { reason: trimmed } });
+    await api('/plans/' + planId + '/cancel-delivery-booking', { method: 'POST', body: { reason: reason } });
     showBigSuccessBanner('✓ Delivery cancelled for ' + planNumber);
     renderKemballsPage();
     renderWarehouseIncomingPage();
@@ -4715,12 +4826,15 @@ async function cancelDeliveryBooking(planId, planNumber) {
 // r31n.1 — Un-receive. Manager only. Rare: Harp marked received but it's wrong (different container,
 //   mistake). Clears warehouse_received_date so the plan goes back to incoming.
 async function unreceiveAtWarehouse(planId, planNumber) {
-  const reason = prompt('Un-receive ' + planNumber + '?\n\nThis is a correction action — only use if the receipt was logged in error.\n\nReason:');
+  const reason = await askReason({
+    title: 'Un-receive ' + planNumber,
+    blurb: 'This is a correction action — only use if the receipt was logged in error. The plan will return to incoming.',
+    confirmLabel: 'Un-receive'
+  });
   if (reason === null) return;
-  const trimmed = reason.trim();
-  if (!trimmed) { toast('Reason required', 'error'); return; }
+  if (!reason) { toast('Reason required', 'error'); return; }
   try {
-    await api('/plans/' + planId + '/unreceive', { method: 'POST', body: { reason: trimmed } });
+    await api('/plans/' + planId + '/unreceive', { method: 'POST', body: { reason: reason } });
     showBigSuccessBanner('✓ ' + planNumber + ' un-received');
     renderWarehouseIncomingPage();
     loadDashboard();
@@ -6117,11 +6231,8 @@ function currentGateFieldsHtml(p, s, audit, targetGate) {
     html += dateField('duty_paid_date', 'Duty paid date', p.duty_paid_date, audit.duty_paid_date);
   } else if (gate === 8) {
     // r31g — gate 8 is Customs cleared (was frontend gate 9).
-    // r31n item 11 — Mandatory disposition confirmation. Gate-5 set initial intent; gate-8 is
-    //   the point of no return. Server rejects customs_cleared_date if disposition is null. UI
-    //   surfaces the picker with a clear warning, and the route choice determines what happens
-    //   next: Warehouse → plan stays active, gate 9 task fires. Kemballs → plan parks, drops from
-    //   active list, "Bring to warehouse" button on Kemballs page brings it back later.
+    // r31n.1 — Mandatory disposition confirmation. Gate-5 set initial intent; gate-8 is the
+    //   point of no return. Server rejects customs_cleared_date if disposition is null.
     html += '<div class="field" style="grid-column: span 2;background:#fff8f0;border:1px solid #f5c8a8;border-radius:8px;padding:12px 14px">';
     html += '<label>Final destination — confirm route <span style="color:#dc2626;font-weight:600">required to mark customs cleared</span></label>';
     html += '<select id="f_disposition" style="margin-top:4px">';
@@ -6130,8 +6241,8 @@ function currentGateFieldsHtml(p, s, audit, targetGate) {
     html += '<option value="kemballs"' + ((p.disposition === 'kemballs' || p.disposition === 'campbells') ? ' selected' : '') + '>Kemballs (storage, retrieve later)</option>';
     html += '</select>';
     html += '<div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.5">' +
-            '<strong>Warehouse:</strong> plan stays active, a "Book local delivery" task is created.<br>' +
-            '<strong>Kemballs:</strong> plan moves to the Kemballs section. Storage cost starts. Use "Bring to warehouse" there when ready.' +
+            '<strong>Warehouse:</strong> plan moves to Warehouse Incoming after save — book delivery from there.<br>' +
+            '<strong>Kemballs:</strong> plan moves to the Kemballs page after save — book delivery from there when ready. Storage clock starts now.' +
             '</div>';
     html += '</div>';
     html += dateField('customs_cleared_date', 'Customs cleared date', p.customs_cleared_date, audit.customs_cleared_date);
@@ -6290,6 +6401,11 @@ function renderGateSupplierLinkButton(p, gateNum) {
     // r31h — freight partner delivery booking. Needs a partner picked from lg_freight_agents.
     // r31j — unified: both routes use local_delivery_booked_date now.
     if (p.local_delivery_booked_date && p.delivery_date) return ''; // fully done — no email button
+    // r31n.1 item 13 — Kemballs route doesn't use the freight-partner email button. Delivery
+    //   booking from Kemballs happens via the inline Book Delivery form (different partner pool,
+    //   different workflow). Hide the button entirely; the inline form on the Kemballs card
+    //   handles the action.
+    if (p.disposition === 'kemballs' || p.disposition === 'campbells') return '';
     return renderFreightPartnerBookingButton(p);
   } else {
     return '';
@@ -6763,12 +6879,15 @@ async function closeClaim(claimId, planId) {
 // r31n item 7 — Drop claim. Distinct from Close (which means resolved). Drop = "shouldn't
 //   have been raised" or "decided not to pursue". Requires a reason so the audit log is useful.
 async function dropClaim(claimId, planId) {
-  const reason = prompt('Why are you dropping this claim?\n\n(e.g. "raised in error", "value too small to pursue", "supplier already credited us elsewhere")');
-  if (reason === null) return;  // user cancelled
-  const trimmed = reason.trim();
-  if (!trimmed) { toast('Reason required', 'error'); return; }
+  const reason = await askReason({
+    title: 'Drop claim',
+    blurb: 'Why are you dropping this claim? (e.g. "raised in error", "value too small to pursue", "supplier already credited us elsewhere")',
+    confirmLabel: 'Drop claim'
+  });
+  if (reason === null) return;
+  if (!reason) { toast('Reason required', 'error'); return; }
   try {
-    await api('/claims/' + claimId + '/drop', { method: 'POST', body: { reason: trimmed } });
+    await api('/claims/' + claimId + '/drop', { method: 'POST', body: { reason: reason } });
     showBigSuccessBanner('✓ Claim dropped');
     openPlan(planId);
     loadDashboard();
