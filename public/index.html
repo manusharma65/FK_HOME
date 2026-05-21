@@ -6078,7 +6078,14 @@ async function amzAssignTask(groupKey) {
   // r21: hard-block if no cached AI critique. Subtasks are seeded from critique
   // bullets so without it the agent has no actionable list. r22: owner/manager
   // can override if the product genuinely has no ASIN (data quality issue).
-  if (!p.asin) {
+  // r35.10: parent objects don't carry p.asin — they carry p.asins[] (an array)
+  // because a parent may group multiple ASIN variants. The old `!p.asin` check
+  // was firing for EVERY product, gated by manager override so agents always
+  // saw "no ASIN" lockout even on products that obviously had ASINs. Fixed by
+  // reading the primary ASIN from p.asins[0] (same pattern used by Run AI critique
+  // button at line ~5653).
+  const primaryAsin = (p.asins || [])[0];
+  if (!primaryAsin) {
     const me = window._meCache || {};
     const isPriv = ((me.role||'').toLowerCase()==='owner') || ((me.role||'').toLowerCase()==='manager') || ((me.department||'').toLowerCase()==='manager');
     if (!isPriv) {
@@ -6088,7 +6095,7 @@ async function amzAssignTask(groupKey) {
     // Owner/manager: skip critique check, allow direct assignment
   } else {
     try {
-      const cr = await fetch('/api/amazon/listing-critique?asin=' + encodeURIComponent(p.asin) + '&cachedOnly=1', { headers: getAuthHeaders() });
+      const cr = await fetch('/api/amazon/listing-critique?asin=' + encodeURIComponent(primaryAsin) + '&cachedOnly=1', { headers: getAuthHeaders() });
       const cj = await cr.json();
       const issues = cj && cj.critique && Array.isArray(cj.critique.issues) ? cj.critique.issues : [];
       if (!cj || !cj.critique || issues.length === 0) {

@@ -1,41 +1,33 @@
-// CampaignPulse — deploy marker 2026-05-20 r35.9 (FIVE FEATURES + HYGIENE.
-// (1) D — Per-agent Opus quota on /api/tasks/:id/escalation-analysis. 24h
-// cooldown per (task, agent), broken when the agent submits non-trivial
-// notes (≥10 chars) via /api/tasks/:id/status. Cache hits don't count
-// toward quota. Owner/manager bypass entirely. Friendly lockout message
-// surfaced via HTTP 429 + quotaMessage field. New table ai_escalation_log.
-// (2) F — Display-name dedupe badge on Tasks. /api/tasks now annotates each
-// open/in_progress task with dedupe_count + dedupe_sibling_ids. Frontend
-// shows 🔗 badge on cards with siblings; click opens merge dialog.
-// (3) F-merge — POST /api/tasks/:id/merge-into endpoint (Option 2: close one,
-// point to other). Dismisses the loser task with "Merged into #X" note,
-// adds matching note to the survivor. Cross-department + cross-name merge
-// rejected. Activity-log entry recorded.
-// (4) Sessions/CVR in product modal. Mirrors the card stat-grid logic from
-// r35.8. Empty until Brand Analytics SP-API role approved (requested
-// 2026-05-20 ~14:30; awaiting Amazon).
-// (5) Product merge opened to agents. /api/amazon/products/merge previously
-// owner+manager only. Now accepts any active staff (dept in
-// amazon/google/logistics/accounts/warehouse) provided confirmed:true is
-// sent. Manager still bypasses confirmation. Audit log records role tag.
-// HYGIENE: removed dead previousNoteSaysWait regex function (no callers).
-// DROPPED FROM SHIP: G (Google consecutive-day rules — Google scheduler
-// uses 7d totals not daily snapshots; bigger work than estimated, deferred).
-// Other hygiene items (AGENT_ALIASES_FALLBACK removal, whereActiveTask
-// helper, snooze endpoint consolidation, duplicate CREATE TABLE collapse)
-// pulled — turns out they need real audits not 5-min tidy work. Next time.
-// INHERITS all of r35.8 (Product card 4-layer diagnostic, sessions/CVR
-// data path, Doing Great + Monitor buckets), r35.7 (BUYABLE recovery boot),
-// r35.6 (REMOVED sweep 2h→3d + product-status recovery), r35.5 (consecutive-
-// day scoring, Sharpen cache fix, Amazon /take endpoint, debug auth),
-// r35.4 (paused root cause, alert state consistency, scheduler idempotency,
-// admin-endpoint security cleanup).
-// NOT IN THIS SHIP (next chat): E (keyword surfacing), H (state.alerts
-// unification), I (AI cache DB persistence — measure first), P6 (Coach
-// briefing endpoint), G (Google consecutive-day), agent-side product hide
-// already works (no changes needed). Awaiting Brand Analytics approval to
-// populate amazon_traffic_snapshots — then trigger /api/admin/backfill-
-// traffic?days=22 to seed 22 days back to 28 April CP launch.)
+// CampaignPulse — deploy marker 2026-05-21 r35.10 (CRITICAL FIX: Sales & Traffic
+// report was failing silently since CP launch on 28 April. The fetchSalesAndTrafficReport
+// function downloaded the report document as 'text' and JSON.parse'd it directly —
+// but Amazon's SP-API returns the document as GZIP-compressed binary. Every nightly
+// 04:00 cron + every backfill attempt produced "Unexpected token at position 0"
+// silently logged via console.error, and amazon_traffic_snapshots stayed at 0 rows.
+// Diagnosed today (2026-05-21) via 1-day backfill log. Fix mirrors the working
+// search-term download pattern at line ~5032: arraybuffer download, conditional
+// zlib.gunzipSync based on docMeta.compressionAlgorithm, then JSON.parse. Also
+// added decompression error path and includes first 120 chars of body in parse
+// errors so silent format changes don't hide again.
+// ALSO INCLUDED: r35.10 added /api/admin/traffic-debug-full endpoint (built during
+// diagnosis, owner-only) that walks all 4 steps and returns a full trace. Useful
+// for future SP-API report flow debugging.
+// DEPLOY-DAY ACTIONS REQUIRED:
+//   1. Verify deploy: head -1 server.js shows r35.10
+//   2. Manual backfill of 22 days back to CP launch 28 April:
+//      POST /api/admin/backfill-traffic?days=22  (~88 min, 4-min throttle)
+//   3. SQL check after ~5 min: rows should start accumulating
+//      SELECT COUNT(*), MIN(report_date), MAX(report_date) FROM amazon_traffic_snapshots
+//   4. After ~90 min: full 22 days populated. Refresh products page.
+//      Sessions/CVR cards + Doing Great tab should populate naturally.
+// INHERITS all of r35.9 (Opus quota, dedupe badge + task merge, Sessions/CVR
+// modal tiles, agent product merge, hygiene), r35.8 (4-layer product diagnostic),
+// r35.7 (BUYABLE recovery), r35.6 (REMOVED sweep 2h→3d), r35.5 (consecutive-day
+// scoring + scoring fix), r35.4 (paused root cause + alert state consistency).
+// NOT IN THIS SHIP (next chat): E (keyword surfacing rethink — three lanes:
+// lost ground + verified wins + hidden gems), 30d tiles in product modal,
+// G (Google consecutive-day rules), H (state.alerts unification), I (AI cache
+// DB persistence), P6 (Coach briefing endpoint).
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -209,7 +201,6 @@ app.use('/api', requireAuth);
 // r30a — Logistics module (self-contained router; lazy-binds db at request time)
 const logisticsRouter = require('./server/logistics')(function() { return db; });
 app.use('/api/logistics', logisticsRouter);
-app.use('/s', logisticsRouter._supplierShare);
 
 let state = {
   accessToken: null,
@@ -1093,14 +1084,36 @@ async function fetchSalesAndTrafficReport(reportDate) {
     }
     if (!docId) throw new Error('report polling timed out');
 
-    // Step 3 — fetch the document URL, then download + parse
+    // Step 3 — fetch the document URL, then download + parse.
+    // r35.10 fix: SP-API Reports v2021-06-30 returns documents with an optional
+    // compressionAlgorithm field ('GZIP' or absent). Previous code downloaded
+    // as 'text' and JSON.parse'd directly — which silently failed for ANY gzipped
+    // response with "Unexpected token at position 0". That's why
+    // amazon_traffic_snapshots stayed empty since launch. Pattern mirrors the
+    // working search-term download path at line ~5032.
     const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
     const docUrl = docMeta && docMeta.url;
     if (!docUrl) throw new Error('no document url');
-    const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'text' });
+    const compression = (docMeta && docMeta.compressionAlgorithm) || null;
+    const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'arraybuffer' });
+    let bodyText;
+    try {
+      if (compression === 'GZIP') {
+        const zlib = require('zlib');
+        bodyText = zlib.gunzipSync(Buffer.from(docRes.data)).toString('utf8');
+      } else {
+        // No compression — just decode the bytes as UTF-8 text
+        bodyText = Buffer.from(docRes.data).toString('utf8');
+      }
+    } catch(decompErr) {
+      throw new Error('decompression failed (compression=' + compression + '): ' + decompErr.message);
+    }
     let payload;
-    try { payload = JSON.parse(docRes.data); }
-    catch(e) { throw new Error('failed to parse report JSON: ' + e.message); }
+    try { payload = JSON.parse(bodyText); }
+    catch(e) {
+      // Include first 120 chars of body for debugging silent format changes
+      throw new Error('failed to parse report JSON: ' + e.message + ' | first 120 chars: ' + bodyText.slice(0, 120));
+    }
 
     // Step 4 — extract per-ASIN rows. Shape:
     // payload.salesAndTrafficByAsin = [{ parentAsin, childAsin, sku, sales: {...}, traffic: {...} }]
@@ -6234,6 +6247,124 @@ app.post('/api/admin/backfill-ad-performance', async function(req, res) {
     console.log('[r22 backfill] done');
   })().catch(function(e){ console.error('[r22 backfill] outer error: ' + e.message); });
   res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each day takes ~2-3 min, total ~' + (days * 3) + ' min. Check server logs.' });
+});
+
+// r35.10: POST /api/admin/traffic-debug-full?date=YYYY-MM-DD — runs ALL 4
+// steps of fetchSalesAndTrafficReport and returns what happened at each step.
+// Tells us exactly where rows are getting lost. Synchronous (~3 min).
+// Owner only.
+app.post('/api/admin/traffic-debug-full', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  const date = String(req.query.date || '').trim() || new Date(Date.now() - 24*60*60*1000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const trace = { date: date, steps: [] };
+  try {
+    // STEP 1 — createReport
+    trace.steps.push({ step: 1, name: 'createReport', startedAt: new Date().toISOString() });
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: date + 'T00:00:00Z',
+      dataEndTime: date + 'T23:59:59Z',
+      reportOptions: { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
+    });
+    const reportId = createRes && createRes.reportId;
+    trace.steps[trace.steps.length - 1].response = createRes;
+    trace.steps[trace.steps.length - 1].reportId = reportId;
+    trace.steps[trace.steps.length - 1].ok = !!reportId;
+    if (!reportId) {
+      trace.failedAt = 'createReport';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 2 — poll until DONE
+    trace.steps.push({ step: 2, name: 'pollUntilDone', startedAt: new Date().toISOString(), polls: [] });
+    let docId = null;
+    let lastStatus = null;
+    const pollStart = Date.now();
+    const maxWait = 180000;
+    while (Date.now() - pollStart < maxWait) {
+      await new Promise(function(r){ setTimeout(r, 8000); });
+      const status = await spApiGet('/reports/2021-06-30/reports/' + encodeURIComponent(reportId));
+      lastStatus = status;
+      const procStatus = status && status.processingStatus;
+      trace.steps[trace.steps.length - 1].polls.push({ at: new Date().toISOString(), status: procStatus });
+      if (procStatus === 'DONE') {
+        docId = status.reportDocumentId;
+        break;
+      } else if (procStatus === 'CANCELLED' || procStatus === 'FATAL') {
+        trace.steps[trace.steps.length - 1].finalStatus = procStatus;
+        trace.steps[trace.steps.length - 1].fullStatusResponse = status;
+        trace.failedAt = 'pollUntilDone:' + procStatus;
+        return res.status(500).json(trace);
+      }
+    }
+    trace.steps[trace.steps.length - 1].finalStatus = lastStatus && lastStatus.processingStatus;
+    trace.steps[trace.steps.length - 1].docId = docId;
+    trace.steps[trace.steps.length - 1].ok = !!docId;
+    if (!docId) {
+      trace.steps[trace.steps.length - 1].fullStatusResponse = lastStatus;
+      trace.failedAt = 'pollUntilDone:timeout';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 3 — fetch document URL
+    trace.steps.push({ step: 3, name: 'fetchDocumentUrl', startedAt: new Date().toISOString() });
+    const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
+    trace.steps[trace.steps.length - 1].docMeta = docMeta;
+    const docUrl = docMeta && docMeta.url;
+    trace.steps[trace.steps.length - 1].hasUrl = !!docUrl;
+    trace.steps[trace.steps.length - 1].compressionAlgorithm = docMeta && docMeta.compressionAlgorithm;
+    trace.steps[trace.steps.length - 1].ok = !!docUrl;
+    if (!docUrl) {
+      trace.failedAt = 'fetchDocumentUrl';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 4 — download + parse + report shape
+    trace.steps.push({ step: 4, name: 'downloadAndParse', startedAt: new Date().toISOString() });
+    try {
+      const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'text' });
+      trace.steps[trace.steps.length - 1].rawBytes = (docRes.data || '').length;
+      trace.steps[trace.steps.length - 1].firstChars = String(docRes.data || '').slice(0, 200);
+      let payload;
+      try {
+        payload = JSON.parse(docRes.data);
+        trace.steps[trace.steps.length - 1].parsedOk = true;
+        trace.steps[trace.steps.length - 1].topLevelKeys = Object.keys(payload);
+        const arr = (payload && payload.salesAndTrafficByAsin) || [];
+        trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength = arr.length;
+        if (arr.length > 0) {
+          trace.steps[trace.steps.length - 1].firstRow = arr[0];
+        }
+        // Also report any other top-level shapes Amazon may have used
+        if (payload.salesAndTrafficByDate) trace.steps[trace.steps.length - 1].salesAndTrafficByDateLength = payload.salesAndTrafficByDate.length;
+        trace.steps[trace.steps.length - 1].ok = arr.length > 0;
+      } catch(parseErr) {
+        trace.steps[trace.steps.length - 1].parseError = parseErr.message;
+        trace.steps[trace.steps.length - 1].ok = false;
+        trace.failedAt = 'parse';
+        return res.status(500).json(trace);
+      }
+      if (trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength === 0) {
+        trace.failedAt = 'emptyReport';
+      }
+      trace.summary = 'Report parsed. ' + (trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength || 0) + ' ASIN rows in payload.';
+    } catch(dlErr) {
+      trace.steps[trace.steps.length - 1].downloadError = dlErr.message;
+      trace.steps[trace.steps.length - 1].errorStack = (dlErr.stack || '').slice(0, 800);
+      trace.steps[trace.steps.length - 1].ok = false;
+      trace.failedAt = 'download';
+      return res.status(500).json(trace);
+    }
+    res.json(trace);
+  } catch(e) {
+    trace.fatalError = e.message;
+    trace.fatalStack = (e.stack || '').slice(0, 1200);
+    res.status(500).json(trace);
+  }
 });
 
 // r23: POST /api/admin/traffic-diagnose?date=YYYY-MM-DD — runs ONE day and
