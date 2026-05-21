@@ -1,17 +1,25 @@
-// server/logistics.js — Logistics module (r30b)
+// server/logistics.js — Logistics module (r31n)
 //
-// r30b additions over r30a:
-//   • Tasks engine — auto-trigger reminders driven by plan state
-//   • Recurring ETA-check task (single live task, bumping next_eta_check_date)
-//   • Restructured gates to match real workflow
-//   • Customs duty chain (Mahima)
-//   • Shipper payment (explicit)
-//   • Slip reason tracking
-//   • Plan status (active/cancelled/closed)
-//   • Remarks + shipping_notes fields
-//   • Supplier shareable form (no auth, token-based)
-//   • Bilingual EN/中文 task titles
-//   • Kemballs terminology
+// r31n changes (single ship, logistics fixes before r32 architecture rebuild):
+//   • Item 2  — refresh + close plan modal after task save (frontend)
+//   • Item 4  — Day 14 + Day 28 production checks → Satyam (per-name assignee)
+//   • Items 5+6 — quote/delivery booking link token substitution fix
+//   • Item 7  — Drop-claim mechanic (separate from Close-claim) + fixed claim assignees
+//   • Item 8  — Production check delay outcome: "1 week" / "2 weeks" → push ETA
+//   • Item 9  — Supplier form: auto-upload + replace button + reason-after-resubmit
+//   • Item 10 — Gate-6 (send_docs_to_agent) due date: ETA−14d (not order_date)
+//   • Item 11 — Kemballs parking flow. Gate-8 disposition picker = mandatory confirmation
+//               of gate-5 intent. If kemballs: status → 'kemballs_parked', drops from active
+//               list, task evaluator skips rules. "Bring to warehouse" button on Kemballs
+//               page → status back to 'active' + fires book_local_delivery.
+//   • Item 12 — New Gate-4 review task → Shauraya/Neha (review & amend supplier docs)
+//   • Item 13 — Hide gate-9 freight-partner email if disposition=kemballs (covered by item 11
+//               for new plans; this guard is for plans returning from Kemballs to warehouse)
+//   • Item 14 — notify(userId, event, data) helper. Logs + writes to lg_notifications table.
+//               GChat webhook wiring INTENTIONALLY OMITTED — being killed in r32 for in-app bell.
+//   • Item 15 — 19-task assignee matrix locked (Mahima/Satyam/Shauraya/Neha/Harp).
+//
+// Inherits all r30b → r31m-prep features. Header marker was stale at r30b through these.
 //
 // Mounted from server.js:
 //   const logisticsRouter = require('./server/logistics')(function(){ return db; });
@@ -390,14 +398,42 @@ async function ensureLogisticsSchema(db) {
     `UPDATE lg_tasks SET rule_key='production_check_day_14' WHERE rule_key='production_check_day_7'`,
     `UPDATE lg_tasks SET rule_key='production_check_day_28' WHERE rule_key='production_check_day_21'`,
     // ── r31m-prep — Google Chat webhook URL per user for real-time notifications
-    `ALTER TABLE users ADD COLUMN IF NOT EXISTS gchat_webhook_url TEXT`
+    //   r31n note: GChat path is being killed in r32 (replaced by in-app bell). Column kept
+    //   for now to avoid breaking existing rows; gets dropped when the bell ships.
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS gchat_webhook_url TEXT`,
+    // ── r31n — per-name task assignment (in addition to per-role).
+    //   Used for tasks owned by a specific person (e.g. production checks → Satyam,
+    //   book_container → Shauraya, eta_check → Shauraya). NULL = falls back to role-based.
+    `ALTER TABLE lg_tasks ADD COLUMN IF NOT EXISTS intended_assignee_name TEXT`,
+    // ── r31n — gate-4 review task tracking. Flag flips true when Shauraya/Neha mark
+    //   the docs reviewed (and amended if needed) after supplier submits gate-4 uploads.
+    `ALTER TABLE lg_plans ADD COLUMN IF NOT EXISTS gate4_review_done BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE lg_plans ADD COLUMN IF NOT EXISTS gate4_review_done_at TIMESTAMP`,
+    `ALTER TABLE lg_plans ADD COLUMN IF NOT EXISTS gate4_review_done_by TEXT`,
+    // ── r31n — notifications scaffolding. notify() helper writes here (logs only for now);
+    //   r32 reads from this table to render the bell. Keeps r31n forward-compatible without
+    //   shipping a UI yet.
+    `CREATE TABLE IF NOT EXISTS lg_notifications (
+       id SERIAL PRIMARY KEY,
+       user_id INTEGER,
+       user_name TEXT,
+       event_type TEXT NOT NULL,
+       title TEXT NOT NULL,
+       body TEXT,
+       plan_id INTEGER,
+       task_id INTEGER,
+       read_at TIMESTAMP,
+       created_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_notif_user ON lg_notifications(user_id, read_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_lg_notif_created ON lg_notifications(created_at DESC)`
   ];
   let ok = 0, fail = 0;
   for (const sql of stmts) {
     try { await db.query(sql); ok++; }
     catch(e) { fail++; console.error('[logistics schema] ' + e.message + ' — ' + sql.split('\n')[0].slice(0,80)); }
   }
-  console.log('[logistics schema r31m-prep] ' + ok + '/' + (ok+fail) + ' statements applied');
+  console.log('[logistics schema r31n] ' + ok + '/' + (ok+fail) + ' statements applied');
 }
 
 async function ensureLogisticsSeed(db) {
@@ -505,6 +541,72 @@ function isWarehouseOnlyUser(u) {
   return (u.role || '').toLowerCase() === 'warehouse_agent';
 }
 function actor(req) { return (req.user && req.user.name) || 'unknown'; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// r31n — notify() helper. Single entry point for all in-app notifications.
+//
+// Today: writes a row to lg_notifications + console.log. No UI surface yet.
+// r32: the bell-icon dropdown reads from lg_notifications; same call sites work
+// unchanged. This keeps r31n code forward-compatible without shipping a UI
+// we'd have to redo in r32.
+//
+// GChat webhook delivery is INTENTIONALLY NOT WIRED — being replaced by the
+// in-app bell in r32. No point building the webhook fan-out now just to delete
+// it in two weeks. The gchat_webhook_url column stays on users for now (cheap)
+// and gets dropped when r32 ships.
+//
+// Usage:
+//   await notify(db, { user_name: 'Mahima' }, 'task_created', {
+//     title: 'Pay deposit — Plan no 142',
+//     body: 'Due Friday 23 May. Supplier sent PI yesterday.',
+//     plan_id: 142, task_id: 9871
+//   });
+//
+// `target` is either { user_id } or { user_name } or { role } — notify() resolves
+// to one or more user rows and writes a notification per recipient. For shared
+// roles like 'logistics_shared', writes one row per matching user. Failure is
+// silent — notifications must never block the action that triggered them.
+// ─────────────────────────────────────────────────────────────────────────────
+async function notify(db, target, eventType, data) {
+  try {
+    let recipients = [];
+    if (target && target.user_id) {
+      const r = await db.query('SELECT id, name FROM users WHERE id=$1', [target.user_id]);
+      recipients = r.rows;
+    } else if (target && target.user_name) {
+      // Case-insensitive match on first name (covers 'Mahima' / 'mahima')
+      const r = await db.query("SELECT id, name FROM users WHERE LOWER(name)=LOWER($1) AND is_active=TRUE", [target.user_name]);
+      recipients = r.rows;
+    } else if (target && target.role) {
+      // 'logistics_shared' = both Shauraya and Neha (any logistics_agent)
+      // 'logistics_agent' / 'accounts_agent' / 'warehouse_agent' = matching role
+      const roleQuery = target.role === 'logistics_shared'
+        ? "SELECT id, name FROM users WHERE role='logistics_agent' AND is_active=TRUE"
+        : "SELECT id, name FROM users WHERE role=$1 AND is_active=TRUE";
+      const args = target.role === 'logistics_shared' ? [] : [target.role];
+      const r = await db.query(roleQuery, args);
+      recipients = r.rows;
+    }
+    if (!recipients.length) {
+      // No-op but not an error — e.g. nobody currently has logistics_agent role
+      console.log('[notify] no recipients for ' + JSON.stringify(target) + ' event=' + eventType);
+      return;
+    }
+    for (const u of recipients) {
+      await db.query(
+        `INSERT INTO lg_notifications (user_id, user_name, event_type, title, body, plan_id, task_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [u.id, u.name, eventType, data.title || eventType, data.body || null,
+         data.plan_id || null, data.task_id || null]
+      );
+    }
+    console.log('[notify] ' + eventType + ' → ' + recipients.map(r=>r.name).join(',') + ' "' + (data.title||'').slice(0,60) + '"');
+  } catch(e) {
+    console.error('[notify] failed: ' + e.message);
+    // never throw — notifications are best-effort
+  }
+}
+
 // r31c — compute which supplier-portal tasks are pending for a plan
 function computeSupplierAvailableTasks(p) {
   const tasks = [];
@@ -885,8 +987,34 @@ function enrichPlan(plan, supplier) {
 // r30f — rules now declare `requires` (array of rule_keys that must be done first).
 // A rule won't fire unless its condition is true AND all required rule_keys exist with status 'done' or 'auto_archived'.
 // `primary` marks the one rule per gate that is the "headline next action" surfaced in the per-plan card.
+//
+// r31n — `assignee_name` (item 15): per-name assignment for tasks owned by a specific person.
+//   When set, the task is created with intended_assignee_name = that name. Task-listing queries
+//   filter by name (when present) OR role (when name is null). Shared roles like 'logistics_shared'
+//   stay role-only — visible to all logistics_agents (Shauraya + Neha).
+//
+// Locked 19-task assignee matrix (r31n item 15):
+//   #1  pay_deposit            → Mahima
+//   #2  chase_approx_loading   → logistics_shared (Shauraya + Neha)
+//   #3  production_check_day_14→ Satyam       (r31n item 4)
+//   #4  production_check_day_28→ Satyam       (r31n item 4)
+//   #5  confirm_exact_loading  → logistics_shared
+//   #6  final_loading_confirm  → logistics_shared
+//   #7  book_container         → Shauraya
+//   #8  pay_final              → Mahima
+//   #9  pay_shipper            → Mahima
+//   #10 send_docs_to_agent     → logistics_shared  (also gets gate-6 due-date fix below — item 10)
+//   #11 await_duty_invoice     → Mahima
+//   #12 pay_duty               → Mahima
+//   #13 confirm_customs_clear  → logistics_shared
+//   #14 book_local_delivery    → logistics_shared
+//   #15 log_delivery_sheet     → logistics_shared
+//   #16 eta_check (recurring)  → Shauraya (set in bumpEtaCheck/dailyTaskEvaluation, not here)
+//   #17 review_gate4_docs      → logistics_shared (NEW — r31n item 12)
+//   #18 mark_warehouse_received→ Harp (warehouse_agent — set at action site, not a task rule)
+//   #19 mark_warehouse_verified→ logistics_shared (action site, not a task rule)
 const TASK_RULES = [
-  { key: 'pay_deposit', role: 'accounts', primary: true,
+  { key: 'pay_deposit', role: 'accounts', assignee_name: 'Mahima', primary: true,
     title: p => 'Pay deposit — ' + p.plan_number,
     title_cn: p => '支付订金 — ' + p.plan_number,
     condition: p => !p.deposit_received_date && p.status === 'active',
@@ -896,12 +1024,13 @@ const TASK_RULES = [
     title_cn: p => '向供应商确认大致装柜日期 — ' + p.plan_number,
     condition: p => p.deposit_received_date && !p.approx_loading_date && p.status === 'active',
     due: p => addDays(p.deposit_received_date, 3) },
-  { key: 'production_check_day_14', role: 'agent',
+  // r31n item 4 — production checks routed to Satyam (was role:'agent' → fell to Shauraya/Neha)
+  { key: 'production_check_day_14', role: 'agent', assignee_name: 'Satyam',
     title: p => 'Day 14 production check — ' + p.plan_number,
     title_cn: p => '生产第14天检查 — ' + p.plan_number,
     condition: p => p.deposit_received_date && !p.actual_loading_date && p.status === 'active',
     due: p => addDays(p.deposit_received_date, 14) },
-  { key: 'production_check_day_28', role: 'agent',
+  { key: 'production_check_day_28', role: 'agent', assignee_name: 'Satyam',
     title: p => 'Day 28 mid-production check — ' + p.plan_number,
     title_cn: p => '生产第28天中期检查 — ' + p.plan_number,
     requires: ['production_check_day_14'],
@@ -918,17 +1047,26 @@ const TASK_RULES = [
     requires: ['confirm_exact_loading'],
     condition: p => p.approx_loading_date && !p.actual_loading_date && p.status === 'active',
     due: p => addDays(p.approx_loading_date, -2) },
-  { key: 'book_container', role: 'agent', primary: true,
+  // r31n item 15 — book_container specifically Shauraya (not shared)
+  { key: 'book_container', role: 'agent', assignee_name: 'Shauraya', primary: true,
     title: p => 'Book container with shipper — ' + p.plan_number,
     title_cn: p => '与货代订舱 — ' + p.plan_number,
     condition: p => p.approx_loading_date && !p.shipper_name && p.status === 'active',
     due: p => addDays(p.approx_loading_date, -7) },
-  { key: 'pay_final', role: 'accounts', primary: true,
+  // r31n item 12 (NEW) — Gate-4 review task. After supplier uploads BL+PI+packing list+loading photos
+  //   at gate 4, Shauraya/Neha review the docs, amend if needed, and re-upload. Marks
+  //   gate4_review_done=TRUE which closes the task.
+  { key: 'review_gate4_docs', role: 'agent', primary: true,
+    title: p => 'Review supplier gate-4 docs (BL/PI/PL/loading photos) — ' + p.plan_number,
+    title_cn: p => '审核装柜文件 — ' + p.plan_number,
+    condition: p => p.actual_loading_date && p.bl_number && !p.gate4_review_done && p.status === 'active',
+    due: p => addDays(p.actual_loading_date, 2) },
+  { key: 'pay_final', role: 'accounts', assignee_name: 'Mahima', primary: true,
     title: p => 'Pay final payment to supplier — ' + p.plan_number,
     title_cn: p => '向供应商支付尾款 — ' + p.plan_number,
     condition: p => p.original_eta && !p.final_payment_received_date && p.actual_loading_date && p.status === 'active',
     due: p => addDays(p.original_eta, -14) },
-  { key: 'pay_shipper', role: 'accounts', primary: true,
+  { key: 'pay_shipper', role: 'accounts', assignee_name: 'Mahima', primary: true,
     title: p => 'Pay shipping cost to freight forwarder — ' + p.plan_number,
     title_cn: p => '向货代支付运输费 — ' + p.plan_number,
     // r31k — promoted to primary + dependency on pay_final removed. Mahima typically pays both
@@ -939,17 +1077,24 @@ const TASK_RULES = [
   // r31j — verify_telex rule removed. Gate 5 has a checkbox `telex_confirmed_by_agent` which is
   //   the only place to verify telex. Standalone task was a safety net that just added noise.
   //   Boot migration auto-archives any open verify_telex tasks.
+  // r31n item 10 — gate-6 due date fix. Was `due: todayDate()` which meant the task was due
+  //   the moment it fired (order_date in some Plan no 140 case). Per Bobby: send docs to import
+  //   agent ~14 days before ETA (aligns with final-payment timing). Fall back to today + 7 if
+  //   no ETA yet (shouldn't happen — gate 4 must be complete first, which sets original_eta).
   { key: 'send_docs_to_agent', role: 'agent', primary: true,
     title: p => 'Send BL + PI + Packing List to import agent — ' + p.plan_number,
     title_cn: p => '将提单+发票+装箱单发给报关行 — ' + p.plan_number,
     condition: p => p.telex_confirmed_by_agent && !p.docs_sent_to_import_agent_date && p.status === 'active',
-    due: p => todayDate() },
-  { key: 'await_duty_invoice', role: 'accounts', primary: true,
+    due: p => {
+      const eta = p.new_eta || p.original_eta;
+      return eta ? addDays(eta, -14) : addDays(todayDate(), 7);
+    } },
+  { key: 'await_duty_invoice', role: 'accounts', assignee_name: 'Mahima', primary: true,
     title: p => 'Watch for duty invoice from import agent — ' + p.plan_number,
     title_cn: p => '等待报关行发来关税发票 — ' + p.plan_number,
     condition: p => p.docs_sent_to_import_agent_date && !p.duty_invoice_received_date && p.status === 'active',
     due: p => addDays(p.docs_sent_to_import_agent_date, 5) },
-  { key: 'pay_duty', role: 'accounts', primary: true,
+  { key: 'pay_duty', role: 'accounts', assignee_name: 'Mahima', primary: true,
     title: p => 'Pay UK customs duty — ' + p.plan_number,
     title_cn: p => '支付英国关税 — ' + p.plan_number,
     requires: ['await_duty_invoice'],
@@ -967,23 +1112,25 @@ const TASK_RULES = [
   // r31j — Unified delivery tasks. Previously had separate book_local_delivery (clean only)
   //   and book_kemballs_retrieval (kemballs only). Now one task fires regardless of route;
   //   the agent books delivery with whichever partner is appropriate for the disposition.
+  // r31n item 11 — Kemballs parking flow: when disposition='kemballs' at customs clearance,
+  //   status flips to 'kemballs_parked' (NOT 'active'). The condition below already gates on
+  //   status='active', so kemballs-parked plans do NOT fire book_local_delivery automatically.
+  //   When user clicks "Bring to warehouse" on Kemballs page, status flips back to 'active' and
+  //   THIS task fires (same task, same email flow). Removed the kemballs|campbells disposition
+  //   matching here — by the time a plan is back to active and ready to book, the journey from
+  //   Kemballs is over and it's a normal delivery booking.
   { key: 'book_local_delivery', role: 'agent', primary: true,
-    title: p => ((p.disposition === 'kemballs' || p.disposition === 'campbells')
-                  ? 'Book retrieval from Kemballs — '
-                  : 'Book local delivery — ') + p.plan_number,
-    title_cn: p => ((p.disposition === 'kemballs' || p.disposition === 'campbells')
-                  ? '预约从Kemballs提货 — '
-                  : '与本地承运商预约送货 — ') + p.plan_number,
+    title: p => 'Book local delivery — ' + p.plan_number,
+    title_cn: p => '与本地承运商预约送货 — ' + p.plan_number,
     requires: ['confirm_customs_clear'],
     condition: p => p.customs_cleared_date && !p.local_delivery_booked_date && !p.delivery_date
-                 && p.status === 'active' && (p.disposition === 'clean' || p.disposition === 'kemballs' || p.disposition === 'campbells'),
+                 && p.status === 'active',
     due: p => todayDate() },
   { key: 'log_delivery_sheet', role: 'agent', primary: true,
     title: p => 'Upload delivery sheet — ' + p.plan_number,
     title_cn: p => '上传送货单 — ' + p.plan_number,
     requires: ['book_local_delivery'],
-    condition: p => p.delivery_date && !p.closed_at && p.status === 'active'
-                 && (p.disposition === 'clean' || p.disposition === 'kemballs' || p.disposition === 'campbells'),
+    condition: p => p.delivery_date && !p.closed_at && p.status === 'active',
     due: p => todayDate() }
 ];
 
@@ -992,6 +1139,22 @@ async function evaluateTasks(db, planId) {
   const r = await db.query('SELECT * FROM lg_plans WHERE id=$1', [planId]);
   if (!r.rows.length) return;
   const plan = r.rows[0];
+  // r31n item 11 — Parked plans (status='kemballs_parked') don't fire any new tasks.
+  //   They're paused until "Bring to warehouse" flips status back to 'active'. The auto-close
+  //   loop below DOES still run, so any stale open tasks get cleaned up. Cancelled / closed
+  //   plans likewise pause — existing rule conditions already check status='active', but the
+  //   early-skip here saves a full sweep.
+  if (plan.status !== 'active') {
+    // Still auto-close any leftover open tasks (e.g. if a plan was just cancelled mid-flight).
+    const stale = await db.query("SELECT id FROM lg_tasks WHERE plan_id=$1 AND status IN ('open','claimed')", [planId]);
+    if (stale.rows.length) {
+      await db.query(
+        "UPDATE lg_tasks SET status='auto_archived', completed_at=NOW(), completion_note=COALESCE(completion_note,'') || ' [auto-archived: plan status=' || $1 || ']' WHERE plan_id=$2 AND status IN ('open','claimed')",
+        [plan.status, planId]
+      );
+    }
+    return;
+  }
   // r30f — load not just rule_keys but also their status, so we can check predecessor completion
   const existing = await db.query('SELECT id, rule_key, status FROM lg_tasks WHERE plan_id=$1', [planId]);
   const existingKeys = new Set(existing.rows.map(t => t.rule_key));
@@ -1032,15 +1195,25 @@ async function evaluateTasks(db, planId) {
       const titleCn  = rule.title_cn ? rule.title_cn(plan) : null;
       const due      = rule.due(plan);
       const priority = ['pay_deposit','pay_final','pay_shipper','pay_duty'].includes(rule.key) ? 'high' : 'normal';
-      await db.query(
-        `INSERT INTO lg_tasks (plan_id, rule_key, title, title_cn, intended_role, priority, due_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [planId, rule.key, title, titleCn, rule.role, priority, due]
+      // r31n item 15 — intended_assignee_name pulled from rule (NULL if rule is role-only)
+      const assigneeName = rule.assignee_name || null;
+      const inserted = await db.query(
+        `INSERT INTO lg_tasks (plan_id, rule_key, title, title_cn, intended_role, intended_assignee_name, priority, due_date)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING id`,
+        [planId, rule.key, title, titleCn, rule.role, assigneeName, priority, due]
       );
+      // r31n item 14 — notify the assignee (or role group). Best-effort, never throws.
+      const notifyTarget = assigneeName ? { user_name: assigneeName }
+                          : (rule.role === 'agent' ? { role: 'logistics_shared' } : { role: rule.role });
+      await notify(db, notifyTarget, 'task_created', {
+        title: title, body: 'Due ' + due, plan_id: planId, task_id: inserted.rows[0] && inserted.rows[0].id
+      });
     } catch(e) { console.error('[tasks evaluate ' + rule.key + '] ' + e.message); }
   }
 
   // Recurring ETA-check task
+  // r31n item 15 — eta_check is Shauraya's (task #16 in the locked matrix)
   try {
     const needs = plan.actual_loading_date && !plan.docs_sent_to_import_agent_date && plan.status === 'active';
     if (needs) {
@@ -1058,11 +1231,16 @@ async function evaluateTasks(db, planId) {
         const dueIso = asIso(due);
         const today = todayDate();
         if (dueIso <= today) {
-          await db.query(
-            `INSERT INTO lg_tasks (plan_id, rule_key, title, title_cn, intended_role, priority, due_date)
-             VALUES ($1,'eta_check',$2,$3,'agent','normal',$4)`,
+          const ins = await db.query(
+            `INSERT INTO lg_tasks (plan_id, rule_key, title, title_cn, intended_role, intended_assignee_name, priority, due_date)
+             VALUES ($1,'eta_check',$2,$3,'agent','Shauraya','normal',$4)
+             RETURNING id`,
             [planId, 'Check ETA — ' + plan.plan_number, '检查到港日期 — ' + plan.plan_number, dueIso]
           );
+          await notify(db, { user_name: 'Shauraya' }, 'task_created', {
+            title: 'Check ETA — ' + plan.plan_number, body: 'Due ' + dueIso, plan_id: planId,
+            task_id: ins.rows[0] && ins.rows[0].id
+          });
         }
       }
     }
@@ -1639,6 +1817,8 @@ module.exports = function(getDb) {
       if (req.query.status === 'active')       where.push("status='active' AND closed_at IS NULL");
       else if (req.query.status === 'closed')  where.push('closed_at IS NOT NULL');
       else if (req.query.status === 'cancelled') where.push("status='cancelled'");
+      // r31n item 11 — Kemballs section fetches plans with status='kemballs_parked'.
+      else if (req.query.status === 'kemballs_parked') where.push("status='kemballs_parked'");
       else if (req.query.status === 'all')     { /* no filter */ }
       else                                     where.push("status='active' AND closed_at IS NULL");
       if (req.query.disposition) { where.push('disposition=$'+(i++)); vals.push(req.query.disposition); }
@@ -1658,12 +1838,16 @@ module.exports = function(getDb) {
       const r = await db.query("SELECT * FROM lg_plans WHERE status='active' AND closed_at IS NULL");
       const supMap = {};
       (await db.query('SELECT * FROM lg_suppliers')).rows.forEach(s => supMap[s.id] = s);
-      let overdue = 0, kemballs = 0;
+      let overdue = 0;
       r.rows.forEach(function(p){
         const g = computeStage(p, supMap[p.supplier_id]);
         if (g.is_overdue) overdue++;
-        if ((p.disposition === 'kemballs' || p.disposition === 'campbells') && !p.campbells_out_date) kemballs++;
       });
+      // r31n item 11 — Kemballs count now = plans currently parked at Kemballs (status='kemballs_parked').
+      //   Previously was "active plans with disposition=kemballs and no out_date" — which over-counted
+      //   active in-flight plans that intended to go via Kemballs but hadn't landed yet.
+      const kemballsQ = await db.query("SELECT COUNT(*)::int AS n FROM lg_plans WHERE status='kemballs_parked'");
+      const kemballs = kemballsQ.rows[0].n;
       // r31e.1 — plans-with-issues count = plans with at least one non-closed claim
       const issuesQ = await db.query("SELECT COUNT(DISTINCT plan_id)::int AS n FROM lg_claims WHERE status NOT IN ('closed','archived')");
       const issues = issuesQ.rows[0].n;
@@ -1841,17 +2025,47 @@ module.exports = function(getDb) {
       const dispoAfter = Object.prototype.hasOwnProperty.call(req.body || {}, 'disposition')
                           ? req.body.disposition : before.disposition;
       const isKemballs = dispoAfter === 'kemballs' || dispoAfter === 'campbells';
+      // r31n item 11 — Mandatory disposition confirmation at customs clearance.
+      //   Gate-5 sets initial intent; gate-8 (customs cleared) is the point of no return.
+      //   Without a disposition the plan can't progress: agent must pick clean or kemballs.
+      if (isClearingNow && !dispoAfter) {
+        return res.status(400).json({ error: 'Disposition required when marking customs cleared. Choose Warehouse (clean) or Kemballs.' });
+      }
       if (isClearingNow && isKemballs && !before.campbells_in_date) {
         sets.push('campbells_in_date=$' + (i++));
         vals.push(req.body.customs_cleared_date);
         changes.push('campbells_in_date (auto-set from customs clearance)');
         await logFieldAudit(db, id, 'campbells_in_date', null, req.body.customs_cleared_date, 'system', 'system');
       }
+      // r31n item 11 — Kemballs parking: flip status to 'kemballs_parked' at the same time
+      //   customs clearance + disposition=kemballs is recorded. Plan drops from active list.
+      //   Task evaluator sees status!=='active' and stops firing rules until released.
+      //   The "Bring to warehouse" endpoint flips back to active later.
+      let didPark = false;
+      if (isClearingNow && isKemballs && before.status === 'active') {
+        sets.push('status=$' + (i++));
+        vals.push('kemballs_parked');
+        changes.push('status → kemballs_parked');
+        didPark = true;
+      }
 
       sets.push('updated_at=NOW()'); vals.push(id);
       const r = await db.query('UPDATE lg_plans SET ' + sets.join(',') + ' WHERE id=$' + i + ' RETURNING *', vals);
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
         [id, 'updated', 'Fields: ' + changes.join(', '), actor(req)]);
+      // r31n — auto-close any open tasks on a plan that just got parked (eta_check, anything
+      //   still in flight). They'll re-fire when the plan is brought back to active.
+      if (didPark) {
+        await db.query(
+          "UPDATE lg_tasks SET status='auto_archived', completed_at=NOW(), completion_note=COALESCE(completion_note,'') || ' [auto-archived: plan parked at Kemballs]' WHERE plan_id=$1 AND status IN ('open','claimed')",
+          [id]
+        );
+        await notify(db, { role: 'logistics_shared' }, 'kemballs_parked', {
+          title: 'Plan ' + r.rows[0].plan_number + ' parked at Kemballs',
+          body: 'Container in storage from ' + req.body.customs_cleared_date + '. Use "Bring to warehouse" when ready.',
+          plan_id: id
+        });
+      }
       await evaluateTasks(db, id);
       res.json({ plan: r.rows[0] });
     } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1998,6 +2212,66 @@ module.exports = function(getDb) {
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
+  // r31n item 12 — Mark gate-4 review done. Shauraya/Neha reviews supplier-uploaded BL/PI/PL/photos
+  //   (and amends/re-uploads if needed via the regular file endpoint), then flips this flag.
+  //   Closes any open review_gate4_docs task on this plan and logs to activity.
+  router.post('/plans/:id/gate4-review-done', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const note = (req.body && req.body.note) || null;
+      const r = await db.query(
+        'UPDATE lg_plans SET gate4_review_done=TRUE, gate4_review_done_at=NOW(), gate4_review_done_by=$1 WHERE id=$2 AND gate4_review_done=FALSE RETURNING *',
+        [actor(req), id]
+      );
+      if (!r.rows.length) {
+        // Either plan not found or already marked done
+        const exists = (await db.query('SELECT gate4_review_done FROM lg_plans WHERE id=$1', [id])).rows[0];
+        if (!exists) return res.status(404).json({ error: 'Plan not found' });
+        return res.json({ ok: true, already: true });
+      }
+      // Auto-close the matching task
+      await db.query(
+        "UPDATE lg_tasks SET status='done', completed_by=$1, completed_at=NOW(), completion_note=$2 WHERE plan_id=$3 AND rule_key='review_gate4_docs' AND status IN ('open','claimed')",
+        [actor(req), note || 'Gate-4 review marked complete', id]
+      );
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [id, 'gate4_review_done', note || '', actor(req)]);
+      await evaluateTasks(db, id);
+      res.json({ ok: true, plan: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // r31n item 11 — "Bring to warehouse" — releases a plan parked at Kemballs.
+  //   Flips status from 'kemballs_parked' back to 'active', stamps campbells_out_date (storage clock
+  //   stops + cost finalised), then evaluateTasks fires book_local_delivery (same flow as a clean-route
+  //   plan reaching gate 9). Anyone with logistics access can press this (per Bobby's spec).
+  router.post('/plans/:id/bring-to-warehouse', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
+      if (!before) return res.status(404).json({ error: 'Plan not found' });
+      if (before.status !== 'kemballs_parked') {
+        return res.status(409).json({ error: "Plan is not parked at Kemballs (status='" + before.status + "')" });
+      }
+      const today = todayDate();
+      const r = await db.query(
+        "UPDATE lg_plans SET status='active', campbells_out_date=COALESCE(campbells_out_date, $1) WHERE id=$2 RETURNING *",
+        [today, id]
+      );
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [id, 'kemballs_released', 'Bring to warehouse — out_date=' + today, actor(req)]);
+      await evaluateTasks(db, id);
+      await notify(db, { role: 'logistics_shared' }, 'kemballs_released', {
+        title: 'Plan ' + before.plan_number + ' released from Kemballs',
+        body: 'Book local delivery task created. Storage closed at ' + today,
+        plan_id: id
+      });
+      res.json({ ok: true, plan: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
   router.post('/plans/:id/files', uploadSingleFile('file'), async function(req, res) {
     const db = req._db;
     const id = parseInt(req.params.id);
@@ -2110,14 +2384,21 @@ module.exports = function(getDb) {
         [planId, 'claim_opened', String(b.description).slice(0,100), actor(req)]);
       // r31e.1 — claims live independently from disposition. Do NOT flip disposition='issues'.
       // The plan's routing decision (clean/kemballs) is separate from whether there's a discrepancy.
-      // Create chase task
-      await db.query(
+      // r31n item 7 — Create chase task with fixed assignees (logistics_shared = Shauraya + Neha).
+      //   Claims fall to whoever in logistics picks them up; no specific name.
+      const chaseIns = await db.query(
         `INSERT INTO lg_tasks (plan_id, rule_key, title, title_cn, intended_role, priority, due_date)
-         VALUES ($1, $2, $3, $4, 'agent', 'high', $5)`,
+         VALUES ($1, $2, $3, $4, 'agent', 'high', $5)
+         RETURNING id`,
         [planId, 'claim_chase_' + claim.id,
          'Chase supplier on claim — ' + String(b.description).slice(0,60),
          '催促供应商处理索赔 — ' + String(b.description).slice(0,60),
          nextChase]);
+      await notify(db, { role: 'logistics_shared' }, 'claim_raised', {
+        title: 'New claim — ' + String(b.description).slice(0,80),
+        body: 'Chase due ' + nextChase, plan_id: planId,
+        task_id: chaseIns.rows[0] && chaseIns.rows[0].id
+      });
       res.json({ claim });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
@@ -2146,6 +2427,31 @@ module.exports = function(getDb) {
         [claim.plan_id, 'claim_supplier_responded_logged_by_agent',
          resolution + (note ? ': ' + note.slice(0,100) : '') + ' (logged on supplier\'s behalf)',
          actor(req)]);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // r31n item 7 — Drop a claim. Distinct from "close" (which means resolved).
+  //   Drop = "this claim shouldn't have been raised, or was decided against pursuing".
+  //   Records actor + reason; auto-archives the chase task. Cannot be undone except by manager
+  //   manually editing status back.
+  router.post('/claims/:id/drop', async function(req, res) {
+    const db = req._db;
+    const id = parseInt(req.params.id);
+    const reason = (req.body && req.body.reason || '').toString().trim();
+    if (!reason) return res.status(400).json({ error: 'Reason required when dropping a claim' });
+    try {
+      const claim = (await db.query('SELECT * FROM lg_claims WHERE id=$1', [id])).rows[0];
+      if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      if (claim.status === 'closed' || claim.status === 'dropped') {
+        return res.status(409).json({ error: 'Claim is already ' + claim.status });
+      }
+      await db.query("UPDATE lg_claims SET status='dropped', closed_at=NOW(), closed_by=$1, agreed_resolution=$2 WHERE id=$3",
+        [actor(req), 'dropped: ' + reason, id]);
+      await db.query("UPDATE lg_tasks SET status='auto_archived', completed_at=NOW(), completion_note='Claim dropped' WHERE rule_key=$1 AND status IN ('open','claimed')",
+        ['claim_chase_' + id]);
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [claim.plan_id, 'claim_dropped', reason, actor(req)]);
       res.json({ ok: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
@@ -2337,6 +2643,33 @@ module.exports = function(getDb) {
       else if (status === 'done')       where.push("t.status IN ('done','auto_archived')");
       if (req.query.plan_id)    { where.push('t.plan_id=$'+(i++)); vals.push(parseInt(req.query.plan_id)); }
       if (req.query.claimed_by) { where.push('t.claimed_by=$'+(i++)); vals.push(req.query.claimed_by); }
+      // r31n item 15 — mine=true: filter to tasks intended for the current user.
+      //   Matches if (a) task is name-assigned to this user, OR (b) task is role-only and the
+      //   user's role matches OR is in the shared-role pool (logistics_agent sees role='agent').
+      //   Manager/owner see all (no filter).
+      if (req.query.mine === 'true' && req.user && !isManager(req.user)) {
+        const myName = req.user.name || '';
+        const myRole = (req.user.role || '').toLowerCase();
+        const myDept = (req.user.department || '').toLowerCase();
+        // Build role inclusion list — what role-only tasks does this user see?
+        //   logistics_agent → sees role='agent' tasks (the shared logistics pool)
+        //   accounts_agent  → sees role='accounts' tasks
+        //   warehouse_agent → sees role='warehouse' tasks (no rules currently emit this, future-proof)
+        const roleVisible = [];
+        if (myRole === 'logistics_agent' || myDept === 'logistics') roleVisible.push('agent');
+        if (myRole === 'accounts_agent'  || myDept === 'accounts')  roleVisible.push('accounts');
+        if (myRole === 'warehouse_agent' || myDept === 'warehouse') roleVisible.push('warehouse');
+        const namePlaceholder = '$' + (i++); vals.push(myName);
+        if (roleVisible.length) {
+          const rolePlaceholders = roleVisible.map(function(){ return '$' + (i++); }).join(',');
+          vals.push.apply(vals, roleVisible);
+          where.push('(LOWER(t.intended_assignee_name) = LOWER(' + namePlaceholder + ')'
+                     + ' OR (t.intended_assignee_name IS NULL AND t.intended_role IN (' + rolePlaceholders + ')))');
+        } else {
+          // No role visibility — only name-assigned tasks
+          where.push('LOWER(t.intended_assignee_name) = LOWER(' + namePlaceholder + ')');
+        }
+      }
       const sql = 'SELECT t.*, p.plan_number, s.name AS supplier_name FROM lg_tasks t LEFT JOIN lg_plans p ON p.id=t.plan_id LEFT JOIN lg_suppliers s ON s.id=p.supplier_id' +
         (where.length ? ' WHERE ' + where.join(' AND ') : '') +
         " ORDER BY CASE t.status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END, CASE t.priority WHEN 'high' THEN 0 ELSE 1 END, t.due_date NULLS LAST LIMIT 500";
@@ -2373,10 +2706,39 @@ module.exports = function(getDb) {
       const task = r.rows[0];
       await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)', [task.plan_id, 'task_done', task.title + (note ? ' — ' + note : ''), actor(req)]);
       // r31j — renamed rule_keys: production_check_day_7 → day_14, day_21 → day_28
+      // r31n item 8 — Outcome options changed from "on_track / 1-3 days / 4+ days" to
+      //   "on_track / delay_1wk / delay_2wk". When a delay is reported, push the ETA forward
+      //   accordingly (new_eta = current new_eta or original_eta + 7 or 14 days). Records the
+      //   push in lg_field_audit so it shows up in the slip log.
       if (task.rule_key === 'production_check_day_14' || task.rule_key === 'production_check_day_28') {
-        const outcome = (req.body && req.body.outcome) || 'on_track';
+        const rawOutcome = (req.body && req.body.outcome) || 'on_track';
+        // Backward compat: accept legacy outcome names but normalise. Legacy "1-3" treated as on_track
+        // (no ETA push); "4+" treated as 1-week (single-bucket simplification).
+        let outcome = rawOutcome;
+        if (rawOutcome === 'delay_1_3_days') outcome = 'on_track';
+        if (rawOutcome === 'delay_4_plus_days') outcome = 'delay_1wk';
+        if (!['on_track','delay_1wk','delay_2wk'].includes(outcome)) outcome = 'on_track';
         await db.query('INSERT INTO lg_production_checks (plan_id, check_label, outcome, note, checked_by) VALUES ($1,$2,$3,$4,$5)',
           [task.plan_id, task.rule_key, outcome, note, actor(req)]);
+        // Push ETA when delay reported
+        if (outcome === 'delay_1wk' || outcome === 'delay_2wk') {
+          const push = outcome === 'delay_1wk' ? 7 : 14;
+          const planRow = (await db.query('SELECT new_eta, original_eta FROM lg_plans WHERE id=$1', [task.plan_id])).rows[0];
+          if (planRow) {
+            const base = planRow.new_eta ? asIso(planRow.new_eta) : (planRow.original_eta ? asIso(planRow.original_eta) : null);
+            if (base) {
+              const pushed = addDays(base, push);
+              await db.query('UPDATE lg_plans SET new_eta=$1 WHERE id=$2', [pushed, task.plan_id]);
+              await logFieldAudit(db, task.plan_id, 'new_eta', base, pushed, actor(req), 'agent', 'production_check_delay');
+              await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+                [task.plan_id, 'eta_pushed', task.rule_key + ' reported ' + outcome + ' → ETA pushed to ' + pushed, actor(req)]);
+            } else {
+              // No ETA yet — just record on the production check, no push possible
+              await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+                [task.plan_id, 'eta_push_skipped', task.rule_key + ' reported ' + outcome + ' but no ETA on plan yet', actor(req)]);
+            }
+          }
+        }
       }
       if (task.rule_key === 'eta_check') await bumpEtaCheck(db, task.plan_id);
       await evaluateTasks(db, task.plan_id);
@@ -2639,11 +3001,20 @@ module.exports = function(getDb) {
   router.get('/kemballs/active', async function(req, res) {
     const db = req._db;
     try {
+      // r31n item 11 — Plans at Kemballs are either:
+      //   (a) status='kemballs_parked' — the new flow, plan dropped from active list
+      //   (b) status='active' + disposition=kemballs + no out_date — legacy in-flight plans
+      //       from before parking flow shipped (defensive; shouldn't see any after r31n)
+      //   Both should appear on the Kemballs page so cost accumulates and "Bring to warehouse"
+      //   can be pressed.
       const rows = (await db.query(`
         SELECT p.*, s.name AS supplier_name, s.payment_terms AS supplier_payment_terms
         FROM lg_plans p LEFT JOIN lg_suppliers s ON s.id = p.supplier_id
-        WHERE p.status='active' AND p.closed_at IS NULL
-          AND p.disposition IN ('kemballs','campbells') AND p.campbells_out_date IS NULL
+        WHERE p.closed_at IS NULL
+          AND (
+            p.status='kemballs_parked'
+            OR (p.status='active' AND p.disposition IN ('kemballs','campbells') AND p.campbells_out_date IS NULL)
+          )
         ORDER BY p.campbells_in_date ASC NULLS LAST
       `)).rows;
       // Attach packing list + final PI file refs
@@ -2874,7 +3245,7 @@ module.exports = function(getDb) {
         value_in_transit_usd: Math.round(valueInTransit),
         at_kemballs: atKemballs.length,
         attention_message: attention,
-        version: 'r31l'
+        version: 'r31m-prep'
       });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
@@ -3417,6 +3788,13 @@ module.exports = function(getDb) {
       const planId = parseInt(req.params.id);
       const p = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [planId])).rows[0];
       if (!p) return res.status(404).json({ error: 'Plan not found' });
+      // r31n item 13 — Kemballs route does not use a freight-partner delivery email at gate 9.
+      //   For Kemballs plans, the route is: park → "Bring to warehouse" → local delivery booking
+      //   handled differently (often direct phone/WeChat to the local agent). Server-level guard
+      //   prevents the email being composed at all; frontend should also hide the button (UI work).
+      if (gate === 9 && (p.disposition === 'kemballs' || p.disposition === 'campbells')) {
+        return res.status(400).json({ error: 'Gate-9 freight-partner email not used for Kemballs route. Use "Bring to warehouse" from the Kemballs section.' });
+      }
       const sup = p.supplier_id ? (await db.query('SELECT * FROM lg_suppliers WHERE id=$1', [p.supplier_id])).rows[0] : null;
       // r31h — freight agent lookup (gate 9 only)
       let freightAgent = null;

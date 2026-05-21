@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Logistics dashboard — r30b -->
+<!-- CampaignPulse Logistics dashboard — r31n (Kemballs parking flow, gate-4 review task, drop-claim,
+     production check 1wk/2wk delay outcomes, modal-close after task save, 19-task assignee matrix UI) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -2299,9 +2300,10 @@ table.plans tr.row-link:hover td { background: var(--surface2); }
       <div class="field"><label>How is production tracking?</label>
         <select id="pc_outcome">
           <option value="on_track">On track</option>
-          <option value="slight_delay">Slight delay (1-3 days)</option>
-          <option value="major_delay">Major delay (4+ days)</option>
+          <option value="delay_1wk">1 week delay (will push ETA +7 days)</option>
+          <option value="delay_2wk">2 weeks delay (will push ETA +14 days)</option>
         </select>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">Selecting a delay automatically updates the plan's new ETA. Notes optional but recommended.</div>
       </div>
       <div class="field"><label>Notes</label><textarea id="pc_note" rows="3" placeholder="Optional"></textarea></div>
     </div>
@@ -3613,12 +3615,37 @@ async function completeTask(id, ruleKey) {
     openEtaCheckModal(id);
     return;
   }
+  // r31n item 12 — gate-4 review completion. Task done flips both task status AND plan's
+  //   gate4_review_done flag (so the rule condition stops re-firing the task). Goes through a
+  //   dedicated endpoint that does both atomically.
+  if (ruleKey === 'review_gate4_docs') {
+    // Need plan_id — fetch it from the task list
+    let task = null;
+    try {
+      const r = await api('/tasks?status=open_or_claimed');
+      task = (r.tasks || []).find(t => t.id === id);
+    } catch(_){}
+    if (!task) { toast('Task not found', 'error'); return; }
+    const note = prompt('Add a note about what you reviewed/amended (optional):') || null;
+    try {
+      await api('/plans/' + task.plan_id + '/gate4-review-done', { method: 'POST', body: note ? { note: note } : {} });
+      toast('Gate 4 review marked complete', 'success');
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      loadDashboard();
+      if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
+    } catch(e) { toast(e.message, 'error'); }
+    return;
+  }
   try {
     await api('/tasks/' + id + '/done', { method: 'POST', body: {} });
     toast('Done', 'success');
+    // r31n item 2 — Close the plan modal after a task save (don't leave it open with stale data).
+    //   Then re-render the underlying page so the dashboard/tasks view reflects the change.
+    //   Previously: modal stayed open and re-rendered with refetched data, which was confusing —
+    //   user expects "Done" to take them back to the list, like marking an item complete elsewhere.
+    if (document.getElementById('planModal').classList.contains('active')) closeModal();
     loadDashboard();
     if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
-    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -3685,9 +3712,10 @@ async function submitEtaCheck(taskId, planId, mandatory, prevEta) {
     await api('/tasks/' + taskId + '/done', { method: 'POST', body: { completion_note: note } });
     closeEtaCheckModal();
     showBigSuccessBanner('✓ ETA check logged' + (newEta && newEta !== prevEta ? ' · new ETA ' + newEta : ''));
+    // r31n item 2 — close plan modal after task save
+    if (document.getElementById('planModal').classList.contains('active')) closeModal();
     loadDashboard();
     if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
-    if (_currentPlan && document.getElementById('planModal').classList.contains('active')) openPlan(_currentPlan.plan.id);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -3700,9 +3728,10 @@ async function confirmProdCheck() {
     document.getElementById('prodCheckModal').classList.remove('active');
     _prodCheckState = null;
     showBigSuccessBanner('✓ Production check logged');
+    // r31n item 2 — close plan modal after task save
+    if (document.getElementById('planModal').classList.contains('active')) closeModal();
     loadDashboard();
     if (document.getElementById('page-tasks').classList.contains('active')) renderTasksPage();
-    if (_currentPlan) openPlan(_currentPlan.plan.id);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4589,23 +4618,35 @@ async function renderKemballsPage() {
         html += '<div class="kb-packing-list-link no-file">📦 No packing list or Final PI uploaded — agent should add at gate 4</div>';
       }
 
-      // r31j — Retrieval status section. Booking now happens at gate 9 (unified flow for both
-      //   clean and kemballs routes). This page just shows where the container is and links to
-      //   the plan modal where the actual booking happens.
+      // r31n item 11 — Kemballs is now a parked state. Cards show running cost + one primary
+      //   action: "Bring to warehouse" — which releases the plan back to active and creates the
+      //   book_local_delivery task in the normal pipeline. No more "open plan to book at gate 9"
+      //   indirection. The retrieval booking is a follow-on task once released.
+      const isParked = p.status === 'kemballs_parked';
+      const alreadyBooked = p.local_delivery_booked_date || p.delivery_date;
       html += '<div class="kb-retrieval-form">';
-      if (p.local_delivery_booked_date || p.delivery_date) {
+      if (alreadyBooked) {
         html += '<div class="kb-form-title">Retrieval booked</div>';
         const bookedLabel = p.delivery_date ? ('delivered ' + escapeHtml(fmtDate(p.delivery_date))) :
                             ('booked ' + escapeHtml(fmtDate(p.local_delivery_booked_date)));
         html += '<div class="kb-retrieval-status">✓ ' + bookedLabel +
                 ' · partner ' + escapeHtml(p.local_delivery_partner || '—') + '</div>';
-      } else {
-        html += '<div class="kb-form-title">Ready to retrieve to warehouse</div>';
+      } else if (isParked) {
+        html += '<div class="kb-form-title">Parked at Kemballs</div>';
         html += '<div style="font-size:12px;color:var(--text2);line-height:1.5;margin-top:6px">' +
-                'When you\'re ready, open the plan and book delivery at gate 9. The same flow as direct deliveries.</div>';
+                'Container is in storage. Press "Bring to warehouse" when ready — this will close the storage ' +
+                'cost clock and create a delivery booking task.</div>';
+      } else {
+        html += '<div class="kb-form-title">In transit</div>';
+        html += '<div style="font-size:12px;color:var(--text2);line-height:1.5;margin-top:6px">' +
+                'Container is at Kemballs but plan is still active (pre-r31n flow). ' +
+                'Open the plan and complete customs clearance to formally park.</div>';
       }
-      html += '<div class="kb-retrieval-actions" style="margin-top:10px">';
-      html += '<button class="btn btn-sm btn-primary" onclick="openStageDrawerFromOther(' + p.id + ')">Open plan ↗</button>';
+      html += '<div class="kb-retrieval-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">';
+      if (isParked && !alreadyBooked) {
+        html += '<button class="btn btn-sm btn-primary" onclick="bringToWarehouse(' + p.id + ', \'' + escapeHtml(p.plan_number) + '\')">🚚 Bring to warehouse</button>';
+      }
+      html += '<button class="btn btn-sm" onclick="openStageDrawerFromOther(' + p.id + ')">Open plan ↗</button>';
       html += '</div>';
       html += '</div>';  // form
 
@@ -4618,6 +4659,18 @@ async function renderKemballsPage() {
 
 // r31j — DELETED: bookKemballsRetrieval. Retrieval booking moved to unified gate 9 flow.
 //   The Kemballs page no longer has its own inline booking form (was creating dual workflows).
+
+// r31n item 11 — Bring a parked Kemballs plan back to active. Server stamps campbells_out_date,
+//   flips status to 'active', and fires book_local_delivery task. Page reloads to reflect the move.
+async function bringToWarehouse(planId, planNumber) {
+  if (!confirm('Bring ' + planNumber + ' back from Kemballs?\n\nThis will:\n  • Stop the storage cost clock\n  • Create a "Book local delivery" task\n  • Move the plan back into the active list\n\nYou can\'t undo this from here — open the plan if you need to adjust dates.')) return;
+  try {
+    await api('/plans/' + planId + '/bring-to-warehouse', { method: 'POST', body: {} });
+    showBigSuccessBanner('✓ ' + planNumber + ' brought back from Kemballs');
+    renderKemballsPage();
+    loadDashboard();
+  } catch(e) { toast(e.message || 'Failed', 'error'); }
+}
 
 // r30k — Large visible save confirmation that stays for ~2.5s, hard to miss
 function showBigSuccessBanner(text) {
@@ -5968,6 +6021,23 @@ function currentGateFieldsHtml(p, s, audit, targetGate) {
     html += dateField('duty_paid_date', 'Duty paid date', p.duty_paid_date, audit.duty_paid_date);
   } else if (gate === 8) {
     // r31g — gate 8 is Customs cleared (was frontend gate 9).
+    // r31n item 11 — Mandatory disposition confirmation. Gate-5 set initial intent; gate-8 is
+    //   the point of no return. Server rejects customs_cleared_date if disposition is null. UI
+    //   surfaces the picker with a clear warning, and the route choice determines what happens
+    //   next: Warehouse → plan stays active, gate 9 task fires. Kemballs → plan parks, drops from
+    //   active list, "Bring to warehouse" button on Kemballs page brings it back later.
+    html += '<div class="field" style="grid-column: span 2;background:#fff8f0;border:1px solid #f5c8a8;border-radius:8px;padding:12px 14px">';
+    html += '<label>Final destination — confirm route <span style="color:#dc2626;font-weight:600">required to mark customs cleared</span></label>';
+    html += '<select id="f_disposition" style="margin-top:4px">';
+    html += '<option value=""' + (!p.disposition ? ' selected' : '') + '>— pick one —</option>';
+    html += '<option value="clean"' + (p.disposition === 'clean' ? ' selected' : '') + '>Warehouse (direct delivery)</option>';
+    html += '<option value="kemballs"' + ((p.disposition === 'kemballs' || p.disposition === 'campbells') ? ' selected' : '') + '>Kemballs (storage, retrieve later)</option>';
+    html += '</select>';
+    html += '<div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.5">' +
+            '<strong>Warehouse:</strong> plan stays active, a "Book local delivery" task is created.<br>' +
+            '<strong>Kemballs:</strong> plan moves to the Kemballs section. Storage cost starts. Use "Bring to warehouse" there when ready.' +
+            '</div>';
+    html += '</div>';
     html += dateField('customs_cleared_date', 'Customs cleared date', p.customs_cleared_date, audit.customs_cleared_date);
   } else if (gate === 9) {
     // r31h — gate 9 unified: book + complete delivery to warehouse.
@@ -6491,8 +6561,11 @@ function renderClaimCard(c, planId) {
     html += '<button class="btn btn-sm" onclick="rejectClaimResponse(' + c.id + ',' + planId + ')">Reject — ask supplier again</button>';
   }
   // Close — only if agreed or no response and want to close anyway
-  if (c.status !== 'closed') {
+  if (c.status !== 'closed' && c.status !== 'dropped') {
     html += '<button class="btn btn-sm btn-ghost" onclick="closeClaim(' + c.id + ',' + planId + ')">Close claim</button>';
+    // r31n item 7 — Drop = "this claim shouldn't have been raised" or "decided not to pursue".
+    //   Distinct from Close (which means resolved).
+    html += '<button class="btn btn-sm btn-ghost" style="color:#dc2626" onclick="dropClaim(' + c.id + ',' + planId + ')">Drop claim</button>';
   } else if (_user && _user.is_manager) {
     html += '<button class="btn btn-sm btn-ghost" onclick="reopenClaim(' + c.id + ',' + planId + ')">Reopen</button>';
   }
@@ -6568,6 +6641,20 @@ async function closeClaim(claimId, planId) {
   try {
     await api('/claims/' + claimId, { method: 'PATCH', body: { status: 'closed' } });
     showBigSuccessBanner('✓ Issue resolved');
+    openPlan(planId);
+    loadDashboard();
+  } catch(e) { toast(e.message, 'error'); }
+}
+// r31n item 7 — Drop claim. Distinct from Close (which means resolved). Drop = "shouldn't
+//   have been raised" or "decided not to pursue". Requires a reason so the audit log is useful.
+async function dropClaim(claimId, planId) {
+  const reason = prompt('Why are you dropping this claim?\n\n(e.g. "raised in error", "value too small to pursue", "supplier already credited us elsewhere")');
+  if (reason === null) return;  // user cancelled
+  const trimmed = reason.trim();
+  if (!trimmed) { toast('Reason required', 'error'); return; }
+  try {
+    await api('/claims/' + claimId + '/drop', { method: 'POST', body: { reason: trimmed } });
+    showBigSuccessBanner('✓ Claim dropped');
     openPlan(planId);
     loadDashboard();
   } catch(e) { toast(e.message, 'error'); }
@@ -7010,6 +7097,16 @@ async function savePlanFields(id) {
     if (v !== null && v !== '') payload[f] = v;
     else if (document.getElementById('f_' + f)) payload[f] = null;
   });
+  // r31n item 11 — Client-side guard: if user is marking customs_cleared_date for the first time,
+  //   disposition must be set. Friendlier error than waiting for the server 400 to come back.
+  const planBefore = _currentPlan && _currentPlan.plan;
+  if (planBefore && payload.customs_cleared_date && !planBefore.customs_cleared_date) {
+    const dispoNow = payload.disposition || planBefore.disposition;
+    if (!dispoNow) {
+      toast('Pick a destination (Warehouse or Kemballs) before marking customs cleared', 'error');
+      return;
+    }
+  }
   // r30f — detect ALL changed date fields; only prompt slip once for all of them;
   // skip entirely if the field is still within its 24h grace window (no prior post-grace audit yet).
   const slipFields = ['approx_loading_date','actual_loading_date','original_eta','new_eta','final_payment_received_date','delivery_date','campbells_in_date','campbells_out_date'];

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- CampaignPulse Logistics — public supplier form (r31l) — task-scoped, claim-aware read-only, thanks-page on submit -->
+<!-- CampaignPulse Logistics — public supplier form (r31n — auto-upload + replace button; reason-after-resubmit was already shipped in r31c) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -383,8 +383,22 @@ function renderFieldHistory(fieldNames) {
 function renderUploadZone(slot, labelEn, labelCn) {
   const slotFiles = files.filter(f => f.slot === slot);
   let html = '<div class="upload-block"><h3>' + escapeHtml(labelEn) + ' <span class="cn">' + escapeHtml(labelCn) + '</span></h3>';
+  // r31n item 9 — Auto-upload: file uploads as soon as supplier picks it (onchange). No separate
+  //   "Upload" button to forget. Spinner shows during upload. If a file is already attached for
+  //   this slot, show "Replace" UI instead of a generic picker — clearer that it's overwriting.
   if (!plan.locked) {
-    html += '<input type="file" id="file_' + slot + '" style="font-size:13px;width:100%"><button class="btn btn-sm btn-secondary" style="margin-top:8px" onclick="uploadFile(\'' + slot + '\')">Upload / 上传</button>';
+    if (slotFiles.length) {
+      // Existing file present — offer Replace
+      html += '<div style="font-size:12px;color:#6b7280;margin-bottom:6px">A file has been uploaded for this slot. Use Replace to swap it. / 该项已上传文件。点击"替换"上传新文件。</div>';
+      html += '<input type="file" id="file_' + slot + '" style="display:none" onchange="uploadFile(\'' + slot + '\')">';
+      html += '<button class="btn btn-sm btn-secondary" onclick="document.getElementById(\'file_' + slot + '\').click()">Replace / 替换</button>';
+      html += '<span id="upstatus_' + slot + '" style="margin-left:10px;font-size:12px;color:#6b7280"></span>';
+    } else {
+      // No file yet — single-step picker
+      html += '<input type="file" id="file_' + slot + '" style="display:none" onchange="uploadFile(\'' + slot + '\')">';
+      html += '<button class="btn btn-sm btn-secondary" onclick="document.getElementById(\'file_' + slot + '\').click()">Choose file & upload / 选择文件并上传</button>';
+      html += '<span id="upstatus_' + slot + '" style="margin-left:10px;font-size:12px;color:#6b7280"></span>';
+    }
   }
   if (slotFiles.length) {
     html += '<div class="file-list">';
@@ -460,11 +474,20 @@ function showSupplierThanks(titleEn, titleCn, extraEn, extraCn) {
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 
+// r31n item 9 — Auto-upload: fires from input.onchange, so picking a file uploads immediately.
+//   Shows status text next to the button. Backend supplier endpoint already accepts re-uploads
+//   for the same slot (preserves history via separate rows + audit), so Replace is non-destructive.
 async function uploadFile(slot) {
   const submitter = v('submitted_by');
-  if (!submitter) { toast('Please enter your name first / 请先输入您的姓名', 'error'); return; }
+  if (!submitter) {
+    toast('Please enter your name at the top of the form first / 请先在表格顶部输入您的姓名', 'error');
+    document.getElementById('file_' + slot).value = '';
+    return;
+  }
   const fInput = document.getElementById('file_' + slot);
-  if (!fInput.files || !fInput.files.length) { toast('Choose a file first / 请先选择文件', 'error'); return; }
+  if (!fInput.files || !fInput.files.length) return;  // nothing picked, silent
+  const status = document.getElementById('upstatus_' + slot);
+  if (status) { status.textContent = 'Uploading… / 上传中…'; status.style.color = '#6b7280'; }
   const fd = new FormData();
   fd.append('file', fInput.files[0]);
   fd.append('slot', slot);
@@ -475,10 +498,15 @@ async function uploadFile(slot) {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.error || 'Upload failed');
     }
+    if (status) { status.textContent = '✓ Uploaded / 已上传'; status.style.color = '#15803d'; }
     toast('Uploaded / 已上传', 'success');
     fInput.value = '';
     await load();
-  } catch(e) { toast(e.message, 'error'); }
+  } catch(e) {
+    if (status) { status.textContent = '✗ ' + e.message; status.style.color = '#dc2626'; }
+    toast(e.message, 'error');
+    fInput.value = '';
+  }
 }
 
 // ─── r30d: Claim rendering + response ────────────────────────────────────
