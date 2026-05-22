@@ -2297,47 +2297,11 @@ module.exports = function(getDb) {
   //   Warehouse received = warehouse_received_date NOT NULL; not verified
   // All transitions reversible. Each endpoint below changes fields; bucket follows.
 
-  // Book delivery — used from Kemballs card AND from Warehouse incoming card. Same form, same
-  //   endpoint. Sets partner + delivery_date + booked_date. For Kemballs plans, also sets
-  //   campbells_out_date=delivery_date (storage clock stops, final cost locked).
-  router.post('/plans/:id/book-delivery', async function(req, res) {
-    const db = req._db;
-    try {
-      const id = parseInt(req.params.id);
-      const partner = (req.body && req.body.partner || '').toString().trim();
-      const deliveryDate = (req.body && req.body.delivery_date || '').toString().trim();
-      if (!partner) return res.status(400).json({ error: 'Delivery partner required' });
-      if (!deliveryDate) return res.status(400).json({ error: 'Delivery date required' });
-      const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
-      if (!before) return res.status(404).json({ error: 'Plan not found' });
-      if (!before.customs_cleared_date) {
-        return res.status(409).json({ error: 'Customs not cleared yet — cannot book delivery' });
-      }
-      const today = todayDate();
-      const isKemballs = before.disposition === 'kemballs' || before.disposition === 'campbells';
-      // For Kemballs plans, lock storage end-date to delivery_date (so cost is final).
-      const setOut = isKemballs && !before.campbells_out_date;
-      const sql = setOut
-        ? `UPDATE lg_plans SET local_delivery_partner=$1, delivery_date=$2,
-             local_delivery_booked_date=$3, campbells_out_date=$2, updated_at=NOW()
-             WHERE id=$4 RETURNING *`
-        : `UPDATE lg_plans SET local_delivery_partner=$1, delivery_date=$2,
-             local_delivery_booked_date=$3, updated_at=NOW()
-             WHERE id=$4 RETURNING *`;
-      const r = await db.query(sql, [partner, deliveryDate, today, id]);
-      await logFieldAudit(db, id, 'local_delivery_partner', before.local_delivery_partner, partner, actor(req), 'agent');
-      await logFieldAudit(db, id, 'delivery_date', before.delivery_date, deliveryDate, actor(req), 'agent');
-      if (setOut) await logFieldAudit(db, id, 'campbells_out_date', null, deliveryDate, 'system', 'system');
-      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
-        [id, 'delivery_booked', partner + ' on ' + deliveryDate + (setOut ? ' (Kemballs storage closed)' : ''), actor(req)]);
-      await evaluateTasks(db, id);
-      await notify(db, { role: 'warehouse_agent' }, 'delivery_booked', {
-        title: 'Incoming delivery — ' + before.plan_number,
-        body: partner + ' delivering on ' + deliveryDate, plan_id: id
-      });
-      res.json({ ok: true, plan: r.rows[0] });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-  });
+  // r31n.1 — NO direct /book-delivery endpoint. Booking is done by the freight partner via the
+  //   public /q/<token> link (see agentPublic.post handler). Shauraya emails the partner with the
+  //   link; partner fills delivery date + transport details; that POST writes local_delivery_* +
+  //   delivery_date + (if Kemballs) campbells_out_date. The earlier r31n.1 /book-delivery endpoint
+  //   was wrong abstraction — Shauraya never types partner name + date directly.
 
   // Cancel delivery booking. Clears partner + delivery_date + booked_date. For Kemballs plans
   //   this also re-opens campbells_out_date=NULL so storage clock resumes.
@@ -4007,13 +3971,9 @@ module.exports = function(getDb) {
       const planId = parseInt(req.params.id);
       const p = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [planId])).rows[0];
       if (!p) return res.status(404).json({ error: 'Plan not found' });
-      // r31n item 13 — Kemballs route does not use a freight-partner delivery email at gate 9.
-      //   For Kemballs plans, the route is: park → "Bring to warehouse" → local delivery booking
-      //   handled differently (often direct phone/WeChat to the local agent). Server-level guard
-      //   prevents the email being composed at all; frontend should also hide the button (UI work).
-      if (gate === 9 && (p.disposition === 'kemballs' || p.disposition === 'campbells')) {
-        return res.status(400).json({ error: 'Gate-9 freight-partner email not used for Kemballs route. Use "Bring to warehouse" from the Kemballs section.' });
-      }
+      // r31n.1 — Same gate-9 freight-partner email flow for BOTH Kemballs and Warehouse routes.
+      //   FK uses one delivery partner (Origin Logistics) for direct AND from-Kemballs deliveries.
+      //   The earlier r31n.0 guard that rejected gate-9 email for Kemballs was wrong — removed.
       const sup = p.supplier_id ? (await db.query('SELECT * FROM lg_suppliers WHERE id=$1', [p.supplier_id])).rows[0] : null;
       // r31h — freight agent lookup (gate 9 only)
       let freightAgent = null;
@@ -4341,48 +4301,40 @@ module.exports = function(getDb) {
           if (!allowedPlans.has(pid)) { skipped.push({plan_id: pid, reason: 'plan not in link'}); continue; }
           const hasAny = ['delivery_date','transport_ref','driver','notes'].some(function(k){ return r[k] !== undefined && r[k] !== null && String(r[k]).trim() !== ''; });
           if (!hasAny) { skipped.push({plan_id: pid, reason: 'empty'}); continue; }
-          // Determine partner field based on plan disposition
           const plan = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [pid])).rows[0];
           if (!plan) { skipped.push({plan_id: pid, reason: 'plan not found'}); continue; }
-          // Compose notes augmenting transport ref + driver into shipping_notes (no dedicated columns)
+          // Compose notes augmenting transport ref + driver into shipping_notes
           const detail = [];
           if (r.transport_ref) detail.push('Transport ref: ' + r.transport_ref);
           if (r.driver) detail.push('Driver/contact: ' + r.driver);
           if (r.notes) detail.push(r.notes);
           const combinedNote = detail.join(' · ');
-          if (plan.disposition === 'kemballs' || plan.disposition === 'campbells') {
-            const updates = {
-              kemballs_retrieval_partner:   agent.name,
-              kemballs_retrieval_booked_date: r.delivery_date || null,
-              delivery_agent_id:             agent.id
-            };
-            const sets = []; const vals = []; let i = 1;
-            for (const f in updates) {
-              if (updates[f] !== null && updates[f] !== undefined) {
-                sets.push(f + '=$' + (i++));
-                vals.push(updates[f]);
-                await logFieldAudit(db, pid, f, plan[f], updates[f], submittedBy, submittedByRole);
-              }
-            }
-            vals.push(pid);
-            if (sets.length) await db.query('UPDATE lg_plans SET ' + sets.join(',') + ', updated_at=NOW() WHERE id=$' + i, vals);
-          } else {
-            const updates = {
-              local_delivery_partner:     agent.name,
-              local_delivery_booked_date: r.delivery_date || null,
-              delivery_agent_id:          agent.id
-            };
-            const sets = []; const vals = []; let i = 1;
-            for (const f in updates) {
-              if (updates[f] !== null && updates[f] !== undefined) {
-                sets.push(f + '=$' + (i++));
-                vals.push(updates[f]);
-                await logFieldAudit(db, pid, f, plan[f], updates[f], submittedBy, submittedByRole);
-              }
-            }
-            vals.push(pid);
-            if (sets.length) await db.query('UPDATE lg_plans SET ' + sets.join(',') + ', updated_at=NOW() WHERE id=$' + i, vals);
+          // r31n.1 — Unified delivery booking. Both Kemballs and Warehouse routes write to the same
+          //   `local_delivery_*` + `delivery_date` fields. For Kemballs plans, also stamp
+          //   `campbells_out_date = delivery_date` so the storage clock stops on the booked date.
+          //   Legacy `kemballs_retrieval_*` fields kept untouched — readable for historical plans,
+          //   no new writes.
+          const isKemballs = plan.disposition === 'kemballs' || plan.disposition === 'campbells';
+          const deliveryDate = r.delivery_date || null;
+          const updates = {
+            local_delivery_partner:     agent.name,
+            local_delivery_booked_date: deliveryDate,
+            delivery_date:              deliveryDate,
+            delivery_agent_id:          agent.id
+          };
+          if (isKemballs && deliveryDate && !plan.campbells_out_date) {
+            updates.campbells_out_date = deliveryDate;
           }
+          const sets = []; const vals = []; let i = 1;
+          for (const f in updates) {
+            if (updates[f] !== null && updates[f] !== undefined) {
+              sets.push(f + '=$' + (i++));
+              vals.push(updates[f]);
+              await logFieldAudit(db, pid, f, plan[f], updates[f], submittedBy, submittedByRole);
+            }
+          }
+          vals.push(pid);
+          if (sets.length) await db.query('UPDATE lg_plans SET ' + sets.join(',') + ', updated_at=NOW() WHERE id=$' + i, vals);
           // r31h — fix: transport_ref + driver + notes from freight partner used to only land in activity log,
           //   never on the plan itself. Now appended to remarks so Bobby actually sees the booking detail.
           if (combinedNote) {
@@ -4394,7 +4346,13 @@ module.exports = function(getDb) {
             await logFieldAudit(db, pid, 'remarks', plan.remarks || null, newRemarks, submittedBy, submittedByRole);
           }
           await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
-            [pid, 'delivery_booked', 'Delivery booked by ' + agent.name + (combinedNote ? ' · ' + combinedNote : ''), submittedBy]);
+            [pid, 'delivery_booked', 'Delivery booked by ' + agent.name + (isKemballs ? ' (from Kemballs)' : '') + (combinedNote ? ' · ' + combinedNote : ''), submittedBy]);
+          // Notify warehouse (Harp) about incoming delivery
+          await notify(db, { role: 'warehouse_agent' }, 'delivery_booked', {
+            title: 'Incoming delivery — ' + plan.plan_number,
+            body: agent.name + ' delivering on ' + (deliveryDate || 'TBC') + (isKemballs ? ' (from Kemballs)' : ''),
+            plan_id: pid
+          });
           await evaluateTasks(db, pid);
           accepted.push(pid);
         }
