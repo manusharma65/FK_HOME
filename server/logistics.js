@@ -2992,10 +2992,13 @@ module.exports = function(getDb) {
     try {
       const today = todayDate();
       const horizon = asIso(addDays(today, 60));
-      // r31g — include plans where Harp's marked received (delivery_date may or may not be set) but
-      //   not yet auto-closed. The auto-close sweep handles plans >30 days post-verify.
+      // r31n.1 — Include plans in any of three states:
+      //   1. Delivery booked, not received yet (delivery_date set, warehouse_received_date NULL) ← MOST COMMON, was missing
+      //   2. Past customs but no booking yet (delivery_date NULL, customs_cleared_date set) ← needs-booking lane
+      //   3. Received (warehouse_received_date set) ← awaiting verify or recently verified
+      // Exclude: still in transit (customs_cleared_date NULL AND delivery_date NULL) — they're on the active list.
       const rows = (await db.query(`
-        SELECT p.id, p.plan_number, p.supplier_id, p.disposition,
+        SELECT p.id, p.plan_number, p.supplier_id, p.disposition, p.customs_cleared_date,
                p.original_eta, p.new_eta,
                p.local_delivery_booked_date, p.local_delivery_partner, p.delivery_date,
                p.kemballs_retrieval_booked_date, p.kemballs_retrieval_partner, p.kemballs_retrieval_confirmed_date,
@@ -3007,8 +3010,9 @@ module.exports = function(getDb) {
         LEFT JOIN lg_suppliers s ON s.id = p.supplier_id
         WHERE p.status='active' AND p.closed_at IS NULL
           AND (
-            p.delivery_date IS NULL
-            OR p.warehouse_received_date IS NOT NULL
+            p.delivery_date IS NOT NULL                                       -- booked or delivered
+            OR p.warehouse_received_date IS NOT NULL                          -- received
+            OR (p.customs_cleared_date IS NOT NULL AND p.disposition='clean') -- clean route past customs, needs booking
           )
       `)).rows;
 

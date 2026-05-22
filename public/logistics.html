@@ -6498,8 +6498,18 @@ async function fireFreightGmail(planId, agentId, isQuote, encodedUrl) {
   //   off-link, use the "Mark booked manually" option on the card.
   if (!isQuote) {
     showBigSuccessBanner('📧 Email sent to Origin Logistics — plan moves to Warehouse Incoming once they fill the booking link');
+    // r31n.1 — Also close the plan modal so the agent isn't confused. The plan stays where it is
+    //   (Kemballs / clean-route Warehouse Incoming) until Origin fills the link.
+    setTimeout(function(){
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      loadDashboard();
+    }, 1500);
   } else {
     showBigSuccessBanner('📧 Quote request sent');
+    setTimeout(function(){
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      loadDashboard();
+    }, 1500);
   }
 }
 
