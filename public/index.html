@@ -5717,12 +5717,17 @@ async function runAmzCritique(groupKey, asin, model) {
     });
     const j = await r.json();
     if (!r.ok || j.error) {
-      if (inlineContent) inlineContent.innerHTML = '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
+      // r35.11: 429 quota — show the friendly quotaMessage instead of raw error string
+      const errMsg = (j.error === 'quota' && j.quotaMessage) ? j.quotaMessage : (j.error || 'unknown');
+      const isQuota = j.error === 'quota';
       const safeKey = escHtml(groupKey).replace(/'/g, "\\'");
-      if (inlineButtons) inlineButtons.innerHTML = '<button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Retry</button>';
-      // Show error in critique modal
+      const inlineHtml = isQuota
+        ? '<div style="color:#92400E;background:#FEF3C7;border-left:4px solid #F59E0B;padding:12px 14px;border-radius:8px;font-size:13px;line-height:1.5">' + escHtml(errMsg) + '</div>'
+        : '<div style="color:var(--red);font-size:13px">Critique failed: ' + escHtml(errMsg) + '</div>';
+      if (inlineContent) inlineContent.innerHTML = inlineHtml;
+      if (inlineButtons) inlineButtons.innerHTML = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')">↻ Re-run Haiku</button>';
       const body = document.getElementById('amz-critique-modal-body');
-      if (body) body.innerHTML = '<div style="color:var(--red);padding:12px">Critique failed: ' + escHtml(j.error || 'unknown') + '</div>';
+      if (body) body.innerHTML = inlineHtml;
       return;
     }
     // Render result in the reader modal AND update the inline section so re-open shows it
@@ -5858,10 +5863,14 @@ function renderAmzCritiqueResult(j, asin, groupKey) {
     const myDept = (me.department || '').toLowerCase();
     const canDeepDive = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
     let buttons = '<button class="btn btn-ghost" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'haiku\')" style="font-size:12px">↻ Re-analyse (Haiku)</button>';
-    // r29e: Opus button shown to everyone if current cache isn't already Opus.
-    // Server gates: agents need ≥1 feedback to actually run it.
+    // r35.11: Opus button visible to everyone. Server enforces per-agent 24h quota
+    // per (product, agent) via ai_escalation_log. Cooldown broken by submitting
+    // ≥10-char feedback. Owner/manager bypass. Consistent with r35.9 task escalation.
     if (cachedModel !== 'opus') {
-      buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="Deep dive. Agents: submit feedback on the Haiku output to unlock.">🔬 Deep dive (Opus)</button>';
+      const opusTitle = canDeepDive
+        ? 'Deep dive analysis (unlimited for manager).'
+        : 'Deep dive (1 per 24h per product). Leave feedback in the box below to unlock another run sooner.';
+      buttons += ' <button class="btn btn-primary" onclick="runAmzCritique(\'' + safeKey + '\', \'' + asin + '\', \'opus\')" style="font-size:12px" title="' + opusTitle + '">🔬 Deep dive (Opus)</button>';
     }
     buttonsEl.innerHTML = buttons;
   }

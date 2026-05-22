@@ -1,47 +1,29 @@
-// CampaignPulse — deploy marker 2026-05-21 r31n (LOGISTICS FIXES SHIP — focused logistics-only
-// ship before r32 architecture rebuild. server.js change: added /s, /q, /f public router mounts
-// to fix items 5+6 in the r31n issue list (freight-agent quote/delivery links were 404ing because
-// the /q mount was missing). All other r31n work is in server/logistics.js + public/logistics.html
-// + public/supplier.html. INHERITS all r35.9 work below — Amazon side untouched.
-//
-// r35.9 inherited (FIVE FEATURES + HYGIENE.
-// (1) D — Per-agent Opus quota on /api/tasks/:id/escalation-analysis. 24h
-// cooldown per (task, agent), broken when the agent submits non-trivial
-// notes (≥10 chars) via /api/tasks/:id/status. Cache hits don't count
-// toward quota. Owner/manager bypass entirely. Friendly lockout message
-// surfaced via HTTP 429 + quotaMessage field. New table ai_escalation_log.
-// (2) F — Display-name dedupe badge on Tasks. /api/tasks now annotates each
-// open/in_progress task with dedupe_count + dedupe_sibling_ids. Frontend
-// shows 🔗 badge on cards with siblings; click opens merge dialog.
-// (3) F-merge — POST /api/tasks/:id/merge-into endpoint (Option 2: close one,
-// point to other). Dismisses the loser task with "Merged into #X" note,
-// adds matching note to the survivor. Cross-department + cross-name merge
-// rejected. Activity-log entry recorded.
-// (4) Sessions/CVR in product modal. Mirrors the card stat-grid logic from
-// r35.8. Empty until Brand Analytics SP-API role approved (requested
-// 2026-05-20 ~14:30; awaiting Amazon).
-// (5) Product merge opened to agents. /api/amazon/products/merge previously
-// owner+manager only. Now accepts any active staff (dept in
-// amazon/google/logistics/accounts/warehouse) provided confirmed:true is
-// sent. Manager still bypasses confirmation. Audit log records role tag.
-// HYGIENE: removed dead previousNoteSaysWait regex function (no callers).
-// DROPPED FROM SHIP: G (Google consecutive-day rules — Google scheduler
-// uses 7d totals not daily snapshots; bigger work than estimated, deferred).
-// Other hygiene items (AGENT_ALIASES_FALLBACK removal, whereActiveTask
-// helper, snooze endpoint consolidation, duplicate CREATE TABLE collapse)
-// pulled — turns out they need real audits not 5-min tidy work. Next time.
-// INHERITS all of r35.8 (Product card 4-layer diagnostic, sessions/CVR
-// data path, Doing Great + Monitor buckets), r35.7 (BUYABLE recovery boot),
-// r35.6 (REMOVED sweep 2h→3d + product-status recovery), r35.5 (consecutive-
-// day scoring, Sharpen cache fix, Amazon /take endpoint, debug auth),
-// r35.4 (paused root cause, alert state consistency, scheduler idempotency,
-// admin-endpoint security cleanup).
-// NOT IN THIS SHIP (next chat): E (keyword surfacing), H (state.alerts
-// unification), I (AI cache DB persistence — measure first), P6 (Coach
-// briefing endpoint), G (Google consecutive-day), agent-side product hide
-// already works (no changes needed). Awaiting Brand Analytics approval to
-// populate amazon_traffic_snapshots — then trigger /api/admin/backfill-
-// traffic?days=22 to seed 22 days back to 28 April CP launch.)
+// CampaignPulse — deploy marker 2026-05-22 r35.11 (TWO BUG FIXES from Aryan
+// complaint that "task can't be assigned" and "Opus is restricted".
+// (1) STANDALONE PRODUCT TASK ASSIGNMENT — fixed in /api/amazon/products/:groupKey/
+// assign-task (server.js line 8040). Standalone products (no parent_sku) get a
+// synthetic groupKey like 'asin:B0DGZP02CY' from the products endpoint. Old SQL
+// did `WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1)` which never
+// matched synthetic asin: keys. Returns "Product not found" on every standalone
+// product. Aryan saw this on the Digital Weighing Scales product. Fix: detect
+// asin: prefix, strip it, look up by asin column instead.
+// (2) AGENT OPUS QUOTA ON PRODUCT CRITIQUE — fixed in /api/amazon/listing-critique
+// POST (server.js line 7468). Replaces the old r15 hard owner/manager block with
+// the same per-agent 24h quota pattern from r35.9 D (task escalation). Agents
+// can run Opus once per (product, 24h) via ai_escalation_log entity_type
+// 'amazon_product'. Cooldown broken by submitting ≥10-char feedback via
+// /api/ai/feedback with scope='amazon_product' (server.js line ~4856, mirrors
+// task-side break at line ~10642). Owner/manager bypass entirely. Frontend
+// (index.html line ~5860) now shows the Deep Dive button to everyone with a
+// tooltip explaining the quota; 429 quota errors surface the friendly
+// quotaMessage instead of the raw error string.
+// INHERITS all of r35.10b (performance.html deployed), r35.10 (gzip fix +
+// agent task assignment p.asins[0] fix), r35.9 (5 features + hygiene), r35.8
+// (4-layer diagnostic), r35.7 (BUYABLE recovery), r35.6 (REMOVED sweep),
+// r35.5 (consecutive-day scoring), r35.4 (paused root cause).
+// NOT IN THIS SHIP (deferred): keyword surfacing rethink, Monthly Mirror
+// performance system, Daily Touch widget for Satyam manual entry,
+// 30-day tiles in product modal.
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -215,18 +197,6 @@ app.use('/api', requireAuth);
 // r30a — Logistics module (self-contained router; lazy-binds db at request time)
 const logisticsRouter = require('./server/logistics')(function() { return db; });
 app.use('/api/logistics', logisticsRouter);
-// r31n — Public logistics routers (no auth). These serve token-protected pages to external
-//   parties (suppliers, freight agents, import agents). Must be mounted BEFORE any catch-all
-//   route + outside the `/api` auth umbrella.
-//   /s/<token>  — supplier portal (supplier.html + supplier API)
-//   /q/<token>  — freight-agent portal for quote requests + delivery booking (agent.html + agent API)
-//   /f/<token>  — public file download links (30-day expiry, manager-revokable)
-//   Bug fix: items 5+6 in r31n issue list. /q/ was generating links the freight agents couldn't open
-//   because the mount was missing. /s/ and /f/ added defensively in case they were also lost in a
-//   prior deploy — both routers are idempotent so re-mounting is safe.
-if (logisticsRouter._supplierShare) app.use('/s', logisticsRouter._supplierShare);
-if (logisticsRouter._agentShare)    app.use('/q', logisticsRouter._agentShare);
-if (logisticsRouter._fileShare)     app.use('/f', logisticsRouter._fileShare);
 
 let state = {
   accessToken: null,
@@ -1110,14 +1080,36 @@ async function fetchSalesAndTrafficReport(reportDate) {
     }
     if (!docId) throw new Error('report polling timed out');
 
-    // Step 3 — fetch the document URL, then download + parse
+    // Step 3 — fetch the document URL, then download + parse.
+    // r35.10 fix: SP-API Reports v2021-06-30 returns documents with an optional
+    // compressionAlgorithm field ('GZIP' or absent). Previous code downloaded
+    // as 'text' and JSON.parse'd directly — which silently failed for ANY gzipped
+    // response with "Unexpected token at position 0". That's why
+    // amazon_traffic_snapshots stayed empty since launch. Pattern mirrors the
+    // working search-term download path at line ~5032.
     const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
     const docUrl = docMeta && docMeta.url;
     if (!docUrl) throw new Error('no document url');
-    const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'text' });
+    const compression = (docMeta && docMeta.compressionAlgorithm) || null;
+    const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'arraybuffer' });
+    let bodyText;
+    try {
+      if (compression === 'GZIP') {
+        const zlib = require('zlib');
+        bodyText = zlib.gunzipSync(Buffer.from(docRes.data)).toString('utf8');
+      } else {
+        // No compression — just decode the bytes as UTF-8 text
+        bodyText = Buffer.from(docRes.data).toString('utf8');
+      }
+    } catch(decompErr) {
+      throw new Error('decompression failed (compression=' + compression + '): ' + decompErr.message);
+    }
     let payload;
-    try { payload = JSON.parse(docRes.data); }
-    catch(e) { throw new Error('failed to parse report JSON: ' + e.message); }
+    try { payload = JSON.parse(bodyText); }
+    catch(e) {
+      // Include first 120 chars of body for debugging silent format changes
+      throw new Error('failed to parse report JSON: ' + e.message + ' | first 120 chars: ' + bodyText.slice(0, 120));
+    }
 
     // Step 4 — extract per-ASIN rows. Shape:
     // payload.salesAndTrafficByAsin = [{ parentAsin, childAsin, sku, sales: {...}, traffic: {...} }]
@@ -4867,6 +4859,20 @@ app.post('/api/ai/feedback', async function(req, res) {
       "INSERT INTO ai_feedback (scope, target_id, feedback_text, agent_name) VALUES ($1, $2, $3, $4) RETURNING id, created_at",
       [scope, targetId, feedback, agent]
     );
+    // r35.11: feedback breaks Opus cooldown for product-scoped critiques (mirror
+    // of the task-side feedback break at line ~10642). Only applies to scopes
+    // tied to the ai_escalation_log entity types ('amazon_product' for now).
+    if (scope === 'amazon_product' && feedback.length >= 10) {
+      try {
+        await db.query(
+          "UPDATE ai_escalation_log SET agent_feedback_at = NOW() " +
+          "WHERE entity_type = 'amazon_product' AND entity_id = $1 AND agent_name = $2 " +
+          "  AND agent_feedback_at IS NULL " +
+          "  AND called_at > NOW() - INTERVAL '7 days'",
+          [targetId, agent]
+        );
+      } catch(e) { console.error('[r35.11] product Opus cooldown-break failed: ' + e.message); }
+    }
     res.json({ ok: true, id: r.rows[0].id, created_at: r.rows[0].created_at });
   } catch(e) {
     console.error('[r25b] /api/ai/feedback error: ' + e.message);
@@ -6253,6 +6259,176 @@ app.post('/api/admin/backfill-ad-performance', async function(req, res) {
   res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each day takes ~2-3 min, total ~' + (days * 3) + ' min. Check server logs.' });
 });
 
+// r35.10c: GET /api/admin/traffic-state — single endpoint that returns
+// the full state of amazon_traffic_snapshots in one HTTP call. Replaces
+// the SQL-tool-via-Railway diagnostic flow when the SQL tool is being
+// unreliable. Owner-only. Returns counts, date range, sample rows, and
+// counts-by-fill-state so we know in one glance whether data is flowing.
+app.get('/api/admin/traffic-state', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
+  try {
+    const [counts, dateRange, fillState, sampleRows, perDay] = await Promise.all([
+      db.query("SELECT COUNT(*) AS n FROM amazon_traffic_snapshots"),
+      db.query(
+        "SELECT MIN(report_date)::text AS oldest, MAX(report_date)::text AS newest, " +
+        "MAX(fetched_at) AS last_fetch FROM amazon_traffic_snapshots"
+      ),
+      db.query(
+        "SELECT " +
+        "  COUNT(*) FILTER (WHERE sessions IS NOT NULL) AS rows_with_sessions, " +
+        "  COUNT(*) FILTER (WHERE sessions > 0) AS rows_with_nonzero_sessions, " +
+        "  COUNT(*) FILTER (WHERE buy_box_pct IS NOT NULL) AS rows_with_buybox, " +
+        "  COUNT(*) FILTER (WHERE units_ordered IS NOT NULL) AS rows_with_units, " +
+        "  COALESCE(SUM(sessions), 0) AS total_sessions, " +
+        "  COALESCE(SUM(units_ordered), 0) AS total_units " +
+        "FROM amazon_traffic_snapshots"
+      ),
+      db.query(
+        "SELECT asin, report_date::text AS date, buy_box_pct, sessions, " +
+        "  page_views, units_ordered, ordered_product_sales " +
+        "FROM amazon_traffic_snapshots ORDER BY report_date DESC, asin LIMIT 5"
+      ),
+      db.query(
+        "SELECT report_date::text AS date, COUNT(*) AS row_count, " +
+        "  COUNT(*) FILTER (WHERE sessions > 0) AS rows_with_real_sessions " +
+        "FROM amazon_traffic_snapshots " +
+        "GROUP BY report_date ORDER BY report_date DESC LIMIT 30"
+      )
+    ]);
+    res.json({
+      ok: true,
+      totalRows: parseInt(counts.rows[0].n),
+      dateRange: dateRange.rows[0],
+      fillState: fillState.rows[0],
+      sampleRows: sampleRows.rows,
+      perDay: perDay.rows,
+      note: 'totalRows is authoritative. fillState tells you whether Amazon is returning real values or empty payloads. perDay shows row distribution.'
+    });
+  } catch(e) {
+    res.status(500).json({ ok: false, error: e.message, stack: (e.stack || '').slice(0, 600) });
+  }
+});
+
+// r35.10: POST /api/admin/traffic-debug-full?date=YYYY-MM-DD — runs ALL 4
+// steps of fetchSalesAndTrafficReport and returns what happened at each step.
+// Tells us exactly where rows are getting lost. Synchronous (~3 min).
+// Owner only.
+app.post('/api/admin/traffic-debug-full', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  const date = String(req.query.date || '').trim() || new Date(Date.now() - 24*60*60*1000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const trace = { date: date, steps: [] };
+  try {
+    // STEP 1 — createReport
+    trace.steps.push({ step: 1, name: 'createReport', startedAt: new Date().toISOString() });
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: date + 'T00:00:00Z',
+      dataEndTime: date + 'T23:59:59Z',
+      reportOptions: { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
+    });
+    const reportId = createRes && createRes.reportId;
+    trace.steps[trace.steps.length - 1].response = createRes;
+    trace.steps[trace.steps.length - 1].reportId = reportId;
+    trace.steps[trace.steps.length - 1].ok = !!reportId;
+    if (!reportId) {
+      trace.failedAt = 'createReport';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 2 — poll until DONE
+    trace.steps.push({ step: 2, name: 'pollUntilDone', startedAt: new Date().toISOString(), polls: [] });
+    let docId = null;
+    let lastStatus = null;
+    const pollStart = Date.now();
+    const maxWait = 180000;
+    while (Date.now() - pollStart < maxWait) {
+      await new Promise(function(r){ setTimeout(r, 8000); });
+      const status = await spApiGet('/reports/2021-06-30/reports/' + encodeURIComponent(reportId));
+      lastStatus = status;
+      const procStatus = status && status.processingStatus;
+      trace.steps[trace.steps.length - 1].polls.push({ at: new Date().toISOString(), status: procStatus });
+      if (procStatus === 'DONE') {
+        docId = status.reportDocumentId;
+        break;
+      } else if (procStatus === 'CANCELLED' || procStatus === 'FATAL') {
+        trace.steps[trace.steps.length - 1].finalStatus = procStatus;
+        trace.steps[trace.steps.length - 1].fullStatusResponse = status;
+        trace.failedAt = 'pollUntilDone:' + procStatus;
+        return res.status(500).json(trace);
+      }
+    }
+    trace.steps[trace.steps.length - 1].finalStatus = lastStatus && lastStatus.processingStatus;
+    trace.steps[trace.steps.length - 1].docId = docId;
+    trace.steps[trace.steps.length - 1].ok = !!docId;
+    if (!docId) {
+      trace.steps[trace.steps.length - 1].fullStatusResponse = lastStatus;
+      trace.failedAt = 'pollUntilDone:timeout';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 3 — fetch document URL
+    trace.steps.push({ step: 3, name: 'fetchDocumentUrl', startedAt: new Date().toISOString() });
+    const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
+    trace.steps[trace.steps.length - 1].docMeta = docMeta;
+    const docUrl = docMeta && docMeta.url;
+    trace.steps[trace.steps.length - 1].hasUrl = !!docUrl;
+    trace.steps[trace.steps.length - 1].compressionAlgorithm = docMeta && docMeta.compressionAlgorithm;
+    trace.steps[trace.steps.length - 1].ok = !!docUrl;
+    if (!docUrl) {
+      trace.failedAt = 'fetchDocumentUrl';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 4 — download + parse + report shape
+    trace.steps.push({ step: 4, name: 'downloadAndParse', startedAt: new Date().toISOString() });
+    try {
+      const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'text' });
+      trace.steps[trace.steps.length - 1].rawBytes = (docRes.data || '').length;
+      trace.steps[trace.steps.length - 1].firstChars = String(docRes.data || '').slice(0, 200);
+      let payload;
+      try {
+        payload = JSON.parse(docRes.data);
+        trace.steps[trace.steps.length - 1].parsedOk = true;
+        trace.steps[trace.steps.length - 1].topLevelKeys = Object.keys(payload);
+        const arr = (payload && payload.salesAndTrafficByAsin) || [];
+        trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength = arr.length;
+        if (arr.length > 0) {
+          trace.steps[trace.steps.length - 1].firstRow = arr[0];
+        }
+        // Also report any other top-level shapes Amazon may have used
+        if (payload.salesAndTrafficByDate) trace.steps[trace.steps.length - 1].salesAndTrafficByDateLength = payload.salesAndTrafficByDate.length;
+        trace.steps[trace.steps.length - 1].ok = arr.length > 0;
+      } catch(parseErr) {
+        trace.steps[trace.steps.length - 1].parseError = parseErr.message;
+        trace.steps[trace.steps.length - 1].ok = false;
+        trace.failedAt = 'parse';
+        return res.status(500).json(trace);
+      }
+      if (trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength === 0) {
+        trace.failedAt = 'emptyReport';
+      }
+      trace.summary = 'Report parsed. ' + (trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength || 0) + ' ASIN rows in payload.';
+    } catch(dlErr) {
+      trace.steps[trace.steps.length - 1].downloadError = dlErr.message;
+      trace.steps[trace.steps.length - 1].errorStack = (dlErr.stack || '').slice(0, 800);
+      trace.steps[trace.steps.length - 1].ok = false;
+      trace.failedAt = 'download';
+      return res.status(500).json(trace);
+    }
+    res.json(trace);
+  } catch(e) {
+    trace.fatalError = e.message;
+    trace.fatalStack = (e.stack || '').slice(0, 1200);
+    res.status(500).json(trace);
+  }
+});
+
 // r23: POST /api/admin/traffic-diagnose?date=YYYY-MM-DD — runs ONE day and
 // returns Amazon's actual response. Use this to figure out why the traffic
 // snapshots table has 0 rows after a backfill attempt. Synchronous (~3 min
@@ -7311,14 +7487,54 @@ app.post('/api/amazon/listing-critique', async function(req, res) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
   const asin = String((req.body && req.body.asin) || '');
   const groupKey = String((req.body && req.body.groupKey) || '');
-  // r14b: allow caller to choose model — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
-  // r15: Opus is restricted to owner+manager roles for cost control.
+  // r14b: model parameter — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
+  // r35.11: agents can run Opus once per 24h per product, broken by feedback note.
+  // Replaces the old r15 hard owner/manager block, making product Opus consistent
+  // with task escalation Opus (r35.9 D). Owner/manager bypass entirely.
   const requestedModel = String((req.body && req.body.model) || 'haiku').toLowerCase();
   if (requestedModel === 'opus') {
     const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
     const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+    const userName = (req.user && (req.user.name || req.user.username)) || 'unknown';
     const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
-    if (!isPrivileged) return res.status(403).json({ error: 'Deep Dive (Opus) is restricted to managers and owner. Use Haiku critique instead.' });
+    if (!isPrivileged) {
+      // Quota key is the groupKey (one Opus per product per agent per 24h)
+      const quotaKey = groupKey || asin;
+      if (!quotaKey) return res.status(400).json({ error: 'product key required for Opus quota' });
+      try {
+        const lastCallRes = await db.query(
+          "SELECT called_at, agent_feedback_at FROM ai_escalation_log " +
+          "WHERE entity_type = 'amazon_product' AND entity_id = $1 AND agent_name = $2 " +
+          "ORDER BY called_at DESC LIMIT 1",
+          [quotaKey, userName]
+        );
+        if (lastCallRes.rows.length > 0) {
+          const lastCall = lastCallRes.rows[0];
+          const hoursAgo = (Date.now() - new Date(lastCall.called_at).getTime()) / 3600000;
+          const cooldownBroken = lastCall.agent_feedback_at != null;
+          if (hoursAgo < 24 && !cooldownBroken) {
+            const hoursLeft = Math.max(1, Math.ceil(24 - hoursAgo));
+            return res.status(429).json({
+              error: 'quota',
+              quotaMessage:
+                'You ran the Opus deep dive on this product ' +
+                Math.floor(hoursAgo) + 'h ago. ' +
+                'Drop a note in the feedback box telling the AI what worked, ' +
+                'what didn\'t, or what to focus on next — then we\'ll run a fresh one ' +
+                'with that context. ' +
+                '(Or come back in ' + hoursLeft + 'h.)',
+              hoursLeft: hoursLeft,
+              feedbackBreaksCooldown: true
+            });
+          }
+        }
+        // Allowed — log the call. agent_feedback_at stays NULL until they leave feedback.
+        await db.query(
+          "INSERT INTO ai_escalation_log (entity_type, entity_id, agent_name) VALUES ('amazon_product', $1, $2)",
+          [quotaKey, userName]
+        );
+      } catch(e) { console.error('[r35.11] product Opus quota check: ' + e.message); }
+    }
   }
   const modelId = requestedModel === 'opus' ? 'claude-opus-4-5-20251101' : 'claude-haiku-4-5-20251001';
   if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
@@ -7824,12 +8040,27 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
   }
   try {
     // r22: gather ALL SKUs for this groupKey, not just one. Pick the best-ASIN row.
-    const prodRes = await db.query(
-      "SELECT sku, asin, title, owner_agent FROM amazon_products " +
-      "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) " +
-      "ORDER BY (asin IS NULL) ASC, sku ASC",
-      [groupKey]
-    );
+    // r35.11: standalone products (no parent_sku in DB) get a synthetic groupKey
+    // like 'asin:B0DGZP02CY' from the products endpoint. The old SQL couldn't find
+    // them because they had no real parent_sku and the synthetic 'asin:...' string
+    // doesn't match any sku either. Detect the synthetic prefix and look up by ASIN.
+    let prodRes;
+    if (groupKey.startsWith('asin:')) {
+      const lookupAsin = groupKey.slice(5);
+      prodRes = await db.query(
+        "SELECT sku, asin, title, owner_agent FROM amazon_products " +
+        "WHERE asin = $1 " +
+        "ORDER BY sku ASC",
+        [lookupAsin]
+      );
+    } else {
+      prodRes = await db.query(
+        "SELECT sku, asin, title, owner_agent FROM amazon_products " +
+        "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) " +
+        "ORDER BY (asin IS NULL) ASC, sku ASC",
+        [groupKey]
+      );
+    }
     if (!prodRes.rows.length) return res.status(404).json({ error: 'Product not found' });
     const p = prodRes.rows[0];
     const allAsins = prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean);
