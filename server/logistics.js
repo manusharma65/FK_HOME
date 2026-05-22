@@ -2297,11 +2297,45 @@ module.exports = function(getDb) {
   //   Warehouse received = warehouse_received_date NOT NULL; not verified
   // All transitions reversible. Each endpoint below changes fields; bucket follows.
 
-  // r31n.1 — NO direct /book-delivery endpoint. Booking is done by the freight partner via the
-  //   public /q/<token> link (see agentPublic.post handler). Shauraya emails the partner with the
-  //   link; partner fills delivery date + transport details; that POST writes local_delivery_* +
-  //   delivery_date + (if Kemballs) campbells_out_date. The earlier r31n.1 /book-delivery endpoint
-  //   was wrong abstraction — Shauraya never types partner name + date directly.
+  // r31n.1 — Booking primary path is the freight-partner public link (see agentPublic.post handler).
+  //   This /book-delivery endpoint is the OVERRIDE for when Origin replies by phone / WeChat and
+  //   doesn't fill the public form. Shauraya types the date manually. Partner name auto-picked
+  //   from the single eligible freight agent client-side (or selected if multiple).
+  router.post('/plans/:id/book-delivery', async function(req, res) {
+    const db = req._db;
+    try {
+      const id = parseInt(req.params.id);
+      const partner = (req.body && req.body.partner || '').toString().trim();
+      const deliveryDate = (req.body && req.body.delivery_date || '').toString().trim();
+      if (!partner) return res.status(400).json({ error: 'Delivery partner required' });
+      if (!deliveryDate) return res.status(400).json({ error: 'Delivery date required' });
+      const before = (await db.query('SELECT * FROM lg_plans WHERE id=$1', [id])).rows[0];
+      if (!before) return res.status(404).json({ error: 'Plan not found' });
+      if (!before.customs_cleared_date) return res.status(409).json({ error: 'Customs not cleared yet — cannot book delivery' });
+      const isKemballs = before.disposition === 'kemballs' || before.disposition === 'campbells';
+      const setOut = isKemballs && !before.campbells_out_date;
+      const today = todayDate();
+      const sql = setOut
+        ? `UPDATE lg_plans SET local_delivery_partner=$1, delivery_date=$2,
+             local_delivery_booked_date=$3, campbells_out_date=$2, updated_at=NOW()
+             WHERE id=$4 RETURNING *`
+        : `UPDATE lg_plans SET local_delivery_partner=$1, delivery_date=$2,
+             local_delivery_booked_date=$3, updated_at=NOW()
+             WHERE id=$4 RETURNING *`;
+      const r = await db.query(sql, [partner, deliveryDate, today, id]);
+      await logFieldAudit(db, id, 'local_delivery_partner', before.local_delivery_partner, partner, actor(req), 'agent', 'manual override (off-link)');
+      await logFieldAudit(db, id, 'delivery_date', before.delivery_date, deliveryDate, actor(req), 'agent', 'manual override (off-link)');
+      if (setOut) await logFieldAudit(db, id, 'campbells_out_date', null, deliveryDate, 'system', 'system');
+      await db.query('INSERT INTO lg_activity (plan_id, action, detail, actor_name) VALUES ($1,$2,$3,$4)',
+        [id, 'delivery_booked', 'Manual override — ' + partner + ' on ' + deliveryDate + (setOut ? ' (Kemballs storage closed)' : ''), actor(req)]);
+      await evaluateTasks(db, id);
+      await notify(db, { role: 'warehouse_agent' }, 'delivery_booked', {
+        title: 'Incoming delivery — ' + before.plan_number,
+        body: partner + ' delivering on ' + deliveryDate + (isKemballs ? ' (from Kemballs)' : ''), plan_id: id
+      });
+      res.json({ ok: true, plan: r.rows[0] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
 
   // Cancel delivery booking. Clears partner + delivery_date + booked_date. For Kemballs plans
   //   this also re-opens campbells_out_date=NULL so storage clock resumes.

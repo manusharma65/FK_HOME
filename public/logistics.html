@@ -6338,12 +6338,10 @@ function renderGateSupplierLinkButton(p, gateNum) {
     label = '📧 Email import agent — BL + PI + PL + shipping cost';
     subtitle = 'Send docs to imports@origin-logistics.com';
   } else if (gateNum === 9) {
-    // r31h — freight partner delivery booking. Needs a partner picked from lg_freight_agents.
-    // r31n.1 — Same flow for both Warehouse and Kemballs routes (FK uses one delivery partner —
-    //   Origin Logistics — for direct AND from-Kemballs deliveries). The button auto-picks when
-    //   only one eligible agent exists.
-    if (p.local_delivery_booked_date && p.delivery_date) return ''; // fully done — no email button
-    return renderFreightPartnerBookingButton(p);
+    // r31n.1 — Gate 9 freight booking button is rendered by renderDeliveryStageBlock at the top
+    //   of the modal body (called by renderStageQuoteOrDeliveryBlock). Returning empty here to
+    //   avoid duplicate rendering.
+    return '';
   } else {
     return '';
   }
@@ -6380,6 +6378,8 @@ function renderFreightPartnerBookingButton(p) {
       '<select id="freightPartnerPick_' + p.id + '" style="display:none"><option value="' + a.id + '" selected>' + escapeHtml(a.name) + '</option></select>' +
       '<button class="btn btn-sm" style="background:#E63946;color:white;border-color:#E63946;font-weight:600" onclick="openFreightBookingModal(' + p.id + ', false)">📧 Email to book</button>' +
       '</div>' +
+      // r31n.1 — Manual override link. For when Origin replies by phone/WeChat off-link.
+      '<div style="margin-top:8px;font-size:11px"><a href="javascript:void(0)" onclick="openManualBookingModal(' + p.id + ',\'' + escapeHtml(p.plan_number || '') + '\',\'' + escapeHtml(a.name) + '\')" style="color:#475569">Or mark booked manually (if Origin replied off-link)</a></div>' +
       '</div>';
   }
   // Multiple eligible agents — dropdown
@@ -6397,6 +6397,8 @@ function renderFreightPartnerBookingButton(p) {
     '<select id="freightPartnerPick_' + p.id + '" style="flex:1;min-width:220px;padding:8px;border:1px solid var(--border2);border-radius:6px;font-family:inherit;font-size:13px">' + optsHtml + '</select>' +
     '<button class="btn btn-sm" style="background:#E63946;color:white;border-color:#E63946;font-weight:600" onclick="openFreightBookingModal(' + p.id + ', false)">Book delivery</button>' +
     '</div>' +
+    // r31n.1 — Manual override link (uses selected partner from dropdown or first eligible if blank)
+    '<div style="margin-top:8px;font-size:11px"><a href="javascript:void(0)" onclick="openManualBookingModalFromPicker(' + p.id + ',\'' + escapeHtml(p.plan_number || '') + '\')" style="color:#475569">Or mark booked manually (if partner replied off-link)</a></div>' +
     '</div>';
 }
 
@@ -6489,8 +6491,73 @@ async function fireFreightGmail(planId, agentId, isQuote, encodedUrl) {
   if (!isQuote) {
     try { await api('/plans/' + planId + '/email-triggered', { method: 'POST', body: { gate: 9 } }); } catch(_){}
   }
-  toast('Gmail opened · activity logged', 'success');
   closeFreightBookingModal();
+  // r31n.1 — Explain the waiting state. Earlier behaviour was a small toast which left agents
+  //   confused why the plan stayed in Kemballs / didn't move. The plan only moves to Warehouse
+  //   Incoming once Origin fills the public booking form (sets delivery_date). If they reply
+  //   off-link, use the "Mark booked manually" option on the card.
+  if (!isQuote) {
+    showBigSuccessBanner('📧 Email sent to Origin Logistics — plan moves to Warehouse Incoming once they fill the booking link');
+  } else {
+    showBigSuccessBanner('📧 Quote request sent');
+  }
+}
+
+// r31n.1 — Manual booking override modal. Used when freight partner replies off-link (phone, WeChat).
+//   Shauraya enters the delivery date; partner name is pre-filled from the eligible agent.
+//   POSTs to /book-delivery which mirrors what the public link would have done.
+function openManualBookingModal(planId, planNumber, partnerName) {
+  const existing = document.getElementById('manualBookModal'); if (existing) existing.remove();
+  let h = '<div class="modal-overlay active" id="manualBookModal" onclick="if(event.target===this)closeManualBookingModal()">';
+  h += '  <div class="modal" style="max-width:440px">';
+  h += '    <div class="modal-head"><div class="modal-title">Mark booked manually</div><button class="modal-close" onclick="closeManualBookingModal()">&times;</button></div>';
+  h += '    <div class="modal-body" style="padding:18px 22px">';
+  h += '      <div style="font-size:13px;color:var(--text2);line-height:1.5;margin-bottom:14px">For ' + escapeHtml(planNumber) + '. Only use if ' + escapeHtml(partnerName) + ' replied by phone or WeChat and won\'t use the booking link.</div>';
+  h += '      <div class="field" style="margin-bottom:12px"><label>Partner</label><input type="text" id="mbPartner" value="' + escapeHtml(partnerName) + '" style="width:100%"></div>';
+  h += '      <div class="field"><label>Delivery date</label><input type="date" id="mbDate" style="width:100%"></div>';
+  h += '    </div>';
+  h += '    <div class="modal-foot">';
+  h += '      <button class="btn" onclick="closeManualBookingModal()">Cancel</button>';
+  h += '      <button class="btn btn-primary" id="mbSubmit" onclick="submitManualBooking(' + planId + ',\'' + escapeHtml(planNumber) + '\')">Mark booked</button>';
+  h += '    </div>';
+  h += '  </div></div>';
+  document.body.insertAdjacentHTML('beforeend', h);
+  setTimeout(function(){ const d = document.getElementById('mbDate'); if (d) d.focus(); }, 50);
+}
+// Variant when dropdown is shown (multiple eligible agents) — reads current selection
+function openManualBookingModalFromPicker(planId, planNumber) {
+  const sel = document.getElementById('freightPartnerPick_' + planId);
+  let partnerName = '';
+  if (sel && sel.value) {
+    const opt = sel.options[sel.selectedIndex];
+    partnerName = opt ? (opt.text || '').split(' · ')[0] : '';
+  } else if ((_freightAgents || []).length) {
+    partnerName = _freightAgents[0].name;
+  }
+  openManualBookingModal(planId, planNumber, partnerName);
+}
+function closeManualBookingModal() { const m = document.getElementById('manualBookModal'); if (m) m.remove(); }
+async function submitManualBooking(planId, planNumber) {
+  const partner = (document.getElementById('mbPartner').value || '').trim();
+  const date = (document.getElementById('mbDate').value || '').trim();
+  if (!partner) { toast('Partner required', 'error'); return; }
+  if (!date) { toast('Delivery date required', 'error'); return; }
+  const btn = document.getElementById('mbSubmit');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    await api('/plans/' + planId + '/book-delivery', { method: 'POST', body: { partner: partner, delivery_date: date } });
+    closeManualBookingModal();
+    showBigSuccessBanner('✓ ' + planNumber + ' marked booked — moved to Warehouse Incoming');
+    setTimeout(function(){
+      if (document.getElementById('planModal').classList.contains('active')) closeModal();
+      renderKemballsPage();
+      renderWarehouseIncomingPage();
+      loadDashboard();
+    }, 1500);
+  } catch(e) {
+    toast(e.message || 'Save failed', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Mark booked'; }
+  }
 }
 
 // r31e — email modal: shows preview of what will be sent, opens Gmail compose URL
