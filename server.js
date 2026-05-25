@@ -6386,14 +6386,27 @@ app.post('/api/admin/traffic-debug-full', async function(req, res) {
     }
 
     // STEP 4 — download + parse + report shape
+    // r35.11b: mirror the gzip fix from fetchSalesAndTrafficReport. The debug
+    // endpoint had the same bug it was built to diagnose — downloaded as text,
+    // tried to JSON.parse compressed binary. Fixed: arraybuffer download +
+    // conditional zlib.gunzipSync based on docMeta.compressionAlgorithm.
     trace.steps.push({ step: 4, name: 'downloadAndParse', startedAt: new Date().toISOString() });
     try {
-      const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'text' });
-      trace.steps[trace.steps.length - 1].rawBytes = (docRes.data || '').length;
-      trace.steps[trace.steps.length - 1].firstChars = String(docRes.data || '').slice(0, 200);
+      const compression = (docMeta && docMeta.compressionAlgorithm) || null;
+      const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'arraybuffer' });
+      let bodyText;
+      if (compression === 'GZIP') {
+        const zlib = require('zlib');
+        bodyText = zlib.gunzipSync(Buffer.from(docRes.data)).toString('utf8');
+      } else {
+        bodyText = Buffer.from(docRes.data).toString('utf8');
+      }
+      trace.steps[trace.steps.length - 1].rawBytes = (docRes.data || '').byteLength || 0;
+      trace.steps[trace.steps.length - 1].decompressedBytes = bodyText.length;
+      trace.steps[trace.steps.length - 1].firstChars = bodyText.slice(0, 200);
       let payload;
       try {
-        payload = JSON.parse(docRes.data);
+        payload = JSON.parse(bodyText);
         trace.steps[trace.steps.length - 1].parsedOk = true;
         trace.steps[trace.steps.length - 1].topLevelKeys = Object.keys(payload);
         const arr = (payload && payload.salesAndTrafficByAsin) || [];
