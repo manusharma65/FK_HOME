@@ -1112,14 +1112,18 @@ async function fetchSalesAndTrafficReport(reportDate) {
     }
 
     // Step 4 — extract per-ASIN rows. Shape:
-    // payload.salesAndTrafficByAsin = [{ parentAsin, childAsin, sku, sales: {...}, traffic: {...} }]
+    // payload.salesAndTrafficByAsin = [{ parentAsin, childAsin, salesByAsin: {...}, trafficByAsin: {...} }]
+    // r35.11c FIX: parser was reading r.traffic and r.sales — Amazon actually sends
+    // r.trafficByAsin and r.salesByAsin. Has been silently writing NULLs to every
+    // sessions/buy_box/page_views/units_ordered field since CP launched. Caught
+    // 2026-05-25 via the traffic-debug-full payload dump showing the real shape.
     const rows = (payload && payload.salesAndTrafficByAsin) || [];
     let inserted = 0;
     for (const r of rows) {
       const asin = r.childAsin || r.parentAsin;
       if (!asin) continue;
-      const traffic = r.traffic || {};
-      const sales = r.sales || {};
+      const traffic = r.trafficByAsin || {};
+      const sales = r.salesByAsin || {};
       const buyBoxPct = traffic.buyBoxPercentage != null ? parseFloat(traffic.buyBoxPercentage) : null;
       const sessions = traffic.sessions != null ? parseInt(traffic.sessions) : null;
       const pageViews = traffic.pageViews != null ? parseInt(traffic.pageViews) : null;
