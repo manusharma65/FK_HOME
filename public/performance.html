@@ -175,6 +175,12 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 -ap
 .drilldown th, .drilldown td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
 .drilldown th { font-size: 11px; text-transform: uppercase; color: var(--text3); font-weight: 700; }
 .drilldown td.num { font-family: var(--mono); text-align: right; }
+/* r35.13: outcome tabs + period toggle on scored-tasks drill-down */
+.scored-controls { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+.scored-tabs, .scored-period { display: flex; gap: 6px; flex-wrap: wrap; }
+.scored-chip { background: #f8fafc; border: 1px solid var(--border); border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 500; color: var(--text2); cursor: pointer; transition: all 0.15s; }
+.scored-chip:hover { border-color: var(--border-strong); }
+.scored-chip.active { background: var(--text); color: white; border-color: var(--text); }
 
 /* Header bits */
 .agent-select-wrap { display: inline-flex; align-items: center; gap: 8px; background: #fef3c7; border: 1px solid #fcd34d; padding: 6px 12px; border-radius: 10px; }
@@ -256,7 +262,12 @@ function fmtPct(n, decimals) {
 }
 function fmtAcosPct(n) {
   if (n == null || isNaN(n)) return '—';
-  return (parseFloat(n) * 100).toFixed(0) + '%';
+  // r35.13: 99 is the server-side sentinel for "spend with zero sales" (i.e.
+  // infinite ACOS). Stored as 99 because the breakthrough rule needs a numeric
+  // comparison; rendered here as "no sales" so the team doesn't see 9900%.
+  const v = parseFloat(n);
+  if (v >= 99) return 'no sales';
+  return (v * 100).toFixed(0) + '%';
 }
 function relDate(s) {
   if (!s) return '';
@@ -529,6 +540,12 @@ async function loadWinsAndMisses() {
   }
 }
 
+// r35.13: cache scored-tasks per period so tab/period changes don't re-fetch.
+// Shape: { '7d': [tasks], '30d': [tasks] }
+const scoredCache = {};
+let scoredFilter = 'all';      // all | breakthrough | improved | flat | worsened
+let scoredPeriod = '30d';      // 7d | 30d
+
 async function toggleAllScored() {
   const box = document.getElementById('all-scored');
   if (!box) return;
@@ -537,25 +554,77 @@ async function toggleAllScored() {
     return;
   }
   box.style.display = 'block';
+  await renderScoredTasks();
+}
+
+async function setScoredFilter(f) {
+  scoredFilter = f;
+  await renderScoredTasks();
+}
+
+async function setScoredPeriod(p) {
+  scoredPeriod = p;
+  await renderScoredTasks();
+}
+
+async function loadScoredForPeriod(period) {
+  if (scoredCache[period]) return scoredCache[period];
+  const outcomes = ['breakthrough','improved','flat','worsened'];
+  const responses = await Promise.all(outcomes.map(function(o){
+    return authedFetch('/api/performance/' + encodeURIComponent(currentAgent) + '/scored-tasks?outcome=' + o + '&period=' + period).then(function(r){ return r.ok ? r.json() : { tasks: [] }; });
+  }));
+  const allTasks = [];
+  responses.forEach(function(resp, i){
+    (resp.tasks || []).forEach(function(t){ t._outcome = outcomes[i]; allTasks.push(t); });
+  });
+  allTasks.sort(function(a,b){ return new Date(b.scored_at) - new Date(a.scored_at); });
+  scoredCache[period] = allTasks;
+  return allTasks;
+}
+
+async function renderScoredTasks() {
+  const box = document.getElementById('all-scored');
+  if (!box) return;
   box.innerHTML = '<div class="empty"><span class="spinner"></span> Loading…</div>';
   try {
-    const outcomes = ['breakthrough','improved','flat','worsened'];
-    const responses = await Promise.all(outcomes.map(function(o){
-      return authedFetch('/api/performance/' + encodeURIComponent(currentAgent) + '/scored-tasks?outcome=' + o + '&period=30d').then(function(r){ return r.ok ? r.json() : { tasks: [] }; });
-    }));
-    const allTasks = [];
-    responses.forEach(function(resp, i){
-      (resp.tasks || []).forEach(function(t){ t._outcome = outcomes[i]; allTasks.push(t); });
-    });
-    allTasks.sort(function(a,b){ return new Date(b.scored_at) - new Date(a.scored_at); });
-    if (!allTasks.length) {
-      box.innerHTML = '<div class="empty">No scored tasks in the last 30 days.</div>';
+    const allTasks = await loadScoredForPeriod(scoredPeriod);
+
+    // Counts per outcome (for tab labels) — computed on the full period set
+    const counts = { all: allTasks.length, breakthrough: 0, improved: 0, flat: 0, worsened: 0 };
+    allTasks.forEach(function(t){ if (counts[t._outcome] != null) counts[t._outcome]++; });
+
+    // Build filter chips (outcome tabs + period toggle)
+    const chip = function(label, key, active, handler) {
+      return '<button class="scored-chip' + (active ? ' active' : '') + '" onclick="' + handler + '(\'' + key + '\')">' + label + '</button>';
+    };
+    const tabsHtml =
+      '<div class="scored-controls">' +
+        '<div class="scored-tabs">' +
+          chip('All (' + counts.all + ')', 'all', scoredFilter === 'all', 'setScoredFilter') +
+          chip('🎯 Breakthrough (' + counts.breakthrough + ')', 'breakthrough', scoredFilter === 'breakthrough', 'setScoredFilter') +
+          chip('✅ Improved (' + counts.improved + ')', 'improved', scoredFilter === 'improved', 'setScoredFilter') +
+          chip('➖ Flat (' + counts.flat + ')', 'flat', scoredFilter === 'flat', 'setScoredFilter') +
+          chip('❌ Worsened (' + counts.worsened + ')', 'worsened', scoredFilter === 'worsened', 'setScoredFilter') +
+        '</div>' +
+        '<div class="scored-period">' +
+          chip('7 days', '7d', scoredPeriod === '7d', 'setScoredPeriod') +
+          chip('30 days', '30d', scoredPeriod === '30d', 'setScoredPeriod') +
+        '</div>' +
+      '</div>';
+
+    // Filter by active outcome
+    const filtered = scoredFilter === 'all' ? allTasks : allTasks.filter(function(t){ return t._outcome === scoredFilter; });
+
+    if (!filtered.length) {
+      const label = scoredFilter === 'all' ? 'scored tasks' : scoredFilter + ' tasks';
+      box.innerHTML = tabsHtml + '<div class="empty">No ' + label + ' in the last ' + scoredPeriod + '.</div>';
       return;
     }
-    let html = '<table><thead><tr>' +
+
+    let html = tabsHtml + '<table><thead><tr>' +
       '<th>Campaign</th><th>Outcome</th><th class="num">ACOS before</th><th class="num">ACOS after</th><th class="num">£ impact</th><th>Date</th>' +
       '</tr></thead><tbody>';
-    allTasks.forEach(function(t){
+    filtered.forEach(function(t){
       const impact = (t._outcome === 'breakthrough' || t._outcome === 'improved') ? (t.efficiency_gain_gbp || 0)
                    : t._outcome === 'worsened' ? -(t.worsened_waste_gbp || 0)
                    : 0;
