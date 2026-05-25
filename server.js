@@ -1,29 +1,32 @@
-// CampaignPulse — deploy marker 2026-05-22 r35.11 (TWO BUG FIXES from Aryan
-// complaint that "task can't be assigned" and "Opus is restricted".
-// (1) STANDALONE PRODUCT TASK ASSIGNMENT — fixed in /api/amazon/products/:groupKey/
-// assign-task (server.js line 8040). Standalone products (no parent_sku) get a
-// synthetic groupKey like 'asin:B0DGZP02CY' from the products endpoint. Old SQL
-// did `WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1)` which never
-// matched synthetic asin: keys. Returns "Product not found" on every standalone
-// product. Aryan saw this on the Digital Weighing Scales product. Fix: detect
-// asin: prefix, strip it, look up by asin column instead.
-// (2) AGENT OPUS QUOTA ON PRODUCT CRITIQUE — fixed in /api/amazon/listing-critique
-// POST (server.js line 7468). Replaces the old r15 hard owner/manager block with
-// the same per-agent 24h quota pattern from r35.9 D (task escalation). Agents
-// can run Opus once per (product, 24h) via ai_escalation_log entity_type
-// 'amazon_product'. Cooldown broken by submitting ≥10-char feedback via
-// /api/ai/feedback with scope='amazon_product' (server.js line ~4856, mirrors
-// task-side break at line ~10642). Owner/manager bypass entirely. Frontend
-// (index.html line ~5860) now shows the Deep Dive button to everyone with a
-// tooltip explaining the quota; 429 quota errors surface the friendly
-// quotaMessage instead of the raw error string.
-// INHERITS all of r35.10b (performance.html deployed), r35.10 (gzip fix +
-// agent task assignment p.asins[0] fix), r35.9 (5 features + hygiene), r35.8
-// (4-layer diagnostic), r35.7 (BUYABLE recovery), r35.6 (REMOVED sweep),
-// r35.5 (consecutive-day scoring), r35.4 (paused root cause).
-// NOT IN THIS SHIP (deferred): keyword surfacing rethink, Monthly Mirror
-// performance system, Daily Touch widget for Satyam manual entry,
-// 30-day tiles in product modal.
+// CampaignPulse — deploy marker 2026-05-25 r35.12 (BUNDLED FIX for two real
+// silent bugs caught today via proper diagnosis:
+// (1) TRAFFIC PARSER FIELD-NAME BUG — fetchSalesAndTrafficReport at line 1115.
+// Code read r.traffic and r.sales. Amazon's actual report sends r.trafficByAsin
+// and r.salesByAsin. Has been writing NULL into every sessions/buy_box/page_views/
+// units_ordered field since CP launched 28 April. The 4,342 rows in
+// amazon_traffic_snapshots are all NULL-content. Caught via traffic-debug-full
+// payload dump showing real Amazon field names. Fix: r.trafficByAsin, r.salesByAsin.
+// Re-run /api/admin/backfill-traffic?days=22 after deploy to overwrite the NULL rows
+// with correct data (ON CONFLICT DO UPDATE).
+// (2) ARCHIVE SWEEP STARVES R34 SCORING — auto-archive sweep at line 13733 moves
+// any complete/dismissed/paused task with 3+ working days since resolved_at to
+// status='archived'. But r34 scoring (backfill at line 3637, nightly at line 3677,
+// previous-task-context at line 3234, duplicate-chain detector at line 3582)
+// all filtered on status='complete' only. So tasks that complete on Monday get
+// archived by Thursday (3 working days), then never qualify for scoring which
+// needs 7-day settlement. Fix: SQL changed to WHERE status IN ('complete', 'archived')
+// in all four places. Already-archived tasks (121 in last 30 days) will now be
+// picked up. To trigger: POST /api/admin/r34/run {which:'backfill'} after deploy.
+// Backfill flag gets cleared automatically by that endpoint.
+// (3) BUNDLED FROM r35.11b: traffic-debug-full endpoint gzip fix (mirror of the
+// r35.10 fix applied to the main function). Was reading compressed binary as
+// text and JSON.parse'ing — same bug it was built to diagnose. Fixed by adding
+// the same arraybuffer + zlib.gunzipSync flow.
+// INHERITS all of r35.11 (standalone product task assign + agent Opus quota on
+// product critique), r35.10b (performance.html deployed), r35.10 (gzip fix + agent
+// task assignment p.asins[0] fix), r35.9, r35.8, r35.7, r35.6, r35.5, r35.4.
+// NOT IN THIS SHIP (deferred): keyword surfacing, Monthly Mirror, Daily Touch
+// widget for Satyam manual entry, 30-day tiles in product modal.
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -3231,7 +3234,7 @@ async function getPreviousTaskContext(department, campaignId, productKey) {
       "FROM campaign_tasks " +
       "WHERE department = $1 AND campaign_id = $2 " +
       "  AND COALESCE(product_key, '') = COALESCE($3, '') " +
-      "  AND status = 'complete' " +
+      "  AND status IN ('complete', 'archived') " +
       "  AND last_resolved_date > NOW() - INTERVAL '30 days' " +
       "ORDER BY last_resolved_date DESC LIMIT 1",
       [department, String(campaignId), productKey || null]
@@ -3581,7 +3584,7 @@ async function r34_scoreOneTask(task, opts) {
     try {
       const dupCheck = await db.query(
         "SELECT id FROM campaign_tasks WHERE agent_name = $1 AND campaign_id = $2 AND problem_type = $3 " +
-        "  AND department = $4 AND status = 'complete' " +
+        "  AND department = $4 AND status IN ('complete', 'archived') " +
         "  AND resolved_at IS NOT NULL " +
         "  AND ABS(EXTRACT(EPOCH FROM (resolved_at - $5::timestamp))) < 86400 " +
         "  AND id != $6 AND id > $6",
@@ -3636,7 +3639,7 @@ async function r34_runBackfillIfNeeded() {
     console.log('[r34 backfill] starting one-time backfill of historical task outcomes...');
     const tasks = await db.query(
       "SELECT * FROM campaign_tasks " +
-      "WHERE status = 'complete' " +
+      "WHERE status IN ('complete', 'archived') " +
       "  AND resolved_at IS NOT NULL " +
       "  AND resolved_at < NOW() - INTERVAL '7 days' " +
       "  AND resolved_at > NOW() - INTERVAL '30 days' " +
@@ -3676,7 +3679,7 @@ async function r34_runNightlyScoring() {
   try {
     const tasks = await db.query(
       "SELECT * FROM campaign_tasks " +
-      "WHERE status = 'complete' " +
+      "WHERE status IN ('complete', 'archived') " +
       "  AND resolved_at IS NOT NULL " +
       "  AND resolved_at < NOW() - INTERVAL '7 days' " +
       "  AND resolved_at > NOW() - INTERVAL '14 days' " +
