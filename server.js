@@ -13569,7 +13569,9 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
         const currentCvr = funnel.sessions > 0 ? (funnel.purchases / funnel.sessions) * 100 : 0;
         const gap = 2 - currentCvr;
         if (gap <= 0) return 0;
-        const aov = sp.unitsSold7d > 0 ? sp.revenue7d / sp.unitsSold7d : (sp.price || 0);
+        // r35.13b hotfix: this code path uses 'shopifyProduct' (not 'sp')
+        if (!shopifyProduct) return 0;
+        const aov = shopifyProduct.unitsSold7d > 0 ? shopifyProduct.revenue7d / shopifyProduct.unitsSold7d : (shopifyProduct.price || 0);
         if (aov === 0) return 0;
         return Math.round(funnel.sessions * (gap / 100) * aov * 0.16 * 100) / 100;
       })(),
