@@ -181,6 +181,15 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 -ap
 .scored-chip { background: #f8fafc; border: 1px solid var(--border); border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 500; color: var(--text2); cursor: pointer; transition: all 0.15s; }
 .scored-chip:hover { border-color: var(--border-strong); }
 .scored-chip.active { background: var(--text); color: white; border-color: var(--text); }
+/* r35.13a: grouped scored-task rows */
+.scored-group-row.clickable { cursor: pointer; }
+.scored-group-row.clickable:hover { background: #f8fafc; }
+.scored-caret { display: inline-block; width: 14px; color: var(--text3); font-size: 11px; }
+.scored-count { display: inline-block; background: #fef3c7; color: #78350f; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; margin-left: 6px; }
+.scored-problem { display: inline-block; background: #f1f5f9; color: var(--text2); font-size: 11px; font-weight: 500; padding: 2px 7px; border-radius: 4px; margin-left: 6px; font-family: var(--mono); }
+.scored-latest { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; }
+.scored-detail-row { background: #fafafa; }
+.scored-detail-cell { padding-left: 28px !important; color: var(--text2); font-size: 12px; font-style: italic; }
 
 /* Header bits */
 .agent-select-wrap { display: inline-flex; align-items: center; gap: 8px; background: #fef3c7; border: 1px solid #fcd34d; padding: 6px 12px; border-radius: 10px; }
@@ -621,28 +630,83 @@ async function renderScoredTasks() {
       return;
     }
 
+    // r35.13a: group by campaign + problem_type + outcome to collapse
+    // recurring tasks into one row. Today's r34 backfill scored months of
+    // historical tasks in one batch, so a campaign that hit the same problem
+    // 4 times shows 4 identical-looking rows. Grouping makes the pattern
+    // clear ("budget_low ×4 — fixed 4 times, kept coming back") instead of
+    // looking like a duplicate-rows bug.
+    const groupMap = {};
+    filtered.forEach(function(t){
+      const key = (t.campaign_name || '?') + '||' + (t.problem_type || '') + '||' + t._outcome;
+      if (!groupMap[key]) {
+        groupMap[key] = { key: key, campaign: t.campaign_name || '?', problem_type: t.problem_type || '', outcome: t._outcome, tasks: [] };
+      }
+      groupMap[key].tasks.push(t);
+    });
+    const groups = Object.values(groupMap);
+    // Sort groups by most recent scored_at within the group
+    groups.forEach(function(g){ g.tasks.sort(function(a,b){ return new Date(b.scored_at) - new Date(a.scored_at); }); });
+    groups.sort(function(a,b){ return new Date(b.tasks[0].scored_at) - new Date(a.tasks[0].scored_at); });
+
+    const iconFor = function(o){ return o === 'breakthrough' ? '🎯' : o === 'improved' ? '✅' : o === 'worsened' ? '❌' : '➖'; };
+    const impactFor = function(t){
+      return (t._outcome === 'breakthrough' || t._outcome === 'improved') ? (t.efficiency_gain_gbp || 0)
+           : t._outcome === 'worsened' ? -(t.worsened_waste_gbp || 0)
+           : 0;
+    };
+
     let html = tabsHtml + '<table><thead><tr>' +
       '<th>Campaign</th><th>Outcome</th><th class="num">ACOS before</th><th class="num">ACOS after</th><th class="num">£ impact</th><th>Date</th>' +
       '</tr></thead><tbody>';
-    filtered.forEach(function(t){
-      const impact = (t._outcome === 'breakthrough' || t._outcome === 'improved') ? (t.efficiency_gain_gbp || 0)
-                   : t._outcome === 'worsened' ? -(t.worsened_waste_gbp || 0)
-                   : 0;
-      const icon = t._outcome === 'breakthrough' ? '🎯' : t._outcome === 'improved' ? '✅' : t._outcome === 'worsened' ? '❌' : '➖';
-      html += '<tr>' +
-        '<td>' + esc(t.campaign_name || '?') + '</td>' +
-        '<td>' + icon + ' ' + esc(t._outcome) + '</td>' +
-        '<td class="num">' + fmtAcosPct(t.before_acos) + '</td>' +
-        '<td class="num">' + fmtAcosPct(t.after_acos) + '</td>' +
-        '<td class="num">' + (impact === 0 ? '—' : fmtMoneyShort(impact)) + '</td>' +
-        '<td>' + esc(relDate(t.scored_at)) + '</td>' +
+    groups.forEach(function(g, gi){
+      const n = g.tasks.length;
+      const latest = g.tasks[0];
+      const totalImpact = g.tasks.reduce(function(s,t){ return s + impactFor(t); }, 0);
+      const icon = iconFor(g.outcome);
+      const problemBadge = g.problem_type ? ' <span class="scored-problem">' + esc(g.problem_type) + '</span>' : '';
+      const countBadge = n > 1 ? ' <span class="scored-count">×' + n + '</span>' : '';
+      const expandable = n > 1;
+      const rowId = 'sg-' + gi;
+
+      // Header row (always shown). If group has >1, clicking toggles detail rows.
+      html += '<tr class="scored-group-row' + (expandable ? ' clickable' : '') + '"' + (expandable ? ' onclick="toggleScoredGroup(\'' + rowId + '\')"' : '') + '>' +
+        '<td>' + (expandable ? '<span class="scored-caret" id="' + rowId + '-caret">▸</span> ' : '') + esc(g.campaign) + problemBadge + countBadge + '</td>' +
+        '<td>' + icon + ' ' + esc(g.outcome) + '</td>' +
+        '<td class="num">' + (n > 1 ? '—' : fmtAcosPct(latest.before_acos)) + '</td>' +
+        '<td class="num">' + (n > 1 ? '—' : fmtAcosPct(latest.after_acos)) + '</td>' +
+        '<td class="num">' + (totalImpact === 0 ? '—' : fmtMoneyShort(totalImpact)) + '</td>' +
+        '<td>' + esc(relDate(latest.scored_at)) + (n > 1 ? ' <span class="scored-latest">latest</span>' : '') + '</td>' +
       '</tr>';
+
+      if (expandable) {
+        g.tasks.forEach(function(t, ti){
+          const impact = impactFor(t);
+          html += '<tr class="scored-detail-row" data-group="' + rowId + '" style="display:none">' +
+            '<td class="scored-detail-cell">↳ attempt ' + (n - ti) + ' of ' + n + '</td>' +
+            '<td>' + icon + ' ' + esc(t._outcome) + '</td>' +
+            '<td class="num">' + fmtAcosPct(t.before_acos) + '</td>' +
+            '<td class="num">' + fmtAcosPct(t.after_acos) + '</td>' +
+            '<td class="num">' + (impact === 0 ? '—' : fmtMoneyShort(impact)) + '</td>' +
+            '<td>' + esc(relDate(t.scored_at)) + '</td>' +
+          '</tr>';
+        });
+      }
     });
     html += '</tbody></table>';
     box.innerHTML = html;
   } catch(e) {
     box.innerHTML = '<div class="empty">Could not load drill-down: ' + esc(e.message) + '</div>';
   }
+}
+
+function toggleScoredGroup(rowId) {
+  const rows = document.querySelectorAll('tr.scored-detail-row[data-group="' + rowId + '"]');
+  const caret = document.getElementById(rowId + '-caret');
+  if (!rows.length) return;
+  const isHidden = rows[0].style.display === 'none';
+  rows.forEach(function(r){ r.style.display = isHidden ? 'table-row' : 'none'; });
+  if (caret) caret.textContent = isHidden ? '▾' : '▸';
 }
 
 // ─────────────────────────────────────────────────────────────────────────

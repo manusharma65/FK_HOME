@@ -1015,7 +1015,6 @@ function productCard(p) {
     + statRow('ACOS', fmtPct(p.googleAcos))
     + statRow('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—')
     + (p.ga4Sessions != null ? statRow('Sessions 7d', fmtNum(p.ga4Sessions)) : '')
-    + (p.ga4Cvr != null ? statRow('CVR 7d', p.ga4Cvr + '%') : '')
     + (p.ga4CartRate != null ? statRow('Cart rate', p.ga4CartRate + '%') : '')
     + '</div>'
     + (p.dailySales7d && p.dailySales7d.some(function(v){ return v > 0; }) ? '<div style="margin-top:10px"><div class="stat-label" style="margin-bottom:4px">Last 7 days revenue</div>' + sparklineHtml(p.dailySales7d) + '</div>' : '')

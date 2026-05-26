@@ -108,6 +108,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 /* r20c: bucket-coloured cards — option B (left border + faint tint) */
 .amz-product-card.bucket-urgent { border-left-color: #DC2626; background: #FEF7F7; }
 .amz-product-card.bucket-urgent:hover { background: #FEEFEF; }
+.amz-product-card.bucket-below_market { border-left-color: #EA580C; background: #FFF7ED; }
+.amz-product-card.bucket-below_market:hover { background: #FFEDD5; }
 .amz-product-card.bucket-underperforming { border-left-color: #D97706; background: #FFFBF3; }
 .amz-product-card.bucket-underperforming:hover { background: #FFF6E8; }
 .amz-product-card.bucket-working { border-left-color: #65A30D; background: var(--surface); }
@@ -124,6 +126,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .amz-product-meta { font-size: 11px; color: var(--text3); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 .amz-priority-pill { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
 .amz-priority-1, .amz-bucket-urgent { background: #FCEBEB; color: #791F1F; }
+/* r35.13b: below_market = orange — between urgent red and underperforming amber */
+.amz-bucket-below_market { background: #FFEDD5; color: #9A3412; }
 .amz-priority-2, .amz-bucket-underperforming { background: #FAEEDA; color: #854F0B; }
 .amz-priority-3, .amz-bucket-working { background: #EAF3DE; color: #3B6D11; }
 .amz-priority-4, .amz-bucket-monitor { background: var(--surface3); color: var(--text2); }
@@ -861,6 +865,7 @@ tbody tr:hover { background: var(--surface2); }
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface)">
         <span style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">View:</span>
         <button id="amz-filter-urgent" class="btn btn-primary amz-tab-btn amz-tab-urgent" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('urgent')">🔥 Urgent <span id="amz-count-urgent" class="amz-tab-count" style="background:#FCEBEB;color:#791F1F">0</span></button>
+        <button id="amz-filter-below_market" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('below_market')" title="CVR below Amazon category floor (8%) — listing improvements needed">📊 Below Market <span id="amz-count-below_market" class="amz-tab-count" style="background:#FFEDD5;color:#9A3412">0</span></button>
         <button id="amz-filter-underperforming" class="btn btn-ghost amz-tab-btn amz-tab-under" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('underperforming')">⚠ Underperforming <span id="amz-count-underperforming" class="amz-tab-count" style="background:#FAEEDA;color:#854F0B">0</span></button>
         <button id="amz-filter-working" class="btn btn-ghost amz-tab-btn amz-tab-working" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('working')">✓ Working <span id="amz-count-working" class="amz-tab-count" style="background:#EAF3DE;color:#3B6D11">0</span></button>
         <button id="amz-filter-doing_great" class="btn btn-ghost amz-tab-btn" style="font-size:12px;padding:5px 10px" onclick="setAmzProductView('doing_great')" title="Strong CVR — scale candidates">⭐ Doing Great <span id="amz-count-doing_great" class="amz-tab-count" style="background:#FEF3C7;color:#92400E">0</span></button>
@@ -4939,7 +4944,8 @@ function setAmzProductView(view) {
   amzProductView = view;
   // r20c: six tabs — urgent / underperforming / working / all / dormant / hidden
   // r35.8: + doing_great / monitor
-  ['urgent', 'underperforming', 'working', 'doing_great', 'monitor', 'all', 'dormant', 'hidden'].forEach(function(v) {
+  // r35.13b: + below_market
+  ['urgent', 'below_market', 'underperforming', 'working', 'doing_great', 'monitor', 'all', 'dormant', 'hidden'].forEach(function(v) {
     const btn = document.getElementById('amz-filter-' + v);
     if (!btn) return;
     btn.className = (v === view) ? 'btn btn-primary amz-tab-btn' : 'btn btn-ghost amz-tab-btn';
@@ -4967,8 +4973,10 @@ async function loadAmazonProducts() {
       let label = '';
       // r20c: bucket-based counter labels
       // r35.8: doing_great + monitor labels added
-      if (amzProductView === 'urgent') label = 'Showing ' + (s.urgent_count || 0) + ' urgent (of ' + (s.total_parents_active || 0) + ' active)';
-      else if (amzProductView === 'underperforming') label = 'Showing ' + (s.underperforming_count || 0) + ' underperforming (includes coverage gaps)';
+      // r35.13b: below_market label added
+      if (amzProductView === 'urgent') label = 'Showing ' + (s.urgent_count || 0) + ' urgent — critical issues, sorted by £ lift potential';
+      else if (amzProductView === 'below_market') label = 'Showing ' + (s.below_market_count || 0) + ' below market — CVR below 8% category floor, sorted by £ lift';
+      else if (amzProductView === 'underperforming') label = 'Showing ' + (s.underperforming_count || 0) + ' underperforming (Buy Box, coverage, ACOS issues)';
       else if (amzProductView === 'working') label = 'Showing ' + (s.working_count || 0) + ' working — performing OK';
       else if (amzProductView === 'doing_great') label = 'Showing ' + (s.doing_great_count || 0) + ' doing great — scale candidates';
       else if (amzProductView === 'monitor') label = 'Showing ' + (s.monitor_count || 0) + ' monitor — not enough signal yet';
@@ -4977,8 +4985,10 @@ async function loadAmazonProducts() {
       else label = 'Showing all ' + (s.total_parents_active + s.total_parents_dormant) + ' products';
       counterEl.textContent = label;
       // r20c: update bucket count badges on the tab buttons
+      // r35.13b: + below_market
       const setBadge = function(id, n) { const el = document.getElementById(id); if (el) el.textContent = n || 0; };
       setBadge('amz-count-urgent', s.urgent_count);
+      setBadge('amz-count-below_market', s.below_market_count);
       setBadge('amz-count-underperforming', s.underperforming_count);
       setBadge('amz-count-working', s.working_count);
       setBadge('amz-count-doing_great', s.doing_great_count);
@@ -5140,8 +5150,10 @@ function amzPriorityLabel(p) {
 }
 // r20c: bucket pill — one of urgent / underperforming / working.
 // r35.8: doing_great + monitor added (priority 0 = scale candidate, priority 4 = no signal)
+// r35.13b: below_market added (priority 2 — CVR below category floor)
 function amzBucketLabel(b) {
   if (b === 'urgent') return 'URGENT';
+  if (b === 'below_market') return 'BELOW MARKET';
   if (b === 'underperforming') return 'UNDERPERFORMING';
   if (b === 'working') return 'WORKING';
   if (b === 'doing_great') return 'DOING GREAT';

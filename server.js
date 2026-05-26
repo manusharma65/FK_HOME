@@ -2238,13 +2238,20 @@ function canonicalAgent(raw) {
 
 function extractAgentFromCampaign(campaignName) {
   if (!campaignName) return null;
+  // r35.13: walk past empty parts to find the first non-empty token.
+  // Handles leading-pipe names like "|ANUJ|KIDS SECTION|" which previously
+  // returned null because parts[0] was empty → tasks went to "Unassigned".
   const parts = campaignName.split(/[|@]/);
-  const name = parts[0].trim();
-  if (name.length === 0 || name.length >= 30) return null;
-  // r21: canonicalise. If it matches a known alias (incl. multi-word like
-  // "Aryan Tomar"), return the canonical form. Otherwise return raw so the
-  // unknown-agents UI can still surface it.
-  return canonicalAgent(name);
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i].trim();
+    if (name.length === 0) continue;
+    if (name.length >= 30) return null;
+    // r21: canonicalise. If it matches a known alias (incl. multi-word like
+    // "Aryan Tomar"), return the canonical form. Otherwise return raw so the
+    // unknown-agents UI can still surface it.
+    return canonicalAgent(name);
+  }
+  return null;
 }
 
 async function sendToAgent(agentName, message) {
@@ -2754,6 +2761,34 @@ async function initTasksTable() {
       );
       if (res.rowCount > 0) console.log('[r33a] reset agent_name to Unassigned on ' + res.rowCount + ' Google tasks');
     } catch(e) { console.error('[r33a agent-name cleanup] ' + e.message); }
+
+    // r35.13: one-shot re-attribution. The old parser failed on campaign names
+    // like "|ANUJ|KIDS SECTION|" (leading pipe → parts[0]=='') and bucketed
+    // them as Unassigned. Parser now walks past empty parts. Re-extract agent
+    // from campaign_name for any existing Google task currently sitting as
+    // Unassigned. Gated by system_meta so it only runs once across deploys.
+    try {
+      const flag = await db.query("SELECT value FROM system_meta WHERE key = 'r35_13_google_reattrib_done'");
+      if (flag.rows.length === 0) {
+        const candidates = await db.query(
+          "SELECT id, campaign_name FROM campaign_tasks " +
+          "WHERE department='google' AND agent_name='Unassigned'"
+        );
+        let reattributed = 0;
+        for (const row of candidates.rows) {
+          const agent = extractAgentFromCampaign(row.campaign_name || '');
+          if (agent && (agent === 'Rahul' || agent === 'Anuj')) {
+            await db.query("UPDATE campaign_tasks SET agent_name=$1 WHERE id=$2", [agent, row.id]);
+            reattributed++;
+          }
+        }
+        await db.query(
+          "INSERT INTO system_meta (key, value) VALUES ('r35_13_google_reattrib_done', NOW()::text) " +
+          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+        );
+        console.log('[r35.13] re-attributed ' + reattributed + ' of ' + candidates.rows.length + ' Unassigned Google tasks to Rahul/Anuj');
+      }
+    } catch(e) { console.error('[r35.13 reattrib] ' + e.message); }
   } catch(e) {
     console.error('Tasks table error: ' + e.message);
   }
@@ -6614,11 +6649,17 @@ function computeAmazonDiagnosis(p) {
   const hasCampaigns = p.campaignCount > 0;
   const sig = p.signals || {};
 
-  // r35.8 constants
-  const CVR_CRITICAL = 6;
-  const CVR_WEAK = 10;
-  const CVR_MILD = 12;
-  const CVR_EXCELLENT = 15;
+  // r35.13b: market-anchored CVR thresholds.
+  // Amazon Sports & Outdoors category CVR average = 8-12% (industry benchmark).
+  // We aim slightly past market (+1-2%) so the team is pushed to compete, not
+  // calibrated to current (3-5%) baseline which would lock the gap in forever.
+  // Bands: <5% critical (far below floor) · 5-8% below market (catching up)
+  //        · 8-11% at market floor · 11-13% at target · >13% excellent/scale
+  const CVR_CRITICAL = 5;        // <5% well below market floor — listing fundamentally broken
+  const CVR_BELOW_MARKET = 8;    // 5-8% below market floor — real lift needed
+  const CVR_AT_FLOOR = 11;       // 8-11% at category average — keep pushing
+  const CVR_AT_MARKET = 13;      // 11-13% hitting target (+1-2% over market)
+                                 // >13% excellent / scale candidate
   const SESSIONS_MIN_FOR_URGENT = 50;
   const SESSIONS_MIN_FOR_FLAG = 30;
   const SESSIONS_MIN_FOR_SCALE = 100;
@@ -6678,6 +6719,11 @@ function computeAmazonDiagnosis(p) {
         'Refresh title keywords, bullets, and A+ content');
   }
 
+  // r35.13: hoisted to top of Layer 2 so coverage rule (and any later rule)
+  // can reference traffic signals.
+  const cvr = sig.cvr_7d;
+  const sess = sig.sessions_7d || 0;
+
   // ─── LAYER 2: Visibility — Are people seeing it? ─────────────────────
   if (hasSales && p.totalSales > 50 && !hasCampaigns) {
     flags.visibility_issue = true;
@@ -6685,38 +6731,48 @@ function computeAmazonDiagnosis(p) {
         '£' + p.totalSales.toFixed(0) + ' organic sales, but no advertising at all',
         'Launch a Sponsored Products campaign — already has organic demand');
   }
-  if (p.totalChildren >= 3 && p.adCoveragePct < 40 && hasSales) {
+  // r35.13: coverage rule now fires whenever there's any signal (sales OR traffic).
+  // Previously gated on hasSales — a multi-variant product with sessions but no sales
+  // was invisible to this rule.
+  if (p.totalChildren >= 3 && p.adCoveragePct < 40 && (hasSales || sess > 0)) {
     flags.visibility_issue = true;
     add(2, 2, p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised',
         'Only ' + p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised (' + p.adCoveragePct + '% coverage)',
         'Add remaining variants to existing campaigns (same parent ASIN target)');
   }
 
-  // ─── LAYER 3: Conversion — Do they buy when they see it? (NEW) ───────
-  const cvr = sig.cvr_7d;
-  const sess = sig.sessions_7d || 0;
+  // ─── LAYER 3: Conversion — Do they buy when they see it? ───────
+  // r35.13b: market-anchored diagnosis. Every band names the Amazon Sports
+  // category benchmark (8-12%) so the agent always sees the target they're
+  // chasing, not just their current number.
   if (cvr != null && sess >= SESSIONS_MIN_FOR_URGENT && cvr < CVR_CRITICAL) {
+    // CRITICAL — below 5%, far below market floor
     flags.conversion_issue = true;
+    const ratio = cvr > 0 ? Math.round(8 / cvr) : 0;
+    const gapText = ratio >= 2 ? 'Converting at ~1/' + ratio + ' of market.' : '';
     add(3, 1, sess + ' sessions, CVR ' + cvr + '%',
-        sess + ' sessions but only ' + cvr + '% CVR — listing not converting at ad-profitable rate (need 6%+ at your margins)',
-        'Pause ads, fix listing first — check main image, title, price, reviews');
-  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_WEAK) {
+        'CVR ' + cvr + '% vs Amazon Sports category average 8-12%. ' + gapText + ' Listing fundamentals likely broken.',
+        'Audit top-ranking competitor listings — main image, A+ content, lifestyle photos, pricing, review count. Rebuild listing to match category leaders.');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_BELOW_MARKET) {
+    // BELOW MARKET — 5-8%, below market floor but working
     flags.conversion_issue = true;
     add(3, 2, sess + ' sessions, CVR ' + cvr + '%',
-        'CVR ' + cvr + '% on ' + sess + ' sessions — below 10% healthy threshold, eats most of margin',
-        'Review listing quality: main image, bullets, A+ content, price competitiveness');
-  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_MILD) {
+        'CVR ' + cvr + '% vs Amazon Sports category 8-12%. Below market floor — real lift available.',
+        'Compare top 3 competitor listings on identical keywords. Identify lift levers: A+ content depth, bullet structure, secondary images, review acquisition.');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_AT_FLOOR) {
+    // AT FLOOR — 8-11%, hitting category average, push for 11-13% target
     flags.conversion_issue = true;
     add(3, 2, sess + ' sessions, CVR ' + cvr + '%',
-        'CVR ' + cvr + '% on ' + sess + ' sessions — below your 12-15% benchmark',
-        'Small listing tweaks could lift CVR — A/B test main image or refresh bullets');
-  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_SCALE && cvr > CVR_EXCELLENT) {
-    // priority 0 = doing_great. Only fires if no other priority 1/2 has been raised.
-    // We add it; aggregation below will only pick it if nothing worse hit.
+        'CVR ' + cvr + '% — at Amazon Sports category floor (8-12%). Push for 11-13% target.',
+        'Tighten one weak point — usually review acquisition or content age. Small lifts compound at this level.');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_SCALE && cvr > CVR_AT_MARKET) {
+    // EXCELLENT — above 13%, above market target, scale candidate
     add(3, 0, sess + ' sessions, CVR ' + cvr + '%',
-        'Strong converter — ' + cvr + '% CVR on ' + sess + ' sessions, above your 15% benchmark',
-        'Increase ad spend and add variants to ride this winner');
+        'CVR ' + cvr + '% — above market target (11-13%). Listing is doing its job.',
+        'Scale ad spend — increase budgets on top-performing campaigns. Apply learnings to similar listings.');
   }
+  // Note: 11-13% sits in the "at target" band — no flag fires, product
+  // lands in WORKING with no issues. Owner sees this as healthy.
 
   // ─── LAYER 4: Ad efficiency — wasted spend, ACOS overlay ─────────────
   // These set flags and contribute candidates. They run alongside Layer 3.
@@ -6786,11 +6842,20 @@ function computeAmazonDiagnosis(p) {
         action: 'Monitor — consider test ads if listing is buyable'
       };
     } else {
+      // r35.13: was priority 3 (WORKING) — wrong. A product with sessions but
+      // no sales, or spend below £5 waste threshold with no sales, isn't
+      // "working" — it's "not enough signal". Bucket as MONITOR instead.
+      const parts = [];
+      if (sess > 0) parts.push(sess + ' sessions');
+      if (hasSpend) parts.push('£' + p.campaignSpend.toFixed(2) + ' spend');
+      parts.push('no sales');
       primary = {
-        priority: 3,
-        evidence: 'no issues flagged',
-        diagnosis: 'No issues detected',
-        action: 'Monitor — no urgent action'
+        priority: 4,
+        evidence: parts.join(', '),
+        diagnosis: parts.join(', ') + ' — too little signal to flag a specific issue',
+        action: (sess > 0 && !hasCampaigns)
+          ? 'Some organic traffic but no ads — consider a small test campaign'
+          : 'Monitor — wait for more data'
       };
     }
   }
@@ -7344,15 +7409,27 @@ app.get('/api/amazon/products', async function(req, res) {
       // coverage-gap absorption logic removed — the new diagnosis function
       // handles all visibility/coverage cases internally so no post-hoc
       // promotion is needed.
+      // r35.13b: split priority-2 into 'below_market' vs 'underperforming'.
+      //   - below_market = primary issue is CVR below 8% category floor
+      //                    (agent should focus on listing improvements)
+      //   - underperforming = priority 2 for other reasons (Buy Box,
+      //                       coverage, content age, ACOS, etc.)
+      // Agent sees "below market" and knows the gap is to category average,
+      // not just generic underperformance.
       //   priority 0 = doing_great (gold)
       //   priority 1 = urgent (red)
-      //   priority 2 = underperforming (amber)
+      //   priority 2 = below_market (orange) OR underperforming (amber)
       //   priority 3 = working (green)
       //   priority 4 = monitor (grey)
       let bucket;
       if (dx.priority === 0) bucket = 'doing_great';
       else if (dx.priority === 1) bucket = 'urgent';
-      else if (dx.priority === 2) bucket = 'underperforming';
+      else if (dx.priority === 2) {
+        // If the winning diagnosis is conversion-driven (CVR below market floor),
+        // route to below_market. Otherwise to underperforming.
+        const isCvrDriven = dx.evidence && /^\d+ sessions, CVR /.test(dx.evidence);
+        bucket = isCvrDriven ? 'below_market' : 'underperforming';
+      }
       else if (dx.priority === 4) bucket = 'monitor';
       else bucket = 'working';
       return Object.assign({}, parent, {
@@ -7388,6 +7465,20 @@ app.get('/api/amazon/products', async function(req, res) {
         flags: dx.flags || {},
         secondary: dx.secondary || [],
         signals: signals,
+        // r35.13b: lift potential — £/wk this listing leaves on the table if
+        // it hit Amazon Sports category floor (8% CVR). Used to sub-rank the
+        // urgent and below_market buckets so agents work biggest gaps first.
+        // Formula: sessions × (target - current)/100 × aov × margin
+        //   target = 8% (Amazon Sports category floor)
+        //   margin = 16% (Bobby's net profit threshold)
+        lift_potential_gbp_wk: (function(){
+          const currentCvr = (signals && signals.cvr_7d) || 0;
+          const sessions = (signals && signals.sessions_7d) || 0;
+          const aov = totalUnits > 0 ? totalSales / totalUnits : 0;
+          const gap = 8 - currentCvr;
+          if (gap <= 0 || sessions === 0 || aov === 0) return 0;
+          return parseFloat((sessions * (gap / 100) * aov * 0.16).toFixed(2));
+        })(),
         // r22: active task block (so card can show "🛠 Already assigned" badge)
         active_task: activeTaskByParent[parent.parent_sku] || null,
         // r22: snooze state — if snoozed, set so frontend can hide from Underperforming
@@ -7418,12 +7509,22 @@ app.get('/api/amazon/products', async function(req, res) {
     else if (view === 'hidden') returnList = hiddenParents;
     else if (view === 'urgent') returnList = activeProducts.filter(function(p){ return p.bucket === 'urgent'; });
     else if (view === 'underperforming' || view === 'gaps') returnList = activeProducts.filter(function(p){ return p.bucket === 'underperforming'; });
+    else if (view === 'below_market') returnList = activeProducts.filter(function(p){ return p.bucket === 'below_market'; });
     else if (view === 'working') returnList = activeProducts.filter(function(p){ return p.bucket === 'working'; });
     else if (view === 'doing_great') returnList = activeProducts.filter(function(p){ return p.bucket === 'doing_great'; });
     else if (view === 'monitor') returnList = activeProducts.filter(function(p){ return p.bucket === 'monitor'; });
     else returnList = activeProducts;  // default 'active' = legacy alias
     returnList.sort(function(a, b) {
       if (a.priority !== b.priority) return a.priority - b.priority;
+      // r35.13b: for urgent and below_market buckets, sort by lift_potential desc
+      // (biggest £ gap to market floor first). Agents see highest-impact fixes
+      // at the top. For other buckets, fall back to legacy waste sort.
+      const isLiftBucket = a.bucket === 'urgent' || a.bucket === 'below_market';
+      if (isLiftBucket && a.bucket === b.bucket) {
+        const aLift = a.lift_potential_gbp_wk || 0;
+        const bLift = b.lift_potential_gbp_wk || 0;
+        if (Math.abs(aLift - bLift) > 1) return bLift - aLift;
+      }
       // Sort by waste-spend descending: highest spend with worst ACOS comes first.
       // For zero-sales items, total spend itself is the waste signal.
       const aWaste = (a.camp_spend_7d || 0) - (a.camp_sales_7d || 0) * 0;
@@ -7434,8 +7535,10 @@ app.get('/api/amazon/products', async function(req, res) {
 
     // r20c: per-bucket counts in summary so tabs can show badges
     // r35.8: doing_great + monitor counts added
+    // r35.13b: below_market count added
     const allActive = activeProducts;
     const urgentCount = allActive.filter(function(p){ return p.bucket === 'urgent'; }).length;
+    const belowMarketCount = allActive.filter(function(p){ return p.bucket === 'below_market'; }).length;
     const underCount = allActive.filter(function(p){ return p.bucket === 'underperforming'; }).length;
     const workingCount = allActive.filter(function(p){ return p.bucket === 'working'; }).length;
     const doingGreatCount = allActive.filter(function(p){ return p.bucket === 'doing_great'; }).length;
@@ -7453,6 +7556,7 @@ app.get('/api/amazon/products', async function(req, res) {
         advertised_asins_count: advertisedAsins.size,
         unassigned_count: returnList.filter(function(p){ return !p.owner_agent; }).length,
         urgent_count: urgentCount,                         // r20c: bucket counts
+        below_market_count: belowMarketCount,               // r35.13b
         underperforming_count: underCount,                  // r20c
         working_count: workingCount,                        // r20c
         doing_great_count: doingGreatCount,                 // r35.8
@@ -13171,6 +13275,18 @@ app.get('/api/google/daily-sales', async function(req, res) {
 
 // The unified diagnosis decision tree.
 // priority: 1 = urgent (red), 2 = needs attention (amber), 3 = scale (green), 4 = healthy/info (grey)
+//
+// r35.13b: market-anchored CVR thresholds for Google/Shopify side.
+// Shopify ecom benchmark (paid-search traffic, considered purchases like ours):
+//   <1% critical, 1-2% below market floor, 2-3% market average, 3-5% strong, >5% excellent
+// Same philosophy as Amazon side — we push slightly past market norms so the team
+// is calibrated to compete with category, not to current baseline.
+const GOOGLE_CVR_CRITICAL = 1;       // <1% well below paid-search Shopify floor
+const GOOGLE_CVR_BELOW_MARKET = 2;   // 1-2% below market floor
+const GOOGLE_CVR_AT_FLOOR = 3;       // 2-3% at Shopify ecom average
+const GOOGLE_CVR_STRONG = 5;         // 3-5% top 20% of Shopify stores
+                                      // >5% excellent / top 10%
+
 function diagnoseProduct(ctx) {
   const s = ctx.shopify;
   const g = ctx.google;
@@ -13221,18 +13337,76 @@ function diagnoseProduct(ctx) {
   }
 
   // 7. Clicks but no conversions — use GA4 funnel data when present to pinpoint where
+  // r35.13b: rule rewritten — overall CVR verdict (Shopify ecom benchmark
+  // 2-3% paid-search), with funnel-stage cause appended to action.
   if (g.clicks > 20 && g.conversions === 0) {
     if (f && f.sessions > 20) {
       const cartRate = f.sessions > 0 ? (f.cartAdditions / f.sessions) * 100 : 0;
       const checkoutRate = f.cartAdditions > 0 ? (f.checkouts / f.cartAdditions) * 100 : 0;
+      // Funnel-stage cause (used in action text)
+      let causeText;
       if (cartRate < 2) {
-        return { diagnosisType: 'page_problem', diagnosis: 'Visitors not adding to cart (cart rate ' + cartRate.toFixed(1) + '%) — listing or page is the bottleneck', action: 'Improve main image, title, price visibility, trust signals', priority: 1 };
+        causeText = 'Cause: cart rate ' + cartRate.toFixed(1) + '% (only ' + f.cartAdditions + ' adds from ' + f.sessions + ' sessions) — page or product image is the bottleneck.';
+      } else if (cartRate >= 2 && checkoutRate < 30) {
+        causeText = 'Cause: cart rate ok (' + cartRate.toFixed(1) + '%) but checkout drop-off ' + (100 - checkoutRate).toFixed(0) + '% — checkout friction.';
+      } else {
+        causeText = 'Cause: cart rate ok and checkout ok, but conversions dropping at final step — payment or trust issue.';
       }
-      if (cartRate >= 2 && checkoutRate < 30) {
-        return { diagnosisType: 'checkout_friction', diagnosis: 'Cart rate is ok (' + cartRate.toFixed(1) + '%) but checkout drop-off (' + checkoutRate.toFixed(0) + '%) — checkout friction', action: 'Review checkout: shipping cost, trust signals, mobile usability', priority: 1 };
-      }
+      return {
+        diagnosisType: 'critical_cvr',
+        diagnosis: 'CVR 0% on ' + f.sessions + ' sessions vs Shopify paid-search average 2-3%. Listing not converting at all.',
+        action: causeText + ' Fix the bottleneck before adding more spend.',
+        priority: 1
+      };
     }
     return { diagnosisType: 'landing_page', diagnosis: 'People clicking but not buying — landing page, price, or reviews issue', action: 'Review product page, pricing, images, and reviews', priority: 1 };
+  }
+
+  // 7c. r35.13b — market-anchored CVR verdict for products WITH conversions
+  // Compares CVR to Shopify ecom paid-search benchmark (2-3%). Layered AFTER
+  // rule 7 (no conversions) so we only enter this branch with real CVR data.
+  if (f && f.sessions >= 50 && f.purchases > 0) {
+    const cvr = (f.purchases / f.sessions) * 100;
+    const cartRate = f.sessions > 0 ? (f.cartAdditions / f.sessions) * 100 : 0;
+    const checkoutRate = f.cartAdditions > 0 ? (f.checkouts / f.cartAdditions) * 100 : 0;
+    // Build cause text — which funnel stage is weakest
+    let stageHint = '';
+    if (cartRate < 3) stageHint = ' Weak point: cart rate ' + cartRate.toFixed(1) + '% — product page not converting.';
+    else if (checkoutRate < 50) stageHint = ' Weak point: checkout drop-off ' + (100 - checkoutRate).toFixed(0) + '% — checkout friction.';
+
+    if (cvr < GOOGLE_CVR_CRITICAL) {
+      return {
+        diagnosisType: 'cvr_critical',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% vs Shopify paid-search benchmark 2-3%. Far below market floor.' + stageHint,
+        action: 'Audit competitor product pages, fix main image / price / trust badges. Pause ads until CVR clears 1%.',
+        priority: 1
+      };
+    }
+    if (cvr < GOOGLE_CVR_BELOW_MARKET) {
+      return {
+        diagnosisType: 'cvr_below_market',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% vs Shopify paid-search benchmark 2-3%. Below market floor — real lift available.' + stageHint,
+        action: 'Compare top 3 competitor pages for same keywords. Test improvements to weakest funnel stage.',
+        priority: 2
+      };
+    }
+    if (cvr < GOOGLE_CVR_AT_FLOOR) {
+      return {
+        diagnosisType: 'cvr_at_floor',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% — at Shopify market floor (2-3%). Push for 3-5% target.' + stageHint,
+        action: 'Small page improvements compound at this level — review acquisition, page speed, trust signals.',
+        priority: 2
+      };
+    }
+    if (cvr > GOOGLE_CVR_STRONG) {
+      return {
+        diagnosisType: 'cvr_excellent',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% — top-decile performer vs Shopify benchmark.',
+        action: 'Scale budget on this product. Apply learnings to similar listings.',
+        priority: 3
+      };
+    }
+    // 3-5% = strong, falls through to healthy below
   }
 
   // 7b. High bounce rate signal (GA4) on a product getting decent ad clicks
@@ -13382,6 +13556,23 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
       ga4AvgEngagementTime: funnel ? funnel.avgEngagementTime : null,
       ga4CartRate: funnel && funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : null,
       ga4CheckoutRate: funnel && funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : null,
+      // r35.13: CVR computed from GA4 funnel — purchases / sessions × 100.
+      ga4Cvr: funnel && funnel.sessions > 0 ? Math.round((funnel.purchases / funnel.sessions) * 1000) / 10 : null,
+      // r35.13b: lift potential — £/wk this listing leaves on the table if it
+      // hit Shopify paid-search benchmark (2% CVR). Used to sub-rank urgent
+      // and below-market buckets so agents see highest-£ gaps first.
+      // Formula: sessions × (target - current)/100 × aov × margin
+      //   target = 2% (Shopify ecom paid-search floor)
+      //   margin = 16% (net profit threshold)
+      lift_potential_gbp_wk: (function(){
+        if (!funnel || !funnel.sessions) return 0;
+        const currentCvr = funnel.sessions > 0 ? (funnel.purchases / funnel.sessions) * 100 : 0;
+        const gap = 2 - currentCvr;
+        if (gap <= 0) return 0;
+        const aov = sp.unitsSold7d > 0 ? sp.revenue7d / sp.unitsSold7d : (sp.price || 0);
+        if (aov === 0) return 0;
+        return Math.round(funnel.sessions * (gap / 100) * aov * 0.16 * 100) / 100;
+      })(),
       diagnosisType: dx.diagnosisType,
       diagnosis: dx.diagnosis,
       action: dx.action,
@@ -13532,6 +13723,23 @@ app.get('/api/google/all-products', async function(req, res) {
       ga4AvgEngagementTime: funnel ? funnel.avgEngagementTime : null,
       ga4CartRate: funnel && funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : null,
       ga4CheckoutRate: funnel && funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : null,
+      // r35.13: CVR computed from GA4 funnel — purchases / sessions × 100.
+      ga4Cvr: funnel && funnel.sessions > 0 ? Math.round((funnel.purchases / funnel.sessions) * 1000) / 10 : null,
+      // r35.13b: lift potential — £/wk this listing leaves on the table if it
+      // hit Shopify paid-search benchmark (2% CVR). Used to sub-rank urgent
+      // and below-market buckets so agents see highest-£ gaps first.
+      // Formula: sessions × (target - current)/100 × aov × margin
+      //   target = 2% (Shopify ecom paid-search floor)
+      //   margin = 16% (net profit threshold)
+      lift_potential_gbp_wk: (function(){
+        if (!funnel || !funnel.sessions) return 0;
+        const currentCvr = funnel.sessions > 0 ? (funnel.purchases / funnel.sessions) * 100 : 0;
+        const gap = 2 - currentCvr;
+        if (gap <= 0) return 0;
+        const aov = sp.unitsSold7d > 0 ? sp.revenue7d / sp.unitsSold7d : (sp.price || 0);
+        if (aov === 0) return 0;
+        return Math.round(funnel.sessions * (gap / 100) * aov * 0.16 * 100) / 100;
+      })(),
       diagnosisType: dx.diagnosisType,
       diagnosis: dx.diagnosis,
       action: dx.action,
