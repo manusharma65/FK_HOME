@@ -5393,7 +5393,13 @@ function buildAmzProductModalBody(p) {
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Sales (Amazon SP-API)</div>',
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">',
       tile('Revenue 7d', '£' + (p.total_sales_7d || 0).toFixed(2)),
-      tile('Units 7d', String(p.total_units_7d || 0)),
+      // r35.13c: Units 7d and CVR both use ORDERS data now. CVR was previously
+      // using traffic-report units which include cross-attributed sales (when
+      // customer clicks an ad on ASIN A but buys sibling ASIN B). For multi-
+      // listing product families that inflated CVR misleadingly. Now CVR is
+      // honest: orders units ÷ sessions for this listing's own ASINs only.
+      tile('Units 7d', String(p.total_units_7d || 0), null,
+        'Actual orders attributed to this listing\'s ASINs over the last 7 days. CVR below is computed from these units ÷ sessions — honest conversion rate for this exact listing, no cross-attribution.'),
       tile('Active', p.active_60d ? 'Yes' : 'No', p.active_60d ? 'good' : 'bad'),
       tile('Listings', (p.buyable_count + p.inactive_count) + ' total'),
       // r35.9: Sessions + CVR in modal. Mirrors card stat-grid logic at line ~5195.

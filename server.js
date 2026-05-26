@@ -4319,6 +4319,35 @@ async function runDailyTaskScheduler() {
       console.log('[r33e] scheduler skipped ' + skippedPaused + ' historical snapshot rows for paused/disabled campaigns');
     }
 
+    // r35.13c: auto-close stale tasks on campaigns that are now paused/disabled.
+    // r33e already skips creating NEW tasks for paused campaigns, but tasks
+    // created when the campaign was active stay open in the agent's queue.
+    // Bobby surfaced "SP Auto" task on a paused campaign — same root cause.
+    // We close them with a clear note so the agent's list reflects reality.
+    if (useEnabledFilter && state.campaigns && state.campaigns.length > 0) {
+      try {
+        const pausedIds = state.campaigns
+          .filter(function(c){ const s = String(c.state || 'enabled').toLowerCase(); return s !== 'enabled' && s !== ''; })
+          .map(function(c){ return String(c.campaignId); });
+        if (pausedIds.length > 0) {
+          const closeRes = await db.query(
+            "UPDATE campaign_tasks SET status='dismissed', " +
+            "dismissed_reason=COALESCE(dismissed_reason, 'Campaign paused — task auto-closed by scheduler'), " +
+            "resolved_at=NOW() " +
+            "WHERE campaign_id = ANY($1) " +
+            "AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+            "RETURNING id, campaign_id, agent_name",
+            [pausedIds]
+          );
+          if (closeRes.rowCount > 0) {
+            console.log('[r35.13c] auto-closed ' + closeRes.rowCount + ' open tasks on paused campaigns');
+          }
+        }
+      } catch(e) {
+        console.error('[r35.13c] auto-close paused tasks error: ' + e.message);
+      }
+    }
+
     // r35.5: snapshots arrive DESC (newest first), so each camp.days is newest-first
     // after push(). The new scoreCampaignDays uses days.slice(-3) which assumes
     // oldest→newest. Sort each campaign's days before scoring.
@@ -7387,8 +7416,15 @@ app.get('/api/amazon/products', async function(req, res) {
         signals_stale_count: staleCount,
         // r35.8: parent-level traffic + conversion
         sessions_7d: sessionsSum || 0,
-        units_7d: unitsSum || 0,
-        cvr_7d: (sessionsSum > 0) ? parseFloat((100 * unitsSum / sessionsSum).toFixed(1)) : null
+        units_7d: unitsSum || 0,                     // traffic-report units (kept for transparency)
+        // r35.13c: CVR now uses ORDERS units, not traffic-report units. The
+        // traffic report can count a "purchase" when the customer clicks an
+        // ad on ASIN A but ends up buying sibling ASIN B — Amazon's
+        // cross-attribution. That inflates CVR for under-converting listings.
+        // Using actual orders against THIS listing's ASINs gives an honest
+        // CVR. For the Rubber Encased Hex Dumbbell case (170 sess, 0 orders,
+        // but traffic-CVR 1.8%), this now correctly shows CVR 0%.
+        cvr_7d: (sessionsSum > 0) ? parseFloat((100 * (totalUnits || 0) / sessionsSum).toFixed(1)) : null
       };
 
       const dx = computeAmazonDiagnosis({
@@ -8225,8 +8261,19 @@ app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) 
       }
       // Owner override: allow task creation, no subtasks. Note is the brief.
     } else {
-      const asinForCritique = p.asin || allAsins[0];
-      const critRes = await db.query("SELECT critique, cached_at FROM amazon_critiques WHERE asin = $1", [asinForCritique]);
+      // r35.13c: gate now accepts a cached critique on ANY ASIN of the product
+      // group, not just the first by sort order. The products endpoint orders
+      // ASINs by insertion to a Set (depends on asinGroup iteration); the
+      // assign-task endpoint orders by `ORDER BY sku`. These two orders can
+      // differ, so the critique saved against asins[0] from the UI couldn't
+      // be found by the gate's primary-ASIN pick. Tasks were blocked even
+      // though the user had run critique. Fix: query by any of the ASINs.
+      const critAsins = Array.from(new Set([p.asin].concat(allAsins).filter(Boolean)));
+      const critRes = await db.query(
+        "SELECT critique, cached_at FROM amazon_critiques WHERE asin = ANY($1) " +
+        "ORDER BY cached_at DESC LIMIT 1",
+        [critAsins]
+      );
       if (!critRes.rows.length) {
         return res.status(412).json({
           error: 'no_critique',
@@ -9018,11 +9065,11 @@ app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
       console.log('[r26c owner-PUT] sku/parent-form key=' + groupKey + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
       r = await db.query(
         "WITH primary_match AS (" +
-        "  SELECT id, asin FROM amazon_products " +
+        "  SELECT sku, asin FROM amazon_products " +
         "  WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)" +
         ") " +
         "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
-        "WHERE id IN (SELECT id FROM primary_match) " +
+        "WHERE sku IN (SELECT sku FROM primary_match) " +
         "   OR (asin IS NOT NULL AND asin IN (SELECT asin FROM primary_match WHERE asin IS NOT NULL)) " +
         "RETURNING sku, asin, parent_sku, owner_agent, owner_manual",
         [agent, groupKey]
