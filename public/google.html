@@ -521,6 +521,7 @@ let currentFilter = 'all';            // Priority axis: all | urgent | scale
 let currentAdFilter = 'all';          // Ad-status axis: all | driving | quiet | notpromoted
 let currentSearchQuery = '';          // Free-text search on title
 let campaignTab = 'active'; // 'active' | 'dismissed' | 'archived'
+let LAST_PRODUCT_FOR_BACK = null;     // r37: stashed so product-scoped campaign view can return
 
 // AI result cache — per browser session.
 // Key: 'product:<id>:<depth>' or 'campaign:<id>'
@@ -2899,16 +2900,178 @@ async function renderCampaignProductsInModal(campaignId, campaignName) {
     const products = j.products || [];
     const campNameSafe = String(campaignName || '').replace(/'/g, "&#39;");
     const back = '<button class="btn btn-ghost" onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="font-size:13px;margin-bottom:14px">← Back to campaign</button>';
+
+    // r37: stash products on window so the search filter can re-render without re-fetching
+    window.CP_CAMPAIGN_PRODUCTS = products;
+
+    // Search input — filters by title / displayName / productName / productGroupPath in memory
+    const searchBar = '<div style="margin-bottom:12px">'
+      + '<input id="cp-campaign-product-search" type="text" placeholder="Search products in this campaign…" '
+      + 'style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:inherit;font-size:13px" '
+      + 'oninput="filterCampaignProductsInModal(this.value)">'
+      + '</div>';
+
     const productsHtml = products.length
       ? products.map(productSubrow).join('')
       : '<div class="empty-state">No products in this campaign.</div>';
     body.innerHTML = back
-      + '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Products in this campaign · ' + products.length + ' total</div>'
-      + '<div class="campaign-products" style="display:block">' + productsHtml + '</div>';
+      + '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Products in this campaign · <span id="cp-campaign-product-count">' + products.length + '</span> total</div>'
+      + searchBar
+      + '<div id="cp-campaign-products-list" class="campaign-products" style="display:block">' + productsHtml + '</div>';
     setTimeout(populateFrictionBadges, 50);
   } catch(e) {
     body.innerHTML = '<div style="padding:20px;color:var(--red);font-size:13px">Could not load products: ' + escapeHtml(e.message) + '</div>';
   }
+}
+
+// r37: in-memory filter for the campaign product list. Matches title / displayName /
+// productName / productGroupPath case-insensitive.
+function filterCampaignProductsInModal(query) {
+  const list = document.getElementById('cp-campaign-products-list');
+  const countEl = document.getElementById('cp-campaign-product-count');
+  if (!list || !window.CP_CAMPAIGN_PRODUCTS) return;
+  const q = String(query || '').trim().toLowerCase();
+  const all = window.CP_CAMPAIGN_PRODUCTS;
+  const filtered = q
+    ? all.filter(function(p){
+        const fields = [p.shopifyTitle, p.displayName, p.productName, p.productGroupPath, p.adGroupName];
+        return fields.some(function(f){ return f && String(f).toLowerCase().indexOf(q) !== -1; });
+      })
+    : all;
+  list.innerHTML = filtered.length
+    ? filtered.map(productSubrow).join('')
+    : '<div class="empty-state" style="padding:20px;text-align:center;color:var(--text3)">No products match "' + escapeHtml(q) + '".</div>';
+  if (countEl) countEl.textContent = q ? (filtered.length + ' of ' + all.length) : all.length;
+  setTimeout(populateFrictionBadges, 50);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// PRODUCT-SCOPED CAMPAIGN VIEW (r37)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// Opens when the user clicks a campaign FROM inside the product modal. Answers
+// "how is THIS product doing in THIS campaign?" — different from the whole-campaign
+// card (which answers "how is the campaign doing overall?").
+//
+// Existing server endpoint: GET /api/google/campaign-product-detail/:campaignId/:shopifyId
+// Returns: current 7d metrics scoped to (campaign, product), prior 7d for WoW, variant breakdown.
+//
+// No misleading rolling-trend chart in this version. Inline prev-week lines per stat
+// card instead of a separate strip — matches the pattern on the product modal.
+
+async function openCampaignProductScopedDetail(campaignId, shopifyId, campaignName, productName, sourceProduct) {
+  if (!campaignId || !shopifyId) return;
+  if (sourceProduct) LAST_PRODUCT_FOR_BACK = sourceProduct;
+
+  const title = 'Campaign × Product · ' + (productName || 'this product');
+  showBigModal(title, '<div class="empty-state">Loading scoped detail…</div>');
+
+  try {
+    const r = await authedFetch('/api/google/campaign-product-detail/' + encodeURIComponent(campaignId) + '/' + encodeURIComponent(shopifyId));
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || 'Failed to load');
+    renderCampaignProductScopedBody(j, campaignId);
+  } catch(e) {
+    document.getElementById('big-modal-body').innerHTML =
+      '<div style="padding:20px;color:var(--red);font-size:13px">Could not load scoped detail: ' + escapeHtml(e.message) + '</div>'
+      + (LAST_PRODUCT_FOR_BACK
+          ? '<div style="margin-top:14px"><button class="btn btn-ghost" onclick="backToProductFromScoped()" style="font-size:13px">← Back to product</button></div>'
+          : '');
+  }
+}
+
+function renderCampaignProductScopedBody(j, campaignId) {
+  const cur = j.current || {};
+  const prior = j.prior;
+  const variants = j.variants || [];
+  const campNameSafe = String(j.campaignName || '').replace(/'/g, "&#39;");
+
+  // Inline prev-week stat tile (no separate strip — pattern matches product modal).
+  function prevWkLine(curVal, priorVal, formatter, opts) {
+    opts = opts || {};
+    if (priorVal == null || priorVal === 0) {
+      return '<div style="font-size:10px;color:var(--text3);margin-top:2px">no prior data</div>';
+    }
+    const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
+    if (Math.abs(change) < 1) {
+      return '<div style="font-size:10px;color:var(--text3);margin-top:2px">flat vs prev wk · prev: ' + formatter(priorVal) + '</div>';
+    }
+    const lowerIsBetter = !!opts.lowerIsBetter;
+    const isUp = change > 0;
+    const isGood = lowerIsBetter ? !isUp : isUp;
+    const arrow = isUp ? '↑' : '↓';
+    const colour = isGood ? '#16a34a' : '#dc2626';
+    return '<div style="font-size:11px;color:' + colour + ';margin-top:2px;font-weight:600">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev wk</div>'
+      + '<div style="font-size:10px;color:var(--text3)">prev: ' + formatter(priorVal) + '</div>';
+  }
+
+  function statTile(label, curVal, priorVal, formatter, opts) {
+    opts = opts || {};
+    const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
+    return '<div class="stat-item"><div class="stat-label">' + label + '</div><div class="stat-value">' + valDisplay + '</div>'
+      + (priorVal !== undefined ? prevWkLine(curVal, priorVal, formatter, opts) : '')
+      + '</div>';
+  }
+
+  // Header: back-to-product + open-whole-campaign + campaign context
+  const backLink = LAST_PRODUCT_FOR_BACK
+    ? '<button onclick="backToProductFromScoped()" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit">← Back to product</button>'
+    : '';
+  const wholeCampaignLink = '<button onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit;margin-left:14px">Open whole campaign card →</button>';
+
+  const header = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' + backLink + wholeCampaignLink + '</div>'
+    + '<div style="font-size:13px;color:var(--text2);margin-bottom:6px">In campaign: <strong style="color:var(--text)">' + escapeHtml(j.campaignName) + '</strong>' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>'
+    + (j.variantCount > 1
+        ? '<div style="font-size:12px;color:var(--text3);margin-bottom:14px;font-style:italic">Aggregated across ' + j.variantCount + ' variants of this product in this campaign.</div>'
+        : '<div style="margin-bottom:14px"></div>');
+
+  // Stats grid with inline prev-week lines on the 5 metrics where it matters
+  // (Spend, Sales, ACOS, Clicks, Conversions). Impressions also gets one — same data shape.
+  const statsGrid = '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">This product, in this campaign — 7 days</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">'
+    + statTile('Spend', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
+    + statTile('Sales', cur.sales, prior && prior.sales, fmtCurrency)
+    + statTile('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true })
+    + statTile('Impressions', cur.impressions, prior && prior.impressions, fmtNum)
+    + statTile('Clicks', cur.clicks, prior && prior.clicks, fmtNum)
+    + statTile('Conversions', cur.conversions, prior && prior.conversions, function(v){ return fmtNum(Math.round(Number(v) || 0)); })
+    + statTile('CTR', cur.ctr, undefined, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
+    + statTile('Cost/conv', cur.costPerConv, undefined, function(v){ return v ? fmtCurrency(v) : '—'; })
+    + '</div>';
+
+  // Variant breakdown — informational table, no click handlers
+  let variantsHtml = '';
+  if (variants.length > 1) {
+    const variantRows = variants.map(function(v){
+      return '<tr style="border-bottom:0.5px solid var(--border)">'
+        + '<td style="padding:6px 8px;font-family:var(--mono);font-size:11px;color:var(--text2)">' + escapeHtml(String(v.variantId || '—')) + '</td>'
+        + '<td style="padding:6px 8px;font-size:12px">' + escapeHtml(v.adGroupName || '—') + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.spend) + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.sales) + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtNum(v.clicks) + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + (v.acos ? fmtPct(v.acos) : '—') + '</td>'
+        + '</tr>';
+    }).join('');
+    variantsHtml = '<div style="margin-top:8px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Variant breakdown · ' + variants.length + ' variants</div>'
+      + '<table style="width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden">'
+      + '<thead><tr style="background:var(--bg);border-bottom:1px solid var(--border)">'
+      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Variant ID</th>'
+      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Ad group</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Spend</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Sales</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Clicks</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">ACOS</th>'
+      + '</tr></thead><tbody>' + variantRows + '</tbody></table></div>';
+  }
+
+  document.getElementById('big-modal-body').innerHTML = header + statsGrid + variantsHtml;
+}
+
+function backToProductFromScoped() {
+  if (!LAST_PRODUCT_FOR_BACK) {
+    closeBigModal();
+    return;
+  }
+  openProductDetailFromObj(LAST_PRODUCT_FOR_BACK);
 }
 
 // ─── Diagnostics — manager-only debug for refund + GA4 matching issues ───
@@ -2958,6 +3121,8 @@ function closeBigModal() {
 // Open a single product in the big modal — full detail
 function openProductDetailFromObj(p) {
   if (!p) return;
+  // r37: stash so the product-scoped campaign view's "← Back to product" can return here
+  LAST_PRODUCT_FOR_BACK = p;
   // Build big detail view
   const img = p.imageUrl ? '<img src="' + p.imageUrl + '" style="width:200px;height:200px;object-fit:cover;border-radius:10px;background:var(--bg2)" alt="">' : '<div style="width:200px;height:200px;display:flex;align-items:center;justify-content:center;background:var(--bg2);color:var(--text3);border-radius:10px">no image</div>';
   const status = p.status ? '<span class="' + statusClass(p.status) + '">' + p.status + '</span>' : '';
@@ -3002,12 +3167,17 @@ function openProductDetailFromObj(p) {
 
   // Bigger, bolder stat tile. Value font is now 22px (was 18px), label 12px (was 11px).
   // Optionally takes a colourFor metric key to auto-redden bad numbers.
-  const stat = function(label, val, metric){
+  const stat = function(label, val, metric, prevSlotKey){
     const v = (typeof val === 'string') ? val.replace(/[^\d.\-]/g, '') : val;
     const colour = metric ? colourFor(metric, v) : null;
+    // r37: optional prevSlotKey creates an empty div that renderProductWoWStrip fills async
+    const prevSlot = prevSlotKey
+      ? '<div id="gads-prev-' + prevSlotKey + '" style="margin-top:4px;font-size:11px;color:var(--text3);min-height:14px"></div>'
+      : '';
     return '<div style="background:var(--bg2);padding:14px 16px;border-radius:10px;border:1px solid ' + (colour === 'var(--red)' ? 'rgba(192,57,43,0.25)' : 'var(--border)') + '">'
       + '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
       + '<div style="font-size:22px;font-weight:700;color:' + (colour || 'var(--text)') + ';font-family:var(--mono);line-height:1.1">' + val + '</div>'
+      + prevSlot
       + '</div>';
   };
 
@@ -3023,18 +3193,63 @@ function openProductDetailFromObj(p) {
       '</div>' +
     '</div>' +
 
-    '<div style="display:flex;align-items:center;justify-content:space-between;margin:24px 0 4px;gap:12px;flex-wrap:wrap">' +
-      '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Sales (Shopify, estimate)</div>' +
-      // r37 window toggle. Only affects this Shopify Sales block. Google Ads block below stays 7d
-      // until v10 daily metrics flow through — then Phase 2 of the toggle extends to those tiles too.
-      '<div id="product-window-toggle" style="display:inline-flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:11px" data-window="' + (window.CURRENT_PRODUCT_WINDOW || '7d') + '">' +
-        '<button class="pwt-btn" data-window="7d" style="padding:5px 10px;border:none;background:' + ((window.CURRENT_PRODUCT_WINDOW || '7d') === '7d' ? 'var(--text)' : 'transparent') + ';color:' + ((window.CURRENT_PRODUCT_WINDOW || '7d') === '7d' ? 'var(--bg)' : 'var(--text2)') + ';cursor:pointer;font-family:inherit;font-size:11px">This week</button>' +
-        '<button class="pwt-btn" data-window="7d-prev" style="padding:5px 10px;border:none;border-left:1px solid var(--border);background:' + (window.CURRENT_PRODUCT_WINDOW === '7d-prev' ? 'var(--text)' : 'transparent') + ';color:' + (window.CURRENT_PRODUCT_WINDOW === '7d-prev' ? 'var(--bg)' : 'var(--text2)') + ';cursor:pointer;font-family:inherit;font-size:11px">Last week</button>' +
-        '<button class="pwt-btn" data-window="30d" style="padding:5px 10px;border:none;border-left:1px solid var(--border);background:' + (window.CURRENT_PRODUCT_WINDOW === '30d' ? 'var(--text)' : 'transparent') + ';color:' + (window.CURRENT_PRODUCT_WINDOW === '30d' ? 'var(--bg)' : 'var(--text2)') + ';cursor:pointer;font-family:inherit;font-size:11px">30 days</button>' +
-      '</div>' +
-    '</div>' +
+    // r37 (final): Sales section restored to 5-stat row. Toggle removed.
+    // Revenue 7d and Units 7d carry a small "vs prev wk" line below the value,
+    // computed inline from dailySales14d / dailyUnits14d (we have 14 days of daily
+    // data — sum of indices 0..6 = previous week, sum of 7..13 = this week).
+    // Other stats (Revenue 30d, Units 30d, Price) stay plain — we don't have
+    // 30d prev data, and price doesn't have a "vs prev" concept.
+    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 4px">Sales (Shopify, estimate)</div>' +
     '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Net of refunds. May differ from Shopify Analytics by ~5% due to refund attribution timing.</div>' +
-    '<div id="product-sales-stats" data-product-id="' + (p.shopifyId || p.id || '') + '">' + renderProductSalesStats(p, window.CURRENT_PRODUCT_WINDOW || '7d') + '</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
+    (function(){
+      // Inline prev-week helper for Sales section. Reads dailySales14d / dailyUnits14d.
+      const sales14 = Array.isArray(p.dailySales14d) ? p.dailySales14d : null;
+      const units14 = Array.isArray(p.dailyUnits14d) ? p.dailyUnits14d : null;
+      const has14Sales = sales14 && sales14.length >= 14;
+      const has14Units = units14 && units14.length >= 14;
+
+      function prevWkLine(curVal, prevVal, formatter) {
+        if (prevVal == null || prevVal === 0) {
+          return '<div style="font-size:10px;color:var(--text3);margin-top:2px">no prior data</div>';
+        }
+        const change = ((curVal - prevVal) / Math.abs(prevVal)) * 100;
+        if (Math.abs(change) < 1) {
+          return '<div style="font-size:10px;color:var(--text3);margin-top:2px">flat vs prev wk · prev: ' + formatter(prevVal) + '</div>';
+        }
+        const arrow = change > 0 ? '↑' : '↓';
+        const colour = change > 0 ? '#16a34a' : '#dc2626';
+        return '<div style="font-size:11px;color:' + colour + ';margin-top:2px;font-weight:600">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev wk</div>'
+          + '<div style="font-size:10px;color:var(--text3)">prev: ' + formatter(prevVal) + '</div>';
+      }
+
+      // Revenue 7d with prev-week line
+      let revBlock;
+      if (has14Sales) {
+        const prevRev = Math.round(sales14.slice(0, 7).reduce(function(s, v){ return s + (Number(v) || 0); }, 0) * 100) / 100;
+        revBlock = '<div class="stat-item"><div class="stat-label">Revenue 7d</div><div class="stat-value">' + fmtCurrency(p.revenue7d) + '</div>'
+          + prevWkLine(Number(p.revenue7d) || 0, prevRev, fmtCurrency) + '</div>';
+      } else {
+        revBlock = '<div class="stat-item"><div class="stat-label">Revenue 7d</div><div class="stat-value">' + fmtCurrency(p.revenue7d) + '</div></div>';
+      }
+
+      // Units 7d with prev-week line
+      let unitsBlock;
+      if (has14Units) {
+        const prevUnits = units14.slice(0, 7).reduce(function(s, v){ return s + (Number(v) || 0); }, 0);
+        unitsBlock = '<div class="stat-item"><div class="stat-label">Units 7d</div><div class="stat-value">' + fmtNum(p.unitsSold7d) + '</div>'
+          + prevWkLine(Number(p.unitsSold7d) || 0, prevUnits, fmtNum) + '</div>';
+      } else {
+        unitsBlock = '<div class="stat-item"><div class="stat-label">Units 7d</div><div class="stat-value">' + fmtNum(p.unitsSold7d) + '</div></div>';
+      }
+
+      return revBlock
+        + '<div class="stat-item"><div class="stat-label">Revenue 30d</div><div class="stat-value">' + fmtCurrency(p.revenue30d) + '</div></div>'
+        + unitsBlock
+        + '<div class="stat-item"><div class="stat-label">Units 30d</div><div class="stat-value">' + fmtNum(p.unitsSold30d) + '</div></div>'
+        + '<div class="stat-item"><div class="stat-label">Price</div><div class="stat-value">' + (p.price != null ? fmtCurrency(p.price) : '—') + '</div></div>';
+    })() +
+    '</div>' +
 
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Daily revenue (last 7 days)</div>' +
     '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px;background:var(--bg2);border-radius:8px">' + dailyBars + '</div>' +
@@ -3045,13 +3260,13 @@ function openProductDetailFromObj(p) {
       ? '<div style="font-size:13px;color:#dc2626;font-weight:700;margin:-4px 0 10px">⚠ Wasted ' + fmtCurrency(p.googleSpend) + ' over the last 7 days — no sales attributed.</div>'
       : '') +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
-    stat('Ad spend', fmtCurrency(p.googleSpend)) +
+    stat('Ad spend', fmtCurrency(p.googleSpend), null, 'spend') +
     stat('Impressions', fmtNum(p.googleImpressions)) +
-    stat('Clicks', fmtNum(p.googleClicks)) +
+    stat('Clicks', fmtNum(p.googleClicks), null, 'clicks') +
     stat('CTR', fmtPct(p.googleCtr)) +
-    stat('Conversions', fmtNum(Math.round(Number(p.googleConversions) || 0))) +
-    stat('Ad revenue', fmtCurrency(p.googleSales)) +
-    stat('ACOS', fmtPct(p.googleAcos), 'acos') +
+    stat('Conversions', fmtNum(Math.round(Number(p.googleConversions) || 0)), null, 'conversions') +
+    stat('Ad revenue', fmtCurrency(p.googleSales), null, 'sales') +
+    stat('ACOS', fmtPct(p.googleAcos), 'acos', 'acos') +
     stat('TACOS', (function(){
       // TACOS = ad spend ÷ TOTAL Shopify revenue (organic + paid).
       // Tells you how dependent this product's revenue is on ads.
@@ -3065,18 +3280,29 @@ function openProductDetailFromObj(p) {
     stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
     '</div>' +
 
-    // Clickable list of campaigns this product appears in — each opens the
-    // product-scoped campaign modal so you see how THIS product performs in THAT campaign,
-    // not the campaign-wide totals (which would be confusing when the campaign has many products).
+    // Clickable list of campaigns this product appears in. Each opens the
+    // product-scoped campaign view (this product's performance in that campaign).
+    // To see the whole campaign overall, use the "Open whole campaign card →"
+    // link inside the scoped view.
     ((p.campaignsAdvertisedIn || []).length > 0
       ? '<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);border-radius:8px">'
-        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to open the campaign card</div>'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to see this product\'s performance in that campaign</div>'
         + (p.campaignsAdvertisedIn || []).map(function(c){
             const nameSafe = escapeHtml(c.campaignName || '').replace(/'/g, "&#39;");
-            return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
+            const productNameSafe = escapeHtml(p.title || '').replace(/'/g, "&#39;");
+            const sid = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
+            if (!sid) {
+              // Without a shopifyId we can't scope — fall back to whole-campaign card
+              return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
+                + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
+                + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
+                + ' <span style="float:right;color:var(--accent);font-size:11px">open whole campaign →</span>'
+                + '</button>';
+            }
+            return '<button onclick="openCampaignProductScopedDetail(\'' + c.campaignId + '\',\'' + sid + '\',\'' + nameSafe + '\',\'' + productNameSafe + '\')" '
               + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
               + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
-              + ' <span style="float:right;color:var(--accent);font-size:11px">open campaign card →</span>'
+              + ' <span style="float:right;color:var(--accent);font-size:11px">how this product is doing →</span>'
               + '</button>';
           }).join('')
         + '</div>'
@@ -3134,79 +3360,6 @@ function openProductDetailFromObj(p) {
   if (p.shopifyId || p.id) {
     renderProductWoWStrip(p.shopifyId || p.id, p);
   }
-  // r37: stash the current product so the window-toggle buttons can re-render Sales section.
-  window.CURRENT_PRODUCT_FOR_TOGGLE = p;
-  // Wire up the window toggle buttons (This week / Last week / 30 days)
-  setTimeout(function(){
-    const toggle = document.getElementById('product-window-toggle');
-    if (!toggle) return;
-    toggle.querySelectorAll('.pwt-btn').forEach(function(btn){
-      btn.onclick = function() {
-        const w = btn.getAttribute('data-window');
-        if (!w) return;
-        window.CURRENT_PRODUCT_WINDOW = w;
-        // Re-render the sales-stats block and daily-bars (window-aware)
-        const statsEl = document.getElementById('product-sales-stats');
-        if (statsEl && window.CURRENT_PRODUCT_FOR_TOGGLE) {
-          statsEl.innerHTML = renderProductSalesStats(window.CURRENT_PRODUCT_FOR_TOGGLE, w);
-        }
-        // Re-style the buttons to reflect the new selection
-        toggle.querySelectorAll('.pwt-btn').forEach(function(b){
-          const active = b.getAttribute('data-window') === w;
-          b.style.background = active ? 'var(--text)' : 'transparent';
-          b.style.color = active ? 'var(--bg)' : 'var(--text2)';
-        });
-      };
-    });
-  }, 20);
-}
-
-// r37: window-aware Sales stats. Reads dailySales14d (or revenue30d) to give correct
-// totals for whichever window the user picked. Falls back gracefully if 14d data isn't
-// present yet (returns "—" for Last week instead of fake zeros).
-function renderProductSalesStats(p, win) {
-  const w = win || '7d';
-  const daily14 = Array.isArray(p.dailySales14d) ? p.dailySales14d : null;
-  const has14 = daily14 && daily14.length >= 14;
-
-  let revenue, units, label;
-  if (w === '7d') {
-    revenue = p.revenue7d;
-    units = p.unitsSold7d;
-    label = 'This week';
-  } else if (w === '7d-prev') {
-    // Last week = days 0..6 of dailySales14d (oldest 7 days). Sum them.
-    if (has14) {
-      revenue = daily14.slice(0, 7).reduce(function(s, v){ return s + (Number(v) || 0); }, 0);
-      revenue = Math.round(revenue * 100) / 100;
-    } else {
-      revenue = null;  // unknown — will render "—"
-    }
-    // We don't have per-day units, so units for last week is "—" (honest).
-    units = null;
-    label = 'Last week';
-  } else { // 30d
-    revenue = p.revenue30d;
-    units = p.unitsSold30d;
-    label = '30 days';
-  }
-
-  function statBlock(lab, val) {
-    const display = (val == null || (typeof val === 'number' && isNaN(val))) ? '—' : val;
-    return '<div class="stat-item"><div class="stat-label">' + lab + '</div><div class="stat-value">' + display + '</div></div>';
-  }
-
-  // Honest note if last-week data is missing
-  const honestNote = (w === '7d-prev' && !has14)
-    ? '<div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-style:italic">Last-week data starts populating once the next Shopify sync lands (within ~30 min). Until then, this shows "—".</div>'
-    : '';
-
-  return honestNote +
-    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
-    statBlock('Revenue · ' + label, revenue != null ? fmtCurrency(revenue) : '—') +
-    statBlock('Units · ' + label, units != null ? fmtNum(units) : '—') +
-    statBlock('Price', p.price != null ? fmtCurrency(p.price) : '—') +
-    '</div>';
 }
 
 // Fetches prior-7d metrics for this product from the snapshot 7 days ago
@@ -3244,6 +3397,7 @@ async function renderProductWoWStrip(shopifyId, p) {
     const salesD = delta(cur.sales, prior.sales, false);
     const acosD = delta(cur.acos, prior.acos, true);
     const clicksD = delta(cur.clicks, prior.clicks, false);
+    const convD = delta(Number(p.googleConversions) || 0, prior.conversions, false);
 
     strip.innerHTML = '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:8px 12px;background:var(--bg2);border-radius:6px;font-size:12px">'
       + '<span style="color:var(--text3);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em">vs prev 7d</span>'
@@ -3253,6 +3407,30 @@ async function renderProductWoWStrip(shopifyId, p) {
       + '<span>Clicks ' + clicksD.html + '</span>'
       + '<span style="color:var(--text3);font-size:11px;margin-left:auto">prior: spend ' + fmtCurrency(prior.spend) + ' · sales ' + fmtCurrency(prior.sales) + '</span>'
       + '</div>';
+
+    // r37: also fill the inline prev-week slot under each Google Ads stat card.
+    // Helper: format the slot line with arrow + % + "prev: £X" so the agent sees
+    // the comparison right next to the number, not just up in the strip.
+    function fillSlot(slotKey, d, priorVal, formatter) {
+      const el = document.getElementById('gads-prev-' + slotKey);
+      if (!el) return;
+      const priorDisplay = priorVal != null ? formatter(priorVal) : '—';
+      // d.html is just the % chunk; build a fuller line for the inline slot
+      if (priorVal == null || priorVal === 0) {
+        el.innerHTML = '<span style="color:var(--text3)">no prior data</span>';
+        return;
+      }
+      if (Math.abs(d.pct) < 1) {
+        el.innerHTML = '<span style="color:var(--text3)">flat vs prev wk · prev: ' + priorDisplay + '</span>';
+        return;
+      }
+      el.innerHTML = d.html + ' vs prev wk · <span style="color:var(--text3)">prev: ' + priorDisplay + '</span>';
+    }
+    fillSlot('spend', spendD, prior.spend, fmtCurrency);
+    fillSlot('clicks', clicksD, prior.clicks, fmtNum);
+    fillSlot('sales', salesD, prior.sales, fmtCurrency);
+    fillSlot('acos', acosD, prior.acos, function(v){ return fmtPct(v); });
+    fillSlot('conversions', convD, prior.conversions, function(v){ return fmtNum(Math.round(Number(v) || 0)); });
   } catch(e) {
     strip.style.display = 'none';
   }

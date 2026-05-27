@@ -12283,7 +12283,7 @@ async function syncShopifyProducts() {
     const dailyAll = {};       // 'YYYY-MM-DD' -> { gross, discount, refund, net, byPid: { pid: net } }
 
     function getDay(map, key) {
-      if (!map[key]) map[key] = { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0 };
+      if (!map[key]) map[key] = { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0, units: 0 };
       return map[key];
     }
     function getDayAll(key) {
@@ -12386,6 +12386,7 @@ async function syncShopifyProducts() {
               d.gross += gross;
               d.discount += discountAllocated;
               d.net += lineNet;
+              d.units = (d.units || 0) + (item.quantity || 0);  // r37: per-day units for prev-week Units 7d
 
               // Store-wide byPid attribution (top products per day) — keep line-item
               // share since order-level numbers can't be split per product.
@@ -12466,11 +12467,13 @@ async function syncShopifyProducts() {
         sparkline.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
       }
       const sparkline14d = [];
+      const unitsSparkline14d = [];
       for (let i = 14; i >= 1; i--) {
         const d = new Date(todayStart - i * 24 * 60 * 60 * 1000);
         const k = londonDateKey(d);
         const dayData = daily[k];
         sparkline14d.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
+        unitsSparkline14d.push(dayData ? (dayData.units || 0) : 0);
       }
 
       return {
@@ -12494,6 +12497,7 @@ async function syncShopifyProducts() {
         unitsSoldToday: unitsToday[pid] || 0,
         dailySales7d: sparkline,
         dailySales14d: sparkline14d,  // r37: powers the time-window toggle (this week / last week)
+        dailyUnits14d: unitsSparkline14d,  // r37: per-day units for prev-week Units 7d
         variantCount: (p.variants || []).length,
         createdAt: p.created_at
       };
@@ -13957,12 +13961,13 @@ app.get('/api/google/product-wow/:shopifyId', async function(req, res) {
 
     if (!matches.length) return res.json({ prior: null });
 
-    let pSpend = 0, pSales = 0, pClicks = 0, pImpressions = 0;
+    let pSpend = 0, pSales = 0, pClicks = 0, pImpressions = 0, pConversions = 0;
     matches.forEach(function(p){
       pSpend += Number(p.spend) || 0;
       pSales += Number(p.sales) || 0;
       pClicks += Number(p.clicks) || 0;
       pImpressions += Number(p.impressions) || 0;
+      pConversions += Number(p.conversions) || 0;
     });
     res.json({
       prior: {
@@ -13970,6 +13975,7 @@ app.get('/api/google/product-wow/:shopifyId', async function(req, res) {
         sales: Math.round(pSales * 100) / 100,
         clicks: pClicks,
         impressions: pImpressions,
+        conversions: Math.round(pConversions * 10) / 10,  // r37: needed for prev-week on Conversions stat
         acos: pSales > 0 ? Math.round((pSpend / pSales) * 1000) / 10 : 0
       }
     });
@@ -14523,6 +14529,7 @@ app.get('/api/google/all-products', async function(req, res) {
       unitsSold30d: sp.unitsSold30d || 0,
       dailySales7d: sp.dailySales7d || [],
       dailySales14d: sp.dailySales14d || [],  // r37: window toggle
+      dailyUnits14d: sp.dailyUnits14d || [],  // r37: prev-week units
       googleImpressions: agg.impressions,
       googleClicks: agg.clicks,
       googleSpend: agg.spend,
