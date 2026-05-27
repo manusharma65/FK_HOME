@@ -2720,6 +2720,157 @@ function renderCampaignDetailBody(j) {
   document.getElementById('big-modal-body').innerHTML = body;
 }
 
+// ─── Product-scoped campaign detail modal ─────────────────────────────────
+// Opens when the user clicks a campaign link from inside the product modal.
+// Different from openCampaignDetailFromId (campaign-wide) — this one is scoped
+// to a single product within a single campaign.
+//
+// State: stash the product modal's source object so the "← back to product"
+// link can re-open it without a server round-trip.
+let LAST_PRODUCT_FOR_BACK = null;
+
+async function openCampaignProductScopedDetail(campaignId, shopifyId, campaignName, productName, sourceProduct) {
+  if (!campaignId || !shopifyId) return;
+  // Stash whatever product we came from so the back link works
+  if (sourceProduct) LAST_PRODUCT_FOR_BACK = sourceProduct;
+
+  const title = 'Campaign × Product · ' + (productName || 'this product');
+  showBigModal(title, '<div class="empty-state">Loading scoped detail…</div>');
+
+  try {
+    const r = await authedFetch('/api/google/campaign-product-detail/' + encodeURIComponent(campaignId) + '/' + encodeURIComponent(shopifyId));
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || 'Failed to load');
+    renderCampaignProductScopedBody(j, campaignId);
+  } catch(e) {
+    document.getElementById('big-modal-body').innerHTML =
+      '<div style="padding:20px;color:var(--red);font-size:13px">Could not load scoped detail: ' + escapeHtml(e.message) + '</div>'
+      + (LAST_PRODUCT_FOR_BACK
+          ? '<div style="margin-top:14px"><button class="btn btn-ghost" onclick="backToProductFromScoped()" style="font-size:13px">← Back to product</button></div>'
+          : '');
+  }
+}
+
+// Render the body of the product-scoped campaign modal.
+function renderCampaignProductScopedBody(j, campaignId) {
+  const cur = j.current || {};
+  const prior = j.prior;
+  const trend = j.trend || [];
+  const variants = j.variants || [];
+  const campNameSafe = String(j.campaignName || '').replace(/'/g, "&#39;");
+
+  function deltaPill(curVal, priorVal, opts) {
+    opts = opts || {};
+    if (priorVal == null || priorVal === 0) return '<div style="font-size:10px;color:var(--text3)">no prior data</div>';
+    const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
+    const lowerIsBetter = !!opts.lowerIsBetter;
+    const isUp = change > 0;
+    const isGood = lowerIsBetter ? !isUp : isUp;
+    if (Math.abs(change) < 1) return '<div style="font-size:10px;color:var(--text3)">flat vs prev 7d</div>';
+    const arrow = isUp ? '↑' : '↓';
+    const colour = isGood ? '#27500A' : '#A32D2D';
+    return '<div style="font-size:10px;color:' + colour + '">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev 7d</div>';
+  }
+  function statTile(label, curVal, priorVal, formatter, opts) {
+    opts = opts || {};
+    const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
+    const tone = opts.tone || '';
+    return '<div style="background:var(--bg2);padding:10px 12px;border-radius:8px">'
+      + '<div style="font-size:11px;color:var(--text3)">' + label + '</div>'
+      + '<div style="font-size:18px;font-weight:600;' + (tone === 'bad' ? 'color:#A32D2D' : '') + '">' + valDisplay + '</div>'
+      + deltaPill(curVal, priorVal, opts)
+      + '</div>';
+  }
+
+  // Back link + scope description + jump to whole-campaign view
+  const backLink = LAST_PRODUCT_FOR_BACK
+    ? '<button onclick="backToProductFromScoped()" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit">← Back to product</button>'
+    : '';
+  const wholeCampaignLink = '<button onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit;margin-left:14px">Open whole campaign (with AI) →</button>';
+
+  const header = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' + backLink + wholeCampaignLink + '</div>'
+    + '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">In campaign: <strong style="color:var(--text)">' + escapeHtml(j.campaignName) + '</strong>' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>'
+    + (j.variantCount > 1
+        ? '<div style="font-size:12px;color:var(--text3);margin-bottom:14px;font-style:italic">Aggregated across ' + j.variantCount + ' variants of this product in this campaign.</div>'
+        : '');
+
+  // Trend chart
+  let trendHtml = '';
+  if (trend.length === 0) {
+    trendHtml = '<div style="font-size:12px;color:var(--text3);padding:10px;text-align:center">Not enough snapshot history yet. Trend appears after a few days.</div>';
+  } else {
+    const maxSpend = Math.max.apply(null, [1].concat(trend.map(function(t){ return t.spend7d; })));
+    const bars = trend.map(function(t, i){
+      const h = Math.max(2, Math.round((t.spend7d / maxSpend) * 100));
+      const isRecent = i >= Math.max(0, trend.length - 7);
+      const colour = isRecent ? '#185FA5' : '#B5D4F4';
+      const dateLabel = new Date(t.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px" title="' + dateLabel + ' · 7d rolling spend £' + t.spend7d.toFixed(2) + ' / sales £' + t.sales7d.toFixed(2) + '">'
+        + '<div style="width:100%;background:' + colour + ';height:' + h + 'px;border-radius:2px;min-height:2px"></div>'
+        + (i % 2 === 0 ? '<div style="font-size:9px;color:var(--text3)">' + dateLabel + '</div>' : '<div style="font-size:9px;color:transparent">.</div>')
+        + '</div>';
+    }).join('');
+    trendHtml = '<div style="background:var(--bg2);padding:14px;border-radius:8px;margin-bottom:18px">'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">7-day rolling spend on this product in this campaign · last ' + trend.length + ' days (darker bars = most recent 7)</div>'
+      + '<div style="display:flex;gap:3px;align-items:flex-end;height:80px">' + bars + '</div>'
+      + '</div>';
+  }
+
+  // Stats with WoW deltas
+  const statsGrid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">'
+    + statTile('Spend 7d', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
+    + statTile('Sales 7d', cur.sales, prior && prior.sales, fmtCurrency)
+    + statTile('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
+    + statTile('Impressions', cur.impressions, prior && prior.impressions, fmtNum)
+    + statTile('Clicks', cur.clicks, prior && prior.clicks, fmtNum)
+    + statTile('Conversions', cur.conversions, prior && prior.conversions, fmtNum)
+    + statTile('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
+    + statTile('Cost/conv', cur.costPerConv, null, function(v){ return v ? fmtCurrency(v) : '—'; })
+    + '</div>';
+
+  // Variant breakdown — informational table, no click handlers
+  let variantsHtml = '';
+  if (variants.length > 1) {
+    const variantRows = variants.map(function(v){
+      return '<tr style="border-bottom:0.5px solid var(--border)">'
+        + '<td style="padding:6px 8px;font-family:var(--mono);font-size:11px;color:var(--text2)">' + escapeHtml(String(v.variantId || '—')) + '</td>'
+        + '<td style="padding:6px 8px;font-size:12px">' + escapeHtml(v.adGroupName || '—') + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.spend) + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.sales) + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtNum(v.clicks) + '</td>'
+        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + (v.acos ? fmtPct(v.acos) : '—') + '</td>'
+        + '</tr>';
+    }).join('');
+    variantsHtml = '<div style="margin-top:18px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Variant breakdown · ' + variants.length + ' variants</div>'
+      + '<table style="width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden">'
+      + '<thead><tr style="background:var(--bg);border-bottom:1px solid var(--border)">'
+      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Variant ID</th>'
+      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Ad group</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Spend</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Sales</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Clicks</th>'
+      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">ACOS</th>'
+      + '</tr></thead><tbody>' + variantRows + '</tbody></table></div>';
+  }
+
+  // Honest footnote about data limitations
+  const footnote = '<div style="margin-top:18px;padding:10px 14px;background:var(--bg2);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.5">'
+    + '<strong>Note:</strong> Trend bars show 7-day rolling cumulative spend, not per-day spend (current data source limitation). '
+    + 'WoW comparison aggregates across whatever variants existed in each snapshot — newly-added or removed variants between weeks can affect the delta.'
+    + '</div>';
+
+  document.getElementById('big-modal-body').innerHTML = header + statsGrid + trendHtml + variantsHtml + footnote;
+}
+
+// Re-open the product modal from a stashed product object
+function backToProductFromScoped() {
+  if (!LAST_PRODUCT_FOR_BACK) {
+    closeBigModal();
+    return;
+  }
+  openProductDetailFromObj(LAST_PRODUCT_FOR_BACK);
+}
+
 // ─── Diagnostics — manager-only debug for refund + GA4 matching issues ───
 async function openDiagnostics() {
   showBigModal('Diagnostics — data discrepancy debug',
@@ -2767,6 +2918,8 @@ function closeBigModal() {
 // Open a single product in the big modal — full detail
 function openProductDetailFromObj(p) {
   if (!p) return;
+  // Stash so the campaign-scoped modal's "← Back to product" link can return here
+  LAST_PRODUCT_FOR_BACK = p;
   // Build big detail view
   const img = p.imageUrl ? '<img src="' + p.imageUrl + '" style="width:200px;height:200px;object-fit:cover;border-radius:10px;background:var(--bg2)" alt="">' : '<div style="width:200px;height:200px;display:flex;align-items:center;justify-content:center;background:var(--bg2);color:var(--text3);border-radius:10px">no image</div>';
   const status = p.status ? '<span class="' + statusClass(p.status) + '">' + p.status + '</span>' : '';
@@ -2872,16 +3025,28 @@ function openProductDetailFromObj(p) {
     '</div>' +
 
     // Clickable list of campaigns this product appears in — each opens the
-    // campaign detail modal so you can discuss the campaign side without leaving the product view.
+    // product-scoped campaign modal so you see how THIS product performs in THAT campaign,
+    // not the campaign-wide totals (which would be confusing when the campaign has many products).
     ((p.campaignsAdvertisedIn || []).length > 0
       ? '<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);border-radius:8px">'
-        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to open</div>'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to see this product\'s performance in each</div>'
         + (p.campaignsAdvertisedIn || []).map(function(c){
             const nameSafe = escapeHtml(c.campaignName || '').replace(/'/g, "&#39;");
-            return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
+            const productNameSafe = escapeHtml(p.title || '').replace(/'/g, "&#39;");
+            // Resolve shopifyId — try p.shopifyId first, fall back to embedded ID in shopifyItemId
+            const sid = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
+            if (!sid) {
+              // Without a shopifyId we can't scope — fall back to campaign-wide view
+              return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
+                + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
+                + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
+                + ' <span style="float:right;color:var(--accent);font-size:11px">open campaign →</span>'
+                + '</button>';
+            }
+            return '<button onclick="openCampaignProductScopedDetail(\'' + c.campaignId + '\',\'' + sid + '\',\'' + nameSafe + '\',\'' + productNameSafe + '\')" '
               + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
               + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
-              + ' <span style="float:right;color:var(--accent);font-size:11px">open detail →</span>'
+              + ' <span style="float:right;color:var(--accent);font-size:11px">how this product is doing →</span>'
               + '</button>';
           }).join('')
         + '</div>'

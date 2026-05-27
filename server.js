@@ -13758,6 +13758,149 @@ app.get('/api/google/product-wow/:shopifyId', async function(req, res) {
   }
 });
 
+// ── Campaign × Product Scoped Detail — single product within a single campaign ──────
+// Used when the user clicks a campaign link from inside the product modal.
+// Returns just this product's metrics within this specific campaign, aggregated
+// across all variants. Different from /campaign-detail/:id which is campaign-wide.
+//
+// Matching: a row belongs to (campaignId, shopifyId) when:
+//   row.campaignId === campaignId
+//   AND row.shopifyItemId.split('_')[2] === shopifyId  (variant ID in [3])
+//
+// Same WoW snapshot + 14-day trend approach as the campaign-wide endpoint,
+// but every aggregation is filtered to this product only.
+app.get('/api/google/campaign-product-detail/:campaignId/:shopifyId', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  const shopifyId = String(req.params.shopifyId || '');
+  if (!campaignId || !shopifyId) return res.status(400).json({ error: 'campaignId and shopifyId both required' });
+
+  // Helper: filter rows to this (campaign, product) pair across variants
+  function scopedRows(rows) {
+    return (rows || []).filter(function(gp){
+      if (String(gp.campaignId) !== campaignId) return false;
+      if (!gp.shopifyItemId) return false;
+      const parts = String(gp.shopifyItemId).split('_');
+      return parts.length >= 4 && parts[2] === shopifyId;
+    });
+  }
+
+  // Helper: aggregate spend/sales/clicks/impressions across rows
+  function aggregate(rows) {
+    let spend = 0, sales = 0, impressions = 0, clicks = 0, conversions = 0;
+    rows.forEach(function(p){
+      spend += Number(p.spend) || 0;
+      sales += Number(p.sales) || 0;
+      impressions += Number(p.impressions) || 0;
+      clicks += Number(p.clicks) || 0;
+      conversions += Number(p.conversions) || 0;
+    });
+    return {
+      spend: Math.round(spend * 100) / 100,
+      sales: Math.round(sales * 100) / 100,
+      impressions: impressions,
+      clicks: clicks,
+      conversions: Math.round(conversions),
+      acos: sales > 0 ? Math.round((spend / sales) * 1000) / 10 : 0,
+      ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0,
+      costPerConv: conversions > 0 ? Math.round((spend / conversions) * 100) / 100 : 0
+    };
+  }
+
+  // 1. Current scoped rows
+  const currentRows = scopedRows(googleState.products);
+  if (!currentRows.length) {
+    return res.status(404).json({ error: 'No data — this product is not currently in this campaign, or the matching failed. May have been removed in the last sync.' });
+  }
+  const current = aggregate(currentRows);
+
+  // Resolve campaign and product names from the matched rows
+  const campaignName = currentRows[0].campaignName || '(unnamed)';
+  const campaignType = currentRows[0].campaignType || null;
+  const productName = currentRows[0].name || currentRows[0].productName || '(unnamed product)';
+  const variantCount = currentRows.length;
+
+  // 2. WoW comparison — same snapshot picking rule as campaign-detail endpoint
+  let prior = null;
+  if (db) {
+    try {
+      const r = await db.query(
+        "SELECT products FROM google_state_snapshots " +
+        "WHERE received_at <= NOW() - INTERVAL '7 days' " +
+        "ORDER BY received_at DESC LIMIT 1"
+      );
+      if (r.rows.length) {
+        const priorRows = scopedRows(r.rows[0].products);
+        if (priorRows.length) {
+          prior = aggregate(priorRows);
+          prior.variantCount = priorRows.length;
+        }
+      }
+    } catch(e) {
+      console.error('[campaign-product-detail WoW] ' + e.message);
+    }
+  }
+
+  // 3. 14-day rolling trend — one bar per day, this (campaign, product) only
+  let trend = [];
+  if (db) {
+    try {
+      const r = await db.query(
+        "WITH per_day AS ( " +
+        "  SELECT DATE(received_at AT TIME ZONE 'Europe/London') AS d, " +
+        "         products, " +
+        "         ROW_NUMBER() OVER (PARTITION BY DATE(received_at AT TIME ZONE 'Europe/London') ORDER BY received_at DESC) AS rn " +
+        "  FROM google_state_snapshots " +
+        "  WHERE received_at >= NOW() - INTERVAL '15 days' " +
+        ") SELECT d, products FROM per_day WHERE rn = 1 ORDER BY d ASC"
+      );
+      trend = r.rows.map(function(row){
+        const dayRows = scopedRows(row.products);
+        const agg = aggregate(dayRows);
+        return {
+          date: row.d,
+          spend7d: agg.spend,
+          sales7d: agg.sales,
+          variantCount: dayRows.length
+        };
+      });
+    } catch(e) {
+      console.error('[campaign-product-detail trend] ' + e.message);
+    }
+  }
+
+  // 4. Variant breakdown — return the raw rows so the modal can show "this product
+  //    appears as N variants in this campaign" with per-variant numbers.
+  const variants = currentRows.map(function(p){
+    const parts = String(p.shopifyItemId || '').split('_');
+    return {
+      shopifyItemId: p.shopifyItemId,
+      variantId: parts.length >= 4 ? parts[3] : null,
+      adGroupName: p.adGroupName || null,
+      itemType: p.itemType || null,
+      spend: Math.round((Number(p.spend) || 0) * 100) / 100,
+      sales: Math.round((Number(p.sales) || 0) * 100) / 100,
+      impressions: Number(p.impressions) || 0,
+      clicks: Number(p.clicks) || 0,
+      conversions: Math.round(Number(p.conversions) || 0),
+      acos: (Number(p.sales) || 0) > 0 ? Math.round(((Number(p.spend) || 0) / (Number(p.sales) || 1)) * 1000) / 10 : 0
+    };
+  }).sort(function(a, b){ return b.spend - a.spend; });
+
+  res.json({
+    campaignId: campaignId,
+    campaignName: campaignName,
+    campaignType: campaignType,
+    shopifyId: shopifyId,
+    productName: productName,
+    variantCount: variantCount,
+    current: current,
+    prior: prior,         // null if no snapshot from 7+ days ago
+    trend: trend,         // array of { date, spend7d, sales7d, variantCount }
+    variants: variants,   // per-variant breakdown
+    lastGoogleSync: googleState.lastSync
+  });
+});
+
 // ── Campaign Detail — single campaign with WoW deltas and 14-day rolling trend ──────
 // Used by the campaign detail modal in google.html. Pulls current state from
 // googleState, then for WoW deltas looks up the snapshot from ~7 days ago.
