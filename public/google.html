@@ -385,6 +385,7 @@ table.activity tr:last-child td { border-bottom: none; }
         <div class="section-sub" id="tasks-sub">Daily auto-generated tasks. Self-allocate, work for 3 days, discuss on day 4, decide on day 7.</div>
       </div>
       <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="createGeneralTask()" id="tasks-new-btn" title="Create a general task not tied to a specific campaign or product (manager only)">+ New task</button>
         <button class="btn btn-ghost" onclick="loadGoogleTasks()" id="tasks-refresh-btn">↻ Refresh</button>
         <button class="btn btn-ghost" onclick="runGoogleTasksNow()" id="tasks-run-btn" title="Manually trigger the daily task creation (manager)">⚙ Run scheduler now</button>
       </div>
@@ -516,7 +517,9 @@ let dailySalesData = null;
 let archiveData = null;
 let currentUser = null;
 let currentView = 'shopify';
-let currentFilter = 'all';
+let currentFilter = 'all';            // Priority axis: all | urgent | scale
+let currentAdFilter = 'all';          // Ad-status axis: all | driving | quiet | notpromoted
+let currentSearchQuery = '';          // Free-text search on title
 let campaignTab = 'active'; // 'active' | 'dismissed' | 'archived'
 
 // AI result cache — per browser session.
@@ -1035,9 +1038,42 @@ function setView(v, btn) {
 }
 function setFilter(f, btn) {
   currentFilter = f;
-  document.querySelectorAll('#filter-row .filter-chip').forEach(function(b){ b.classList.remove('active'); });
+  // Only clear chips in the priority row (those with data-axis="priority")
+  document.querySelectorAll('#filter-row .filter-chip[data-axis="priority"]').forEach(function(b){ b.classList.remove('active'); });
   if (btn) btn.classList.add('active');
   renderProductsPage();
+}
+function setAdFilter(f, btn) {
+  currentAdFilter = f;
+  document.querySelectorAll('#filter-row .filter-chip[data-axis="adstatus"]').forEach(function(b){ b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  renderProductsPage();
+}
+function setSearchQuery(q) {
+  currentSearchQuery = (q || '').toLowerCase().trim();
+  // Only re-render the product grid, not the whole filter row, so the search
+  // input keeps focus and cursor position. Chip count updates are skipped during
+  // search-typing because they refer to the unfiltered universe anyway.
+  renderProductsGrid();
+}
+function renderProductsGrid() {
+  if (currentView !== 'shopify') { renderProductsPage(); return; }
+  if (!allProductsData) return;
+  const all = allProductsData.products || [];
+  let filtered = all;
+  if (currentFilter === 'urgent') filtered = filtered.filter(function(p){ return p.priority === 1; });
+  else if (currentFilter === 'scale') filtered = filtered.filter(function(p){ return p.priority === 3; });
+  if (currentAdFilter === 'driving') filtered = filtered.filter(function(p){ return p.adStatus === 'driving_traffic'; });
+  else if (currentAdFilter === 'quiet') filtered = filtered.filter(function(p){ return p.adStatus === 'listed_quiet'; });
+  else if (currentAdFilter === 'notpromoted') filtered = filtered.filter(function(p){ return p.adStatus === 'not_promoted' && p.status === 'active'; });
+  if (currentSearchQuery) {
+    filtered = filtered.filter(function(p){
+      return String(p.title || '').toLowerCase().indexOf(currentSearchQuery) !== -1;
+    });
+  }
+  document.getElementById('products-content').innerHTML = filtered.length
+    ? filtered.map(productCard).join('')
+    : '<div class="empty-state">No products match these filters.</div>';
 }
 
 function renderProductsPage() {
@@ -1059,28 +1095,46 @@ function renderShopifyView() {
     quiet: all.filter(function(p){ return p.adStatus === 'listed_quiet'; }).length,
     notpromoted: all.filter(function(p){ return p.adStatus === 'not_promoted' && p.status === 'active'; }).length,
   };
-  const filters = [
+
+  // Two axes: priority (urgent/scale) and ad-status (driving/quiet/notpromoted).
+  // A product can be in one from each axis (e.g. urgent + driving), so they don't
+  // compete for the same chip row. Fixes the "same product in two chips" issue.
+  const priorityChips = [
     { id: 'all', label: 'All', count: counts.all },
     { id: 'urgent', label: '🔴 Urgent', count: counts.urgent },
     { id: 'scale', label: '🟢 Scale', count: counts.scale },
+  ];
+  const adStatusChips = [
+    { id: 'all', label: 'Any ad status' },
     { id: 'driving', label: '● Driving traffic', count: counts.driving },
     { id: 'quiet', label: '● Listed but quiet', count: counts.quiet },
     { id: 'notpromoted', label: '● Not yet promoted', count: counts.notpromoted },
   ];
-  document.getElementById('filter-row').innerHTML = filters.map(function(f){
-    return '<button class="filter-chip ' + (currentFilter === f.id ? 'active' : '') + '" onclick="setFilter(\'' + f.id + '\', this)">' + f.label + ' <span class="count">' + f.count + '</span></button>';
-  }).join('');
 
-  let filtered = all;
-  if (currentFilter === 'urgent') filtered = all.filter(function(p){ return p.priority === 1; });
-  else if (currentFilter === 'scale') filtered = all.filter(function(p){ return p.priority === 3; });
-  else if (currentFilter === 'driving') filtered = all.filter(function(p){ return p.adStatus === 'driving_traffic'; });
-  else if (currentFilter === 'quiet') filtered = all.filter(function(p){ return p.adStatus === 'listed_quiet'; });
-  else if (currentFilter === 'notpromoted') filtered = all.filter(function(p){ return p.adStatus === 'not_promoted' && p.status === 'active'; });
+  const priorityRow = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">'
+    + priorityChips.map(function(f){
+      return '<button class="filter-chip ' + (currentFilter === f.id ? 'active' : '') + '" data-axis="priority" onclick="setFilter(\'' + f.id + '\', this)">' + f.label + ' <span class="count">' + f.count + '</span></button>';
+    }).join('')
+    + '</div>';
 
-  document.getElementById('products-content').innerHTML = filtered.length
-    ? filtered.map(productCard).join('')
-    : '<div class="empty-state">No products match this filter.</div>';
+  const adStatusRow = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">'
+    + adStatusChips.map(function(f){
+      const countHtml = f.count != null ? ' <span class="count">' + f.count + '</span>' : '';
+      return '<button class="filter-chip ' + (currentAdFilter === f.id ? 'active' : '') + '" data-axis="adstatus" onclick="setAdFilter(\'' + f.id + '\', this)">' + f.label + countHtml + '</button>';
+    }).join('')
+    + '</div>';
+
+  const searchEsc = String(currentSearchQuery || '').replace(/"/g, '&quot;');
+  const searchRow = '<div style="margin-bottom:10px">'
+    + '<input type="text" id="products-search" placeholder="Search products by title..." value="' + searchEsc + '" '
+    + 'oninput="setSearchQuery(this.value)" '
+    + 'style="width:100%;max-width:360px;padding:8px 12px;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:6px;font-size:13px;font-family:inherit;box-sizing:border-box">'
+    + '</div>';
+
+  document.getElementById('filter-row').innerHTML = priorityRow + adStatusRow + searchRow;
+
+  // Render the grid using the shared filter logic
+  renderProductsGrid();
 }
 
 function renderGoogleView() {
@@ -1113,8 +1167,13 @@ function campaignBlock(c) {
     ? '<button class="btn btn-ghost" style="margin-left:8px;font-size:12px" onclick="event.stopPropagation();promptDismiss(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Flag this campaign with a note">Dismiss</button>'
     : '';
 
-  // Campaign-level AI button
-  const aiBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();aiAnalyseCampaign(\'' + c.campaignId + '\',\'' + nameEsc + '\')" title="AI analysis of the whole campaign">🪄 Campaign AI</button>';
+  // Open detail button — opens the campaign detail modal which contains AI analysis,
+  // WoW deltas, 14-day trend, and the products list all in one place.
+  const detailBtn = '<button class="btn btn-primary" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameEsc + '\')" title="Open the full campaign detail — AI analysis, trend, and product list">📊 Open detail</button>';
+
+  // Legacy Campaign AI button — opens detail modal (AI is inside it now).
+  // Kept for muscle memory; redirects to the same detail modal.
+  const aiBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameEsc + '\')" title="AI analysis of the whole campaign">🪄 AI</button>';
 
   // Assign button — manager creates a manual task on this campaign
   const assignBtn = '<button class="btn btn-ghost" style="margin-left:6px;font-size:12px" onclick="event.stopPropagation();assignToCampaign(\'' + c.campaignId + '\',\'' + nameEsc + '\',\'' + (c.campaignType || '') + '\')" title="Create a task and assign to Rahul or Anuj">📋 Assign</button>';
@@ -1134,13 +1193,12 @@ function campaignBlock(c) {
     + '<div><div class="stat-label">Clicks</div><div class="stat-value">' + fmtNum(c.totalClicks) + '</div></div>'
     + '<div><div class="stat-label">ACOS</div><div class="stat-value">' + fmtPct(c.acos) + '</div></div>'
     + '<div><div class="stat-label">Cost/conv</div><div class="stat-value">' + (c.costPerConv ? fmtCurrency(c.costPerConv) : '—') + '</div></div>'
-    + aiBtn + assignBtn + dismissBtn
+    + detailBtn + aiBtn + assignBtn + dismissBtn
     + '<svg class="expand-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" onclick="toggleCampaign(\'' + c.campaignId + '\')" style="cursor:pointer"><path d="M6 4l4 4-4 4"/></svg>'
     + '</div>'
     + '</div>'
     + '<div class="campaign-products">'
-    + (c.products || []).slice(0, 50).map(productSubrow).join('')
-    + (c.products.length > 50 ? '<div style="padding:10px;color:var(--text3);font-size:12px">Showing 50 of ' + c.products.length + ' rows</div>' : '')
+    + (c.products || []).map(productSubrow).join('')
     + '</div>'
     + '</div>';
 }
@@ -1148,14 +1206,14 @@ function toggleCampaign(id) {
   document.getElementById('camp-' + id).classList.toggle('expanded');
 }
 function productSubrow(p) {
-  // A product is "wasting" if it spent real money (>£0.50) but generated zero sales in 7 days.
+  // A product is "wasting" if it spent >£5 in 7d but generated zero sales.
   // We DON'T change the card layout — just the Spend stat goes red+bold so it's scannable
   // without disrupting the existing visual.
-  const isWasting = (Number(p.spend) || 0) > 0.5 && (!p.sales || Number(p.sales) === 0);
+  const isWasting = (Number(p.spend) || 0) > 5 && (!p.sales || Number(p.sales) === 0);
 
   const img = p.shopifyImageUrl ? ('<img class="product-img" style="width:48px;height:48px" src="' + p.shopifyImageUrl + '">') : '<div class="product-img-placeholder" style="width:48px;height:48px;font-size:9px">—</div>';
   const pri = '<span class="priority-pill ' + priorityClass(p.priority) + '">' + priorityLabel(p.priority) + '</span>';
-  const titleAttr = escapeHtml(p.displayName || p.productName || '');
+  const titleAttr = escapeHtml(p.shopifyTitle || p.displayName || p.productName || '');
   const payload = JSON.stringify(p).replace(/'/g, "&#39;");
   // Placeholder for the rule-friction counts — filled in lazily after card renders
   const productIdForFriction = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
@@ -1187,7 +1245,7 @@ function productSubrow(p) {
     + statRow('Sales', fmtCurrency(p.sales))
     + statRow('Impr', fmtNum(p.impressions))
     + statRow('Clicks', fmtNum(p.clicks))
-    + statRow('Conv', fmtNum(p.conversions))
+    + statRow('Conv', fmtNum(Math.round(Number(p.conversions) || 0)))
     + statRow('ACOS', fmtPct(p.acos))
     + statRow('Cost/conv', p.costPerConv ? fmtCurrency(p.costPerConv) : '—')
     + '</div>'
@@ -1306,6 +1364,11 @@ function openProductDetailFromCampaignRow(p) {
 
 // ─── Standalone campaigns page ───────────────────────────────────────────
 let campaignsTab = 'active'; // 'active' | 'dismissed' | 'archived'
+let campaignSearchQuery = '';
+function setCampaignSearchQuery(q) {
+  campaignSearchQuery = (q || '').toLowerCase().trim();
+  renderCampaignsList();
+}
 function setCampaignsTab(tab, btn) {
   if (tab === 'archived' && !isManager()) { alert('Only managers can view archived campaigns.'); return; }
   campaignsTab = tab;
@@ -1354,23 +1417,54 @@ function renderCampaignsPage() {
     }).join('') || '<div class="empty-state">Nothing dismissed yet.</div>';
     document.getElementById('campaigns-list').innerHTML = tabsHtml + dismissedRows;
   } else {
-    // If user clicked the wasted-this-week tile from Overview, filter to wasting campaigns
-    let campaignsToShow = (advertisedData.campaigns || []);
-    let filterBanner = '';
-    if (window.WASTING_CAMPAIGNS_FILTER) {
-      campaignsToShow = campaignsToShow.filter(function(c){ return !c.dismissed && (Number(c.wastedSpend) || 0) > 5; });
-      filterBanner = '<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#991b1b">'
-        + '<span><strong>Filtered: campaigns wasting > £5 this week</strong> · ' + campaignsToShow.length + ' of ' + (advertisedData.campaigns || []).length + ' campaigns shown.</span>'
-        + '<button class="btn btn-ghost" style="font-size:12px" onclick="window.WASTING_CAMPAIGNS_FILTER=false;renderCampaignsPage();">✕ Clear filter</button>'
-        + '</div>';
-      document.getElementById('camp-sub').textContent = campaignsToShow.length + ' wasting campaigns (filtered)';
-    } else {
-      document.getElementById('camp-sub').textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
-    }
-    document.getElementById('campaigns-list').innerHTML = tabsHtml + filterBanner + campaignsToShow.map(campaignBlock).join('');
-    // After render, lazily populate friction badges (one cheap GET, no AI)
-    setTimeout(populateFrictionBadges, 50);
+    // Active campaigns tab — with search + wasted-this-week filter from Overview tile
+    const searchEsc = String(campaignSearchQuery || '').replace(/"/g, '&quot;');
+    const searchRow = '<div style="margin-bottom:10px">'
+      + '<input type="text" id="campaigns-search" placeholder="Search campaigns by name..." value="' + searchEsc + '" '
+      + 'oninput="setCampaignSearchQuery(this.value)" '
+      + 'style="width:100%;max-width:360px;padding:8px 12px;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:6px;font-size:13px;font-family:inherit;box-sizing:border-box">'
+      + '</div>';
+    document.getElementById('campaigns-list').innerHTML = tabsHtml + searchRow + '<div id="campaigns-active-list"></div>';
+    renderCampaignsList();
   }
+}
+
+// Renders only the list portion of the active tab — used by search keystroke
+// so the input doesn't lose focus on every character typed.
+function renderCampaignsList() {
+  if (campaignsTab !== 'active') return;
+  if (!advertisedData) return;
+  let campaignsToShow = (advertisedData.campaigns || []);
+  let filterBanner = '';
+  if (window.WASTING_CAMPAIGNS_FILTER) {
+    campaignsToShow = campaignsToShow.filter(function(c){ return !c.dismissed && (Number(c.wastedSpend) || 0) > 5; });
+    filterBanner = '<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#991b1b">'
+      + '<span><strong>Filtered: campaigns wasting > £5 this week</strong> · ' + campaignsToShow.length + ' of ' + (advertisedData.campaigns || []).length + ' campaigns shown.</span>'
+      + '<button class="btn btn-ghost" style="font-size:12px" onclick="window.WASTING_CAMPAIGNS_FILTER=false;renderCampaignsPage();">✕ Clear filter</button>'
+      + '</div>';
+  }
+  if (campaignSearchQuery) {
+    campaignsToShow = campaignsToShow.filter(function(c){
+      return String(c.campaignName || '').toLowerCase().indexOf(campaignSearchQuery) !== -1;
+    });
+  }
+  const subEl = document.getElementById('camp-sub');
+  if (subEl) {
+    if (window.WASTING_CAMPAIGNS_FILTER) {
+      subEl.textContent = campaignsToShow.length + ' wasting campaigns (filtered)';
+    } else if (campaignSearchQuery) {
+      subEl.textContent = campaignsToShow.length + ' of ' + (advertisedData.campaigns || []).length + ' campaigns match "' + campaignSearchQuery + '"';
+    } else {
+      subEl.textContent = advertisedData.totalCampaigns + ' campaigns, ' + advertisedData.totalProducts + ' rows total';
+    }
+  }
+  const listEl = document.getElementById('campaigns-active-list');
+  if (!listEl) return;
+  listEl.innerHTML = filterBanner + (campaignsToShow.length
+    ? campaignsToShow.map(campaignBlock).join('')
+    : '<div class="empty-state">No campaigns match "' + escapeHtml(campaignSearchQuery) + '".</div>');
+  // After render, lazily populate friction badges (one cheap GET, no AI)
+  setTimeout(populateFrictionBadges, 50);
 }
 
 // ─── Google Tasks page ───────────────────────────────────────────────────
@@ -2075,7 +2169,7 @@ function showAssignModal(opts) {
   overlay.innerHTML =
     '<div style="background:white;width:100%;max-width:560px;border-radius:12px;padding:24px 28px;box-shadow:0 25px 50px rgba(0,0,0,0.3)" onclick="event.stopPropagation()">'
       + '<div style="font-size:18px;font-weight:700;color:#111;margin-bottom:4px">Create task</div>'
-      + '<div style="font-size:13px;color:#6b7280;margin-bottom:16px">' + escapeHtml(opts.productTitle || opts.campaignName || '') + '</div>'
+      + '<div style="font-size:13px;color:#6b7280;margin-bottom:16px">' + escapeHtml(opts.productTitle || opts.campaignName || (opts.general ? 'General task — not tied to a specific campaign or product' : '')) + '</div>'
 
       + '<div style="font-size:13px;font-weight:600;color:#111;margin-bottom:6px">Assign to</div>'
       + '<div id="assign-agents" style="display:flex;gap:8px;margin-bottom:14px">'
@@ -2160,6 +2254,16 @@ function showAssignModal(opts) {
 // Helper: show assign modal scoped to a campaign (no product)
 function assignToCampaign(campaignId, campaignName, campaignType) {
   showAssignModal({ campaignId: campaignId, campaignName: campaignName, campaignType: campaignType });
+}
+
+// Helper: open the assign modal for a general (uncategorised) task — manager only.
+// Used for cross-campaign work like "audit negative keyword list" or "review competitor pricing".
+function createGeneralTask() {
+  if (!isManager()) {
+    alert('Only managers can create general tasks. Anchor your task to a campaign or product instead.');
+    return;
+  }
+  showAssignModal({ general: true });
 }
 
 // Helper: show assign modal scoped to a specific product within a campaign.
@@ -2494,6 +2598,128 @@ async function runCampaignAi(campaignId, campaignName, forceRefresh) {
 // Legacy stub — closeAi was used by the old standalone AI modal. Kept as no-op for safety.
 function closeAi() { /* no-op: AI is now inline inside the big modal */ }
 
+// ─── Campaign detail modal ───────────────────────────────────────────────
+// Opens when the user clicks a campaign name or "Open" button. Shows:
+//   1. AI diagnosis at the top (Opus, cached, re-run button)
+//   2. Stats with week-over-week deltas from snapshot 7 days ago
+//   3. 14-day rolling-window trend chart
+//   4. Products inside the campaign — clicking any opens the product modal
+async function openCampaignDetailFromId(campaignId, campaignName) {
+  if (!campaignId) return;
+  const title = campaignName ? ('Campaign · ' + campaignName) : 'Campaign detail';
+  showBigModal(title, '<div class="empty-state">Loading campaign detail…</div>');
+
+  try {
+    const r = await authedFetch('/api/google/campaign-detail/' + encodeURIComponent(campaignId));
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || 'Failed to load');
+    renderCampaignDetailBody(j);
+    // After render, trigger AI load (uses cache if fresh, lazy)
+    setTimeout(function(){ runCampaignAi(campaignId, j.campaignName || campaignName || '', false); }, 30);
+    // Lazily populate friction badges on the embedded product subrows
+    setTimeout(populateFrictionBadges, 80);
+  } catch(e) {
+    document.getElementById('big-modal-body').innerHTML =
+      '<div style="padding:20px;color:var(--red);font-size:13px">Could not load campaign detail: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+// Build the inner HTML of the campaign-detail modal.
+// `j` is the response from /api/google/campaign-detail/:id
+function renderCampaignDetailBody(j) {
+  const cur = j.current || {};
+  const prior = j.prior; // may be null
+  const trend = j.trend || [];
+
+  // Helper: render a delta pill ("↑ 18% vs prev 7d", "↓ 8%", or em-dash if no prior)
+  function deltaPill(curVal, priorVal, opts) {
+    opts = opts || {};
+    if (priorVal == null || priorVal === 0) {
+      return '<div style="font-size:10px;color:var(--text3)">no prior data</div>';
+    }
+    const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
+    const pct = Math.abs(change).toFixed(0);
+    // For metrics where lower is better (acos, wasted), invert the colour logic
+    const lowerIsBetter = !!opts.lowerIsBetter;
+    const isUp = change > 0;
+    const isGood = lowerIsBetter ? !isUp : isUp;
+    if (Math.abs(change) < 1) return '<div style="font-size:10px;color:var(--text3)">flat vs prev 7d</div>';
+    const arrow = isUp ? '↑' : '↓';
+    const colour = isGood ? '#27500A' : '#A32D2D';
+    return '<div style="font-size:10px;color:' + colour + '">' + arrow + ' ' + pct + '% vs prev 7d</div>';
+  }
+
+  // Helper: a single stat tile
+  function statTile(label, curVal, priorVal, formatter, opts) {
+    opts = opts || {};
+    const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
+    const tone = opts.tone || '';
+    return '<div style="background:var(--bg2);padding:10px 12px;border-radius:8px">'
+      + '<div style="font-size:11px;color:var(--text3)">' + label + '</div>'
+      + '<div style="font-size:18px;font-weight:600;' + (tone === 'bad' ? 'color:#A32D2D' : '') + '">' + valDisplay + '</div>'
+      + deltaPill(curVal, priorVal, opts)
+      + '</div>';
+  }
+
+  // Build the 14-day rolling trend chart. Each bar = one day's 7-day-cumulative
+  // spend (because the script only sends rolling 7d totals). We label this
+  // honestly as "7-day rolling" so it's not misread as daily spend.
+  let trendHtml = '';
+  if (trend.length === 0) {
+    trendHtml = '<div style="font-size:12px;color:var(--text3);padding:10px;text-align:center">Not enough snapshot history yet. Trend appears after a few days.</div>';
+  } else {
+    const maxSpend = Math.max.apply(null, [1].concat(trend.map(function(t){ return t.spend7d; })));
+    const bars = trend.map(function(t, i){
+      const h = Math.max(2, Math.round((t.spend7d / maxSpend) * 100));
+      // Last 7 entries highlighted, earlier in muted
+      const isRecent = i >= Math.max(0, trend.length - 7);
+      const colour = isRecent ? '#185FA5' : '#B5D4F4';
+      const dateLabel = new Date(t.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px" title="' + dateLabel + ' · 7d rolling spend £' + t.spend7d.toFixed(2) + ' / sales £' + t.sales7d.toFixed(2) + '">'
+        + '<div style="width:100%;background:' + colour + ';height:' + h + 'px;border-radius:2px;min-height:2px"></div>'
+        + (i % 2 === 0 ? '<div style="font-size:9px;color:var(--text3)">' + dateLabel + '</div>' : '<div style="font-size:9px;color:transparent">.</div>')
+        + '</div>';
+    }).join('');
+    trendHtml = '<div style="background:var(--bg2);padding:14px;border-radius:8px;margin-bottom:18px">'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">7-day rolling spend · last ' + trend.length + ' days (darker bars = most recent 7)</div>'
+      + '<div style="display:flex;gap:3px;align-items:flex-end;height:80px">' + bars + '</div>'
+      + '</div>';
+  }
+
+  // AI section shell — populated by runCampaignAi() after this body lands
+  const aiSection = '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:18px">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px;flex-wrap:wrap">'
+    + '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 Campaign analysis <span id="ai-lock-badge-campaign" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>'
+    + '<div id="ai-buttons-campaign" style="display:flex;gap:8px;flex-wrap:wrap"></div>'
+    + '</div>'
+    + '<div id="ai-content-campaign" style="font-size:14px;line-height:1.65;color:var(--text);white-space:pre-wrap">Loading…</div>'
+    + '<div id="ai-meta-campaign" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>'
+    + '</div>';
+
+  // Stats grid — 4 cols on desktop, with WoW deltas
+  const statsGrid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">'
+    + statTile('Spend 7d', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
+    + statTile('Sales 7d', cur.sales, prior && prior.sales, fmtCurrency)
+    + statTile('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
+    + statTile('Wasted', cur.wastedSpend, null, fmtCurrency, { tone: cur.wastedSpend > 5 ? 'bad' : '' })
+    + statTile('Impressions', cur.impressions, prior && prior.impressions, fmtNum)
+    + statTile('Clicks', cur.clicks, prior && prior.clicks, fmtNum)
+    + statTile('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
+    + statTile('Cost/conv', cur.costPerConv, null, function(v){ return v ? fmtCurrency(v) : '—'; })
+    + '</div>';
+
+  // Products list — uses the existing productSubrow renderer for visual consistency.
+  const productsHtml = '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Products in this campaign · ' + (j.products || []).length + ' total</div>'
+    + '<div class="campaign-products" style="display:block">'
+    + (j.products || []).map(productSubrow).join('')
+    + '</div>';
+
+  const header = '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">' + j.productCount + ' products' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>';
+
+  const body = header + aiSection + statsGrid + trendHtml + productsHtml;
+  document.getElementById('big-modal-body').innerHTML = body;
+}
+
 // ─── Diagnostics — manager-only debug for refund + GA4 matching issues ───
 async function openDiagnostics() {
   showBigModal('Diagnostics — data discrepancy debug',
@@ -2620,7 +2846,8 @@ function openProductDetailFromObj(p) {
     '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px;background:var(--bg2);border-radius:8px">' + dailyBars + '</div>' +
 
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Google Ads (last 7 complete days, excludes today)</div>' +
-    ((Number(p.googleSpend) || 0) > 0.5 && (!p.googleSales || Number(p.googleSales) === 0)
+    '<div id="product-wow-strip" style="margin-bottom:10px;font-size:12px;color:var(--text3)">Comparing to last week…</div>' +
+    ((Number(p.googleSpend) || 0) > 5 && (!p.googleSales || Number(p.googleSales) === 0)
       ? '<div style="font-size:13px;color:#dc2626;font-weight:700;margin:-4px 0 10px">⚠ Wasted ' + fmtCurrency(p.googleSpend) + ' over the last 7 days — no sales attributed.</div>'
       : '') +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
@@ -2628,12 +2855,37 @@ function openProductDetailFromObj(p) {
     stat('Impressions', fmtNum(p.googleImpressions)) +
     stat('Clicks', fmtNum(p.googleClicks)) +
     stat('CTR', fmtPct(p.googleCtr)) +
-    stat('Conversions', fmtNum(p.googleConversions)) +
+    stat('Conversions', fmtNum(Math.round(Number(p.googleConversions) || 0))) +
     stat('Ad revenue', fmtCurrency(p.googleSales)) +
     stat('ACOS', fmtPct(p.googleAcos), 'acos') +
+    stat('TACOS', (function(){
+      // TACOS = ad spend ÷ TOTAL Shopify revenue (organic + paid).
+      // Tells you how dependent this product's revenue is on ads.
+      // Low TACOS = organic doing the work. High TACOS = product is fragile if ads pause.
+      const spend = Number(p.googleSpend) || 0;
+      const totalRev = Number(p.revenue7d) || 0;
+      if (totalRev <= 0) return '—';
+      return ((spend / totalRev) * 100).toFixed(1) + '%';
+    })(), 'tacos') +
     stat('Cost/conv', p.googleCostPerConv ? fmtCurrency(p.googleCostPerConv) : '—') +
     stat('Campaigns', (p.campaignsAdvertisedIn || []).length) +
     '</div>' +
+
+    // Clickable list of campaigns this product appears in — each opens the
+    // campaign detail modal so you can discuss the campaign side without leaving the product view.
+    ((p.campaignsAdvertisedIn || []).length > 0
+      ? '<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);border-radius:8px">'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to open</div>'
+        + (p.campaignsAdvertisedIn || []).map(function(c){
+            const nameSafe = escapeHtml(c.campaignName || '').replace(/'/g, "&#39;");
+            return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
+              + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
+              + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
+              + ' <span style="float:right;color:var(--accent);font-size:11px">open detail →</span>'
+              + '</button>';
+          }).join('')
+        + '</div>'
+      : '') +
 
     (p.ga4Sessions != null ? '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Funnel (GA4 last 7 complete days)</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
@@ -2682,6 +2934,60 @@ function openProductDetailFromObj(p) {
   renderRuleFrictionSection(p);
   // Initialise the AI section with either the cached result or the run buttons
   renderProductAiSection(p);
+  // Lazily fetch WoW (week-over-week) comparison — fills in the strip above
+  // the Google Ads stats. Cheap, one DB query, no AI.
+  if (p.shopifyId || p.id) {
+    renderProductWoWStrip(p.shopifyId || p.id, p);
+  }
+}
+
+// Fetches prior-7d metrics for this product from the snapshot 7 days ago
+// and renders a comparison strip showing % change on spend, sales, ACOS, clicks.
+async function renderProductWoWStrip(shopifyId, p) {
+  const strip = document.getElementById('product-wow-strip');
+  if (!strip) return;
+  try {
+    const r = await authedFetch('/api/google/product-wow/' + encodeURIComponent(shopifyId));
+    const j = await r.json();
+    if (!j.prior) {
+      strip.style.display = 'none';
+      return;
+    }
+    const prior = j.prior;
+    const cur = {
+      spend: Number(p.googleSpend) || 0,
+      sales: Number(p.googleSales) || 0,
+      clicks: Number(p.googleClicks) || 0,
+      acos: Number(p.googleAcos) || 0
+    };
+
+    function delta(curV, priorV, lowerIsBetter) {
+      if (priorV == null || priorV === 0) return { html: '<span style="color:var(--text3)">—</span>', pct: 0 };
+      const change = ((curV - priorV) / Math.abs(priorV)) * 100;
+      if (Math.abs(change) < 1) return { html: '<span style="color:var(--text3)">flat</span>', pct: change };
+      const isUp = change > 0;
+      const isGood = lowerIsBetter ? !isUp : isUp;
+      const arrow = isUp ? '↑' : '↓';
+      const colour = isGood ? '#16a34a' : '#dc2626';
+      return { html: '<span style="color:' + colour + ';font-weight:600">' + arrow + ' ' + Math.abs(change).toFixed(0) + '%</span>', pct: change };
+    }
+
+    const spendD = delta(cur.spend, prior.spend, true);
+    const salesD = delta(cur.sales, prior.sales, false);
+    const acosD = delta(cur.acos, prior.acos, true);
+    const clicksD = delta(cur.clicks, prior.clicks, false);
+
+    strip.innerHTML = '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:8px 12px;background:var(--bg2);border-radius:6px;font-size:12px">'
+      + '<span style="color:var(--text3);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em">vs prev 7d</span>'
+      + '<span>Spend ' + spendD.html + '</span>'
+      + '<span>Sales ' + salesD.html + '</span>'
+      + '<span>ACOS ' + acosD.html + '</span>'
+      + '<span>Clicks ' + clicksD.html + '</span>'
+      + '<span style="color:var(--text3);font-size:11px;margin-left:auto">prior: spend ' + fmtCurrency(prior.spend) + ' · sales ' + fmtCurrency(prior.sales) + '</span>'
+      + '</div>';
+  } catch(e) {
+    strip.style.display = 'none';
+  }
 }
 
 // ─── Rule-based friction (free, instant, always visible) ──────────────────

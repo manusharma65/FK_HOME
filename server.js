@@ -11448,7 +11448,10 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   await ensureGoogleTaskColumns();
 
   const { campaignId, campaignName, campaignType, productKey, productTitle, agentName, brief, taskType, subtaskBodies, feedbackScope, feedbackTargetId } = req.body;
-  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  // General tasks (no campaignId, no productKey) are allowed for owner/manager only — used for cross-campaign
+  // work like "audit negative keyword list" or "review competitor pricing".
+  const isGeneralTask = !campaignId && !productKey;
+  if (!campaignId && !isGeneralTask) return res.status(400).json({ error: 'campaignId required' });
   if (!agentName) return res.status(400).json({ error: 'agentName required (Rahul, Anuj, or Unassigned)' });
   if (!brief || !brief.trim()) return res.status(400).json({ error: 'A brief is required — describe what the agent should do.' });
   if (!['Rahul', 'Anuj', 'Unassigned'].includes(agentName)) return res.status(400).json({ error: 'agentName must be Rahul, Anuj, or Unassigned' });
@@ -11457,13 +11460,18 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
   const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
 
+  if (isGeneralTask && !isPrivileged) {
+    return res.status(403).json({ error: 'Only owner/manager can create general (uncategorised) tasks. Anchor your task to a campaign or product.' });
+  }
+
   // r29l + r33a: prevent duplicate open task on same target. If an open task already
   // exists on this campaign+product combo, refuse with a useful message pointing the
   // user to the existing task. Manager bypass — they may have valid reasons.
+  // General tasks skip this check (no campaign target to dedupe on).
   //
   // r33a fixes: created_at → created_date (column was misnamed, query threw every call).
   // Also hardened with explicit $2::text cast and IS NULL pair check for safety.
-  if (!isPrivileged) {
+  if (!isPrivileged && !isGeneralTask) {
     try {
       const productKeyParam = productKey || null;
       const existingOpen = await db.query(
@@ -11559,7 +11567,11 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
   }
 
   const finalTaskType = taskType === 'scale' ? 'scale' : 'problem';
-  const problemType = productKey ? 'product_manual_assign' : 'manual_assign';
+  const problemType = productKey ? 'product_manual_assign' : (isGeneralTask ? 'general_manual' : 'manual_assign');
+  // For general tasks, use a sentinel so the NOT NULL constraint is satisfied and
+  // the row is easy to identify as a non-campaign task.
+  const insertCampaignId = isGeneralTask ? '__general__' : String(campaignId);
+  const insertCampaignName = isGeneralTask ? '(General task)' : (resolvedCampaignName || '(unnamed campaign)');
 
   try {
     const r = await db.query(
@@ -11569,8 +11581,8 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
       " task_type, priority, product_image_url, status) " +
       "VALUES ($1,$2,$3,$4,$5,$6,$7,'manual','google',$8,$9,$10,$11,$12,$13,$14,$15,$16,'open') RETURNING id",
       [
-        String(campaignId),
-        resolvedCampaignName || '(unnamed campaign)',
+        insertCampaignId,
+        insertCampaignName,
         agentName,
         resolvedCampaignType || '',
         problemType,
@@ -11610,7 +11622,7 @@ app.post('/api/google/tasks/manual-create', async function(req, res) {
     try {
       await db.query(
         "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'manual_create',$5,'',$6,$7,'google')",
-        [String(campaignId), resolvedCampaignName || '', agentName, actor, brief.trim() + (subCount ? ' (' + subCount + ' subtasks)' : ''), 'open', newId]
+        [insertCampaignId, insertCampaignName, agentName, actor, brief.trim() + (subCount ? ' (' + subCount + ' subtasks)' : ''), 'open', newId]
       );
     } catch(e) { console.error('[GTASK] manual-create log error: ' + e.message); }
     res.json({ success: true, id: newId, subtaskCount: subCount });
@@ -13651,7 +13663,10 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
     c.totalClicks += r.clicks || 0;
     c.totalConversions += r.conversions || 0;
     // Wasted spend = money spent on a product/keyword that returned £0 sales
-    // (with a real spend > 0 — ignore noise at < 50p)
+    // (with a real spend > £0.50 — ignore noise at < 50p but capture long-tail
+    // waste so the campaign-level total reflects every penny lost. HTML side
+    // uses a higher £5 threshold for individual-row red highlights to avoid
+    // visual noise on small wastes.)
     if ((r.spend || 0) > 0.5 && (!r.sales || r.sales === 0)) {
       c.wastedSpend += r.spend || 0;
     }
@@ -13692,6 +13707,200 @@ app.get('/api/google/products-diagnostic', async function(req, res) {
     shopifyMatched: rows.filter(function(r){ return r.shopifyMatched; }).length,
     lastGoogleSync: googleState.lastSync,
     lastShopifySync: shopifyState.lastSync
+  });
+});
+
+// ── Product WoW (week-over-week) — lazy endpoint called when product modal opens ─────
+// Returns prior-7d Google Ads metrics for one product (matched by Shopify ID),
+// summed across all its campaigns. The modal computes deltas client-side.
+app.get('/api/google/product-wow/:shopifyId', async function(req, res) {
+  const shopifyId = String(req.params.shopifyId || '');
+  if (!shopifyId) return res.status(400).json({ error: 'shopifyId required' });
+  if (!db) return res.json({ prior: null });
+
+  try {
+    const r = await db.query(
+      "SELECT products FROM google_state_snapshots " +
+      "WHERE received_at <= NOW() - INTERVAL '7 days' " +
+      "ORDER BY received_at DESC LIMIT 1"
+    );
+    if (!r.rows.length) return res.json({ prior: null });
+
+    // Match snapshot rows whose shopifyItemId embeds this shopifyId
+    const matches = (r.rows[0].products || []).filter(function(gp){
+      if (!gp.shopifyItemId) return false;
+      const parts = String(gp.shopifyItemId).split('_');
+      const embeddedId = parts.length >= 3 ? parts[2] : null;
+      return embeddedId === shopifyId;
+    });
+
+    if (!matches.length) return res.json({ prior: null });
+
+    let pSpend = 0, pSales = 0, pClicks = 0, pImpressions = 0;
+    matches.forEach(function(p){
+      pSpend += Number(p.spend) || 0;
+      pSales += Number(p.sales) || 0;
+      pClicks += Number(p.clicks) || 0;
+      pImpressions += Number(p.impressions) || 0;
+    });
+    res.json({
+      prior: {
+        spend: Math.round(pSpend * 100) / 100,
+        sales: Math.round(pSales * 100) / 100,
+        clicks: pClicks,
+        impressions: pImpressions,
+        acos: pSales > 0 ? Math.round((pSpend / pSales) * 1000) / 10 : 0
+      }
+    });
+  } catch(e) {
+    console.error('[product-wow] ' + e.message);
+    res.json({ prior: null });
+  }
+});
+
+// ── Campaign Detail — single campaign with WoW deltas and 14-day rolling trend ──────
+// Used by the campaign detail modal in google.html. Pulls current state from
+// googleState, then for WoW deltas looks up the snapshot from ~7 days ago.
+// For the rolling trend, picks one snapshot per day for the last 14 days.
+//
+// IMPORTANT: every value in googleState.products[].spend (etc.) is a 7-day
+// CUMULATIVE total (the script pushes 7d totals). So:
+//   - prior_7d  = snapshot from ~7d ago (its spend = the prior week's 7d total)
+//   - current_7d = snapshot from now (matches what live UI shows)
+//   - WoW delta = (current_7d - prior_7d) / prior_7d
+// The 14-day trend is a series of 7d-rolling totals, NOT per-day totals.
+// We label it "7-day rolling" in the UI so it's not misread as daily spend.
+app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+
+  // 1. Current campaign data — same shape as products-diagnostic builds, scoped to one campaign.
+  const currentProducts = (googleState.products || []).filter(function(gp){
+    return String(gp.campaignId) === campaignId;
+  });
+  if (!currentProducts.length) {
+    return res.status(404).json({ error: 'Campaign not found in current Google state. May have been paused or removed.' });
+  }
+  const campaignName = currentProducts[0].campaignName || '(unnamed)';
+  const campaignType = currentProducts[0].campaignType || null;
+
+  // Aggregate current 7d totals
+  let curSpend = 0, curSales = 0, curImpressions = 0, curClicks = 0, curConversions = 0, curWasted = 0;
+  currentProducts.forEach(function(p){
+    curSpend += Number(p.spend) || 0;
+    curSales += Number(p.sales) || 0;
+    curImpressions += Number(p.impressions) || 0;
+    curClicks += Number(p.clicks) || 0;
+    curConversions += Number(p.conversions) || 0;
+    if ((Number(p.spend) || 0) > 0.5 && (!p.sales || Number(p.sales) === 0)) {
+      curWasted += Number(p.spend) || 0;
+    }
+  });
+  const curAcos = curSales > 0 ? (curSpend / curSales) * 100 : 0;
+  const curCtr = curImpressions > 0 ? (curClicks / curImpressions) * 100 : 0;
+  const curCostPerConv = curConversions > 0 ? curSpend / curConversions : 0;
+
+  // 2. WoW comparison — find latest snapshot received ≥7 days ago.
+  let prior = null;
+  if (db) {
+    try {
+      const r = await db.query(
+        "SELECT products FROM google_state_snapshots " +
+        "WHERE received_at <= NOW() - INTERVAL '7 days' " +
+        "ORDER BY received_at DESC LIMIT 1"
+      );
+      if (r.rows.length) {
+        const priorProducts = (r.rows[0].products || []).filter(function(gp){
+          return String(gp.campaignId) === campaignId;
+        });
+        let pSpend = 0, pSales = 0, pImpressions = 0, pClicks = 0, pConversions = 0;
+        priorProducts.forEach(function(p){
+          pSpend += Number(p.spend) || 0;
+          pSales += Number(p.sales) || 0;
+          pImpressions += Number(p.impressions) || 0;
+          pClicks += Number(p.clicks) || 0;
+          pConversions += Number(p.conversions) || 0;
+        });
+        const pAcos = pSales > 0 ? (pSpend / pSales) * 100 : 0;
+        prior = {
+          spend: Math.round(pSpend * 100) / 100,
+          sales: Math.round(pSales * 100) / 100,
+          impressions: pImpressions,
+          clicks: pClicks,
+          conversions: Math.round(pConversions),
+          acos: Math.round(pAcos * 10) / 10
+        };
+      }
+    } catch(e) {
+      console.error('[campaign-detail WoW] ' + e.message);
+    }
+  }
+
+  // 3. 14-day rolling trend — for each of the last 14 calendar days, pick the
+  //    LAST snapshot of that day and extract this campaign's 7d cumulative total.
+  let trend = [];
+  if (db) {
+    try {
+      const r = await db.query(
+        "WITH per_day AS ( " +
+        "  SELECT DATE(received_at AT TIME ZONE 'Europe/London') AS d, " +
+        "         products, " +
+        "         ROW_NUMBER() OVER (PARTITION BY DATE(received_at AT TIME ZONE 'Europe/London') ORDER BY received_at DESC) AS rn " +
+        "  FROM google_state_snapshots " +
+        "  WHERE received_at >= NOW() - INTERVAL '15 days' " +
+        ") SELECT d, products FROM per_day WHERE rn = 1 ORDER BY d ASC"
+      );
+      trend = r.rows.map(function(row){
+        const ps = (row.products || []).filter(function(gp){ return String(gp.campaignId) === campaignId; });
+        let s = 0, sa = 0;
+        ps.forEach(function(p){
+          s += Number(p.spend) || 0;
+          sa += Number(p.sales) || 0;
+        });
+        return {
+          date: row.d,
+          spend7d: Math.round(s * 100) / 100,
+          sales7d: Math.round(sa * 100) / 100
+        };
+      });
+    } catch(e) {
+      console.error('[campaign-detail trend] ' + e.message);
+    }
+  }
+
+  // 4. Products list — already on currentProducts. Re-shape to match what the
+  //    products-diagnostic endpoint returns for each row, since the modal's
+  //    "products in this campaign" section reuses the existing productSubrow
+  //    renderer.
+  // Reuse same logic as products-diagnostic — but only for THIS campaign.
+  // To avoid duplicating the diagnose+enrich code, we just hand back the raw
+  // googleState.products entries; the frontend already knows how to render them
+  // (it's how the current campaign-block expands inline).
+  const rows = currentProducts.slice().sort(function(a, b){
+    if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
+    return (Number(b.spend) || 0) - (Number(a.spend) || 0);
+  });
+
+  res.json({
+    campaignId: campaignId,
+    campaignName: campaignName,
+    campaignType: campaignType,
+    productCount: currentProducts.length,
+    current: {
+      spend: Math.round(curSpend * 100) / 100,
+      sales: Math.round(curSales * 100) / 100,
+      wastedSpend: Math.round(curWasted * 100) / 100,
+      impressions: curImpressions,
+      clicks: curClicks,
+      conversions: Math.round(curConversions),
+      acos: Math.round(curAcos * 10) / 10,
+      ctr: Math.round(curCtr * 100) / 100,
+      costPerConv: Math.round(curCostPerConv * 100) / 100
+    },
+    prior: prior,         // null if no snapshot from 7+ days ago
+    trend: trend,         // array of { date, spend7d, sales7d }, up to 14 points
+    products: rows,
+    lastGoogleSync: googleState.lastSync
   });
 });
 
