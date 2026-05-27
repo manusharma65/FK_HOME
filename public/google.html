@@ -2598,277 +2598,317 @@ async function runCampaignAi(campaignId, campaignName, forceRefresh) {
 // Legacy stub — closeAi was used by the old standalone AI modal. Kept as no-op for safety.
 function closeAi() { /* no-op: AI is now inline inside the big modal */ }
 
-// ─── Campaign detail modal ───────────────────────────────────────────────
-// Opens when the user clicks a campaign name or "Open" button. Shows:
-//   1. AI diagnosis at the top (Opus, cached, re-run button)
-//   2. Stats with week-over-week deltas from snapshot 7 days ago
-//   3. 14-day rolling-window trend chart
-//   4. Products inside the campaign — clicking any opens the product modal
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// REAL CAMPAIGN CARD (r37/Batch 2)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// Opens when the user clicks "Open detail" on a campaign or a campaign name from
+// the product modal. Different from the product modal — answers campaign-level
+// questions: search-term waste, keyword opportunities, device split, AI verdict.
+//
+// Data sources:
+//   - AI verdict          /api/google/ai-analyse-campaign           (existing endpoint, prompt enriched with search terms in Batch 2)
+//   - Campaign stats      /api/google/campaign-detail/:id            (existing endpoint — gives current totals + WoW)
+//   - Search terms        /api/google/campaign/:id/search-terms      (new in Batch 2)
+//   - Segments            /api/google/campaign/:id/segments          (new in Batch 2)
+//
+// If v10 script data isn't flowing yet, search-terms and segments sections
+// show "no data" placeholders. The card still works with just AI + stats.
+
 async function openCampaignDetailFromId(campaignId, campaignName) {
   if (!campaignId) return;
   const title = campaignName ? ('Campaign · ' + campaignName) : 'Campaign detail';
   showBigModal(title, '<div class="empty-state">Loading campaign detail…</div>');
 
   try {
-    const r = await authedFetch('/api/google/campaign-detail/' + encodeURIComponent(campaignId));
-    const j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error || 'Failed to load');
-    renderCampaignDetailBody(j);
-    // After render, trigger AI load (uses cache if fresh, lazy)
-    setTimeout(function(){ runCampaignAi(campaignId, j.campaignName || campaignName || '', false); }, 30);
-    // Lazily populate friction badges on the embedded product subrows
-    setTimeout(populateFrictionBadges, 80);
+    const detailRes = await authedFetch('/api/google/campaign-detail/' + encodeURIComponent(campaignId));
+    const detail = await detailRes.json();
+    if (!detailRes.ok || detail.error) throw new Error(detail.error || 'Failed to load campaign');
+
+    // Render the shell — sections will be populated as the parallel fetches return
+    renderRealCampaignCardShell(detail, campaignId);
+
+    // Fire the three v10 fetches in parallel + the AI fetch
+    setTimeout(function(){ runCampaignAi(campaignId, detail.campaignName || campaignName || '', false); }, 20);
+    loadCampaignSearchTerms(campaignId, detail.campaignName || campaignName || '');
+    loadCampaignSegments(campaignId);
   } catch(e) {
     document.getElementById('big-modal-body').innerHTML =
-      '<div style="padding:20px;color:var(--red);font-size:13px">Could not load campaign detail: ' + escapeHtml(e.message) + '</div>';
+      '<div style="padding:20px;color:var(--red);font-size:13px">Could not load campaign: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
-// Build the inner HTML of the campaign-detail modal.
-// `j` is the response from /api/google/campaign-detail/:id
-function renderCampaignDetailBody(j) {
+// Build the shell of the real campaign card. Sections are populated lazily by the
+// load helpers below — they replace placeholder divs as their data arrives.
+function renderRealCampaignCardShell(j, campaignId) {
   const cur = j.current || {};
   const prior = j.prior; // may be null
-  const trend = j.trend || [];
+  const campNameSafe = String(j.campaignName || '').replace(/'/g, "&#39;");
 
-  // Helper: render a delta pill ("↑ 18% vs prev 7d", "↓ 8%", or em-dash if no prior)
-  function deltaPill(curVal, priorVal, opts) {
-    opts = opts || {};
-    if (priorVal == null || priorVal === 0) {
-      return '<div style="font-size:10px;color:var(--text3)">no prior data</div>';
-    }
-    const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
-    const pct = Math.abs(change).toFixed(0);
-    // For metrics where lower is better (acos, wasted), invert the colour logic
-    const lowerIsBetter = !!opts.lowerIsBetter;
-    const isUp = change > 0;
-    const isGood = lowerIsBetter ? !isUp : isUp;
-    if (Math.abs(change) < 1) return '<div style="font-size:10px;color:var(--text3)">flat vs prev 7d</div>';
-    const arrow = isUp ? '↑' : '↓';
-    const colour = isGood ? '#27500A' : '#A32D2D';
-    return '<div style="font-size:10px;color:' + colour + '">' + arrow + ' ' + pct + '% vs prev 7d</div>';
-  }
-
-  // Helper: a single stat tile
-  function statTile(label, curVal, priorVal, formatter, opts) {
+  // Helper for inline pill — value + WoW delta
+  function pill(label, curVal, priorVal, formatter, opts) {
     opts = opts || {};
     const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
     const tone = opts.tone || '';
-    return '<div style="background:var(--bg2);padding:10px 12px;border-radius:8px">'
-      + '<div style="font-size:11px;color:var(--text3)">' + label + '</div>'
-      + '<div style="font-size:18px;font-weight:600;' + (tone === 'bad' ? 'color:#A32D2D' : '') + '">' + valDisplay + '</div>'
-      + deltaPill(curVal, priorVal, opts)
+    let bg = 'var(--bg2)';
+    let textColour = 'var(--text)';
+    if (tone === 'bad') { bg = '#fee2e2'; textColour = '#991b1b'; }
+    let deltaHtml = '';
+    if (priorVal != null && priorVal !== 0) {
+      const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
+      const lowerIsBetter = !!opts.lowerIsBetter;
+      const isUp = change > 0;
+      const isGood = lowerIsBetter ? !isUp : isUp;
+      if (Math.abs(change) >= 1) {
+        const arrow = isUp ? '↑' : '↓';
+        const colour = isGood ? '#16a34a' : '#dc2626';
+        deltaHtml = ' <span style="color:' + colour + ';font-weight:600">' + arrow + Math.abs(change).toFixed(0) + '%</span>';
+      }
+    }
+    return '<div style="background:' + bg + ';padding:4px 12px;border-radius:14px;font-size:12px;color:' + textColour + '">'
+      + '<span style="color:var(--text3)">' + label + '</span> <strong>' + valDisplay + '</strong>' + deltaHtml
       + '</div>';
   }
 
-  // Build the 14-day rolling trend chart. Each bar = one day's 7-day-cumulative
-  // spend (because the script only sends rolling 7d totals). We label this
-  // honestly as "7-day rolling" so it's not misread as daily spend.
-  let trendHtml = '';
-  if (trend.length === 0) {
-    trendHtml = '<div style="font-size:12px;color:var(--text3);padding:10px;text-align:center">Not enough snapshot history yet. Trend appears after a few days.</div>';
-  } else {
-    const maxSpend = Math.max.apply(null, [1].concat(trend.map(function(t){ return t.spend7d; })));
-    const bars = trend.map(function(t, i){
-      const h = Math.max(2, Math.round((t.spend7d / maxSpend) * 100));
-      // Last 7 entries highlighted, earlier in muted
-      const isRecent = i >= Math.max(0, trend.length - 7);
-      const colour = isRecent ? '#185FA5' : '#B5D4F4';
-      const dateLabel = new Date(t.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-      return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px" title="' + dateLabel + ' · 7d rolling spend £' + t.spend7d.toFixed(2) + ' / sales £' + t.sales7d.toFixed(2) + '">'
-        + '<div style="width:100%;background:' + colour + ';height:' + h + 'px;border-radius:2px;min-height:2px"></div>'
-        + (i % 2 === 0 ? '<div style="font-size:9px;color:var(--text3)">' + dateLabel + '</div>' : '<div style="font-size:9px;color:transparent">.</div>')
-        + '</div>';
-    }).join('');
-    trendHtml = '<div style="background:var(--bg2);padding:14px;border-radius:8px;margin-bottom:18px">'
-      + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">7-day rolling spend · last ' + trend.length + ' days (darker bars = most recent 7)</div>'
-      + '<div style="display:flex;gap:3px;align-items:flex-end;height:80px">' + bars + '</div>'
-      + '</div>';
-  }
-
-  // AI section shell — populated by runCampaignAi() after this body lands
-  const aiSection = '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:18px">'
-    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px;flex-wrap:wrap">'
-    + '<div style="font-size:14px;font-weight:700;color:var(--text)">🪄 Campaign analysis <span id="ai-lock-badge-campaign" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>'
+  const aiSection = '<div id="rcc-ai-shell" style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:18px">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;flex-wrap:wrap">'
+    + '<div style="font-size:13px;font-weight:700;color:var(--text)">🪄 Verdict <span id="ai-lock-badge-campaign" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>'
     + '<div id="ai-buttons-campaign" style="display:flex;gap:8px;flex-wrap:wrap"></div>'
     + '</div>'
     + '<div id="ai-content-campaign" style="font-size:14px;line-height:1.65;color:var(--text);white-space:pre-wrap">Loading…</div>'
     + '<div id="ai-meta-campaign" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>'
     + '</div>';
 
-  // Stats grid — 4 cols on desktop, with WoW deltas
-  const statsGrid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">'
-    + statTile('Spend 7d', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
-    + statTile('Sales 7d', cur.sales, prior && prior.sales, fmtCurrency)
-    + statTile('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
-    + statTile('Wasted', cur.wastedSpend, null, fmtCurrency, { tone: cur.wastedSpend > 5 ? 'bad' : '' })
-    + statTile('Impressions', cur.impressions, prior && prior.impressions, fmtNum)
-    + statTile('Clicks', cur.clicks, prior && prior.clicks, fmtNum)
-    + statTile('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
-    + statTile('Cost/conv', cur.costPerConv, null, function(v){ return v ? fmtCurrency(v) : '—'; })
+  const pillRow = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;font-size:12px">'
+    + pill('Spend', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
+    + pill('Sales', cur.sales, prior && prior.sales, fmtCurrency)
+    + pill('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
+    + pill('Wasted', cur.wastedSpend, null, fmtCurrency, { tone: cur.wastedSpend > 5 ? 'bad' : '' })
+    + pill('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
+    + pill('Conv', cur.conversions, prior && prior.conversions, fmtNum)
     + '</div>';
 
-  // Products list — uses the existing productSubrow renderer for visual consistency.
-  const productsHtml = '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Products in this campaign · ' + (j.products || []).length + ' total</div>'
-    + '<div class="campaign-products" style="display:block">'
-    + (j.products || []).map(productSubrow).join('')
+  // Search terms placeholder — replaced by loadCampaignSearchTerms
+  const searchTermsPlaceholder = '<div id="rcc-search-terms" style="margin-bottom:18px">'
+    + '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Search terms</div>'
+    + '<div style="font-size:12px;color:var(--text3);padding:14px;background:var(--bg2);border-radius:6px;text-align:center">Loading search-term data…</div>'
+    + '</div>';
+
+  // Segments placeholder — replaced by loadCampaignSegments
+  const segmentsPlaceholder = '<div id="rcc-segments" style="margin-bottom:18px"></div>';
+
+  // Footer link to products list (the existing campaign block expand-products view in the list)
+  const productsLink = '<div style="margin-top:18px;padding:10px 14px;background:var(--bg2);border-radius:6px;font-size:12px;color:var(--text3);display:flex;gap:10px;align-items:center;justify-content:space-between">'
+    + '<span>Want to see products in this campaign?</span>'
+    + '<button class="btn btn-ghost" onclick="renderCampaignProductsInModal(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="font-size:12px">Show product list (' + (j.productCount || 0) + ') →</button>'
     + '</div>';
 
   const header = '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">' + j.productCount + ' products' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>';
 
-  const body = header + aiSection + statsGrid + trendHtml + productsHtml;
-  document.getElementById('big-modal-body').innerHTML = body;
+  document.getElementById('big-modal-body').innerHTML =
+    header + aiSection + pillRow + searchTermsPlaceholder + segmentsPlaceholder + productsLink;
 }
 
-// ─── Product-scoped campaign detail modal ─────────────────────────────────
-// Opens when the user clicks a campaign link from inside the product modal.
-// Different from openCampaignDetailFromId (campaign-wide) — this one is scoped
-// to a single product within a single campaign.
-//
-// State: stash the product modal's source object so the "← back to product"
-// link can re-open it without a server round-trip.
-let LAST_PRODUCT_FOR_BACK = null;
-
-async function openCampaignProductScopedDetail(campaignId, shopifyId, campaignName, productName, sourceProduct) {
-  if (!campaignId || !shopifyId) return;
-  // Stash whatever product we came from so the back link works
-  if (sourceProduct) LAST_PRODUCT_FOR_BACK = sourceProduct;
-
-  const title = 'Campaign × Product · ' + (productName || 'this product');
-  showBigModal(title, '<div class="empty-state">Loading scoped detail…</div>');
-
+// Fetch and render the search-terms table.
+// Empty state if v10 script hasn't started pushing data yet.
+async function loadCampaignSearchTerms(campaignId, campaignName) {
+  const container = document.getElementById('rcc-search-terms');
+  if (!container) return;
   try {
-    const r = await authedFetch('/api/google/campaign-product-detail/' + encodeURIComponent(campaignId) + '/' + encodeURIComponent(shopifyId));
+    const r = await authedFetch('/api/google/campaign/' + encodeURIComponent(campaignId) + '/search-terms');
     const j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error || 'Failed to load');
-    renderCampaignProductScopedBody(j, campaignId);
-  } catch(e) {
-    document.getElementById('big-modal-body').innerHTML =
-      '<div style="padding:20px;color:var(--red);font-size:13px">Could not load scoped detail: ' + escapeHtml(e.message) + '</div>'
-      + (LAST_PRODUCT_FOR_BACK
-          ? '<div style="margin-top:14px"><button class="btn btn-ghost" onclick="backToProductFromScoped()" style="font-size:13px">← Back to product</button></div>'
-          : '');
-  }
-}
-
-// Render the body of the product-scoped campaign modal.
-function renderCampaignProductScopedBody(j, campaignId) {
-  const cur = j.current || {};
-  const prior = j.prior;
-  const trend = j.trend || [];
-  const variants = j.variants || [];
-  const campNameSafe = String(j.campaignName || '').replace(/'/g, "&#39;");
-
-  function deltaPill(curVal, priorVal, opts) {
-    opts = opts || {};
-    if (priorVal == null || priorVal === 0) return '<div style="font-size:10px;color:var(--text3)">no prior data</div>';
-    const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
-    const lowerIsBetter = !!opts.lowerIsBetter;
-    const isUp = change > 0;
-    const isGood = lowerIsBetter ? !isUp : isUp;
-    if (Math.abs(change) < 1) return '<div style="font-size:10px;color:var(--text3)">flat vs prev 7d</div>';
-    const arrow = isUp ? '↑' : '↓';
-    const colour = isGood ? '#27500A' : '#A32D2D';
-    return '<div style="font-size:10px;color:' + colour + '">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev 7d</div>';
-  }
-  function statTile(label, curVal, priorVal, formatter, opts) {
-    opts = opts || {};
-    const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
-    const tone = opts.tone || '';
-    return '<div style="background:var(--bg2);padding:10px 12px;border-radius:8px">'
-      + '<div style="font-size:11px;color:var(--text3)">' + label + '</div>'
-      + '<div style="font-size:18px;font-weight:600;' + (tone === 'bad' ? 'color:#A32D2D' : '') + '">' + valDisplay + '</div>'
-      + deltaPill(curVal, priorVal, opts)
-      + '</div>';
-  }
-
-  // Back link + scope description + jump to whole-campaign view
-  const backLink = LAST_PRODUCT_FOR_BACK
-    ? '<button onclick="backToProductFromScoped()" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit">← Back to product</button>'
-    : '';
-  const wholeCampaignLink = '<button onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit;margin-left:14px">Open whole campaign (with AI) →</button>';
-
-  const header = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' + backLink + wholeCampaignLink + '</div>'
-    + '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">In campaign: <strong style="color:var(--text)">' + escapeHtml(j.campaignName) + '</strong>' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>'
-    + (j.variantCount > 1
-        ? '<div style="font-size:12px;color:var(--text3);margin-bottom:14px;font-style:italic">Aggregated across ' + j.variantCount + ' variants of this product in this campaign.</div>'
-        : '');
-
-  // Trend chart
-  let trendHtml = '';
-  if (trend.length === 0) {
-    trendHtml = '<div style="font-size:12px;color:var(--text3);padding:10px;text-align:center">Not enough snapshot history yet. Trend appears after a few days.</div>';
-  } else {
-    const maxSpend = Math.max.apply(null, [1].concat(trend.map(function(t){ return t.spend7d; })));
-    const bars = trend.map(function(t, i){
-      const h = Math.max(2, Math.round((t.spend7d / maxSpend) * 100));
-      const isRecent = i >= Math.max(0, trend.length - 7);
-      const colour = isRecent ? '#185FA5' : '#B5D4F4';
-      const dateLabel = new Date(t.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-      return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px" title="' + dateLabel + ' · 7d rolling spend £' + t.spend7d.toFixed(2) + ' / sales £' + t.sales7d.toFixed(2) + '">'
-        + '<div style="width:100%;background:' + colour + ';height:' + h + 'px;border-radius:2px;min-height:2px"></div>'
-        + (i % 2 === 0 ? '<div style="font-size:9px;color:var(--text3)">' + dateLabel + '</div>' : '<div style="font-size:9px;color:transparent">.</div>')
+    if (!j.hasData || !j.terms || !j.terms.length) {
+      container.innerHTML = '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Search terms</div>'
+        + '<div style="font-size:12px;color:var(--text3);padding:14px;background:var(--bg2);border-radius:6px;text-align:center">'
+        + 'No search-term data yet. This populates once the v10 Google Ads Script has run (typically within 30 min of installation).'
+        + (j.error ? '<br><span style="color:#dc2626">Error: ' + escapeHtml(j.error) + '</span>' : '')
         + '</div>';
-    }).join('');
-    trendHtml = '<div style="background:var(--bg2);padding:14px;border-radius:8px;margin-bottom:18px">'
-      + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">7-day rolling spend on this product in this campaign · last ' + trend.length + ' days (darker bars = most recent 7)</div>'
-      + '<div style="display:flex;gap:3px;align-items:flex-end;height:80px">' + bars + '</div>'
-      + '</div>';
-  }
+      return;
+    }
+    const terms = j.terms;
+    const showCap = 12;
+    const visible = terms.slice(0, showCap);
+    const wasterCount = terms.filter(function(t){ return t.kind === 'wasting'; }).length;
+    const converterCount = terms.filter(function(t){ return t.kind === 'converting'; }).length;
 
-  // Stats with WoW deltas
-  const statsGrid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">'
-    + statTile('Spend 7d', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
-    + statTile('Sales 7d', cur.sales, prior && prior.sales, fmtCurrency)
-    + statTile('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
-    + statTile('Impressions', cur.impressions, prior && prior.impressions, fmtNum)
-    + statTile('Clicks', cur.clicks, prior && prior.clicks, fmtNum)
-    + statTile('Conversions', cur.conversions, prior && prior.conversions, fmtNum)
-    + statTile('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
-    + statTile('Cost/conv', cur.costPerConv, null, function(v){ return v ? fmtCurrency(v) : '—'; })
-    + '</div>';
+    const campNameSafe = String(campaignName || '').replace(/'/g, "&#39;");
+    const rows = visible.map(function(t){
+      const termSafe = String(t.searchTerm || '').replace(/'/g, "&#39;");
+      const rowBg = t.kind === 'wasting' ? '#fee2e2' : (t.kind === 'converting' ? '#dcfce7' : 'transparent');
+      const spendColour = t.kind === 'wasting' ? '#dc2626' : 'var(--text)';
+      const salesColour = t.kind === 'wasting' ? '#dc2626' : (t.kind === 'converting' ? '#16a34a' : 'var(--text)');
+      const fontWeightSpend = t.kind === 'wasting' ? '600' : '400';
+      const fontWeightSales = t.kind === 'converting' ? '600' : '400';
 
-  // Variant breakdown — informational table, no click handlers
-  let variantsHtml = '';
-  if (variants.length > 1) {
-    const variantRows = variants.map(function(v){
-      return '<tr style="border-bottom:0.5px solid var(--border)">'
-        + '<td style="padding:6px 8px;font-family:var(--mono);font-size:11px;color:var(--text2)">' + escapeHtml(String(v.variantId || '—')) + '</td>'
-        + '<td style="padding:6px 8px;font-size:12px">' + escapeHtml(v.adGroupName || '—') + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.spend) + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.sales) + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtNum(v.clicks) + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + (v.acos ? fmtPct(v.acos) : '—') + '</td>'
+      let actionCell = '<span style="font-size:11px;color:var(--text3)">healthy</span>';
+      if (t.kind === 'wasting') {
+        actionCell = '<button class="rcc-action-btn" data-action="add_negative" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" style="font-size:10px;padding:3px 8px;background:#dc2626;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit">Add negative</button>';
+      } else if (t.kind === 'converting') {
+        actionCell = '<button class="rcc-action-btn" data-action="add_exact" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" style="font-size:10px;padding:3px 8px;background:#16a34a;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit">Add exact</button>';
+      }
+
+      return '<tr style="border-bottom:0.5px solid var(--border);background:' + rowBg + '">'
+        + '<td style="padding:8px 6px">' + escapeHtml(t.searchTerm) + '</td>'
+        + '<td style="padding:8px 6px;text-align:right;font-size:10px;color:var(--text3)">' + (t.matchType ? String(t.matchType).toLowerCase() : '—') + '</td>'
+        + '<td style="padding:8px 6px;text-align:right;color:' + spendColour + ';font-weight:' + fontWeightSpend + '">' + fmtCurrency(t.cost) + '</td>'
+        + '<td style="padding:8px 6px;text-align:right">' + fmtNum(t.clicks) + '</td>'
+        + '<td style="padding:8px 6px;text-align:right;color:' + salesColour + ';font-weight:' + fontWeightSales + '">' + fmtCurrency(t.sales) + '</td>'
+        + '<td style="padding:8px 6px;text-align:right">' + actionCell + '</td>'
         + '</tr>';
     }).join('');
-    variantsHtml = '<div style="margin-top:18px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Variant breakdown · ' + variants.length + ' variants</div>'
-      + '<table style="width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden">'
-      + '<thead><tr style="background:var(--bg);border-bottom:1px solid var(--border)">'
-      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Variant ID</th>'
-      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Ad group</th>'
-      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Spend</th>'
-      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Sales</th>'
-      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Clicks</th>'
-      + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">ACOS</th>'
-      + '</tr></thead><tbody>' + variantRows + '</tbody></table></div>';
+
+    const summary = '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">'
+      + 'Showing ' + visible.length + ' of ' + terms.length + ' terms · '
+      + wasterCount + ' wasting · ' + converterCount + ' converting · sorted by waste first, then by spend'
+      + '</div>';
+
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+      + '<div style="font-size:13px;font-weight:600">Search terms — top by spend</div>'
+      + '<div style="font-size:11px;color:var(--text3)">click action to record decision</div>'
+      + '</div>'
+      + summary
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">'
+      + '<thead><tr style="border-bottom:0.5px solid var(--border)">'
+      + '<th style="text-align:left;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500">Search term</th>'
+      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:56px">Match</th>'
+      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:70px">Spend</th>'
+      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:60px">Clicks</th>'
+      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:70px">Sales</th>'
+      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:100px">Action</th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>';
+
+    // Wire the action buttons
+    container.querySelectorAll('.rcc-action-btn').forEach(function(btn){
+      btn.onclick = function() {
+        const action = btn.getAttribute('data-action');
+        const term = btn.getAttribute('data-term');
+        const cid = btn.getAttribute('data-campaign-id');
+        const cname = btn.getAttribute('data-campaign-name');
+        submitKeywordDecision(cid, cname, term, action, btn);
+      };
+    });
+  } catch(e) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--red);padding:14px;background:var(--bg2);border-radius:6px">Could not load search terms: ' + escapeHtml(e.message) + '</div>';
   }
-
-  // Honest footnote about data limitations
-  const footnote = '<div style="margin-top:18px;padding:10px 14px;background:var(--bg2);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.5">'
-    + '<strong>Note:</strong> Trend bars show 7-day rolling cumulative spend, not per-day spend (current data source limitation). '
-    + 'WoW comparison aggregates across whatever variants existed in each snapshot — newly-added or removed variants between weeks can affect the delta.'
-    + '</div>';
-
-  document.getElementById('big-modal-body').innerHTML = header + statsGrid + trendHtml + variantsHtml + footnote;
 }
 
-// Re-open the product modal from a stashed product object
-function backToProductFromScoped() {
-  if (!LAST_PRODUCT_FOR_BACK) {
-    closeBigModal();
-    return;
+// Submit an Add-negative or Add-exact decision to the server (record-only).
+async function submitKeywordDecision(campaignId, campaignName, searchTerm, decisionKind, btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await authedFetch('/api/google/campaign/' + encodeURIComponent(campaignId) + '/keyword-decision', {
+      method: 'POST',
+      body: JSON.stringify({
+        searchTerm: searchTerm,
+        decisionKind: decisionKind,
+        campaignName: campaignName
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    // Replace the button with a confirmation pill
+    btn.outerHTML = '<span style="font-size:10px;color:#16a34a;font-weight:600">✓ recorded #' + j.id + '</span>';
+    // Show a small toast with the reminder
+    showKeywordDecisionToast(j.reminder || 'Recorded. Remember to add it in Google Ads UI.');
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    alert('Could not record: ' + e.message);
   }
-  openProductDetailFromObj(LAST_PRODUCT_FOR_BACK);
+}
+
+function showKeywordDecisionToast(message) {
+  const existing = document.getElementById('kw-decision-toast');
+  if (existing) existing.remove();
+  const t = document.createElement('div');
+  t.id = 'kw-decision-toast';
+  t.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#1f2937;color:white;padding:12px 16px;border-radius:8px;font-size:13px;line-height:1.5;max-width:400px;box-shadow:0 8px 24px rgba(0,0,0,0.3);z-index:10003';
+  t.textContent = message;
+  document.body.appendChild(t);
+  setTimeout(function(){ if (t.parentNode) t.parentNode.removeChild(t); }, 6000);
+}
+
+// Fetch and render device + day-of-week segments.
+async function loadCampaignSegments(campaignId) {
+  const container = document.getElementById('rcc-segments');
+  if (!container) return;
+  try {
+    const r = await authedFetch('/api/google/campaign/' + encodeURIComponent(campaignId) + '/segments');
+    const j = await r.json();
+    if (!j.hasData) {
+      container.innerHTML = '';  // hide entirely until v10 data arrives
+      return;
+    }
+    const device = j.device || [];
+    const dow = j.dayOfWeek || [];
+
+    function deviceRow(d) {
+      const totalSpend = device.reduce(function(s, x){ return s + (x.cost || 0); }, 0);
+      const share = totalSpend > 0 ? Math.round((d.cost / totalSpend) * 100) : 0;
+      const acosText = d.acos > 0 ? ' · ACOS ' + d.acos.toFixed(1) + '%' : '';
+      const label = String(d.value || '').toLowerCase().replace(/_/g, ' ');
+      return '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>' + escapeHtml(label) + '</span><span><strong>' + share + '%</strong>' + acosText + '</span></div>';
+    }
+
+    function dowSort(arr) {
+      const order = { MONDAY: 1, TUESDAY: 2, WEDNESDAY: 3, THURSDAY: 4, FRIDAY: 5, SATURDAY: 6, SUNDAY: 7 };
+      return arr.slice().sort(function(a, b){ return (order[a.value] || 99) - (order[b.value] || 99); });
+    }
+
+    let dowBest = null, dowWorst = null;
+    dow.forEach(function(d){
+      if (d.sales > 0 && (!dowBest || d.acos < dowBest.acos)) dowBest = d;
+      if (d.cost > 0 && (!dowWorst || d.acos > dowWorst.acos)) dowWorst = d;
+    });
+
+    const deviceCard = device.length
+      ? '<div style="background:var(--bg2);padding:12px 14px;border-radius:8px">'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Device split</div>'
+        + device.sort(function(a, b){ return b.cost - a.cost; }).map(deviceRow).join('')
+        + '</div>'
+      : '';
+
+    const dowCard = (dowBest || dowWorst)
+      ? '<div style="background:var(--bg2);padding:12px 14px;border-radius:8px">'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Best / worst day</div>'
+        + (dowBest ? '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:#16a34a">Best · ' + escapeHtml(String(dowBest.value).toLowerCase()) + '</span><span><strong>' + fmtCurrency(dowBest.sales) + '</strong> sales · ' + dowBest.acos.toFixed(0) + '% ACOS</span></div>' : '')
+        + (dowWorst ? '<div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:#dc2626">Worst · ' + escapeHtml(String(dowWorst.value).toLowerCase()) + '</span><span><strong>' + fmtCurrency(dowWorst.sales) + '</strong> sales · ' + dowWorst.acos.toFixed(0) + '% ACOS</span></div>' : '')
+        + '</div>'
+      : '';
+
+    container.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px">'
+      + deviceCard + dowCard
+      + '</div>';
+  } catch(e) {
+    container.innerHTML = '';  // fail silently for segments — they're nice-to-have
+  }
+}
+
+// Render the products inside a campaign as a secondary view inside the modal.
+// User opts into this by clicking "Show product list →" — kept secondary because
+// the campaign card's purpose is traffic/keyword analysis, not product analysis.
+async function renderCampaignProductsInModal(campaignId, campaignName) {
+  const body = document.getElementById('big-modal-body');
+  if (!body) return;
+  body.innerHTML = '<div class="empty-state">Loading products in campaign…</div>';
+  try {
+    const r = await authedFetch('/api/google/campaign-detail/' + encodeURIComponent(campaignId));
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || 'Failed');
+    const products = j.products || [];
+    const campNameSafe = String(campaignName || '').replace(/'/g, "&#39;");
+    const back = '<button class="btn btn-ghost" onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="font-size:13px;margin-bottom:14px">← Back to campaign</button>';
+    const productsHtml = products.length
+      ? products.map(productSubrow).join('')
+      : '<div class="empty-state">No products in this campaign.</div>';
+    body.innerHTML = back
+      + '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Products in this campaign · ' + products.length + ' total</div>'
+      + '<div class="campaign-products" style="display:block">' + productsHtml + '</div>';
+    setTimeout(populateFrictionBadges, 50);
+  } catch(e) {
+    body.innerHTML = '<div style="padding:20px;color:var(--red);font-size:13px">Could not load products: ' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 // ─── Diagnostics — manager-only debug for refund + GA4 matching issues ───
@@ -2918,8 +2958,6 @@ function closeBigModal() {
 // Open a single product in the big modal — full detail
 function openProductDetailFromObj(p) {
   if (!p) return;
-  // Stash so the campaign-scoped modal's "← Back to product" link can return here
-  LAST_PRODUCT_FOR_BACK = p;
   // Build big detail view
   const img = p.imageUrl ? '<img src="' + p.imageUrl + '" style="width:200px;height:200px;object-fit:cover;border-radius:10px;background:var(--bg2)" alt="">' : '<div style="width:200px;height:200px;display:flex;align-items:center;justify-content:center;background:var(--bg2);color:var(--text3);border-radius:10px">no image</div>';
   const status = p.status ? '<span class="' + statusClass(p.status) + '">' + p.status + '</span>' : '';
@@ -2985,15 +3023,18 @@ function openProductDetailFromObj(p) {
       '</div>' +
     '</div>' +
 
-    '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 4px">Sales (Shopify, estimate)</div>' +
-    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Net of refunds. May differ from Shopify Analytics by ~5% due to refund attribution timing.</div>' +
-    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
-    stat('Revenue 7d', fmtCurrency(p.revenue7d)) +
-    stat('Revenue 30d', fmtCurrency(p.revenue30d)) +
-    stat('Units 7d', fmtNum(p.unitsSold7d)) +
-    stat('Units 30d', fmtNum(p.unitsSold30d)) +
-    stat('Price', p.price != null ? fmtCurrency(p.price) : '—') +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin:24px 0 4px;gap:12px;flex-wrap:wrap">' +
+      '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em">Sales (Shopify, estimate)</div>' +
+      // r37 window toggle. Only affects this Shopify Sales block. Google Ads block below stays 7d
+      // until v10 daily metrics flow through — then Phase 2 of the toggle extends to those tiles too.
+      '<div id="product-window-toggle" style="display:inline-flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:11px" data-window="' + (window.CURRENT_PRODUCT_WINDOW || '7d') + '">' +
+        '<button class="pwt-btn" data-window="7d" style="padding:5px 10px;border:none;background:' + ((window.CURRENT_PRODUCT_WINDOW || '7d') === '7d' ? 'var(--text)' : 'transparent') + ';color:' + ((window.CURRENT_PRODUCT_WINDOW || '7d') === '7d' ? 'var(--bg)' : 'var(--text2)') + ';cursor:pointer;font-family:inherit;font-size:11px">This week</button>' +
+        '<button class="pwt-btn" data-window="7d-prev" style="padding:5px 10px;border:none;border-left:1px solid var(--border);background:' + (window.CURRENT_PRODUCT_WINDOW === '7d-prev' ? 'var(--text)' : 'transparent') + ';color:' + (window.CURRENT_PRODUCT_WINDOW === '7d-prev' ? 'var(--bg)' : 'var(--text2)') + ';cursor:pointer;font-family:inherit;font-size:11px">Last week</button>' +
+        '<button class="pwt-btn" data-window="30d" style="padding:5px 10px;border:none;border-left:1px solid var(--border);background:' + (window.CURRENT_PRODUCT_WINDOW === '30d' ? 'var(--text)' : 'transparent') + ';color:' + (window.CURRENT_PRODUCT_WINDOW === '30d' ? 'var(--bg)' : 'var(--text2)') + ';cursor:pointer;font-family:inherit;font-size:11px">30 days</button>' +
+      '</div>' +
     '</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Net of refunds. May differ from Shopify Analytics by ~5% due to refund attribution timing.</div>' +
+    '<div id="product-sales-stats" data-product-id="' + (p.shopifyId || p.id || '') + '">' + renderProductSalesStats(p, window.CURRENT_PRODUCT_WINDOW || '7d') + '</div>' +
 
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 10px">Daily revenue (last 7 days)</div>' +
     '<div style="display:flex;gap:8px;align-items:flex-end;padding:12px;background:var(--bg2);border-radius:8px">' + dailyBars + '</div>' +
@@ -3029,24 +3070,13 @@ function openProductDetailFromObj(p) {
     // not the campaign-wide totals (which would be confusing when the campaign has many products).
     ((p.campaignsAdvertisedIn || []).length > 0
       ? '<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);border-radius:8px">'
-        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to see this product\'s performance in each</div>'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">Advertising campaigns — click to open the campaign card</div>'
         + (p.campaignsAdvertisedIn || []).map(function(c){
             const nameSafe = escapeHtml(c.campaignName || '').replace(/'/g, "&#39;");
-            const productNameSafe = escapeHtml(p.title || '').replace(/'/g, "&#39;");
-            // Resolve shopifyId — try p.shopifyId first, fall back to embedded ID in shopifyItemId
-            const sid = p.shopifyId || (p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null);
-            if (!sid) {
-              // Without a shopifyId we can't scope — fall back to campaign-wide view
-              return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
-                + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
-                + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
-                + ' <span style="float:right;color:var(--accent);font-size:11px">open campaign →</span>'
-                + '</button>';
-            }
-            return '<button onclick="openCampaignProductScopedDetail(\'' + c.campaignId + '\',\'' + sid + '\',\'' + nameSafe + '\',\'' + productNameSafe + '\')" '
+            return '<button onclick="openCampaignDetailFromId(\'' + c.campaignId + '\',\'' + nameSafe + '\')" '
               + 'style="display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);font-family:inherit">'
               + '📊 ' + escapeHtml(c.campaignName || '(unnamed)') + ' ' + typeBadge(c.campaignType)
-              + ' <span style="float:right;color:var(--accent);font-size:11px">how this product is doing →</span>'
+              + ' <span style="float:right;color:var(--accent);font-size:11px">open campaign card →</span>'
               + '</button>';
           }).join('')
         + '</div>'
@@ -3104,6 +3134,79 @@ function openProductDetailFromObj(p) {
   if (p.shopifyId || p.id) {
     renderProductWoWStrip(p.shopifyId || p.id, p);
   }
+  // r37: stash the current product so the window-toggle buttons can re-render Sales section.
+  window.CURRENT_PRODUCT_FOR_TOGGLE = p;
+  // Wire up the window toggle buttons (This week / Last week / 30 days)
+  setTimeout(function(){
+    const toggle = document.getElementById('product-window-toggle');
+    if (!toggle) return;
+    toggle.querySelectorAll('.pwt-btn').forEach(function(btn){
+      btn.onclick = function() {
+        const w = btn.getAttribute('data-window');
+        if (!w) return;
+        window.CURRENT_PRODUCT_WINDOW = w;
+        // Re-render the sales-stats block and daily-bars (window-aware)
+        const statsEl = document.getElementById('product-sales-stats');
+        if (statsEl && window.CURRENT_PRODUCT_FOR_TOGGLE) {
+          statsEl.innerHTML = renderProductSalesStats(window.CURRENT_PRODUCT_FOR_TOGGLE, w);
+        }
+        // Re-style the buttons to reflect the new selection
+        toggle.querySelectorAll('.pwt-btn').forEach(function(b){
+          const active = b.getAttribute('data-window') === w;
+          b.style.background = active ? 'var(--text)' : 'transparent';
+          b.style.color = active ? 'var(--bg)' : 'var(--text2)';
+        });
+      };
+    });
+  }, 20);
+}
+
+// r37: window-aware Sales stats. Reads dailySales14d (or revenue30d) to give correct
+// totals for whichever window the user picked. Falls back gracefully if 14d data isn't
+// present yet (returns "—" for Last week instead of fake zeros).
+function renderProductSalesStats(p, win) {
+  const w = win || '7d';
+  const daily14 = Array.isArray(p.dailySales14d) ? p.dailySales14d : null;
+  const has14 = daily14 && daily14.length >= 14;
+
+  let revenue, units, label;
+  if (w === '7d') {
+    revenue = p.revenue7d;
+    units = p.unitsSold7d;
+    label = 'This week';
+  } else if (w === '7d-prev') {
+    // Last week = days 0..6 of dailySales14d (oldest 7 days). Sum them.
+    if (has14) {
+      revenue = daily14.slice(0, 7).reduce(function(s, v){ return s + (Number(v) || 0); }, 0);
+      revenue = Math.round(revenue * 100) / 100;
+    } else {
+      revenue = null;  // unknown — will render "—"
+    }
+    // We don't have per-day units, so units for last week is "—" (honest).
+    units = null;
+    label = 'Last week';
+  } else { // 30d
+    revenue = p.revenue30d;
+    units = p.unitsSold30d;
+    label = '30 days';
+  }
+
+  function statBlock(lab, val) {
+    const display = (val == null || (typeof val === 'number' && isNaN(val))) ? '—' : val;
+    return '<div class="stat-item"><div class="stat-label">' + lab + '</div><div class="stat-value">' + display + '</div></div>';
+  }
+
+  // Honest note if last-week data is missing
+  const honestNote = (w === '7d-prev' && !has14)
+    ? '<div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-style:italic">Last-week data starts populating once the next Shopify sync lands (within ~30 min). Until then, this shows "—".</div>'
+    : '';
+
+  return honestNote +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
+    statBlock('Revenue · ' + label, revenue != null ? fmtCurrency(revenue) : '—') +
+    statBlock('Units · ' + label, units != null ? fmtNum(units) : '—') +
+    statBlock('Price', p.price != null ? fmtCurrency(p.price) : '—') +
+    '</div>';
 }
 
 // Fetches prior-7d metrics for this product from the snapshot 7 days ago
