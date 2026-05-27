@@ -2747,6 +2747,112 @@ async function initTasksTable() {
       console.error('[INIT] google_state_snapshots error: ' + e.message);
     }
 
+    // r37 (Batch 2): Search terms per campaign. Populated by Google Ads Script v10 pulling
+    // SEARCH_TERM_VIEW (7d). UPSERT on (campaign_id, search_term) so we don't multiply rows
+    // across ingests — each push overwrites the latest 7d metrics.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_search_terms (
+          campaign_id TEXT NOT NULL,
+          search_term TEXT NOT NULL,
+          campaign_name TEXT,
+          match_type TEXT,
+          cost NUMERIC DEFAULT 0,
+          clicks INTEGER DEFAULT 0,
+          impressions INTEGER DEFAULT 0,
+          conversions NUMERIC DEFAULT 0,
+          conversions_value NUMERIC DEFAULT 0,
+          status TEXT,
+          period_start DATE,
+          period_end DATE,
+          updated_at TIMESTAMP DEFAULT NOW(),
+          PRIMARY KEY (campaign_id, search_term)
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gst_campaign ON google_search_terms(campaign_id)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gst_cost ON google_search_terms(cost DESC)");
+      console.log('[INIT] google_search_terms table ready');
+    } catch (e) {
+      console.error('[INIT] google_search_terms error: ' + e.message);
+    }
+
+    // r37: per-campaign per-day metrics for the time-window toggle and real daily trend.
+    // UPSERT on (campaign_id, snapshot_date). Each push overwrites the day's values.
+    // Keeps 60 days of history (auto-pruned).
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_campaign_daily (
+          campaign_id TEXT NOT NULL,
+          snapshot_date DATE NOT NULL,
+          campaign_name TEXT,
+          campaign_type TEXT,
+          spend NUMERIC DEFAULT 0,
+          sales NUMERIC DEFAULT 0,
+          clicks INTEGER DEFAULT 0,
+          impressions INTEGER DEFAULT 0,
+          conversions NUMERIC DEFAULT 0,
+          updated_at TIMESTAMP DEFAULT NOW(),
+          PRIMARY KEY (campaign_id, snapshot_date)
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gcd_campaign ON google_campaign_daily(campaign_id)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gcd_date ON google_campaign_daily(snapshot_date DESC)");
+      console.log('[INIT] google_campaign_daily table ready');
+    } catch (e) {
+      console.error('[INIT] google_campaign_daily error: ' + e.message);
+    }
+
+    // r37: per-campaign device + day-of-week splits. Same UPSERT pattern.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_campaign_segments (
+          campaign_id TEXT NOT NULL,
+          segment_kind TEXT NOT NULL,
+          segment_value TEXT NOT NULL,
+          campaign_name TEXT,
+          cost NUMERIC DEFAULT 0,
+          sales NUMERIC DEFAULT 0,
+          clicks INTEGER DEFAULT 0,
+          impressions INTEGER DEFAULT 0,
+          conversions NUMERIC DEFAULT 0,
+          period_start DATE,
+          period_end DATE,
+          updated_at TIMESTAMP DEFAULT NOW(),
+          PRIMARY KEY (campaign_id, segment_kind, segment_value)
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gcs_campaign ON google_campaign_segments(campaign_id)");
+      console.log('[INIT] google_campaign_segments table ready');
+    } catch (e) {
+      console.error('[INIT] google_campaign_segments error: ' + e.message);
+    }
+
+    // r37: agent decisions on search terms (record-only — does NOT push to Google Ads API).
+    // Agent clicks "Add negative" or "Add exact", we log intent. They then add it in
+    // Google Ads UI themselves. Phase 2 (later) can auto-push via API once we trust the flow.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_keyword_decisions (
+          id SERIAL PRIMARY KEY,
+          campaign_id TEXT NOT NULL,
+          campaign_name TEXT,
+          search_term TEXT NOT NULL,
+          decision_kind TEXT NOT NULL,
+          decided_by TEXT,
+          decided_at TIMESTAMP DEFAULT NOW(),
+          reason TEXT,
+          status TEXT DEFAULT 'pending',
+          applied_at TIMESTAMP,
+          applied_by TEXT
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gkd_campaign ON google_keyword_decisions(campaign_id)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gkd_status ON google_keyword_decisions(status)");
+      console.log('[INIT] google_keyword_decisions table ready');
+    } catch (e) {
+      console.error('[INIT] google_keyword_decisions error: ' + e.message);
+    }
+
     // r33a: removed the boot-time UPDATE that parsed campaign_name and wrote
     // the first token as agent_name on every restart. That logic was an early
     // Amazon migration step that long outlived its purpose and was actively
@@ -11956,6 +12062,109 @@ app.post('/api/google/ingest', async function(req, res) {
       }
     }
 
+    // r37 (Batch 2): Persist v10 script fields if present.
+    // All four are OPTIONAL — if the script is still v9.1, these are undefined
+    // and we skip silently. Once v10 is installed they start populating.
+    //
+    // Counts logged so it's obvious in Railway logs which script version pushed.
+    if (db) {
+      let r37Stats = { searchTerms: 0, daily: 0, segments: 0 };
+
+      // Search terms (top N per campaign, last 7d) — UPSERT on (campaign_id, search_term)
+      const searchTerms = req.body.searchTerms || [];
+      if (Array.isArray(searchTerms) && searchTerms.length) {
+        try {
+          for (const st of searchTerms) {
+            if (!st || !st.campaignId || !st.searchTerm) continue;
+            await db.query(
+              "INSERT INTO google_search_terms " +
+              "(campaign_id, search_term, campaign_name, match_type, cost, clicks, impressions, conversions, conversions_value, status, period_start, period_end, updated_at) " +
+              "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW()) " +
+              "ON CONFLICT (campaign_id, search_term) DO UPDATE SET " +
+              "campaign_name=EXCLUDED.campaign_name, match_type=EXCLUDED.match_type, " +
+              "cost=EXCLUDED.cost, clicks=EXCLUDED.clicks, impressions=EXCLUDED.impressions, " +
+              "conversions=EXCLUDED.conversions, conversions_value=EXCLUDED.conversions_value, " +
+              "status=EXCLUDED.status, period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, " +
+              "updated_at=NOW()",
+              [
+                String(st.campaignId), String(st.searchTerm),
+                st.campaignName || null, st.matchType || null,
+                Number(st.cost) || 0, Number(st.clicks) || 0, Number(st.impressions) || 0,
+                Number(st.conversions) || 0, Number(st.conversionsValue) || 0,
+                st.status || null, st.periodStart || null, st.periodEnd || null
+              ]
+            );
+            r37Stats.searchTerms++;
+          }
+        } catch(e) { console.error('[r37 INGEST search_terms] ' + e.message); }
+      }
+
+      // Daily campaign metrics (30d, one row per campaign per day) — UPSERT on (campaign_id, snapshot_date)
+      const dailyMetrics = req.body.dailyMetrics || [];
+      if (Array.isArray(dailyMetrics) && dailyMetrics.length) {
+        try {
+          for (const d of dailyMetrics) {
+            if (!d || !d.campaignId || !d.date) continue;
+            await db.query(
+              "INSERT INTO google_campaign_daily " +
+              "(campaign_id, snapshot_date, campaign_name, campaign_type, spend, sales, clicks, impressions, conversions, updated_at) " +
+              "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW()) " +
+              "ON CONFLICT (campaign_id, snapshot_date) DO UPDATE SET " +
+              "campaign_name=EXCLUDED.campaign_name, campaign_type=EXCLUDED.campaign_type, " +
+              "spend=EXCLUDED.spend, sales=EXCLUDED.sales, clicks=EXCLUDED.clicks, " +
+              "impressions=EXCLUDED.impressions, conversions=EXCLUDED.conversions, updated_at=NOW()",
+              [
+                String(d.campaignId), d.date,
+                d.campaignName || null, d.campaignType || null,
+                Number(d.spend) || 0, Number(d.sales) || 0, Number(d.clicks) || 0,
+                Number(d.impressions) || 0, Number(d.conversions) || 0
+              ]
+            );
+            r37Stats.daily++;
+          }
+          // Prune anything older than 60 days
+          await db.query("DELETE FROM google_campaign_daily WHERE snapshot_date < CURRENT_DATE - INTERVAL '60 days'");
+        } catch(e) { console.error('[r37 INGEST daily] ' + e.message); }
+      }
+
+      // Device + day-of-week segments — both go into google_campaign_segments
+      const deviceSegments = req.body.deviceSegments || [];
+      const dayOfWeekSegments = req.body.dayOfWeekSegments || [];
+      const allSegments = [];
+      if (Array.isArray(deviceSegments)) deviceSegments.forEach(function(s){ if (s) allSegments.push(Object.assign({}, s, { kind: 'device' })); });
+      if (Array.isArray(dayOfWeekSegments)) dayOfWeekSegments.forEach(function(s){ if (s) allSegments.push(Object.assign({}, s, { kind: 'day_of_week' })); });
+      if (allSegments.length) {
+        try {
+          for (const s of allSegments) {
+            if (!s.campaignId || !s.kind || !s.value) continue;
+            await db.query(
+              "INSERT INTO google_campaign_segments " +
+              "(campaign_id, segment_kind, segment_value, campaign_name, cost, sales, clicks, impressions, conversions, period_start, period_end, updated_at) " +
+              "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW()) " +
+              "ON CONFLICT (campaign_id, segment_kind, segment_value) DO UPDATE SET " +
+              "campaign_name=EXCLUDED.campaign_name, cost=EXCLUDED.cost, sales=EXCLUDED.sales, " +
+              "clicks=EXCLUDED.clicks, impressions=EXCLUDED.impressions, conversions=EXCLUDED.conversions, " +
+              "period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, updated_at=NOW()",
+              [
+                String(s.campaignId), s.kind, String(s.value),
+                s.campaignName || null,
+                Number(s.cost) || 0, Number(s.sales) || 0, Number(s.clicks) || 0,
+                Number(s.impressions) || 0, Number(s.conversions) || 0,
+                s.periodStart || null, s.periodEnd || null
+              ]
+            );
+            r37Stats.segments++;
+          }
+        } catch(e) { console.error('[r37 INGEST segments] ' + e.message); }
+      }
+
+      if (r37Stats.searchTerms || r37Stats.daily || r37Stats.segments) {
+        console.log('[r37 INGEST v10] persisted: ' + r37Stats.searchTerms + ' search terms, ' + r37Stats.daily + ' daily rows, ' + r37Stats.segments + ' segments');
+      } else {
+        console.log('[r37 INGEST] script appears to be v9.1 (no v10 fields present) — that is fine, will populate once v10 installed');
+      }
+    }
+
     if (!alertsSuppressed) {
       for (const c of googleState.campaigns) {
         if (c.state !== 'ENABLED' && c.state !== 'enabled') continue;
@@ -12242,8 +12451,12 @@ async function syncShopifyProducts() {
       const imageUrl = p.images && p.images[0] ? p.images[0].src : null;
       const tags = (p.tags || '').split(',').map(function(t){ return t.trim(); });
 
-      // Build 7-day sparkline of NET sales — 7 COMPLETE days ENDING YESTERDAY (London time).
-      // Order: oldest (7 days ago) → newest (yesterday)
+      // Build NET-sales daily series.
+      // - sparkline (7d, oldest → newest) feeds the existing 7-bar daily-revenue chart in the
+      //   product modal. UNCHANGED.
+      // - sparkline14d (14d, oldest → newest) feeds the r37 window toggle so "Last week" =
+      //   sum of indices 0..6, "This week" = sum of indices 7..13. Same per-day numbers,
+      //   just a longer window.
       const daily = dailyByPid[pid] || {};
       const sparkline = [];
       for (let i = 7; i >= 1; i--) {
@@ -12251,6 +12464,13 @@ async function syncShopifyProducts() {
         const k = londonDateKey(d);
         const dayData = daily[k];
         sparkline.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
+      }
+      const sparkline14d = [];
+      for (let i = 14; i >= 1; i--) {
+        const d = new Date(todayStart - i * 24 * 60 * 60 * 1000);
+        const k = londonDateKey(d);
+        const dayData = daily[k];
+        sparkline14d.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
       }
 
       return {
@@ -12273,6 +12493,7 @@ async function syncShopifyProducts() {
         revenueToday: Math.round((salesToday[pid] || 0) * 100) / 100,
         unitsSoldToday: unitsToday[pid] || 0,
         dailySales7d: sparkline,
+        dailySales14d: sparkline14d,  // r37: powers the time-window toggle (this week / last week)
         variantCount: (p.variants || []).length,
         createdAt: p.created_at
       };
@@ -13908,6 +14129,204 @@ app.get('/api/google/campaign-product-detail/:campaignId/:shopifyId', async func
 //
 // IMPORTANT: every value in googleState.products[].spend (etc.) is a 7-day
 // CUMULATIVE total (the script pushes 7d totals). So:
+// ─── Batch 2 endpoints (r37) — fed by v10 script data ───────────────────────────────
+
+// Top search terms for one campaign, sorted by waste-first (zero-sale spenders) then by spend.
+// Returns empty array if v10 hasn't been installed yet.
+app.get('/api/google/campaign/:campaignId/search-terms', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!db) return res.json({ terms: [], hasData: false });
+
+  try {
+    const r = await db.query(
+      "SELECT search_term, match_type, cost, clicks, impressions, conversions, conversions_value, status, updated_at " +
+      "FROM google_search_terms WHERE campaign_id=$1 " +
+      "ORDER BY " +
+      "  CASE WHEN (cost > 0.5 AND conversions_value = 0) THEN 0 ELSE 1 END, " +
+      "  cost DESC LIMIT 50",
+      [campaignId]
+    );
+    // Tag each row with kind: 'wasting' | 'converting' | 'healthy'
+    const terms = r.rows.map(function(row){
+      const cost = Number(row.cost) || 0;
+      const sales = Number(row.conversions_value) || 0;
+      let kind = 'healthy';
+      if (cost > 0.5 && sales === 0) kind = 'wasting';
+      else if (sales > 0 && cost > 0 && (sales / cost) >= 3) kind = 'converting';
+      return {
+        searchTerm: row.search_term,
+        matchType: row.match_type,
+        cost: Math.round(cost * 100) / 100,
+        clicks: Number(row.clicks) || 0,
+        impressions: Number(row.impressions) || 0,
+        conversions: Math.round(Number(row.conversions) * 10) / 10,
+        sales: Math.round(sales * 100) / 100,
+        status: row.status,
+        kind: kind,
+        updatedAt: row.updated_at
+      };
+    });
+    res.json({ terms: terms, hasData: terms.length > 0, total: terms.length });
+  } catch(e) {
+    console.error('[campaign/search-terms] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Device + day-of-week splits for one campaign.
+app.get('/api/google/campaign/:campaignId/segments', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!db) return res.json({ device: [], dayOfWeek: [], hasData: false });
+
+  try {
+    const r = await db.query(
+      "SELECT segment_kind, segment_value, cost, sales, clicks, impressions, conversions " +
+      "FROM google_campaign_segments WHERE campaign_id=$1",
+      [campaignId]
+    );
+    const device = [], dayOfWeek = [];
+    r.rows.forEach(function(row){
+      const item = {
+        value: row.segment_value,
+        cost: Math.round(Number(row.cost) * 100) / 100,
+        sales: Math.round(Number(row.sales) * 100) / 100,
+        clicks: Number(row.clicks) || 0,
+        impressions: Number(row.impressions) || 0,
+        conversions: Math.round(Number(row.conversions) * 10) / 10,
+        acos: Number(row.sales) > 0 ? Math.round((Number(row.cost) / Number(row.sales)) * 1000) / 10 : 0
+      };
+      if (row.segment_kind === 'device') device.push(item);
+      else if (row.segment_kind === 'day_of_week') dayOfWeek.push(item);
+    });
+    res.json({ device: device, dayOfWeek: dayOfWeek, hasData: (device.length + dayOfWeek.length) > 0 });
+  } catch(e) {
+    console.error('[campaign/segments] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Daily metrics for one campaign over the last N days. Used by the window toggle and trend chart.
+// query params: days (default 30, max 60)
+app.get('/api/google/campaign/:campaignId/daily', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!db) return res.json({ days: [], hasData: false });
+  const requestedDays = Math.min(60, Math.max(1, parseInt(req.query.days || '30')));
+
+  try {
+    const r = await db.query(
+      "SELECT snapshot_date, spend, sales, clicks, impressions, conversions " +
+      "FROM google_campaign_daily WHERE campaign_id=$1 " +
+      "AND snapshot_date >= CURRENT_DATE - ($2 || ' days')::INTERVAL " +
+      "ORDER BY snapshot_date ASC",
+      [campaignId, String(requestedDays)]
+    );
+    const days = r.rows.map(function(row){
+      return {
+        date: row.snapshot_date,
+        spend: Math.round(Number(row.spend) * 100) / 100,
+        sales: Math.round(Number(row.sales) * 100) / 100,
+        clicks: Number(row.clicks) || 0,
+        impressions: Number(row.impressions) || 0,
+        conversions: Math.round(Number(row.conversions) * 10) / 10
+      };
+    });
+    res.json({ days: days, hasData: days.length > 0, requestedDays: requestedDays });
+  } catch(e) {
+    console.error('[campaign/daily] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Record agent's decision on a search term — "add as negative" or "add as exact match".
+// Record-only — does NOT push to Google Ads API. Agent has to add it in Google Ads UI manually.
+// Returns the decision id and a reminder message.
+app.post('/api/google/campaign/:campaignId/keyword-decision', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+
+  const { searchTerm, decisionKind, reason, campaignName } = req.body;
+  if (!searchTerm) return res.status(400).json({ error: 'searchTerm required' });
+  if (!['add_negative', 'add_exact'].includes(decisionKind)) {
+    return res.status(400).json({ error: 'decisionKind must be add_negative or add_exact' });
+  }
+
+  const u = req.user || {};
+  const decidedBy = u.name || u.username || 'unknown';
+
+  try {
+    // Check if a pending decision already exists on the same (campaign, term, kind)
+    const dup = await db.query(
+      "SELECT id FROM google_keyword_decisions " +
+      "WHERE campaign_id=$1 AND search_term=$2 AND decision_kind=$3 AND status='pending' " +
+      "LIMIT 1",
+      [campaignId, String(searchTerm), decisionKind]
+    );
+    if (dup.rows.length) {
+      return res.status(409).json({
+        error: 'Already pending — someone already flagged this term for the same action. Check Google Ads.',
+        existingId: dup.rows[0].id
+      });
+    }
+
+    const result = await db.query(
+      "INSERT INTO google_keyword_decisions " +
+      "(campaign_id, campaign_name, search_term, decision_kind, decided_by, reason, status) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,'pending') RETURNING id",
+      [campaignId, campaignName || null, String(searchTerm), decisionKind, decidedBy, reason || null]
+    );
+    const newId = result.rows[0].id;
+    const reminder = decisionKind === 'add_negative'
+      ? 'Recorded. Now add "' + searchTerm + '" as a negative keyword in Google Ads → Campaign → Keywords → Negative keywords.'
+      : 'Recorded. Now add "' + searchTerm + '" as an exact-match keyword in Google Ads → Campaign → Keywords.';
+    res.json({ success: true, id: newId, reminder: reminder });
+  } catch(e) {
+    console.error('[keyword-decision] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List pending keyword decisions (for an admin/manager view — not built into UI yet,
+// but useful for tracking what's been flagged but not applied).
+app.get('/api/google/keyword-decisions', async function(req, res) {
+  if (!db) return res.json({ decisions: [] });
+  try {
+    const r = await db.query(
+      "SELECT id, campaign_id, campaign_name, search_term, decision_kind, decided_by, decided_at, reason, status, applied_at, applied_by " +
+      "FROM google_keyword_decisions ORDER BY decided_at DESC LIMIT 200"
+    );
+    res.json({ decisions: r.rows });
+  } catch(e) {
+    console.error('[keyword-decisions list] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Mark a decision as applied (someone added it in Google Ads UI). Manager-only.
+app.post('/api/google/keyword-decisions/:id/applied', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const u = req.user || {};
+  const role = (u.role || '').toLowerCase();
+  if (!['owner','manager'].includes(role)) {
+    return res.status(403).json({ error: 'Manager only' });
+  }
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'id required' });
+  try {
+    await db.query(
+      "UPDATE google_keyword_decisions SET status='applied', applied_at=NOW(), applied_by=$1 WHERE id=$2",
+      [u.name || u.username || 'manager', id]
+    );
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[keyword-decisions applied] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 //   - prior_7d  = snapshot from ~7d ago (its spend = the prior week's 7d total)
 //   - current_7d = snapshot from now (matches what live UI shows)
 //   - WoW delta = (current_7d - prior_7d) / prior_7d
@@ -14103,6 +14522,7 @@ app.get('/api/google/all-products', async function(req, res) {
       revenue30d: sp.revenue30d || 0,
       unitsSold30d: sp.unitsSold30d || 0,
       dailySales7d: sp.dailySales7d || [],
+      dailySales14d: sp.dailySales14d || [],  // r37: window toggle
       googleImpressions: agg.impressions,
       googleClicks: agg.clicks,
       googleSpend: agg.spend,
@@ -16712,6 +17132,44 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       ? '\n... and ' + remaining + ' more product rows in this campaign.'
       : '';
 
+    // r37 (Batch 2): pull search-term data for this campaign if v10 script has been
+    // populating it. No-op if google_search_terms is empty. Adds a new SEARCH TERMS section
+    // to the prompt so the AI can name specific terms instead of generic advice.
+    let searchTermsContext = '';
+    try {
+      if (db) {
+        const stRes = await db.query(
+          "SELECT search_term, match_type, cost, clicks, conversions, conversions_value " +
+          "FROM google_search_terms WHERE campaign_id=$1 " +
+          "ORDER BY cost DESC LIMIT 25",
+          [String(campaignId)]
+        );
+        if (stRes.rows.length) {
+          const wasters = stRes.rows.filter(function(r){ return Number(r.cost) > 0.5 && Number(r.conversions_value) === 0; });
+          const converters = stRes.rows.filter(function(r){ return Number(r.conversions_value) > 0; });
+          let block = '\n\n═══ SEARCH TERMS (last 7 days) ═══\n';
+          if (wasters.length) {
+            block += 'WASTED SPEND (£0 sales) — candidates for negative keywords:\n';
+            wasters.slice(0, 10).forEach(function(r){
+              block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
+                + ', ' + r.clicks + ' clicks, 0 sales'
+                + (r.match_type ? ' (' + r.match_type.toLowerCase() + ')' : '') + '\n';
+            });
+          }
+          if (converters.length) {
+            block += 'CONVERTING — candidates for exact-match keywords:\n';
+            converters.slice(0, 10).forEach(function(r){
+              block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
+                + ' spend, £' + Number(r.conversions_value).toFixed(2) + ' sales, '
+                + r.clicks + ' clicks'
+                + (r.match_type ? ' (' + r.match_type.toLowerCase() + ')' : '') + '\n';
+            });
+          }
+          searchTermsContext = block;
+        }
+      }
+    } catch(e) { console.error('[r37 campaign-ai search terms] ' + e.message); }
+
     // r28: Sharper, campaign-specific prompt. Different from product-level critique.
     // Focus areas: budget, bid strategy, ACOS/TACOS, keywords, negatives, conversion
     // tracking, ad-vs-page coherence. Word-cap 150.
@@ -16734,13 +17192,14 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       + '- TACOS (vs total store revenue 7d): ' + tacos + (tacos === 'N/A' ? '' : '%') + '\n'
       + '- Cost per conversion: £' + overallCostPerConv + ' (use this when ACOS is N/A — tells you what one sale costs regardless of revenue lag)\n'
       + '- Product rows in campaign: ' + allProducts.length + '\n\n'
-      + 'TOP PRODUCTS BY SPEND (with Shopify-side truth):\n' + productLines + remainingNote + '\n\n'
+      + 'TOP PRODUCTS BY SPEND (with Shopify-side truth):\n' + productLines + remainingNote
+      + searchTermsContext + '\n\n'
       + '═══ YOUR JOB — DIAGNOSE EACH OF THESE ═══\n'
       + '1. BUDGET — too high? too low? being exhausted daily? sitting unspent?\n'
       + '2. BID STRATEGY — given the campaign type, is it appropriate? Should it switch (e.g. Manual CPC → Max Conversions)?\n'
       + '3. ACOS / TACOS — are they sustainable? trend?\n'
-      + '4. KEYWORDS — for Search campaigns: wasted spend on broad terms? are converting terms set as exact match?\n'
-      + '5. NEGATIVES — should specific negative keywords be added? (Look at product names — anything in the campaign name that should be excluded?)\n'
+      + '4. KEYWORDS — for Search campaigns: wasted spend on broad terms? are converting terms set as exact match? (If SEARCH TERMS section is provided above, NAME specific terms.)\n'
+      + '5. NEGATIVES — should specific negative keywords be added? (If SEARCH TERMS section lists wasted terms, recommend those AS NEGATIVES BY NAME.)\n'
       + '6. CONVERSION TRACKING — does the conversion count look plausible vs clicks? if 1000 clicks → 0 conv, suspect tracking.\n'
       + '7. AD-vs-PAGE COHERENCE — do the products being advertised match what the campaign is supposed to be about?\n\n'
       + '═══ OUTPUT FORMAT ═══\n'
@@ -16752,6 +17211,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       + '- DO NOT use these phrases: "monitor closely", "review performance", "optimise targeting", "consider A/B testing", "ongoing optimisation needed".\n'
       + '- DO NOT recommend things at the product page level (titles, images, descriptions) — that is the product analyst\'s job.\n'
       + '- DO quote real numbers and named products.\n'
+      + '- If SEARCH TERMS section is provided, DO name specific search terms when recommending negatives or new exact-match keywords.\n'
       + '- If the campaign is genuinely fine, say so in one line: "Verdict: healthy. ACOS X%, TACOS Y%, on track. No action needed this week."';
 
     // r25b/r28: append agent feedback — handled via stronger buildFeedbackPromptSection.
