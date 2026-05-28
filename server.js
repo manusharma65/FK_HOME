@@ -1,259 +1,17990 @@
-// FK Home — bootstrap
-// Build marker: r0.13 (2026-05-27) — Ship 1: shell foundation.
-//                                    Sidebar regrouped into WORKSPACE/HR/DAY/
-//                                    SYSTEM/YOU with permission-based item
-//                                    hiding. Mobile hamburger + overlay
-//                                    sidebar. Hash router foundation (Ship 2
-//                                    will migrate modules into the shell).
-//                                    All standalone pages still work as before.
-// All real logic lives in /server/modules/. This file stays small on purpose.
-
+// CampaignPulse — deploy marker 2026-05-25 r35.12 (BUNDLED FIX for two real
+// silent bugs caught today via proper diagnosis:
+// (1) TRAFFIC PARSER FIELD-NAME BUG — fetchSalesAndTrafficReport at line 1115.
+// Code read r.traffic and r.sales. Amazon's actual report sends r.trafficByAsin
+// and r.salesByAsin. Has been writing NULL into every sessions/buy_box/page_views/
+// units_ordered field since CP launched 28 April. The 4,342 rows in
+// amazon_traffic_snapshots are all NULL-content. Caught via traffic-debug-full
+// payload dump showing real Amazon field names. Fix: r.trafficByAsin, r.salesByAsin.
+// Re-run /api/admin/backfill-traffic?days=22 after deploy to overwrite the NULL rows
+// with correct data (ON CONFLICT DO UPDATE).
+// (2) ARCHIVE SWEEP STARVES R34 SCORING — auto-archive sweep at line 13733 moves
+// any complete/dismissed/paused task with 3+ working days since resolved_at to
+// status='archived'. But r34 scoring (backfill at line 3637, nightly at line 3677,
+// previous-task-context at line 3234, duplicate-chain detector at line 3582)
+// all filtered on status='complete' only. So tasks that complete on Monday get
+// archived by Thursday (3 working days), then never qualify for scoring which
+// needs 7-day settlement. Fix: SQL changed to WHERE status IN ('complete', 'archived')
+// in all four places. Already-archived tasks (121 in last 30 days) will now be
+// picked up. To trigger: POST /api/admin/r34/run {which:'backfill'} after deploy.
+// Backfill flag gets cleared automatically by that endpoint.
+// (3) BUNDLED FROM r35.11b: traffic-debug-full endpoint gzip fix (mirror of the
+// r35.10 fix applied to the main function). Was reading compressed binary as
+// text and JSON.parse'ing — same bug it was built to diagnose. Fixed by adding
+// the same arraybuffer + zlib.gunzipSync flow.
+// INHERITS all of r35.11 (standalone product task assign + agent Opus quota on
+// product critique), r35.10b (performance.html deployed), r35.10 (gzip fix + agent
+// task assignment p.asins[0] fix), r35.9, r35.8, r35.7, r35.6, r35.5, r35.4.
+// NOT IN THIS SHIP (deferred): keyword surfacing, Monthly Mirror, Daily Touch
+// widget for Satyam manual entry, 30-day tiles in product modal.
 const express = require('express');
+const axios = require('axios');
+const cron = require('node-cron');
 const path = require('path');
-const cookieParser = require('cookie-parser');
-
-const { initDb } = require('./server/db');
-const { runMigrations } = require('./server/schema');
-const { seedInitialData } = require('./server/schema/seed');
-const { attachUserToRequest } = require('./server/auth');
-
-const authRoutes = require('./server/modules/auth');
-const meRoutes = require('./server/modules/me');
-const teamRoutes = require('./server/modules/team');
-const leavesRoutes = require('./server/modules/leaves');
-const adminRoutes = require('./server/modules/admin');
-const chatRoutes = require('./server/modules/chat');
-const notificationsRoutes = require('./server/modules/notifications');
-const attendanceRoutes = require('./server/modules/attendance');
-const filesRoutes = require('./server/modules/files');
-const profileRoutes = require('./server/modules/profile');
-const tasksRoutes = require('./server/modules/tasks');
-const leaveEngine = require('./server/modules/leave-engine');
-const backupEngine = require('./server/modules/backup');
-const lifecycle = require('./server/modules/lifecycle');
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+app.use(express.json({ limit: '10mb' }));
 
-app.set('trust proxy', 1); // Railway sits behind a proxy
-app.use(express.json({ limit: '5mb' }));
-app.use(cookieParser());
+// ── r7b: timeline + ACOS configuration ────────────────────────────────────
+// Account-wide ACOS target. Used to colour-code Discuss/Decide callouts.
+// 20% = green, 20-40% = amber, > 40% = red, 0 revenue = red "no conversions".
+const TARGET_ACOS_PCT = 20;
 
-// Health check
-app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.13' }));
-
-// Static files
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Hydrate req.user on every API request
-app.use('/api', attachUserToRequest);
-
-// Module routers
-app.use('/api/auth', authRoutes);
-app.use('/api/me', meRoutes);
-app.use('/api/team', teamRoutes);
-app.use('/api/leaves', leavesRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/notifications', notificationsRoutes);
-app.use('/api/attendance', attendanceRoutes);
-app.use('/api/files', filesRoutes);
-app.use('/api/profile', profileRoutes);
-app.use('/api/tasks', tasksRoutes);
-
-// 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
-app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
-
-// SPA fallback — everything else returns index.html
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// ---- Cron jobs -----------------------------------------------------------
-// We use simple setInterval rather than node-cron to avoid adding deps.
-// All ticks are wrapped to never throw.
-function startCronJobs() {
-  // Every 5 minutes (300_000 ms) — late detection, idle escalation
-  setInterval(() => {
-    attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron 5min]', e.message));
-  }, 5 * 60 * 1000);
-
-  // Every 1 minute, check if we just crossed midnight London time. If so, run daily tick.
-  let lastMidnightRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-'); // dd/mm/yyyy -> yyyy-mm-dd
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      // Run between 00:00 and 00:05 London time, once per date
-      if (hhmm < '00:05' && lastMidnightRun !== londonDate) {
-        lastMidnightRun = londonDate;
-        console.log('[cron] daily midnight tick @', londonDate);
-        attendanceRoutes.tickDailyMidnight().catch(e => console.error('[cron midnight]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron midnight check]', e.message);
-    }
-  }, 60 * 1000);
-
-  // Weekly tick — Sunday 23:00 London. Same check pattern.
-  let lastWeeklyRun = null;
-  setInterval(() => {
-    try {
-      const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false
-      }).formatToParts(new Date());
-      const get = (t) => parts.find(p => p.type === t).value;
-      const isoDate = `${get('year')}-${get('month')}-${get('day')}`;
-      const hhmm = `${get('hour')}:${get('minute')}`;
-      const weekday = get('weekday');
-      if (weekday === 'Sunday' && hhmm >= '23:00' && hhmm < '23:30' && lastWeeklyRun !== isoDate) {
-        lastWeeklyRun = isoDate;
-        console.log('[cron] weekly Sunday tick @', isoDate);
-        attendanceRoutes.tickWeeklySunday().catch(e => console.error('[cron weekly]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron weekly check]', e.message);
-    }
-  }, 60 * 1000);
-
-  // r0.7 — Daily accrual tick at 01:00 London. Credits leave days on user anniversaries.
-  let lastAccrualRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '01:00' && hhmm < '01:05' && lastAccrualRun !== londonDate) {
-        lastAccrualRun = londonDate;
-        console.log('[cron] daily accrual tick @', londonDate);
-        leaveEngine.tickMonthlyAccrual().catch(e => console.error('[cron accrual]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron accrual check]', e.message);
-    }
-  }, 60 * 1000);
-
-  // r0.7 — Weekend pay calc Sunday 23:30 London (right after weekly Sunday tick at 23:00).
-  let lastWeekendPayRun = null;
-  setInterval(() => {
-    try {
-      const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false
-      }).formatToParts(new Date());
-      const get = (t) => parts.find(p => p.type === t).value;
-      const isoDate = `${get('year')}-${get('month')}-${get('day')}`;
-      const hhmm = `${get('hour')}:${get('minute')}`;
-      const weekday = get('weekday');
-      if (weekday === 'Sunday' && hhmm >= '23:30' && hhmm < '23:55' && lastWeekendPayRun !== isoDate) {
-        lastWeekendPayRun = isoDate;
-        console.log('[cron] weekly weekend-pay tick @', isoDate);
-        leaveEngine.tickWeeklyWeekendPay().catch(e => console.error('[cron weekend-pay]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron weekend-pay check]', e.message);
-    }
-  }, 60 * 1000);
-
-  // r0.8 — Nightly backup at 02:00 London. Off-site pg_dump → Backblaze B2.
-  let lastBackupRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '02:00' && hhmm < '02:05' && lastBackupRun !== londonDate) {
-        lastBackupRun = londonDate;
-        console.log('[cron] nightly backup tick @', londonDate);
-        backupEngine.tickNightlyBackup().catch(e => console.error('[cron backup]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron backup check]', e.message);
-    }
-  }, 60 * 1000);
-
-  // r0.9 — Daily file hard-purge at 03:00 London. Removes soft-deleted files
-  // past 90-day retention from the bytea store.
-  let lastFilePurgeRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '03:00' && hhmm < '03:05' && lastFilePurgeRun !== londonDate) {
-        lastFilePurgeRun = londonDate;
-        console.log('[cron] daily file-purge tick @', londonDate);
-        filesRoutes.tickHardPurge().catch(e => console.error('[cron file-purge]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron file-purge check]', e.message);
-    }
-  }, 60 * 1000);
-
-  // r0.10 — Daily task tick at 06:00 London. Promotes review tasks
-  // pending → open → due → overdue, fires notifications, re-nudges overdue.
-  let lastTaskTickRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '06:00' && hhmm < '06:05' && lastTaskTickRun !== londonDate) {
-        lastTaskTickRun = londonDate;
-        console.log('[cron] daily task tick @', londonDate);
-        lifecycle.tickTasks()
-          .then(r => console.log('[cron task tick] opened=' + r.opened + ' due=' + r.dued + ' overdue=' + r.overdued + ' renudged=' + r.reNudged))
-          .catch(e => console.error('[cron task tick]', e.message));
-        // r0.11 — Also run probation end nudge (fires when a user's
-        // probation_end_date arrives and they still need a decision).
-        lifecycle.tickProbationNudges()
-          .then(r => console.log('[cron probation nudge] nudged=' + r.nudged))
-          .catch(e => console.error('[cron probation nudge]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron task tick check]', e.message);
-    }
-  }, 60 * 1000);
-
-  console.log('[boot] cron jobs scheduled (5min, midnight, 01:00 accrual, 02:00 backup, 03:00 file-purge, 06:00 task tick, Sun 23:00 weekly, Sun 23:30 weekend-pay)');
+// Working-day helpers. "Working day" = any day except Sunday.
+// Saturday counts as a normal working day per Bobby's spec.
+// All comparisons happen in Europe/London local time so an agent in the UK
+// sees the same Day-N count as the cron that runs at 00:01 London.
+function toLondonDate(d) {
+  // Normalise to a YYYY-MM-DD string in London tz then back to a Date
+  // so we can do day-arithmetic without DST surprises.
+  const s = new Date(d).toLocaleDateString('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' });
+  // s is dd/mm/yyyy — flip to yyyy-mm-dd
+  const parts = s.split('/');
+  return new Date(parts[2] + '-' + parts[1] + '-' + parts[0] + 'T00:00:00');
+}
+function isSunday(d) { return toLondonDate(d).getDay() === 0; }
+function workingDaysBetween(fromDate, toDate) {
+  // Inclusive count of working days from `fromDate` up to (and NOT including) `toDate`.
+  // workingDaysBetween(creationDay, today) gives 0 on the creation day, 1 the next working day, etc.
+  let from = toLondonDate(fromDate);
+  const to = toLondonDate(toDate);
+  if (from >= to) return 0;
+  let count = 0;
+  const cur = new Date(from);
+  while (cur < to) {
+    cur.setDate(cur.getDate() + 1);
+    if (cur.getDay() !== 0) count++; // skip Sundays
+  }
+  return count;
+}
+// Map working-days-open → task stage. 0-3 working days = open, 4-6 = discuss, 7 = decide, 8+ = overdue.
+function stageForWorkingDay(n) {
+  if (n >= 8) return 'overdue';
+  if (n >= 7) return 'decide';
+  if (n >= 4) return 'discuss';
+  return 'open';
+}
+// What's the next milestone and how many working days until it?
+function milestoneInfo(workingDaysOpen) {
+  if (workingDaysOpen >= 8) return { next: null, daysUntil: 0, label: 'Overdue' };
+  if (workingDaysOpen === 7) return { next: 'overdue', daysUntil: 0, label: 'Decide today' };
+  if (workingDaysOpen >= 4) return { next: 'decide', daysUntil: 7 - workingDaysOpen, label: (7 - workingDaysOpen) + ' working day' + ((7 - workingDaysOpen) === 1 ? '' : 's') + ' until Decide' };
+  if (workingDaysOpen === 3) return { next: 'discuss', daysUntil: 1, label: '1 working day until Discuss' };
+  return { next: 'discuss', daysUntil: 4 - workingDaysOpen, label: (4 - workingDaysOpen) + ' working days until Discuss' };
 }
 
-async function start() {
+
+// ── Auth middleware ───────────────────────────────────────────────────────
+// Truly public endpoints — these CANNOT require auth because they're either
+// pre-login (login itself), or hit by external services that use a shared secret
+// (Google Ads script for ingest, OAuth callback handlers).
+const PUBLIC_PATHS = [
+  '/auth/login', '/auth/logout',     // r35.4: removed '/admin/create-manager' (endpoint deleted)
+  '/google/ingest',                  // Google Ads script ingest (uses x-google-secret)
+  '/google/oauth',                   // GA4 OAuth callback
+  '/google/ga4-status',              // Pre-OAuth status check
+  '/google/ga4-refresh'              // GA4 token refresh
+  // r35.5: removed '/google/debug/' — was making every debug endpoint reachable
+  // without authentication. Individual debug endpoints now sit behind requireAuth
+  // (default) + an owner guard added in r35.5 for the most sensitive ones.
+];
+
+// Endpoints that require authentication AND check that the user's department matches.
+// Maps URL prefix → required department(s). Manager passes everything.
+const DEPARTMENT_GUARD = [
+  // Google-only endpoints — block Amazon agents from hitting them
+  { prefix: '/api/google/', allowed: ['google', 'manager'] },
+  // Amazon-only endpoints — block Google agents
+  { prefix: '/api/amazon/', allowed: ['amazon', 'manager', 'agent'] }   // 'agent' = legacy Amazon agents
+];
+
+// ─── Time helpers — Shopify Analytics groups by SHOP timezone (Europe/London).
+// Railway containers run UTC, so we compute London-midnight + London-date-keys
+// explicitly to avoid orders near midnight being bucketed into the wrong day.
+
+function londonDateKey(date) {
+  // Returns 'YYYY-MM-DD' in London time. Uses Intl.DateTimeFormat parts
+  // because toLocaleDateString format strings vary across Node versions.
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date);
+  const obj = {};
+  parts.forEach(function(p){ obj[p.type] = p.value; });
+  return obj.year + '-' + obj.month + '-' + obj.day;
+}
+
+function londonMidnightToday() {
+  // Returns the unix-ms timestamp of midnight TODAY in London time.
+  // We construct this by formatting "now" in London, extracting Y/M/D, and parsing
+  // back with the right BST/GMT offset.
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  }).formatToParts(now);
+  const o = {};
+  parts.forEach(function(p){ o[p.type] = p.value; });
+  // Build "YYYY-MM-DDT00:00:00" as if local-London. We need to find the UTC equivalent.
+  // Trick: take "now" and subtract the seconds-into-day in London. London-now-seconds-in-day:
+  let h = parseInt(o.hour, 10); if (h === 24) h = 0;  // some nodes return '24' at midnight
+  const secondsIntoDay = h * 3600 + parseInt(o.minute, 10) * 60 + parseInt(o.second, 10);
+  return now.getTime() - secondsIntoDay * 1000 - now.getMilliseconds();
+}
+
+async function requireAuth(req, res, next) {
+  if (PUBLIC_PATHS.some(function(p){ return req.path.startsWith(p); })) return next();
+  if (req.path.match(/\.(css|js|png|jpg|ico|svg|woff|woff2)$/)) return next();
+
+  const token = req.headers['x-auth-token'] || (req.headers['authorization'] || '').replace('Bearer ', '');
+  if (!token) {
+    if (req.path === '/' || req.path === '/index.html') return res.redirect('/login.html');
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
   try {
-    await initDb();
-    console.log('[boot] database connected');
-    await runMigrations();
-    console.log('[boot] migrations applied');
-    await seedInitialData();
-    console.log('[boot] seed verified');
-    app.listen(PORT, () => {
-      console.log(`[boot] FK Home r0.13 listening on port ${PORT}`);
-      startCronJobs();
-      // Run one immediate 5-min tick on boot, in case the server was down for a while.
-      attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron boot tick]', e.message));
-    });
-  } catch (err) {
-    console.error('[boot] FATAL:', err.message);
-    console.error(err.stack);
-    process.exit(1);
+    if (!db) return next();
+    const result = await db.query(
+      'SELECT * FROM user_sessions WHERE token=$1 AND expires_at > NOW()',
+      [token]
+    );
+    if (!result.rows.length) {
+      if (req.path === '/' || req.path === '/index.html') return res.redirect('/login.html');
+      return res.status(401).json({ error: 'Session expired' });
+    }
+    await db.query(
+      "UPDATE user_sessions SET expires_at=NOW() + INTERVAL '24 hours', last_active=NOW() WHERE token=$1",
+      [token]
+    );
+    req.user = result.rows[0];
+
+    // Department guard: agents can only hit endpoints that match their department.
+    // Manager AND Owner (role='manager'/'owner' OR department='manager') bypass all checks.
+    const userDept = (req.user.department || '').toLowerCase();
+    const userRole = (req.user.role || '').toLowerCase();
+    const isManager = userRole === 'manager' || userRole === 'owner' || userDept === 'manager';
+    if (!isManager) {
+      for (const guard of DEPARTMENT_GUARD) {
+        if (req.path.startsWith(guard.prefix)) {
+          if (!guard.allowed.includes(userDept) && !guard.allowed.includes(userRole)) {
+            return res.status(403).json({ error: 'You do not have access to this department' });
+          }
+          break;
+        }
+      }
+    }
+
+    next();
+  } catch(e) {
+    console.error('Auth middleware error: ' + e.message);
+    next();
   }
 }
 
-start();
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/api', requireAuth);
+
+// r30a — Logistics module (self-contained router; lazy-binds db at request time)
+const logisticsRouter = require('./server/logistics')(function() { return db; });
+app.use('/api/logistics', logisticsRouter);
+
+let state = {
+  accessToken: null,
+  tokenExpiry: null,
+  profileId: null,
+  campaigns: [],
+  portfolios: {},
+  alerts: [],
+  exhaustionLog: [],
+  lastSync: null,
+  syncing: false,
+  error: null
+};
+
+// ── Google Ads State ──────────────────────────────────────────────────────
+let googleState = {
+  campaigns: [],
+  products: [],
+  alerts: [],
+  lastSync: null,           // human-readable string like "08:23"
+  lastReceivedAt: null,     // ISO timestamp from server clock when last ingest succeeded
+  error: null
+};
+
+async function getAccessToken() {
+  if (!process.env.AMAZON_REFRESH_TOKEN || !process.env.AMAZON_CLIENT_ID || !process.env.AMAZON_CLIENT_SECRET) {
+    throw new Error('Amazon credentials not configured');
+  }
+  if (state.accessToken && state.tokenExpiry && Date.now() < state.tokenExpiry - 60000) {
+    return state.accessToken;
+  }
+  console.log('Refreshing access token...');
+  const res = await axios.post('https://api.amazon.co.uk/auth/o2/token',
+    new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: process.env.AMAZON_REFRESH_TOKEN.trim(),
+      client_id: process.env.AMAZON_CLIENT_ID.trim(),
+      client_secret: process.env.AMAZON_CLIENT_SECRET.trim()
+    }),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
+  state.accessToken = res.data.access_token;
+  state.tokenExpiry = Date.now() + (res.data.expires_in * 1000);
+  console.log('Token refreshed OK');
+  return state.accessToken;
+}
+
+async function getProfileId() {
+  if (state.profileId) return state.profileId;
+  const token = await getAccessToken();
+  const res = await axios.get('https://advertising-api-eu.amazon.com/v2/profiles', {
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Amazon-Advertising-API-ClientId': process.env.AMAZON_CLIENT_ID.trim()
+    }
+  });
+  const uk = res.data.find(function(p) { return p.countryCode === 'GB' || p.countryCode === 'UK'; }) || res.data[0];
+  state.profileId = uk.profileId;
+  console.log('Profile ID: ' + state.profileId);
+  return state.profileId;
+}
+
+function getHeaders(profileId, token) {
+  return {
+    'Authorization': 'Bearer ' + token,
+    'Amazon-Advertising-API-ClientId': process.env.AMAZON_CLIENT_ID.trim(),
+    'Amazon-Advertising-API-Scope': String(profileId)
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SP-API (Selling Partner API) — r8
+// ════════════════════════════════════════════════════════════════════════════
+// This is a SEPARATE Amazon API from the Advertising API above. SP-API gives
+// us access to the seller's catalogue, listings, inventory, orders, and pricing.
+// Auth uses LWA (Login With Amazon) — same OAuth flow as the Ads API but with
+// its own refresh token (different scopes granted at consent time).
+//
+// Env vars (must be configured in Railway):
+//   SP_API_CLIENT_ID        — LWA app Client ID
+//   SP_API_CLIENT_SECRET    — LWA app Client Secret
+//   SP_API_REFRESH_TOKEN    — long-lived refresh token from OAuth consent
+//   SP_API_SELLER_ID        — optional; if missing we fetch via /sellers/v1/marketplaceParticipations
+//
+// Endpoints — UK marketplace (A1F83G8C2ARO7P) on EU host.
+
+const SP_API_HOST = 'https://sellingpartnerapi-eu.amazon.com';
+const SP_API_MARKETPLACE_ID = 'A1F83G8C2ARO7P'; // UK
+const spApiState = {
+  accessToken: null,
+  tokenExpiry: 0,
+  sellerId: process.env.SP_API_SELLER_ID || null
+};
+
+function spApiConfigured() {
+  return !!(process.env.SP_API_CLIENT_ID && process.env.SP_API_CLIENT_SECRET && process.env.SP_API_REFRESH_TOKEN);
+}
+
+async function getSpApiAccessToken() {
+  if (!spApiConfigured()) throw new Error('SP-API credentials not configured (need SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, SP_API_REFRESH_TOKEN)');
+  // Cache token for 55 mins (LWA tokens last 60 mins, refresh 5 mins early)
+  if (spApiState.accessToken && Date.now() < spApiState.tokenExpiry - 60000) {
+    return spApiState.accessToken;
+  }
+  console.log('[SP-API] Refreshing access token...');
+  try {
+    const res = await axios.post('https://api.amazon.com/auth/o2/token',
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: process.env.SP_API_REFRESH_TOKEN.trim(),
+        client_id: process.env.SP_API_CLIENT_ID.trim(),
+        client_secret: process.env.SP_API_CLIENT_SECRET.trim()
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    spApiState.accessToken = res.data.access_token;
+    spApiState.tokenExpiry = Date.now() + (res.data.expires_in * 1000);
+    console.log('[SP-API] Token refreshed OK (expires in ' + res.data.expires_in + 's)');
+    return spApiState.accessToken;
+  } catch(e) {
+    const msg = (e.response && e.response.data) ? JSON.stringify(e.response.data) : e.message;
+    console.error('[SP-API] Token refresh FAILED: ' + msg);
+    throw new Error('SP-API token refresh failed: ' + msg);
+  }
+}
+
+// Generic SP-API GET wrapper — handles auth + base URL + retry on 429
+async function spApiGet(pathAndQuery, retryCount) {
+  retryCount = retryCount || 0;
+  const token = await getSpApiAccessToken();
+  try {
+    const res = await axios.get(SP_API_HOST + pathAndQuery, {
+      headers: {
+        'x-amz-access-token': token,
+        'Accept': 'application/json',
+        'User-Agent': 'CampaignPulse/1.0 (Language=Node.js)'
+      },
+      timeout: 30000
+    });
+    return res.data;
+  } catch(e) {
+    // SP-API rate limits — back off and retry up to 3 times
+    if (e.response && e.response.status === 429 && retryCount < 3) {
+      const wait = Math.pow(2, retryCount) * 1000;
+      console.log('[SP-API] Rate limited on ' + pathAndQuery + ', waiting ' + wait + 'ms');
+      await new Promise(function(r){ setTimeout(r, wait); });
+      return spApiGet(pathAndQuery, retryCount + 1);
+    }
+    const status = e.response ? e.response.status : 'no-response';
+    const body = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    console.error('[SP-API] GET ' + pathAndQuery + ' failed (' + status + '): ' + body);
+    throw e;
+  }
+}
+
+// Get the seller ID — needed for some endpoints. Fetches once and caches.
+// Tries multiple known shapes of the response, since the field names have
+// changed across SP-API versions.
+async function getSellerId() {
+  if (spApiState.sellerId) return spApiState.sellerId;
+  try {
+    const data = await spApiGet('/sellers/v1/marketplaceParticipations');
+    // Newer responses: data.payload is an array of participation objects
+    // Older responses: same shape, but field names differ slightly
+    const participations = (data && data.payload) || [];
+    if (!participations.length) {
+      throw new Error('No marketplace participations returned (raw shape: ' + JSON.stringify(data || {}).slice(0, 200) + ')');
+    }
+    // Try to find UK first, fall back to first entry
+    let chosen = participations.find(function(p) {
+      const mp = p.marketplace || {};
+      return mp.id === SP_API_MARKETPLACE_ID || mp.countryCode === 'GB' || mp.countryCode === 'UK';
+    }) || participations[0];
+    // The seller ID can live in different places depending on response version
+    const candidates = [
+      chosen && chosen.participation && chosen.participation.sellerId,
+      chosen && chosen.sellerId,
+      chosen && chosen.merchantId,
+      data && data.sellerId
+    ].filter(Boolean);
+    if (!candidates.length) {
+      throw new Error('Seller ID not found in any expected field. First participation keys: ' + Object.keys(chosen || {}).join(','));
+    }
+    spApiState.sellerId = candidates[0];
+    console.log('[SP-API] Seller ID fetched: ' + spApiState.sellerId);
+    return spApiState.sellerId;
+  } catch(e) {
+    console.error('[SP-API] getSellerId failed: ' + e.message);
+    throw e;
+  }
+}
+
+// r20: SP-API POST helper. Used for Reports API (createReport, etc.) and other
+// write-style endpoints. Same auth + rate-limit-retry pattern as spApiGet.
+async function spApiPost(pathAndQuery, body, retryCount) {
+  retryCount = retryCount || 0;
+  const token = await getSpApiAccessToken();
+  try {
+    const res = await axios.post(SP_API_HOST + pathAndQuery, body || {}, {
+      headers: {
+        'x-amz-access-token': token,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'CampaignPulse/1.0 (Language=Node.js)'
+      },
+      timeout: 30000
+    });
+    return res.data;
+  } catch(e) {
+    if (e.response && e.response.status === 429 && retryCount < 3) {
+      const wait = Math.pow(2, retryCount) * 1000;
+      console.log('[SP-API] POST rate limited on ' + pathAndQuery + ', waiting ' + wait + 'ms');
+      await new Promise(function(r){ setTimeout(r, wait); });
+      return spApiPost(pathAndQuery, body, retryCount + 1);
+    }
+    const status = e.response ? e.response.status : 'no-response';
+    const errBody = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    console.error('[SP-API] POST ' + pathAndQuery + ' failed (' + status + '): ' + errBody);
+    throw e;
+  }
+}
+
+// ── Sync the seller's product catalogue from SP-API into amazon_products ─────
+// Uses /listings/2021-08-01/items/{sellerId} to enumerate every SKU.
+// Now (r9) also fetches `relationships` so we can populate parent_sku/variation_theme
+// for child variants. Probe established that summaries+relationships is supported.
+async function syncAmazonCatalogue() {
+  if (!db) { console.log('[SP-API catalogue sync] No DB — skipping'); return { ok: false, error: 'no-db' }; }
+  if (!spApiConfigured()) { console.log('[SP-API catalogue sync] Not configured — skipping'); return { ok: false, error: 'not-configured' }; }
+  const startedAt = Date.now();
+  let total = 0, upserted = 0, errors = 0, withParent = 0;
+  try {
+    const sellerId = await getSellerId();
+    let pageToken = null;
+    let pageNum = 0;
+    do {
+      pageNum++;
+      const params = new URLSearchParams({
+        marketplaceIds: SP_API_MARKETPLACE_ID,
+        includedData: 'summaries,relationships',
+        pageSize: '20'
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const data = await spApiGet('/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?' + params.toString());
+      const items = (data && data.items) || [];
+      total += items.length;
+      for (const item of items) {
+        try {
+          const sku = item.sku;
+          const summary = (item.summaries && item.summaries[0]) || {};
+          const asin = summary.asin || null;
+          const title = summary.itemName || null;
+          let status = null;
+          if (summary.status) {
+            status = Array.isArray(summary.status) ? summary.status.join(',') : String(summary.status);
+          }
+          const imageUrl = (summary.mainImage && summary.mainImage.link) || null;
+          // Extract parent SKU + variation theme from relationships array.
+          // Shape (from probe): item.relationships[0].relationships[0].parentSkus[0]
+          // and ...variationTheme.theme.
+          // If empty array → standalone product (no parent).
+          let parentSku = null;
+          let variationTheme = null;
+          try {
+            const relGroup = (item.relationships && item.relationships[0]) || null;
+            const relInner = (relGroup && relGroup.relationships && relGroup.relationships[0]) || null;
+            if (relInner) {
+              if (relInner.parentSkus && relInner.parentSkus.length) parentSku = relInner.parentSkus[0];
+              if (relInner.variationTheme && relInner.variationTheme.theme) variationTheme = relInner.variationTheme.theme;
+            }
+          } catch(e) { /* malformed relationships — leave null */ }
+          if (parentSku) withParent++;
+          await db.query(
+            'INSERT INTO amazon_products (sku, asin, title, status, image_url, parent_sku, variation_theme, last_synced_at, raw_summary) ' +
+            'VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8) ' +
+            'ON CONFLICT (sku) DO UPDATE SET asin=$2, title=$3, status=$4, image_url=$5, parent_sku=$6, variation_theme=$7, last_synced_at=NOW(), raw_summary=$8',
+            [sku, asin, title, status, imageUrl, parentSku, variationTheme, JSON.stringify(summary)]
+          );
+          upserted++;
+        } catch(e) { errors++; console.error('[SP-API catalogue sync] Row error sku=' + (item.sku || '?') + ': ' + e.message); }
+      }
+      pageToken = (data && data.pagination && data.pagination.nextToken) || null;
+      if (pageNum >= 100) { console.log('[SP-API catalogue sync] Hit page cap (100), stopping pagination'); break; }
+    } while (pageToken);
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log('[SP-API catalogue sync] Done in ' + seconds + 's: ' + total + ' items pulled, ' + upserted + ' upserted, ' + withParent + ' had parent_sku, ' + errors + ' errors');
+    try {
+      // r35.6: changed from INTERVAL '2 hours' to INTERVAL '3 days'.
+      // Amazon's SP-API listings endpoint is eventually consistent — a single
+      // nightly sync can silently miss SKUs. The old 2-hour window flagged
+      // those as REMOVED after just one missed sync, wiping products from CP
+      // that were perfectly fine on Amazon. With 3 days, a product has to be
+      // missed by 3 consecutive nightly syncs before being flagged. Genuinely
+      // deleted listings still get flagged eventually, just not on one bad
+      // night. Recovery for the 274 products swept on 2026-05-20 lives in the
+      // boot block (one-time, gated by system_meta).
+      await db.query("UPDATE amazon_products SET status='REMOVED' WHERE last_synced_at < NOW() - INTERVAL '3 days'");
+    } catch(e) { console.error('[SP-API catalogue sync] Marking removed failed: ' + e.message); }
+    // r26: removed automatic deriveProductOwners() call here. The TF-IDF matcher
+    // was reassigning products to the most active agent (Satyam) every night,
+    // overriding manual assignments on products where owner_manual=FALSE.
+    // Owners are now set MANUALLY ONLY via the inline dropdown on each product card.
+    // New products start as Unassigned until a manager picks them up — that's the
+    // correct semantics for an op who genuinely owns the product.
+    return { ok: true, total: total, upserted: upserted, withParent: withParent, errors: errors, seconds: parseFloat(seconds) };
+  } catch(e) {
+    console.error('[SP-API catalogue sync] FAILED: ' + e.message);
+    return { ok: false, error: e.message, total: total, upserted: upserted, errors: errors };
+  }
+}
+
+// ── Sync recent orders from SP-API into amazon_orders ───────────────────────
+// Uses /orders/v0/orders. Pulls orders updated in the last N days (default 7).
+// We pull both orders and their line items so we can attribute revenue per SKU.
+async function syncAmazonOrders(daysBack, opts) {
+  if (!db) return { ok: false, error: 'no-db' };
+  if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
+  // r17: default 9 days (was 7) so the boundary day at the start of the window
+  // is fully captured. London-aligned sales display needs a full 24h per day.
+  daysBack = daysBack || 9;
+  opts = opts || {};
+  // r25c: optional LastUpdatedAfter mode. When provided (ISO timestamp), uses
+  // SP-API's LastUpdatedAfter param so we only refetch orders that have been
+  // CREATED OR UPDATED since that point. Reduces typical cron load by ~85%.
+  // Caller is responsible for tracking the high-water-mark timestamp; we update
+  // app_settings.last_orders_sync_at on success so the next call can pick it up.
+  const lastUpdatedAfter = opts.lastUpdatedAfter || null;
+  const startedAt = Date.now();
+  let total = 0, upserted = 0, errors = 0, itemsUpserted = 0, itemsSkipped = 0;
+  try {
+    // SP-API requires CreatedAfter / LastUpdatedAfter in ISO 8601 — and at least 2 minutes in the past
+    const after = new Date(Date.now() - daysBack * 86400000).toISOString();
+    let nextToken = null;
+    let pageNum = 0;
+    do {
+      pageNum++;
+      const params = new URLSearchParams({
+        MarketplaceIds: SP_API_MARKETPLACE_ID,
+        MaxResultsPerPage: '50'
+      });
+      if (lastUpdatedAfter) {
+        // Incremental mode — only orders changed since the last successful run
+        params.set('LastUpdatedAfter', lastUpdatedAfter);
+      } else {
+        // Full mode (manual button or first-ever run) — last N days
+        params.set('CreatedAfter', after);
+      }
+      if (nextToken) params.set('NextToken', nextToken);
+      const data = await spApiGet('/orders/v0/orders?' + params.toString());
+      const orders = (data && data.payload && data.payload.Orders) || [];
+      total += orders.length;
+      for (const o of orders) {
+        try {
+          const orderId = o.AmazonOrderId;
+          const purchaseDate = o.PurchaseDate || null;
+          const orderStatus = o.OrderStatus || null;
+          const orderTotal = o.OrderTotal && o.OrderTotal.Amount ? parseFloat(o.OrderTotal.Amount) : 0;
+          const currency = o.OrderTotal && o.OrderTotal.CurrencyCode ? o.OrderTotal.CurrencyCode : 'GBP';
+          const numItems = parseInt(o.NumberOfItemsShipped || 0) + parseInt(o.NumberOfItemsUnshipped || 0);
+
+          // r25c: skip-line-items optimisation. If the order is already in our DB
+          // AND its LastUpdateDate hasn't changed AND we already have items for it,
+          // we don't need to refetch line items — they don't change after pickup.
+          let needItemsFetch = true;
+          if (!opts.forceItemsRefetch) {
+            try {
+              const existing = await db.query(
+                "SELECT 1 FROM amazon_order_items WHERE order_id = $1 LIMIT 1",
+                [orderId]
+              );
+              const oLastUpdate = o.LastUpdateDate ? new Date(o.LastUpdateDate).getTime() : 0;
+              if (existing.rows.length > 0) {
+                // We already have items. Only refetch if order shows recent updates
+                // (status change, refund, etc.) — otherwise skip the API call.
+                const lastLoadedRes = await db.query(
+                  "SELECT EXTRACT(EPOCH FROM last_synced_at) * 1000 AS ts FROM amazon_orders WHERE order_id = $1",
+                  [orderId]
+                );
+                const lastLoadedMs = lastLoadedRes.rows.length ? parseFloat(lastLoadedRes.rows[0].ts) : 0;
+                if (oLastUpdate > 0 && lastLoadedMs > 0 && oLastUpdate <= lastLoadedMs) {
+                  needItemsFetch = false;
+                }
+              }
+            } catch(e) { /* fall through — fetch items anyway */ }
+          }
+
+          await db.query(
+            'INSERT INTO amazon_orders (order_id, purchase_date, status, order_total, currency, num_items, last_synced_at, raw_order) ' +
+            'VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7) ' +
+            'ON CONFLICT (order_id) DO UPDATE SET status=$3, order_total=$4, currency=$5, num_items=$6, last_synced_at=NOW(), raw_order=$7',
+            [orderId, purchaseDate, orderStatus, orderTotal, currency, numItems, JSON.stringify(o)]
+          );
+          upserted++;
+
+          if (!needItemsFetch) { itemsSkipped++; continue; }
+
+          // r29r: small delay between orderItems calls to stay under SP-API rate limit.
+          // Endpoint allows ~0.5 req/s sustained; we now pace at ~3 req/s (333ms) which
+          // is still over-budget but the existing 429 retry will catch what slips through.
+          // Without this, ~2000 orders in a single sync burst hits 429 repeatedly.
+          await new Promise(function(r){ setTimeout(r, 350); });
+
+          // Pull line items — separate API call per order
+          try {
+            const itemsData = await spApiGet('/orders/v0/orders/' + encodeURIComponent(orderId) + '/orderItems');
+            const items = (itemsData && itemsData.payload && itemsData.payload.OrderItems) || [];
+            for (const it of items) {
+              try {
+                const itemPrice = it.ItemPrice && it.ItemPrice.Amount ? parseFloat(it.ItemPrice.Amount) : 0;
+                const qty = parseInt(it.QuantityOrdered || 0);
+                await db.query(
+                  'INSERT INTO amazon_order_items (order_id, asin, sku, title, quantity, item_price, currency) ' +
+                  'VALUES ($1,$2,$3,$4,$5,$6,$7) ' +
+                  'ON CONFLICT (order_id, sku) DO UPDATE SET quantity=$5, item_price=$6, title=$4',
+                  [orderId, it.ASIN || null, it.SellerSKU || '', it.Title || null, qty, itemPrice, (it.ItemPrice && it.ItemPrice.CurrencyCode) || 'GBP']
+                );
+                itemsUpserted++;
+              } catch(e) { errors++; console.error('[SP-API orders sync] Item error: ' + e.message); }
+            }
+          } catch(e) { errors++; console.error('[SP-API orders sync] Items fetch error for order ' + orderId + ': ' + e.message); }
+        } catch(e) { errors++; console.error('[SP-API orders sync] Order error: ' + e.message); }
+      }
+      nextToken = (data && data.payload && data.payload.NextToken) || null;
+      if (pageNum >= 100) { console.log('[SP-API orders sync] Hit page cap (100), stopping'); break; }
+    } while (nextToken);
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log('[SP-API orders sync] Done in ' + seconds + 's: ' + total + ' orders, ' + upserted + ' upserted, ' + itemsUpserted + ' items fetched, ' + itemsSkipped + ' items skipped (already current), ' + errors + ' errors' + (lastUpdatedAfter ? ' [incremental from ' + lastUpdatedAfter + ']' : ' [full ' + daysBack + 'd]'));
+
+    // r25c: persist high-water-mark for the next incremental run.
+    // Backed off 60s from now to be safe against clock skew / very recent updates.
+    // Stored inside the existing app_settings.settings JSONB blob (id=1).
+    try {
+      const hwm = new Date(Date.now() - 60000).toISOString();
+      await db.query(
+        "UPDATE app_settings SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{last_orders_sync_at}', to_jsonb($1::text)), updated_at = NOW() WHERE id = 1",
+        [hwm]
+      );
+    } catch(e) { /* non-fatal */ }
+
+    return { ok: true, total: total, upserted: upserted, itemsUpserted: itemsUpserted, itemsSkipped: itemsSkipped, errors: errors, seconds: parseFloat(seconds), mode: lastUpdatedAfter ? 'incremental' : 'full' };
+  } catch(e) {
+    console.error('[SP-API orders sync] FAILED: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// r20: SP-API signal refresher — populates amazon_pricing_signals for active ASINs.
+// One row per ASIN. Refreshed by cron at 03:30 London (after catalogue 02:30,
+// before orders 06:00). Stale > 36h shows "—" on UI.
+//
+// Signals fetched per ASIN:
+//   1. Reviews count + avg ........... /catalog/2022-04-01/items/{ASIN}?includedData=summaries
+//   2. Inventory (fulfillable qty) .... /fba/inventory/v1/summaries
+//   3. Last content update ............ /listings/2021-08-01/items/{sellerId}/{sku}?includedData=summaries
+//   4. Price vs lowest competitor ..... /products/pricing/v0/items/{ASIN}/offers?ItemCondition=New
+//   5. Velocity 30d (computed from amazon_orders) → stock_cover_days = fulfillable_qty / velocity
+// Buy Box win % is NOT here — it comes from amazon_traffic_snapshots (path b).
+// ════════════════════════════════════════════════════════════════════════════
+async function refreshAmazonPricingSignals(opts) {
+  opts = opts || {};
+  const limit = opts.limit || 9999;  // cap for ad-hoc runs; cron passes no limit
+  const onlyAsin = opts.onlyAsin || null;
+  // r21: includeAll=true forces refresh of ALL BUYABLE ASINs incl. dormant.
+  // Default (false) restricts to ASINs sold in the last 60 days — same window
+  // as the "active products" filter on the dashboard. Cuts cron from ~247 ASINs
+  // down to ~71, saving ~10 min and ~70% of SP-API quota.
+  const includeAll = opts.includeAll === true;
+  if (!db) return { ok: false, error: 'no-db' };
+  if (!spApiConfigured()) return { ok: false, error: 'not-configured' };
+
+  // 1. Pick the ASINs to refresh — every BUYABLE ASIN, OR the explicit one if onlyAsin is set
+  let asinRows;
+  try {
+    if (onlyAsin) {
+      asinRows = (await db.query(
+        "SELECT DISTINCT asin, sku FROM amazon_products WHERE asin = $1 LIMIT 1",
+        [onlyAsin]
+      )).rows;
+    } else if (includeAll) {
+      // Cron path with explicit include-all override (rare, e.g. one-shot recovery)
+      asinRows = (await db.query(
+        "SELECT DISTINCT ON (asin) asin, sku FROM amazon_products " +
+        "WHERE asin IS NOT NULL AND status LIKE '%BUYABLE%' " +
+        "ORDER BY asin LIMIT $1",
+        [limit]
+      )).rows;
+    } else {
+      // r21 default: only BUYABLE ASINs that sold something in the last 60 days.
+      // Dormant ASINs keep their last-known signals (which the UI already treats
+      // as stale > 36h and shows as "—"). Big quota saving.
+      asinRows = (await db.query(
+        "SELECT DISTINCT ON (p.asin) p.asin, p.sku FROM amazon_products p " +
+        "WHERE p.asin IS NOT NULL AND p.status LIKE '%BUYABLE%' " +
+        "AND EXISTS (" +
+        "  SELECT 1 FROM amazon_order_items i " +
+        "  JOIN amazon_orders o ON o.order_id = i.order_id " +
+        "  WHERE i.asin = p.asin " +
+        "  AND o.purchase_date >= NOW() - INTERVAL '60 days' " +
+        "  AND o.status NOT IN ('Cancelled','Canceled')" +
+        ") " +
+        "ORDER BY p.asin LIMIT $1",
+        [limit]
+      )).rows;
+    }
+  } catch(e) {
+    console.error('[r20 signals] ASIN picker failed: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+
+  console.log('[r20 signals] refreshing ' + asinRows.length + ' ASINs' + (onlyAsin ? ' (single)' : (includeAll ? ' (include-all)' : ' (active 60d only — r21 optimization)')));
+  const startedAt = Date.now();
+  let okCount = 0, errCount = 0;
+
+  // 2. Pre-compute 30-day velocity for ALL these ASINs in one query (faster than per-ASIN)
+  let velocityMap = {};
+  try {
+    const velRes = await db.query(
+      "SELECT i.asin, SUM(i.quantity)::float / 30.0 AS velocity " +
+      "FROM amazon_order_items i JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '30 days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin = ANY($1) " +
+      "GROUP BY i.asin",
+      [asinRows.map(function(r){ return r.asin; })]
+    );
+    velRes.rows.forEach(function(r){ velocityMap[r.asin] = parseFloat(r.velocity || 0); });
+  } catch(e) {
+    console.error('[r20 signals] velocity query failed: ' + e.message);
+  }
+
+  // 3. Walk each ASIN and fetch its signals. Each individual fetch is wrapped so
+  // one failure doesn't abort the run — partial data is better than no data.
+  let sellerId;
+  try { sellerId = await getSellerId(); } catch(e) { console.error('[r20 signals] sellerId fetch failed: ' + e.message); return { ok: false, error: 'no-seller-id' }; }
+
+  for (const row of asinRows) {
+    const asin = row.asin;
+    const sku = row.sku;
+    const sig = {
+      asin: asin,
+      your_price: null,
+      lowest_competitor_price: null,
+      price_vs_lowest: null,
+      reviews_count: null,
+      reviews_avg: null,
+      last_content_update: null,
+      fulfillable_qty: null,
+      velocity_30d: velocityMap[asin] != null ? velocityMap[asin] : 0,
+      stock_cover_days: null,
+      fulfillment_mode: null,
+      last_error: null
+    };
+    const errors = [];
+
+    // 3a. Catalog item — reviews + browse signals
+    try {
+      const cat = await spApiGet(
+        '/catalog/2022-04-01/items/' + encodeURIComponent(asin) +
+        '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
+        '&includedData=summaries'
+      );
+      const summary = (cat && cat.summaries && cat.summaries[0]) || {};
+      // SP-API may surface reviews under different keys. Try a few.
+      // Note: SP-API does NOT consistently expose review count/rating — many ASINs return nothing
+      // here. We accept patchy data per spec.
+      const rc = summary.totalRatings || summary.numberOfReviews || (summary.itemRatingsAndReviews && summary.itemRatingsAndReviews.totalRatings);
+      const ra = summary.averageRating || (summary.itemRatingsAndReviews && summary.itemRatingsAndReviews.averageRating);
+      if (rc != null) sig.reviews_count = parseInt(rc) || null;
+      if (ra != null) sig.reviews_avg = parseFloat(ra) || null;
+    } catch(e) {
+      errors.push('catalog: ' + (e.response && e.response.status || e.message));
+    }
+
+    // 3b + 3c (r20d): Walk EVERY SKU for this ASIN and pull both
+    //   - last content update (from listings summaries)
+    //   - FBM warehouse stock (from listings.fulfillmentAvailability where
+    //     fulfillmentChannelCode='DEFAULT' — i.e. merchant-fulfilled)
+    // Then add FBA fulfillable on top via the inventory call.
+    //
+    // Why this matters: many of FK Sports' ASINs have BOTH an FBA SKU (often
+    // CLOSED with 0 units) and an FBM SKU (Active with 500 in the warehouse).
+    // Pre-r20d the code only saw the FBA side and reported "0 stock cover" for
+    // products that actually had plenty of warehouse inventory.
+    //
+    // Convention agreed with Bobby:
+    //   - Any SKU containing "FBA" (case-insensitive) is FBA-fulfilled
+    //   - Anything else is MFN/FBM
+    //   - fulfillment_mode is 'fba' / 'fbm' / 'mixed' / null based on what's present
+    let allSkus = [];
+    try {
+      const skuRows = await db.query(
+        "SELECT sku, status FROM amazon_products WHERE asin=$1",
+        [asin]
+      );
+      allSkus = skuRows.rows;
+    } catch(e) {
+      // Fall back to just the picked SKU
+      if (sku) allSkus = [{ sku: sku, status: '' }];
+    }
+
+    let fbmQty = 0;        // sum of FBM/warehouse fulfillable across all SKUs
+    let hasFbaSku = false; // any SKU named like FBA
+    let hasFbmSku = false; // any SKU NOT named like FBA
+    for (const r of allSkus) {
+      const sk = r.sku;
+      if (!sk) continue;
+      const isFbaSku = /fba/i.test(sk);
+      if (isFbaSku) hasFbaSku = true; else hasFbmSku = true;
+
+      try {
+        // includedData=summaries,offers — `offers` carries fulfillmentAvailability
+        // for SP-API listings v2021-08-01. summaries gives lastUpdatedDate.
+        const list = await spApiGet(
+          '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sk) +
+          '?marketplaceIds=' + SP_API_MARKETPLACE_ID +
+          '&includedData=summaries,offers'
+        );
+        // Last content update — keep the MOST RECENT lastUpdatedDate across SKUs
+        // (using the freshest one — at least one SKU was updated then)
+        const summary = (list && list.summaries && list.summaries[0]) || {};
+        if (summary.lastUpdatedDate) {
+          const d = String(summary.lastUpdatedDate).slice(0, 10);
+          if (!sig.last_content_update || d > sig.last_content_update) {
+            sig.last_content_update = d;
+          }
+        }
+        // FBM stock — fulfillmentAvailability lives on offers OR at the top of
+        // the response depending on the API version. Try both.
+        const fa = (list && list.fulfillmentAvailability)
+                   || (list && list.offers && list.offers[0] && list.offers[0].fulfillmentAvailability)
+                   || [];
+        if (Array.isArray(fa)) {
+          fa.forEach(function(entry) {
+            const channel = String(entry.fulfillmentChannelCode || entry.fulfillment_channel_code || '').toUpperCase();
+            const qty = entry.quantity != null ? parseInt(entry.quantity) : null;
+            if (qty == null || !isFinite(qty)) return;
+            // DEFAULT = merchant-fulfilled (FBM/warehouse)
+            // AMAZON_NA / AMAZON_EU / AMAZON_* = FBA — already counted via inventory call
+            if (channel === 'DEFAULT' || channel === '' || channel === 'MERCHANT') {
+              fbmQty += qty;
+            }
+          });
+        }
+      } catch(e) {
+        errors.push('listings(' + sk + '): ' + (e.response && e.response.status || e.message));
+      }
+    }
+
+    // 3c. Inventory (FBA fulfillable qty) — same call as before but now ADDED
+    // to the FBM total rather than replacing it.
+    let fbaQty = 0;
+    let fbaCallSucceeded = false;
+    try {
+      const inv = await spApiGet(
+        '/fba/inventory/v1/summaries' +
+        '?details=true' +
+        '&granularityType=Marketplace' +
+        '&granularityId=' + SP_API_MARKETPLACE_ID +
+        '&marketplaceIds=' + SP_API_MARKETPLACE_ID
+      );
+      const summaries = (inv && inv.payload && inv.payload.inventorySummaries) || [];
+      const matches = summaries.filter(function(s){ return s.asin === asin; });
+      fbaCallSucceeded = true;
+      matches.forEach(function(m) {
+        const detail = m.inventoryDetails || {};
+        const candidates = [
+          detail.fulfillableQuantity,
+          detail.FulfillableQuantity,
+          m.totalQuantity
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+          const v = candidates[i];
+          if (v != null) {
+            const n = parseInt(v);
+            if (isFinite(n)) { fbaQty += n; break; }
+          }
+        }
+      });
+    } catch(e) {
+      errors.push('inventory: ' + (e.response && e.response.status || e.message));
+    }
+
+    // Combine — total stock available across all channels.
+    sig.fulfillable_qty = fbaQty + fbmQty;
+    if (hasFbaSku && hasFbmSku) sig.fulfillment_mode = 'mixed';
+    else if (hasFbmSku) sig.fulfillment_mode = 'fbm';
+    else if (hasFbaSku) sig.fulfillment_mode = 'fba';
+    else sig.fulfillment_mode = null;
+
+    // 3d. Price vs lowest competitor — Product Pricing v0 offers
+    // r20 fix: SP-API returns prices in MULTIPLE shapes depending on the marketplace
+    // and seller history. Tolerate every shape we've seen rather than the one we
+    // hoped for. Source-of-truth fields can live in:
+    //   - Summary.LowestPrices[].LandedPrice.Amount   (most common)
+    //   - Summary.LowestPrices[].ListingPrice.Amount  (when shipping is excluded)
+    //   - Summary.BuyBoxPrices[].LandedPrice.Amount   (Buy Box winner only)
+    //   - Offers[].ListingPrice.Amount                (raw offers — pick min after excluding ours)
+    // Condition field is also inconsistent: 'New' / 'new' / 'NEW'. Treat case-insensitively.
+    try {
+      const pr = await spApiGet(
+        '/products/pricing/v0/items/' + encodeURIComponent(asin) + '/offers' +
+        '?MarketplaceId=' + SP_API_MARKETPLACE_ID +
+        '&ItemCondition=New&CustomerType=Consumer'
+      );
+      const summary = (pr && pr.payload && pr.payload.Summary) || {};
+      const offers = (pr && pr.payload && pr.payload.Offers) || [];
+
+      // Helper — pull a numeric Amount from a price-object shape, trying common keys.
+      function priceAmount(obj) {
+        if (!obj) return null;
+        // Try LandedPrice → ListingPrice → Price (sometimes flat) → top-level Amount
+        const candidates = [
+          obj.LandedPrice && obj.LandedPrice.Amount,
+          obj.ListingPrice && obj.ListingPrice.Amount,
+          obj.Price && obj.Price.Amount,
+          obj.Amount
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+          const v = candidates[i];
+          if (v != null && isFinite(parseFloat(v))) return parseFloat(v);
+        }
+        return null;
+      }
+      function isNew(condStr) {
+        return String(condStr || '').toLowerCase() === 'new';
+      }
+
+      // Your price — try the offer matching our seller, then fall back to Buy Box if it's ours
+      const myOffer = offers.find(function(o){ return o.SellerId === sellerId; });
+      if (myOffer) {
+        const p = priceAmount(myOffer);
+        if (p != null) sig.your_price = p;
+      }
+      // Fallback: BuyBoxPrices in Summary contains seller-winning prices
+      if (sig.your_price == null) {
+        const bb = (summary.BuyBoxPrices || []).filter(function(b){ return isNew(b.condition || b.Condition); });
+        for (const b of bb) {
+          // Some payloads include sellerId on Buy Box entry
+          if (b.sellerId === sellerId || b.SellerId === sellerId) {
+            const p = priceAmount(b);
+            if (p != null) { sig.your_price = p; break; }
+          }
+        }
+      }
+
+      // Lowest competitor — try every documented place, take the minimum.
+      let candidatePrices = [];
+      // 1. Summary.LowestPrices (any "new" entry)
+      (summary.LowestPrices || []).forEach(function(lp) {
+        if (!isNew(lp.condition || lp.Condition)) return;
+        const p = priceAmount(lp);
+        if (p != null) candidatePrices.push(p);
+      });
+      // 2. Summary.BuyBoxPrices (any "new" entry — even if not ours)
+      (summary.BuyBoxPrices || []).forEach(function(bp) {
+        if (!isNew(bp.condition || bp.Condition)) return;
+        const p = priceAmount(bp);
+        if (p != null) candidatePrices.push(p);
+      });
+      // 3. Raw Offers — exclude our own seller, take new condition only
+      offers.forEach(function(o) {
+        if (o.SellerId === sellerId) return;
+        const cond = o.SubCondition || o.condition || (o.ItemCondition && o.ItemCondition);
+        // SP-API offers from /items/{asin}/offers with ItemCondition=New filter often
+        // omit the condition field entirely (already filtered). Don't reject on missing condition.
+        if (cond && !isNew(cond)) return;
+        const p = priceAmount(o);
+        if (p != null) candidatePrices.push(p);
+      });
+      // De-dupe and pick the minimum, EXCLUDING our own price (it can leak in via Summary).
+      // r20b fix: if after excluding our price the pool is empty, that means we have
+      // no genuine competitor offers — return null, do NOT fall back to the pool that
+      // contains our own price (which would falsely report price_vs_lowest = 0).
+      if (candidatePrices.length) {
+        if (sig.your_price != null) {
+          const filtered = candidatePrices.filter(function(p){ return Math.abs(p - sig.your_price) > 0.01; });
+          if (filtered.length) {
+            sig.lowest_competitor_price = parseFloat(Math.min.apply(null, filtered).toFixed(2));
+          }
+          // else: leave null — no real competitors, we are the only "new" offer
+        } else {
+          // We don't know our own price (rare) — take the minimum of whatever's there
+          sig.lowest_competitor_price = parseFloat(Math.min.apply(null, candidatePrices).toFixed(2));
+        }
+      }
+      if (sig.your_price != null && sig.lowest_competitor_price != null) {
+        sig.price_vs_lowest = parseFloat((sig.your_price - sig.lowest_competitor_price).toFixed(2));
+      }
+    } catch(e) {
+      errors.push('pricing: ' + (e.response && e.response.status || e.message));
+    }
+
+    // 4. Compute stock cover days from fulfillable + velocity
+    if (sig.fulfillable_qty != null && sig.velocity_30d > 0) {
+      sig.stock_cover_days = parseFloat((sig.fulfillable_qty / sig.velocity_30d).toFixed(1));
+    } else if (sig.fulfillable_qty != null && sig.fulfillable_qty > 0 && sig.velocity_30d === 0) {
+      // In stock but no recent sales — show large number (effectively "infinite cover")
+      sig.stock_cover_days = 999;
+    }
+
+    if (errors.length) sig.last_error = errors.join(' | ');
+
+    // 5. Upsert into cache table
+    try {
+      await db.query(
+        "INSERT INTO amazon_pricing_signals " +
+        "(asin, your_price, lowest_competitor_price, price_vs_lowest, reviews_count, reviews_avg, " +
+        " last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, fulfillment_mode, last_error, fetched_at) " +
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) " +
+        "ON CONFLICT (asin) DO UPDATE SET " +
+        "your_price=EXCLUDED.your_price, lowest_competitor_price=EXCLUDED.lowest_competitor_price, " +
+        "price_vs_lowest=EXCLUDED.price_vs_lowest, reviews_count=EXCLUDED.reviews_count, " +
+        "reviews_avg=EXCLUDED.reviews_avg, last_content_update=EXCLUDED.last_content_update, " +
+        "fulfillable_qty=EXCLUDED.fulfillable_qty, velocity_30d=EXCLUDED.velocity_30d, " +
+        "stock_cover_days=EXCLUDED.stock_cover_days, fulfillment_mode=EXCLUDED.fulfillment_mode, " +
+        "last_error=EXCLUDED.last_error, fetched_at=NOW()",
+        [asin, sig.your_price, sig.lowest_competitor_price, sig.price_vs_lowest, sig.reviews_count,
+         sig.reviews_avg, sig.last_content_update, sig.fulfillable_qty, sig.velocity_30d,
+         sig.stock_cover_days, sig.fulfillment_mode, sig.last_error]
+      );
+      okCount++;
+    } catch(e) {
+      console.error('[r20 signals] upsert failed for ' + asin + ': ' + e.message);
+      errCount++;
+    }
+
+    // Tiny pause between ASINs — SP-API rate limits on the tightest endpoints (Pricing) are
+    // 0.5 req/sec burst 1. With 4 endpoints per ASIN, ~600ms between ASINs is conservative.
+    await new Promise(function(r){ setTimeout(r, 600); });
+  }
+
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.log('[r20 signals] done in ' + elapsed + 's — ok=' + okCount + ' err=' + errCount);
+  return { ok: true, refreshed: okCount, errors: errCount, elapsedSec: elapsed };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// r20: Sales-and-Traffic Report ingest (Buy Box win % path b).
+// Calls Reports API — async flow: createReport → poll → download document.
+// One row per (asin, report_date) in amazon_traffic_snapshots.
+// Card metric is AVG(buy_box_pct) over last 7 days where data exists.
+// Backfill endpoint: POST /api/admin/backfill-traffic?days=N (cap 30).
+// ════════════════════════════════════════════════════════════════════════════
+async function fetchSalesAndTrafficReport(reportDate) {
+  // reportDate is a YYYY-MM-DD string for a SINGLE day. Amazon report data
+  // typically lags 24h, so the cron at 04:00 London asks for "yesterday".
+  if (!db || !spApiConfigured()) return { ok: false, error: 'not-configured' };
+  const dateStr = String(reportDate).slice(0, 10);
+
+  try {
+    // Step 1 — request the report. Use childAsin granularity so we get per-ASIN rows.
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: dateStr + 'T00:00:00Z',
+      dataEndTime: dateStr + 'T23:59:59Z',
+      reportOptions: {
+        dateGranularity: 'DAY',
+        asinGranularity: 'CHILD'
+      }
+    });
+    const reportId = createRes && createRes.reportId;
+    if (!reportId) throw new Error('no reportId returned');
+    console.log('[r20 traffic] requested report for ' + dateStr + ' — id=' + reportId);
+
+    // Step 2 — poll until DONE (or fail after ~3 min)
+    let docId = null;
+    const pollStart = Date.now();
+    const maxWait = 180000; // 3 minutes
+    while (Date.now() - pollStart < maxWait) {
+      await new Promise(function(r){ setTimeout(r, 8000); });
+      const status = await spApiGet('/reports/2021-06-30/reports/' + encodeURIComponent(reportId));
+      const procStatus = status && status.processingStatus;
+      if (procStatus === 'DONE') {
+        docId = status.reportDocumentId;
+        break;
+      } else if (procStatus === 'CANCELLED' || procStatus === 'FATAL') {
+        throw new Error('report status ' + procStatus);
+      }
+    }
+    if (!docId) throw new Error('report polling timed out');
+
+    // Step 3 — fetch the document URL, then download + parse.
+    // r35.10 fix: SP-API Reports v2021-06-30 returns documents with an optional
+    // compressionAlgorithm field ('GZIP' or absent). Previous code downloaded
+    // as 'text' and JSON.parse'd directly — which silently failed for ANY gzipped
+    // response with "Unexpected token at position 0". That's why
+    // amazon_traffic_snapshots stayed empty since launch. Pattern mirrors the
+    // working search-term download path at line ~5032.
+    const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
+    const docUrl = docMeta && docMeta.url;
+    if (!docUrl) throw new Error('no document url');
+    const compression = (docMeta && docMeta.compressionAlgorithm) || null;
+    const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'arraybuffer' });
+    let bodyText;
+    try {
+      if (compression === 'GZIP') {
+        const zlib = require('zlib');
+        bodyText = zlib.gunzipSync(Buffer.from(docRes.data)).toString('utf8');
+      } else {
+        // No compression — just decode the bytes as UTF-8 text
+        bodyText = Buffer.from(docRes.data).toString('utf8');
+      }
+    } catch(decompErr) {
+      throw new Error('decompression failed (compression=' + compression + '): ' + decompErr.message);
+    }
+    let payload;
+    try { payload = JSON.parse(bodyText); }
+    catch(e) {
+      // Include first 120 chars of body for debugging silent format changes
+      throw new Error('failed to parse report JSON: ' + e.message + ' | first 120 chars: ' + bodyText.slice(0, 120));
+    }
+
+    // Step 4 — extract per-ASIN rows. Shape:
+    // payload.salesAndTrafficByAsin = [{ parentAsin, childAsin, salesByAsin: {...}, trafficByAsin: {...} }]
+    // r35.11c FIX: parser was reading r.traffic and r.sales — Amazon actually sends
+    // r.trafficByAsin and r.salesByAsin. Has been silently writing NULLs to every
+    // sessions/buy_box/page_views/units_ordered field since CP launched. Caught
+    // 2026-05-25 via the traffic-debug-full payload dump showing the real shape.
+    const rows = (payload && payload.salesAndTrafficByAsin) || [];
+    let inserted = 0;
+    for (const r of rows) {
+      const asin = r.childAsin || r.parentAsin;
+      if (!asin) continue;
+      const traffic = r.trafficByAsin || {};
+      const sales = r.salesByAsin || {};
+      const buyBoxPct = traffic.buyBoxPercentage != null ? parseFloat(traffic.buyBoxPercentage) : null;
+      const sessions = traffic.sessions != null ? parseInt(traffic.sessions) : null;
+      const pageViews = traffic.pageViews != null ? parseInt(traffic.pageViews) : null;
+      const unitsOrdered = sales.unitsOrdered != null ? parseInt(sales.unitsOrdered) : null;
+      const orderedSales = (sales.orderedProductSales && sales.orderedProductSales.amount != null) ?
+        parseFloat(sales.orderedProductSales.amount) : null;
+      try {
+        await db.query(
+          "INSERT INTO amazon_traffic_snapshots " +
+          "(asin, report_date, buy_box_pct, sessions, page_views, units_ordered, ordered_product_sales, fetched_at) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,NOW()) " +
+          "ON CONFLICT (asin, report_date) DO UPDATE SET " +
+          "buy_box_pct=EXCLUDED.buy_box_pct, sessions=EXCLUDED.sessions, " +
+          "page_views=EXCLUDED.page_views, units_ordered=EXCLUDED.units_ordered, " +
+          "ordered_product_sales=EXCLUDED.ordered_product_sales, fetched_at=NOW()",
+          [asin, dateStr, buyBoxPct, sessions, pageViews, unitsOrdered, orderedSales]
+        );
+        inserted++;
+      } catch(e) {
+        console.error('[r20 traffic] insert failed for ' + asin + ' ' + dateStr + ': ' + e.message);
+      }
+    }
+    console.log('[r20 traffic] ' + dateStr + ' — ' + inserted + ' rows inserted');
+    return { ok: true, date: dateStr, rows: inserted };
+  } catch(e) {
+    console.error('[r20 traffic] FAILED for ' + dateStr + ': ' + e.message);
+    return { ok: false, date: dateStr, error: e.message };
+  }
+}
+
+// END SP-API module
+// ════════════════════════════════════════════════════════════════════════════
+
+// r32b: cached active-agent prefix list. Refreshed every 5 minutes so new agents
+// added to users table appear without restart. Falls back to env override
+// (ACTIVE_AGENT_PREFIXES, comma-separated like "Aryan |,Satyam |") if DB unreachable
+// or to catch edge cases where user.name doesn't match campaign prefix exactly.
+let _activeAgentPrefixesCache = { prefixes: null, expiresAt: 0 };
+async function getActiveAgentPrefixes() {
+  const now = Date.now();
+  if (_activeAgentPrefixesCache.prefixes && now < _activeAgentPrefixesCache.expiresAt) {
+    return _activeAgentPrefixesCache.prefixes;
+  }
+  const set = new Set();
+  // 1) Env override — always includes these regardless of DB state.
+  // Use this for edge cases where campaign prefix differs from user.name (e.g.
+  // legacy campaigns kept for reference, manager-owned campaigns).
+  const envPrefixes = String(process.env.ACTIVE_AGENT_PREFIXES || '')
+    .split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  envPrefixes.forEach(function(p){ set.add(p); });
+  // 2) Auto-discovery from users table — active Amazon staff (agent, manager, owner).
+  // Build prefix as "<FirstWord> |" because campaigns use that pattern.
+  // Uses canonicalAgent() to handle "Aryan Tomar" → "Aryan" so "Aryan |" prefix lands.
+  if (db) {
+    try {
+      const uRes = await db.query(
+        "SELECT name FROM users " +
+        "WHERE is_active = TRUE " +
+        "  AND LOWER(department) IN ('amazon','manager') " +
+        "  AND LOWER(role) IN ('agent','manager','owner','admin')"
+      );
+      uRes.rows.forEach(function(r) {
+        const raw = String(r.name || '').trim();
+        if (!raw) return;
+        // canonicalAgent maps "Aryan Tomar" → "Aryan", "satyam" → "Satyam"
+        const canonical = canonicalAgent(raw);
+        if (canonical) set.add(canonical + ' |');
+        // Also include the first word as a fallback in case the user has an
+        // unmapped name like "Kunal Sharma" — first word "Kunal" + " |".
+        const firstWord = raw.split(/\s+/)[0];
+        if (firstWord && firstWord.length >= 2 && firstWord.length <= 25) {
+          set.add(firstWord + ' |');
+        }
+      });
+    } catch(e) {
+      console.error('[r32b agent-prefixes] DB query error: ' + e.message + ' — falling back to env');
+    }
+  }
+  const prefixes = Array.from(set);
+  if (prefixes.length === 0) {
+    // Final safety: never return empty — would filter all campaigns out.
+    // Fall back to hardcoded defaults.
+    prefixes.push('Aryan |', 'Satyam |');
+    console.warn('[r32b agent-prefixes] no agents found in DB or env — using hardcoded fallback');
+  }
+  _activeAgentPrefixesCache = { prefixes: prefixes, expiresAt: now + 5 * 60 * 1000 };
+  console.log('[r32b agent-prefixes] resolved: ' + prefixes.join(', '));
+  return prefixes;
+}
+
+// r33c: list of canonical agent names eligible for daily Amazon task assignment.
+// Used by runDailyScheduler — was hardcoded ['Aryan','Satyam']. Now reads the
+// same users table as getActiveAgentPrefixes so adding an Amazon agent to user
+// management (e.g. Kunal) automatically gives them daily-task coverage.
+// Falls back to ['Aryan','Satyam'] if DB lookup fails or returns empty.
+async function getActiveAmazonAgents() {
+  if (!db) return ['Aryan', 'Satyam'];
+  try {
+    const r = await db.query(
+      "SELECT name FROM users " +
+      "WHERE is_active = TRUE " +
+      "  AND LOWER(department) IN ('amazon','manager') " +
+      "  AND LOWER(role) IN ('agent','manager','owner','admin') " +
+      "  AND name IS NOT NULL AND TRIM(name) <> ''"
+    );
+    const names = r.rows
+      .map(function(u){ return u.name.trim().split(/\s+/)[0]; })
+      .map(function(f){ return f.charAt(0).toUpperCase() + f.slice(1).toLowerCase(); })
+      .filter(function(s){ return s.length >= 2; });
+    const unique = Array.from(new Set(names));
+    if (unique.length === 0) {
+      console.warn('[r33c amazon-agents] no agents found — using hardcoded fallback');
+      return ['Aryan', 'Satyam'];
+    }
+    return unique;
+  } catch(e) {
+    console.error('[r33c amazon-agents] DB query error: ' + e.message + ' — using hardcoded fallback');
+    return ['Aryan', 'Satyam'];
+  }
+}
+
+async function fetchCampaigns() {
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = Object.assign({}, getHeaders(profileId, token), {
+    'Content-Type': 'application/vnd.spCampaign.v3+json',
+    'Accept': 'application/vnd.spCampaign.v3+json'
+  });
+  // r32: include PAUSED campaigns too. Amazon's "Portfolio not delivering" state shows
+  // up as ENABLED campaign in a paused/issue-state portfolio — campaigns can still have
+  // spend/sales while in this state. ARCHIVED stays excluded (truly dead).
+  const res = await axios.post(
+    'https://advertising-api-eu.amazon.com/sp/campaigns/list',
+    { stateFilter: { include: ['ENABLED', 'PAUSED'] } },
+    { headers: headers }
+  );
+  const rawCampaigns = res.data.campaigns || res.data || [];
+  // r32b: filter to campaigns owned by active agents (prefix in name).
+  // Without this, broadening to ENABLED+PAUSED dumps in ~20 months of dead campaigns
+  // ("Auto - 30/9/2022" style) that the team isn't working on anymore.
+  // Prefix list comes from users table (Option B hybrid — auto-detect + env override).
+  const activePrefixes = await getActiveAgentPrefixes();
+  const campaigns = rawCampaigns.filter(function(c) {
+    const name = String(c.name || '');
+    return activePrefixes.some(function(p){ return name.startsWith(p); });
+  });
+  console.log('[r32b] Campaigns fetched: ' + rawCampaigns.length + ' raw → ' + campaigns.length + ' agent-owned');
+  return campaigns;
+}
+
+// r30d: four independent report streams. todayOnly is THE source of truth for budget
+// alerts (out-of-budget, budget-low, high-ACOS) — matches what pre-r30 code did.
+//   - todayOnly: today's summary. Powers ALL three 15-min alerts. Fast refresh (90 min).
+//   - summary7d: 7-day rollup. Source of truth for Campaign Health + Action Centre rules.
+//   - summary30d: 30-day rollup. Powers 30d toggle on Campaign Health.
+//   - daily7d: per-day rows over 7 days. Powers modal sparkline + 3-day consecutive rules.
+// All use Amazon's standard attribution (sales1d for today, sales7d for 7d, sales30d for 30d).
+//
+// r30e: PRIORITY ordering + global throttle. Amazon Ads API returns 425 (Too Early) if
+// we request reports too fast. Highest priority first so when throttled, we lose the
+// least-critical streams. Only ONE new POST per sync; the rest poll any pending reports.
+const REPORT_STREAM_PRIORITY = ['todayOnly', 'summary7d', 'daily7d', 'summary30d'];
+let _lastReportPostAt = 0;
+const REPORT_POST_INTERVAL_MS = 60 * 1000;  // min 1 min between new report POSTs
+
+let reportState = {
+  todayOnly: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 90 * 60 * 1000 },
+  summary7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 4 * 60 * 60 * 1000 },
+  summary30d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 6 * 60 * 60 * 1000 },
+  daily7d: { pendingReportId: null, data: null, lastFetched: 0, requested: 0, last425At: 0, refreshMs: 4 * 60 * 60 * 1000 }
+};
+
+// r30e: Just POLL the stream's pending report. Does NOT request a new one.
+// Polling is cheap and parallel-safe — many GETs against the reports endpoint are fine.
+// Request-side is handled separately by _requestNextDueReport() below.
+async function _pollReport(streamName, headers) {
+  const stream = reportState[streamName];
+  if (!stream.pendingReportId) return stream.data || null;
+  try {
+    const statusRes = await axios.get(
+      'https://advertising-api-eu.amazon.com/reporting/reports/' + stream.pendingReportId,
+      { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
+    );
+    const status = statusRes.data.status;
+    if (status === 'COMPLETED') {
+      const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+      const zlib = require('zlib');
+      const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+      stream.data = JSON.parse(decompressed.toString());
+      stream.lastFetched = Date.now();
+      stream.pendingReportId = null;
+      console.log('[r30 ' + streamName + '] report downloaded: ' + stream.data.length + ' records');
+    } else if (status === 'FAILED') {
+      console.warn('[r30 ' + streamName + '] report FAILED, will retry');
+      stream.pendingReportId = null;
+    }
+    // PROCESSING — check again next sync
+  } catch(e) {
+    console.error('[r30 ' + streamName + '] poll error: ' + e.message);
+    stream.pendingReportId = null;
+  }
+  return stream.data || null;
+}
+
+// r30e: Request at most ONE new report per sync, picked by priority order.
+// Skips streams that are: in 425-backoff, already pending, or recently requested.
+// This is the single bottleneck that prevents Amazon from 425-throttling us.
+async function _requestNextDueReport(configBuilders, headers) {
+  const now = Date.now();
+  // Global throttle — at most one new POST per REPORT_POST_INTERVAL_MS
+  if (now - _lastReportPostAt < REPORT_POST_INTERVAL_MS) return null;
+
+  for (const streamName of REPORT_STREAM_PRIORITY) {
+    const stream = reportState[streamName];
+    const refreshMs = stream.refreshMs || (2 * 60 * 60 * 1000);
+    // Skip: pending, in 425 backoff, recently requested
+    if (stream.pendingReportId) continue;
+    if (stream.last425At && (now - stream.last425At) < 60 * 60 * 1000) continue;
+    if ((now - stream.requested) <= refreshMs) continue;
+    // This stream is due
+    const builder = configBuilders[streamName];
+    if (!builder) continue;
+    try {
+      const reportRes = await axios.post(
+        'https://advertising-api-eu.amazon.com/reporting/reports',
+        builder(),
+        { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
+      );
+      stream.pendingReportId = reportRes.data.reportId;
+      stream.requested = now;
+      stream.last425At = 0;
+      _lastReportPostAt = now;
+      console.log('[r30 ' + streamName + '] requested: ' + stream.pendingReportId);
+      return streamName;  // one only
+    } catch(e) {
+      const status = e.response && e.response.status;
+      if (status === 425) {
+        stream.last425At = now;
+        _lastReportPostAt = now;  // back off globally too
+        console.warn('[r30 ' + streamName + '] 425 (Too Early) — backing off 1h');
+        return streamName;
+      }
+      console.error('[r30 ' + streamName + '] request error: ' + (e.response ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
+    }
+  }
+  return null;
+}
+
+// Legacy helper kept for any callers that haven't migrated. Now just polls.
+async function _pollOrRequestReport(streamName, configBuilder, headers) {
+  return _pollReport(streamName, headers);
+}
+
+async function fetchCampaignStats() {
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  const today = new Date().toISOString().split('T')[0];
+  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+
+  // r30e: build the config builders for each stream up front
+  const configBuilders = {
+    todayOnly: function() {
+      return {
+        name: 'CampaignPulse today ' + today,
+        startDate: today,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          columns: ['campaignId', 'campaignName', 'cost', 'sales1d', 'clicks', 'impressions', 'purchases1d', 'clickThroughRate', 'costPerClick'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      };
+    },
+    summary7d: function() {
+      return {
+        name: 'CampaignPulse 7d ' + today,
+        startDate: sevenDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          columns: ['campaignId', 'campaignName', 'cost', 'sales7d', 'clicks', 'impressions', 'purchases7d', 'clickThroughRate', 'unitsSoldClicks7d', 'costPerClick'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      };
+    },
+    summary30d: function() {
+      return {
+        name: 'CampaignPulse 30d ' + today,
+        startDate: thirtyDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          columns: ['campaignId', 'campaignName', 'cost', 'sales30d', 'clicks', 'impressions', 'purchases30d', 'clickThroughRate', 'unitsSoldClicks30d', 'costPerClick'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      };
+    },
+    daily7d: function() {
+      return {
+        name: 'CampaignPulse daily 7d ' + today,
+        startDate: sevenDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['campaign'],
+          columns: ['campaignId', 'campaignName', 'cost', 'sales1d', 'clicks', 'impressions', 'purchases1d', 'date'],
+          reportTypeId: 'spCampaigns',
+          timeUnit: 'DAILY',
+          format: 'GZIP_JSON'
+        }
+      };
+    }
+  };
+
+  // r30e: 1) Poll all pending reports in parallel (cheap GETs, no throttle risk)
+  await Promise.all([
+    _pollReport('todayOnly', headers),
+    _pollReport('summary7d', headers),
+    _pollReport('summary30d', headers),
+    _pollReport('daily7d', headers)
+  ]);
+
+  // r30e: 2) Request the next due report (at most one per sync, priority-ordered)
+  await _requestNextDueReport(configBuilders, headers);
+
+  return {
+    todayOnly: reportState.todayOnly.data,
+    summary7d: reportState.summary7d.data,
+    summary30d: reportState.summary30d.data,
+    daily7d: reportState.daily7d.data
+  };
+}
+
+
+async function updateBudget(campaignId, newBudget) {
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = Object.assign({}, getHeaders(profileId, token), {
+    'Content-Type': 'application/vnd.spCampaign.v3+json',
+    'Accept': 'application/vnd.spCampaign.v3+json'
+  });
+  try {
+    const res = await axios.put(
+      'https://advertising-api-eu.amazon.com/sp/campaigns',
+      { campaigns: [{ campaignId: String(campaignId), budget: { budget: newBudget, budgetType: 'DAILY' } }] },
+      { headers: headers }
+    );
+    console.log('Budget updated v3: ' + JSON.stringify(res.data).substring(0, 200));
+    return res.data;
+  } catch(e) {
+    console.error('Budget update error: ' + e.response?.status + ' ' + JSON.stringify(e.response?.data));
+    throw e;
+  }
+}
+
+async function sendGoogleChat(message) {
+  if (!process.env.GOOGLE_CHAT_WEBHOOK) return;
+  await new Promise(function(resolve) { setTimeout(resolve, 1000); });
+  try {
+    await axios.post(process.env.GOOGLE_CHAT_WEBHOOK, { text: message });
+    console.log('Google Chat sent');
+  } catch(e) {
+    console.error('Google Chat error: ' + e.message);
+  }
+}
+
+async function analyseCampaigns(campaigns) {
+  const acosCritical = parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35);
+  const budgetLowPct = parseFloat(process.env.BUDGET_LOW_PERCENT || 20);
+  const now = new Date();
+  state.alerts = state.alerts.filter(function(a) { return a.date === now.toDateString(); });
+  const timeStr = now.toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'});
+  const dateStr = now.toDateString();
+
+  for (let i = 0; i < campaigns.length; i++) {
+    const c = campaigns[i];
+    // r35.4: skip paused/archived campaigns. Was generating alerts on PAUSED
+    // campaigns with leftover todaySpend from before they were paused — agent
+    // gets pinged about a campaign they can't actually fix.
+    const campState = String(c.state || 'enabled').toLowerCase();
+    if (campState && campState !== 'enabled') continue;
+    const budget = c.dailyBudget || 0;
+    // r30d: c.todaySpend is now from the dedicated todayOnly Amazon Ads report stream
+    // (90-min refresh, live within ~hours of actual). Pre-r30 code worked the same way.
+    // If null, today's report still pending (only at startup or after API failure).
+    if (c.todaySpend == null) continue;
+    const spend = c.todaySpend;
+    const sales = c.todaySales || 0;
+    const acos = sales > 0 ? (spend / sales) * 100 : 0;
+    const remaining = Math.max(0, budget - spend);
+    const remainingPct = budget > 0 ? (remaining / budget) * 100 : 100;
+    const outOfBudget = remaining <= 0.01 && budget > 0;
+    const budgetLow = remainingPct <= budgetLowPct && !outOfBudget;
+    const acosHigh = acos > acosCritical && spend > 5;
+    const ukHour = parseInt(new Date().toLocaleString('en-GB', {timeZone:'Europe/London', hour:'numeric', hour12:false}));
+    if (ukHour >= 22 || ukHour < 8) continue;
+    const alertType = outOfBudget ? 'out_of_budget' : acosHigh ? 'acos_high' : budgetLow ? 'budget_low' : null;
+    if (!alertType) continue;
+
+    let alreadyAlerted = state.alerts.find(function(a) {
+      return a.campaignId === c.campaignId && a.date === dateStr && a.type === alertType;
+    });
+    if (!alreadyAlerted && db) {
+      try {
+        // r35.3 — dedupe must only count OPEN alerts. Previously this would
+        // see a closed alert task (e.g. budget added → alert closed; budget
+        // ran out again later) and refuse to re-fire, leaving the campaign
+        // invisibly out-of-budget for the rest of the day with no banner.
+        const dbAlert = await db.query(
+          "SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND task_source='alert' AND problem_type=$2 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE) AND status IN ('open','in_progress')",
+          [String(c.campaignId), alertType]
+        );
+        if (dbAlert.rows.length > 0) alreadyAlerted = true;
+      } catch(e) {}
+    }
+    if (alreadyAlerted) continue;
+    if (db) {
+      try {
+        const suppressed = await db.query(
+          'SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND status=$2 AND DATE(suppressed_until)=CURRENT_DATE',
+          [String(c.campaignId), 'dismissed']
+        );
+        if (suppressed.rows.length > 0) continue;
+      } catch(e) {}
+    }
+
+    const name = c.name || 'Unknown';
+    const agent = extractAgentFromCampaign(name) || '';
+    const portfolioName = c.portfolio || '';
+
+    state.alerts.push({ campaignId: c.campaignId, name: name, portfolio: portfolioName, agent: agent, type: alertType, time: timeStr, date: dateStr, budget: budget, acos: Math.round(acos * 10) / 10 });
+
+    const dashUrl = process.env.DASHBOARD_URL || 'https://campaignpulse-setup-production.up.railway.app';
+
+    if (outOfBudget) {
+      const hoursLeft = (23 * 60 + 59 - now.getHours() * 60 - now.getMinutes()) / 60;
+      const roas = spend > 0 ? sales / spend : 0;
+      const hourly = spend / Math.max(now.getHours(), 1);
+      const missed = Math.round(hourly * hoursLeft * roas);
+      state.exhaustionLog.unshift({ date: now.toLocaleDateString('en-GB'), time: timeStr, campaign: name, portfolio: portfolioName, agent: agent, budget: '£' + budget.toFixed(2), acos: acos.toFixed(1) + '%', missed: '£' + missed, added: 'Pending', action: 'Pending' });
+      // r30b: all alerts show TODAY's data — what the agent needs to act on right now
+      const m1 = ['⚠ OUT OF BUDGET', name, 'Time: ' + timeStr, 'Spent today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2), 'Today ACOS: ' + acos.toFixed(1) + '%', 'Est. missed: ~£' + missed, dashUrl].join('\n');
+      if (agent) { await sendToAgent(agent, m1); } else { await sendGoogleChat(m1); }
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'out_of_budget', 'Ran out at ' + timeStr + '. Spent £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ', today ACOS ' + acos.toFixed(1) + '%');
+    } else if (acosHigh) {
+      const m2 = ['📈 HIGH ACOS', name, 'Today ACOS: ' + acos.toFixed(1) + '%', 'Today spend: £' + spend.toFixed(2) + ' · sales: £' + sales.toFixed(2), dashUrl].join('\n');
+      if (agent) { await sendToAgent(agent, m2); } else { await sendGoogleChat(m2); }
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'high_acos', 'Today ACOS ' + acos.toFixed(1) + '% with £' + spend.toFixed(2) + ' spend');
+    } else if (budgetLow) {
+      const m3 = ['⚡ BUDGET LOW', name, 'Today: £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' (' + remainingPct.toFixed(0) + '% left)', dashUrl].join('\n');
+      if (agent) { await sendToAgent(agent, m3); } else { await sendGoogleChat(m3); }
+      createAlertTask(c.campaignId, name, agent, portfolioName, 'budget_low', 'Today £' + spend.toFixed(2) + ' / £' + budget.toFixed(2) + ' used, £' + remaining.toFixed(2) + ' left');
+    }
+  }
+  console.log('Alert analysis complete');
+}
+
+async function syncCampaigns() {
+  if (state.syncing) return;
+  state.syncing = true;
+  console.log('Syncing at ' + new Date().toTimeString().slice(0, 8));
+  try {
+    const raw = await fetchCampaigns();
+    // r30d: stats now { todayOnly, summary7d, summary30d, daily7d }
+    const stats = await fetchCampaignStats();
+    const todayOnly = (stats && stats.todayOnly) || [];
+    const summary7d = (stats && stats.summary7d) || [];
+    const summary30d = (stats && stats.summary30d) || [];
+    const daily7d = (stats && stats.daily7d) || [];
+
+    // r30d: today-only lookup — source of truth for budget alerts
+    const statsToday = {};
+    todayOnly.forEach(function(s) {
+      statsToday[s.campaignId] = {
+        spend: parseFloat(s.cost || 0),
+        sales: parseFloat(s.sales1d || 0),
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
+        conversions: parseInt(s.purchases1d || 0),
+        // r33a: ctr deliberately not stored — Amazon's clickThroughRate is unreliable
+        // (returns the value already as %, but old code paths multiplied by 100,
+        // producing 146% etc in Daily History). Always compute clicks/impressions×100
+        // at display time. UI uses realCtr() helper.
+        ctr: null,
+        cpc: parseFloat(s.costPerClick || 0)
+      };
+    });
+
+    // r33a: stats7d — same CTR cleanup as today. Diagnostic log removed (root cause confirmed).
+    const stats7d = {};
+    summary7d.forEach(function(s) {
+      stats7d[s.campaignId] = {
+        spend: parseFloat(s.cost || 0),
+        sales: parseFloat(s.sales7d || 0),
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
+        conversions: parseInt(s.purchases7d || 0),
+        units: parseInt(s.unitsSoldClicks7d || 0),
+        ctr: null,
+        cpc: parseFloat(s.costPerClick || 0),
+        portfolio: s.portfolioName || '',
+        portfolioId: s.portfolioId || ''
+      };
+    });
+    const stats30d = {};
+    summary30d.forEach(function(s) {
+      stats30d[s.campaignId] = {
+        spend: parseFloat(s.cost || 0),
+        sales: parseFloat(s.sales30d || 0),
+        clicks: parseInt(s.clicks || 0),
+        impressions: parseInt(s.impressions || 0),
+        conversions: parseInt(s.purchases30d || 0),
+        units: parseInt(s.unitsSoldClicks30d || 0),
+        ctr: null,
+        cpc: parseFloat(s.costPerClick || 0)
+      };
+    });
+    // Per-day rows grouped by campaign (for sparkline + 3-day consecutive rules)
+    const days7d = {};
+    daily7d.forEach(function(d) {
+      const id = String(d.campaignId);
+      if (!days7d[id]) days7d[id] = [];
+      days7d[id].push({
+        date: d.date,
+        spend: parseFloat(d.cost || 0),
+        sales: parseFloat(d.sales1d || 0),
+        clicks: parseInt(d.clicks || 0),
+        impressions: parseInt(d.impressions || 0),
+        conversions: parseInt(d.purchases1d || 0)
+      });
+    });
+    // Sort each campaign's days oldest→newest so consumers can rely on order
+    Object.keys(days7d).forEach(function(id){
+      days7d[id].sort(function(a, b){ return String(a.date) < String(b.date) ? -1 : 1; });
+    });
+
+    if (Object.keys(stats7d).length === 0) {
+      console.warn('[r30d] No 7d stats this sync — reports may still be processing.');
+    } else {
+      console.log('[r30d] Stats loaded: today=' + Object.keys(statsToday).length + ', 7d=' + Object.keys(stats7d).length + ', 30d=' + Object.keys(stats30d).length + ', daily7d campaigns=' + Object.keys(days7d).length);
+    }
+
+    const campaigns = raw.map(function(c) {
+      const budget = parseFloat((c.budget && c.budget.budget) || c.dailyBudget || 0);
+      const sT = statsToday[c.campaignId] || {};
+      const s7 = stats7d[c.campaignId] || {};
+      const s30 = stats30d[c.campaignId] || {};
+      const d7 = days7d[String(c.campaignId)] || [];
+
+      // r30d: TODAY metrics from the dedicated todayOnly report stream (NOT from dailySeries7d).
+      // This restores the pre-r30 behaviour where today's spend updates every ~90 min from
+      // the live SUMMARY API call. Budget alerts depend on this being accurate.
+      const haveToday = Object.keys(statsToday).length > 0;
+      const todaySpend = haveToday ? parseFloat(sT.spend || 0) : null;
+      const todaySales = haveToday ? parseFloat(sT.sales || 0) : null;
+      const todayClicks = haveToday ? parseInt(sT.clicks || 0) : null;
+      const todayImpressions = haveToday ? parseInt(sT.impressions || 0) : null;
+      const todayConversions = haveToday ? parseInt(sT.conversions || 0) : null;
+      const todayAcos = (todaySales != null && todaySales > 0) ? Math.round((todaySpend / todaySales) * 1000) / 10 : 0;
+
+      const remaining = (todaySpend != null) ? Math.max(0, budget - todaySpend) : null;
+      const pct = (todaySpend != null && budget > 0) ? Math.round((todaySpend / budget) * 100) : 0;
+
+      // Headline numbers = 7-day. Campaign Health page + Action Centre rules read these.
+      const spend7 = s7.spend !== undefined ? parseFloat(s7.spend) : null;
+      const sales7 = s7.sales !== undefined ? parseFloat(s7.sales) : null;
+      const acos7 = sales7 > 0 ? Math.round((spend7 / sales7) * 1000) / 10 : 0;
+      const cpcv7 = s7.conversions > 0 ? +(spend7 / s7.conversions).toFixed(2) : null;
+
+      const spend30 = s30.spend !== undefined ? parseFloat(s30.spend) : null;
+      const sales30 = s30.sales !== undefined ? parseFloat(s30.sales) : null;
+      const acos30 = sales30 > 0 ? Math.round((spend30 / sales30) * 1000) / 10 : 0;
+      const cpcv30 = s30.conversions > 0 ? +(spend30 / s30.conversions).toFixed(2) : null;
+
+      const portfolioName = c.portfolioId ? (state.portfolios[c.portfolioId] || '') : '';
+      let agent = portfolioName ? portfolioName.replace('@', '').split(' ')[0] : '';
+      if (!agent) {
+        const parsed = parseCampaignName(c.name || '');
+        if (parsed && parsed.agent) agent = parsed.agent;
+      }
+      return {
+        campaignId: c.campaignId,
+        name: c.name || '',
+        state: (c.state || '').toLowerCase(),
+        targetingType: (c.targetingType || '').toLowerCase(),
+        portfolio: portfolioName,
+        agent: agent,
+        dailyBudget: budget,
+        // c.spend / c.sales / c.acos default to 7-day (used by Campaign Health, Action Centre)
+        spend: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
+        sales: sales7 !== null ? Math.round(sales7 * 100) / 100 : null,
+        acos: acos7,
+        clicks: s7.clicks || 0,
+        impressions: s7.impressions || 0,
+        conversions: s7.conversions || 0,
+        units: s7.units || 0,
+        // r33a: CTR computed from primary fields, never trusted from Amazon's clickThroughRate
+        // value (which arrived inconsistent — sometimes as ratio, sometimes as %).
+        // clicks/impressions × 100 always produces correct % regardless of source quirks.
+        ctr: s7.impressions > 0 ? +((s7.clicks / s7.impressions) * 100).toFixed(2) : 0,
+        cpc: s7.cpc || 0,
+        // Explicit 7d block
+        spend7d: spend7 !== null ? Math.round(spend7 * 100) / 100 : null,
+        sales7d: sales7 !== null ? Math.round(sales7 * 100) / 100 : null,
+        acos7d: acos7,
+        clicks7d: s7.clicks || 0,
+        impressions7d: s7.impressions || 0,
+        conversions7d: s7.conversions || 0,
+        units7d: s7.units || 0,
+        // r33a: 7d CTR computed from primary fields
+        ctr7d: s7.impressions > 0 ? +((s7.clicks / s7.impressions) * 100).toFixed(2) : 0,
+        cpc7d: s7.cpc || 0,
+        costPerConv7d: cpcv7,
+        // 30d block
+        spend30d: spend30 !== null ? Math.round(spend30 * 100) / 100 : null,
+        sales30d: sales30 !== null ? Math.round(sales30 * 100) / 100 : null,
+        acos30d: acos30,
+        clicks30d: s30.clicks || 0,
+        impressions30d: s30.impressions || 0,
+        conversions30d: s30.conversions || 0,
+        units30d: s30.units || 0,
+        ctr30d: s30.impressions > 0 ? +((s30.clicks / s30.impressions) * 100).toFixed(2) : 0,
+        cpc30d: s30.cpc || 0,
+        costPerConv30d: cpcv30,
+        // Per-day 7d series (sparklines + consecutive-day rules)
+        dailySeries7d: d7,
+        // r30d: today block from todayOnly stream — live, updates every ~90min
+        todaySpend: todaySpend,
+        todaySales: todaySales,
+        todayAcos: todayAcos,
+        todayClicks: todayClicks,
+        todayImpressions: todayImpressions,
+        todayConversions: todayConversions,
+        budgetRemaining: (remaining != null) ? Math.round(remaining * 100) / 100 : null,
+        budgetPct: pct
+      };
+    });
+
+    state.campaigns = campaigns;
+    await analyseCampaigns(campaigns);
+    state.lastSync = new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    state.error = null;
+    console.log('Sync done. ' + campaigns.length + ' campaigns.');
+    saveDailySnapshot().catch(function(e){ console.error('Snapshot error: ' + e.message); });
+  } catch(e) {
+    state.error = e.message;
+    console.error('Sync error:', e.message);
+  } finally {
+    state.syncing = false;
+  }
+}
+
+// ── Database ──────────────────────────────────────────────────────────────
+let db = null;
+
+async function initDB() {
+  if (!process.env.DATABASE_URL) { console.log('No DATABASE_URL - skipping DB'); return; }
+  try {
+    // r29r: switched from Client to Pool. Client only allows one in-flight query at a
+    // time; concurrent calls (Promise.all, parallel HTTP handlers) hit the pg@8
+    // "Calling client.query() when the client is already executing a query" deprecation
+    // and will outright fail on pg@9. Pool gives each query its own connection.
+    // Same .query() / .connect() interface — no other code changes needed.
+    const { Pool } = require('pg');
+    db = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 10,                          // connections per Railway service
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000
+    });
+    // Pool doesn't need explicit connect — first query opens a connection.
+    // Probe once to make sure DATABASE_URL is valid before the rest of init proceeds.
+    await db.query('SELECT 1');
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS daily_snapshots (
+        id SERIAL PRIMARY KEY,
+        snapshot_date DATE NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        metrics JSONB,
+        campaigns JSONB,
+        exhaustion_log JSONB,
+        alerts JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshots(snapshot_date);
+      CREATE TABLE IF NOT EXISTS app_settings (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        settings JSONB NOT NULL DEFAULT '{}',
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+      INSERT INTO app_settings (id, settings) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING;
+
+      -- ════ SP-API tables (r8) ═══════════════════════════════════════════════
+      -- amazon_products: one row per SKU. Refreshed daily by syncAmazonCatalogue().
+      CREATE TABLE IF NOT EXISTS amazon_products (
+        sku TEXT PRIMARY KEY,
+        asin TEXT,
+        title TEXT,
+        status TEXT,
+        image_url TEXT,
+        price NUMERIC,
+        currency TEXT,
+        parent_sku TEXT,
+        variation_theme TEXT,
+        last_synced_at TIMESTAMP DEFAULT NOW(),
+        raw_summary JSONB
+      );
+      -- Idempotent column adds for existing deployments (r9):
+      DO $do$ BEGIN
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS parent_sku TEXT; EXCEPTION WHEN OTHERS THEN END;
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS variation_theme TEXT; EXCEPTION WHEN OTHERS THEN END;
+        -- r11: owner_agent + manual override flag
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS owner_agent TEXT; EXCEPTION WHEN OTHERS THEN END;
+        BEGIN ALTER TABLE amazon_products ADD COLUMN IF NOT EXISTS owner_manual BOOLEAN DEFAULT FALSE; EXCEPTION WHEN OTHERS THEN END;
+      END $do$;
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_asin ON amazon_products(asin);
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_status ON amazon_products(status);
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_parent_sku ON amazon_products(parent_sku);
+      CREATE INDEX IF NOT EXISTS idx_amazon_products_owner_agent ON amazon_products(owner_agent);
+
+      -- amazon_orders: one row per order. Refreshed every few hours by syncAmazonOrders().
+      CREATE TABLE IF NOT EXISTS amazon_orders (
+        order_id TEXT PRIMARY KEY,
+        purchase_date TIMESTAMP,
+        status TEXT,
+        order_total NUMERIC,
+        currency TEXT,
+        num_items INTEGER,
+        last_synced_at TIMESTAMP DEFAULT NOW(),
+        raw_order JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_orders_date ON amazon_orders(purchase_date);
+
+      -- amazon_order_items: per-line revenue, joined to amazon_products by SKU/ASIN.
+      CREATE TABLE IF NOT EXISTS amazon_order_items (
+        order_id TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        asin TEXT,
+        title TEXT,
+        quantity INTEGER,
+        item_price NUMERIC,
+        currency TEXT,
+        PRIMARY KEY (order_id, sku)
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_order_items_sku ON amazon_order_items(sku);
+      CREATE INDEX IF NOT EXISTS idx_amazon_order_items_asin ON amazon_order_items(asin);
+
+      -- r13: amazon_critiques — cached AI listing critique results.
+      CREATE TABLE IF NOT EXISTS amazon_critiques (
+        asin TEXT PRIMARY KEY,
+        critique JSONB NOT NULL,
+        cached_at TIMESTAMP DEFAULT NOW()
+      );
+
+      -- r16: hidden products and campaigns — soft-hide for visual cleanup
+      CREATE TABLE IF NOT EXISTS hidden_products (
+        parent_sku TEXT PRIMARY KEY,
+        hidden_by TEXT,
+        hidden_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT
+      );
+      CREATE TABLE IF NOT EXISTS hidden_campaigns (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        hidden_by TEXT,
+        hidden_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT
+      );
+
+      -- r20: amazon_pricing_signals — cached SP-API operational metrics per ASIN.
+      -- Refreshed by cron at 03:30 London. Stale > 36h on UI surfaces "—".
+      -- price_vs_lowest = your_price - lowest_competitor_price (negative = we are cheaper).
+      CREATE TABLE IF NOT EXISTS amazon_pricing_signals (
+        asin TEXT PRIMARY KEY,
+        your_price NUMERIC(10,2),
+        lowest_competitor_price NUMERIC(10,2),
+        price_vs_lowest NUMERIC(10,2),
+        reviews_count INTEGER,
+        reviews_avg NUMERIC(3,2),
+        last_content_update DATE,
+        fulfillable_qty INTEGER,
+        velocity_30d NUMERIC(8,2),
+        stock_cover_days NUMERIC(8,1),
+        fulfillment_mode TEXT,
+        last_error TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW()
+      );
+      -- r20d: Idempotent migration — for environments that already created the
+      -- table before fulfillment_mode existed. ADD COLUMN IF NOT EXISTS is
+      -- supported in Postgres 9.6+; Railway is 14+.
+      ALTER TABLE amazon_pricing_signals ADD COLUMN IF NOT EXISTS fulfillment_mode TEXT;
+      CREATE INDEX IF NOT EXISTS idx_amazon_pricing_signals_fetched ON amazon_pricing_signals(fetched_at);
+
+      -- r20: amazon_traffic_snapshots — daily Buy Box %, sessions, page views, units
+      -- pulled from GET_SALES_AND_TRAFFIC_REPORT (Detail Page Sales and Traffic by Child Item).
+      -- Buy Box win % on the product card is rolling 7-day avg from this table.
+      CREATE TABLE IF NOT EXISTS amazon_traffic_snapshots (
+        asin TEXT NOT NULL,
+        report_date DATE NOT NULL,
+        buy_box_pct NUMERIC(5,2),
+        sessions INTEGER,
+        page_views INTEGER,
+        units_ordered INTEGER,
+        ordered_product_sales NUMERIC(10,2),
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (asin, report_date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_amazon_traffic_snapshots_date ON amazon_traffic_snapshots(report_date);
+      CREATE INDEX IF NOT EXISTS idx_amazon_traffic_snapshots_asin ON amazon_traffic_snapshots(asin);
+
+      -- r22: amazon_asin_ad_performance — per-ASIN per-campaign per-day ad spend
+      -- pulled from Sponsored Products advertisedProduct report. Replaces the
+      -- gutted campaign-matcher: each product card shows TRUE per-ASIN ad spend
+      -- (multiple ASINs in one campaign get their share, multiple campaigns
+      -- per ASIN get summed). Daily cron at 04:30 London pulls yesterday.
+      CREATE TABLE IF NOT EXISTS amazon_asin_ad_performance (
+        asin TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        ad_group_id TEXT NOT NULL DEFAULT '',
+        report_date DATE NOT NULL,
+        spend NUMERIC(10,2) DEFAULT 0,
+        sales NUMERIC(10,2) DEFAULT 0,
+        clicks INTEGER DEFAULT 0,
+        impressions INTEGER DEFAULT 0,
+        units INTEGER DEFAULT 0,
+        orders INTEGER DEFAULT 0,
+        campaign_name TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (asin, campaign_id, ad_group_id, report_date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_aap_asin_date ON amazon_asin_ad_performance(asin, report_date);
+      CREATE INDEX IF NOT EXISTS idx_aap_campaign_date ON amazon_asin_ad_performance(campaign_id, report_date);
+      CREATE INDEX IF NOT EXISTS idx_aap_date ON amazon_asin_ad_performance(report_date);
+
+      -- r23: amazon_campaign_snooze — temporarily hide an underperforming
+      -- campaign from the Underperforming page. Auto-expires at snoozed_until.
+      -- Replaces r22 amazon_product_snooze (table dropped if empty).
+      CREATE TABLE IF NOT EXISTS amazon_campaign_snooze (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        snoozed_until TIMESTAMP NOT NULL,
+        snoozed_by TEXT,
+        snoozed_at TIMESTAMP DEFAULT NOW(),
+        snooze_reason TEXT,
+        snooze_action TEXT  -- 'snooze' or 'dismiss' (30d=dismiss-ish but explicit)
+      );
+      CREATE INDEX IF NOT EXISTS idx_camp_snooze_until ON amazon_campaign_snooze(snoozed_until);
+
+      -- r25b: ai_feedback — agent corrections to AI analyses. The AI reads recent
+      -- feedback for a target before generating a new analysis, so subsequent runs
+      -- get progressively more accurate.
+      CREATE TABLE IF NOT EXISTS ai_feedback (
+        id SERIAL PRIMARY KEY,
+        scope TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        feedback_text TEXT NOT NULL,
+        agent_name TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      -- r35.9: ai_escalation_log — per-agent quota tracking for the Opus
+      -- escalation-analysis endpoint. Each row records when a given agent ran
+      -- Opus on a given entity. 24h cooldown per (entity, agent) — broken
+      -- early when that agent leaves a feedback note. Cache hits don't write
+      -- rows (so they don't count against quota). Manager/owner override
+      -- bypasses the check entirely.
+      CREATE TABLE IF NOT EXISTS ai_escalation_log (
+        id SERIAL PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        called_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        agent_feedback_at TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_esc_lookup
+        ON ai_escalation_log(entity_type, entity_id, agent_name, called_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_feedback_scope_target ON ai_feedback(scope, target_id, created_at DESC);
+
+      -- r26: gsc_daily — Google Search Console daily-per-(page,query) data.
+      -- Pulled by daily cron at 06:00 London. Used on Google product modal to show
+      -- organic ranking trends. URL is the Shopify product URL.
+      CREATE TABLE IF NOT EXISTS gsc_daily (
+        report_date DATE NOT NULL,
+        page_url TEXT NOT NULL,
+        query TEXT NOT NULL,
+        clicks INTEGER DEFAULT 0,
+        impressions INTEGER DEFAULT 0,
+        ctr NUMERIC(6,4) DEFAULT 0,
+        position NUMERIC(7,2) DEFAULT 0,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY (report_date, page_url, query)
+      );
+      CREATE INDEX IF NOT EXISTS idx_gsc_daily_url_date ON gsc_daily(page_url, report_date DESC);
+      CREATE INDEX IF NOT EXISTS idx_gsc_daily_date ON gsc_daily(report_date DESC);
+
+      -- r26d: campaign AI analysis cache. Stores the latest Haiku or Opus
+      -- analysis for each campaign. The campaign-analysis endpoint returns
+      -- the cached row instead of re-running, unless ?model=opus is passed
+      -- (which always runs Opus fresh and overwrites the cache).
+      CREATE TABLE IF NOT EXISTS campaign_ai_analysis (
+        campaign_id TEXT PRIMARY KEY,
+        model_used TEXT NOT NULL,
+        analysis_text TEXT NOT NULL,
+        total_spend NUMERIC(10,2),
+        total_sales NUMERIC(10,2),
+        acos_7d NUMERIC(6,2),
+        days_no_revenue INTEGER,
+        days_no_activity INTEGER,
+        generated_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_campaign_ai_generated ON campaign_ai_analysis(generated_at DESC);
+    `);
+
+    // r23: drop the old product snooze table (introduced r22, never deployed).
+    // Wrapped in try/catch in case it never existed.
+    try { await db.query("DROP TABLE IF EXISTS amazon_product_snooze"); } catch(e) {}
+    console.log('Database connected and tables ready');
+    await initTasksTable();
+    // r29j: critical columns migrations — runs every boot, idempotent
+    await ensureCriticalColumns();
+  } catch(e) {
+    console.error('DB init error: ' + e.message);
+    db = null;
+  }
+}
+
+async function saveDailySnapshot() {
+  if (!db) return;
+  try {
+    // r14 timezone fix: snapshots keyed by London date, not UTC.
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
+    // r30d: snapshot stores TODAY's actuals (from todayOnly stream), not 7-day rollups.
+    // c.todaySpend/Sales/etc come from the live todayOnly Amazon Ads report stream.
+    // If null, today's report not yet fetched — skip the save rather than overwrite
+    // yesterday's good snapshot with zeros.
+    const liveCampaigns = state.campaigns || [];
+    const haveToday = liveCampaigns.some(function(c){ return c.todaySpend != null; });
+    if (!haveToday) {
+      console.log('[r30d] Skipping snapshot — todayOnly report not yet fetched');
+      return;
+    }
+    const todayCampaigns = liveCampaigns.map(function(c) {
+      const tSpend = parseFloat(c.todaySpend || 0);
+      const tSales = parseFloat(c.todaySales || 0);
+      const tAcos = tSales > 0 ? Math.round((tSpend / tSales) * 1000) / 10 : 0;
+      // Snapshot row carries today's spend/sales/etc as the primary metric fields
+      return Object.assign({}, c, {
+        spend: Math.round(tSpend * 100) / 100,
+        sales: Math.round(tSales * 100) / 100,
+        acos: tAcos,
+        clicks: c.todayClicks || 0,
+        impressions: c.todayImpressions || 0,
+        conversions: c.todayConversions || 0
+      });
+    });
+    const totalRevenue = todayCampaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
+    const totalSpend = todayCampaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
+    const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend/totalRevenue)*1000)/10 : 0;
+    const metrics = {
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos,
+      activeCampaigns: todayCampaigns.filter(function(c){ return c.state==='enabled'; }).length,
+      totalCampaigns: todayCampaigns.length,
+      outOfBudget: todayCampaigns.filter(function(c){ return c.budgetRemaining!=null&&c.budgetRemaining<=0.01&&c.dailyBudget>0; }).length,
+      spendNoRevenue: todayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0||c.sales===null); }).length,
+      totalWastedSpend: todayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0||c.sales===null); }).reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2)
+    };
+    await db.query(
+      'INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, exhaustion_log=$4, alerts=$5, created_at=NOW()',
+      [today, JSON.stringify(metrics), JSON.stringify(todayCampaigns), JSON.stringify(state.exhaustionLog), JSON.stringify(state.alerts)]
+    );
+    console.log('[r30d] Daily snapshot saved for ' + today + ': spend £' + totalSpend.toFixed(2) + ' · revenue £' + totalRevenue.toFixed(2) + ' · wasted £' + metrics.totalWastedSpend);
+  } catch(e) {
+    console.error('Snapshot save error: ' + e.message);
+  }
+}
+
+async function getDailySnapshot(date) {
+  if (!db) return null;
+  try {
+    const dateStr = String(date).split('T')[0];
+    const res = await db.query("SELECT *, TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date FROM daily_snapshots WHERE snapshot_date = $1", [dateStr]);
+    return res.rows[0] || null;
+  } catch(e) {
+    console.error('Snapshot fetch error: ' + e.message);
+    return null;
+  }
+}
+
+async function getSnapshotDates() {
+  if (!db) return [];
+  try {
+    const res = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, metrics FROM daily_snapshots ORDER BY snapshot_date DESC LIMIT 30");
+    return res.rows;
+  } catch(e) { return []; }
+}
+
+// ── Agent webhook routing ─────────────────────────────────────────────────
+function getAgentWebhook(agentName) {
+  if (!agentName) return null;
+  try {
+    const mapping = JSON.parse(process.env.AGENT_WEBHOOKS || '{}');
+    const varName = mapping[agentName];
+    if (varName && process.env[varName]) return process.env[varName];
+  } catch(e) {}
+  return null;
+}
+
+// r21: Agent name canonicalisation. Campaign prefixes and stored agent values
+// can drift (full names, lowercase, typos). All extraction goes through
+// r33b: agent canonicalisation now driven by the users table. Adding a user
+// in the management UI gives you alias coverage automatically — no code change,
+// no restart. First name only ("Kunal Sharma" → "Kunal"). 5-minute cache so
+// new users propagate within minutes; background refresh on stale read so calls
+// never block on DB.
+//
+// Hardcoded fallback retained for safety: if the users table is unreachable
+// or returns empty, canonicalAgent still maps Aryan/Satyam correctly.
+//
+// r33c hotfix: an in-flight promise guard prevents the runaway refresh bug
+// observed in r33b prod — every call to canonicalAgent saw the cache as stale,
+// each fired its own async refresh, and hundreds of parallel DB queries ran
+// before any of them landed. Now: while one refresh is in flight, all other
+// callers see the in-flight promise as "fresh enough" and skip.
+const AGENT_ALIASES_FALLBACK = {
+  'aryan': 'Aryan',
+  'aryan tomar': 'Aryan',
+  'satyam': 'Satyam'
+};
+let _agentAliasCache = null;
+let _agentAliasCacheUntil = 0;
+let _agentAliasRefreshInFlight = null;  // r33c: promise guard
+
+async function refreshAgentAliasCache() {
+  // r33c: if a refresh is already in flight, return that same promise. Prevents
+  // the runaway refresh storm seen in r33b prod.
+  if (_agentAliasRefreshInFlight) return _agentAliasRefreshInFlight;
+  if (!db) return;
+  _agentAliasRefreshInFlight = (async function() {
+    try {
+      const r = await db.query(
+        "SELECT name FROM users WHERE is_active=true AND name IS NOT NULL AND TRIM(name) <> ''"
+      );
+      const map = {};
+      r.rows.forEach(function(u) {
+        const fullName = u.name.trim();
+        const firstName = fullName.split(/\s+/)[0];
+        // Canonical form: First letter uppercase, rest lowercase.
+        const canonical = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+        map[fullName.toLowerCase()] = canonical;
+        map[firstName.toLowerCase()] = canonical;
+      });
+      _agentAliasCache = map;
+      _agentAliasCacheUntil = Date.now() + 5 * 60 * 1000;
+      console.log('[r33b] agent alias cache refreshed: ' + Object.keys(map).length + ' aliases (' + r.rows.length + ' users)');
+    } catch(e) {
+      console.error('[r33b] alias cache refresh failed: ' + e.message);
+      // On failure, push the next attempt out by 30s so we don't hammer DB on persistent errors
+      _agentAliasCacheUntil = Date.now() + 30 * 1000;
+    } finally {
+      _agentAliasRefreshInFlight = null;
+    }
+  })();
+  return _agentAliasRefreshInFlight;
+}
+
+function canonicalAgent(raw) {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  // r33c: only kick off a background refresh if no refresh is currently in flight.
+  // The in-flight guard inside refreshAgentAliasCache also catches this, but
+  // skipping the call entirely is cheaper.
+  if ((!_agentAliasCache || Date.now() > _agentAliasCacheUntil) && !_agentAliasRefreshInFlight) {
+    refreshAgentAliasCache().catch(function(){});
+  }
+  // Use DB-backed cache if populated; otherwise fall back to hardcoded dict
+  const map = (_agentAliasCache && Object.keys(_agentAliasCache).length > 0)
+    ? _agentAliasCache
+    : AGENT_ALIASES_FALLBACK;
+  // Direct match
+  if (map[lower]) return map[lower];
+  // Prefix match — "Aryan-something", "aryan_xyz", "Satyam tasks" etc.
+  // Longest alias first so "aryan tomar" wins over "aryan".
+  const aliases = Object.keys(map).sort(function(a, b){ return b.length - a.length; });
+  for (const alias of aliases) {
+    if (lower === alias) return map[alias];
+    if (lower.indexOf(alias) === 0) {
+      const next = lower.charAt(alias.length);
+      if (!next || /[\s\-_|@.,:;\/]/.test(next)) return map[alias];
+    }
+  }
+  // Unknown — return original trimmed (caller decides how to bucket)
+  return trimmed;
+}
+
+function extractAgentFromCampaign(campaignName) {
+  if (!campaignName) return null;
+  // r35.13: walk past empty parts to find the first non-empty token.
+  // Handles leading-pipe names like "|ANUJ|KIDS SECTION|" which previously
+  // returned null because parts[0] was empty → tasks went to "Unassigned".
+  const parts = campaignName.split(/[|@]/);
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i].trim();
+    if (name.length === 0) continue;
+    if (name.length >= 30) return null;
+    // r21: canonicalise. If it matches a known alias (incl. multi-word like
+    // "Aryan Tomar"), return the canonical form. Otherwise return raw so the
+    // unknown-agents UI can still surface it.
+    return canonicalAgent(name);
+  }
+  return null;
+}
+
+async function sendToAgent(agentName, message) {
+  const webhook = getAgentWebhook(agentName);
+  if (webhook) {
+    try {
+      await axios.post(webhook, { text: message });
+      console.log('Sent to agent space: ' + agentName);
+      return true;
+    } catch(e) {
+      console.error('Agent webhook error (' + agentName + '): ' + e.message);
+    }
+  }
+  return false;
+}
+
+// ── Tasks table init ───────────────────────────────────────────────────────
+async function initTasksTable() {
+  if (!db) return;
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS campaign_tasks (
+        id SERIAL PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        campaign_name TEXT NOT NULL,
+        agent_name TEXT,
+        portfolio TEXT,
+        problem_type TEXT NOT NULL,
+        problem_detail TEXT,
+        days_persisted INTEGER DEFAULT 1,
+        total_wasted NUMERIC DEFAULT 0,
+        score INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'open',
+        agent_notes TEXT,
+        task_source TEXT DEFAULT 'daily',
+        created_date DATE DEFAULT ((NOW() AT TIME ZONE 'Europe/London')::DATE),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        resolved_at TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_tasks_agent ON campaign_tasks(agent_name);
+      CREATE INDEX IF NOT EXISTS idx_tasks_status ON campaign_tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_tasks_date ON campaign_tasks(created_date);
+    `);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS task_source TEXT DEFAULT 'daily'`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS dismissed_reason TEXT`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS suppressed_until TIMESTAMP`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS paused_reason TEXT`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS first_action_at TIMESTAMP`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS days_persisted INTEGER DEFAULT 1`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS total_wasted NUMERIC DEFAULT 0`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS escalation_reason TEXT`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS scaling_deadline TIMESTAMP`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 1`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS last_resolved_date TIMESTAMP`);
+    await db.query(`ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE`);
+
+    // r29f: drop the legacy UNIQUE(campaign_id, created_date) constraint that was
+    // blocking manual task creation when the daily cron had already inserted a row
+    // for that campaign on the same day. The constraint exists in the live DB but
+    // not in current source. We have proper repeat-detection (failure_count, stuck
+    // table) — we don't need the unique index on top. Idempotent (no-op if missing).
+    try {
+      await db.query("ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key");
+      console.log('[r29f] dropped legacy unique constraint on campaign_tasks (if it existed)');
+    } catch(e) { console.error('[r29f] could not drop unique constraint: ' + e.message); }
+
+    // r29: stuck_campaigns — surfaces campaigns/products that have failed the same
+    // rule 3+ times. Auto-task creation STOPS for these (no more clutter on Repeat
+    // Offenders tab). Manager reviews the stuck list and decides on structural change.
+    // Cleared when manager resolves manually OR when the underlying rule no longer trips.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS stuck_campaigns (
+          id SERIAL PRIMARY KEY,
+          campaign_id TEXT NOT NULL,
+          product_key TEXT,
+          campaign_name TEXT,
+          product_title TEXT,
+          department TEXT NOT NULL,
+          problem_type TEXT,
+          failure_count INTEGER DEFAULT 3,
+          first_seen_at TIMESTAMP DEFAULT NOW(),
+          last_seen_at TIMESTAMP DEFAULT NOW(),
+          last_resolved_note TEXT,
+          last_problem_detail TEXT,
+          status TEXT DEFAULT 'open',
+          resolved_by TEXT,
+          resolved_at TIMESTAMP,
+          resolution TEXT
+        )
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_stuck_active ON stuck_campaigns(status, department)");
+      await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_stuck_target ON stuck_campaigns(campaign_id, COALESCE(product_key,''), department) WHERE status = 'open'");
+      console.log('[r29] stuck_campaigns table ready');
+    } catch(e) { console.error('[r29] stuck_campaigns init: ' + e.message); }
+
+    // r14: Fix created_date default to use London time (was UTC, causing tasks created late London evening to show as next day)
+    try { await db.query(`ALTER TABLE campaign_tasks ALTER COLUMN created_date SET DEFAULT ((NOW() AT TIME ZONE 'Europe/London')::DATE)`); } catch(e) {}
+    // r14: One-shot fix for tasks where created_date is in the past but the row was actually created today (London time).
+    // Scope: all OPEN/IN-PROGRESS tasks (not resolved) where updated_at falls on a different London-date than created_date by 1 day.
+    // This catches the timezone-drift bug for tasks still in due, without touching genuinely-old or already-resolved tasks.
+    try {
+      const fixRes = await db.query(
+        "UPDATE campaign_tasks SET created_date = ((updated_at AT TIME ZONE 'Europe/London')::DATE) " +
+        "WHERE status IN ('open','in_progress') " +
+        "AND ((updated_at AT TIME ZONE 'Europe/London')::DATE) - created_date = 1 " +
+        "AND updated_at >= NOW() - INTERVAL '36 hours' " +
+        "RETURNING id"
+      );
+      if (fixRes.rowCount > 0) console.log('[r14 timezone-fix] Re-dated ' + fixRes.rowCount + ' open/in-progress task(s) to correct London date');
+    } catch(e) { console.error('[r14 timezone-fix] ' + e.message); }
+    console.log('Tasks table ready');
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS activity_log (
+        id SERIAL PRIMARY KEY,
+        campaign_id TEXT,
+        campaign_name TEXT,
+        agent_name TEXT,
+        action TEXT NOT NULL,
+        notes TEXT,
+        status_before TEXT,
+        status_after TEXT,
+        task_id INTEGER,
+        logged_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_log(agent_name);
+      CREATE INDEX IF NOT EXISTS idx_activity_campaign ON activity_log(campaign_id);
+      CREATE INDEX IF NOT EXISTS idx_activity_logged ON activity_log(logged_at DESC);
+    `);
+    console.log('Activity log table ready');
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        department TEXT NOT NULL DEFAULT 'amazon',
+        role TEXT NOT NULL DEFAULT 'agent',
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        last_login TIMESTAMP
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        token TEXT UNIQUE NOT NULL,
+        department TEXT NOT NULL,
+        role TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        last_active TIMESTAMP DEFAULT NOW(),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await db.query('CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(token)');
+    await db.query('CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at)');
+
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'");
+    await db.query("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'");
+    // r7b: timeline stage tracking (open / discuss / decide / overdue) and start-warning timestamp.
+    // task_stage is auto-advanced by the daily 00:01 cron based on working days since created_date.
+    // working_days_open is computed (Sundays excluded) — replaces the old days_persisted as the
+    // canonical "how long has this task been open" measure.
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS task_stage TEXT DEFAULT 'open'");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS stage_advanced_at TIMESTAMP");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_tasks_stage ON campaign_tasks(task_stage)");
+    // actor_name = the LOGGED-IN USER who took the action (vs agent_name which is the task owner).
+    // Critical for audit: when Bobby reassigns Rahul's task to Anuj, log shows Bobby did it.
+    await db.query("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor_name TEXT");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_at TIMESTAMP");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS reassigned_from TEXT");
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS notes_ignored BOOLEAN DEFAULT FALSE");
+    // r35.2: deadline column — optional, used by general tasks (task_source='general')
+    // for "do this by date X". Distinct from scaling_deadline which is for the
+    // r7b scaling-window flow on campaign tasks.
+    await db.query("ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS deadline DATE");
+
+    // r21: subtasks table — populated when a product card is assigned as a task.
+    // Each subtask = one bullet point from the AI critique. Agent can complete or
+    // dismiss-with-reason but cannot delete. Card cannot move to 'complete' until
+    // every subtask is in ('complete','dismissed').
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS task_subtasks (
+        id SERIAL PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES campaign_tasks(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        dismiss_reason TEXT,
+        completed_at TIMESTAMP,
+        completed_by TEXT,
+        dismissed_at TIMESTAMP,
+        dismissed_by TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_subtasks_task ON task_subtasks(task_id);
+      CREATE INDEX IF NOT EXISTS idx_subtasks_status ON task_subtasks(status);
+    `);
+
+    try {
+      const userCount = await db.query('SELECT COUNT(*) as cnt FROM users');
+      if (parseInt(userCount.rows[0].cnt) === 0) {
+        const hash = await bcrypt.hash('FKSports2024!', 10);
+        await db.query(
+          'INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5)',
+          ['Bobby', 'bobby@fksports.co.uk', hash, 'manager', 'manager']
+        );
+        console.log('Default manager account created: bobby@fksports.co.uk / FKSports2024!');
+      }
+      // Idempotent seed for Google agents — only adds if missing.
+      // Initial password is FKSports2024! (they should change on first login).
+      const googleAgents = [
+        { name: 'Rahul', email: 'rahul@fksports.co.uk' },
+        { name: 'Anuj',  email: 'anuj@fksports.co.uk' }
+      ];
+      for (const ag of googleAgents) {
+        const exists = await db.query('SELECT id FROM users WHERE email=$1', [ag.email]);
+        if (!exists.rows.length) {
+          const hash = await bcrypt.hash('FKSports2024!', 10);
+          await db.query(
+            'INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5)',
+            [ag.name, ag.email, hash, 'google', 'agent']
+          );
+          console.log('Google agent seeded: ' + ag.email + ' / FKSports2024! (please change on first login)');
+        }
+      }
+      // Promote Bobby from 'manager' to 'owner' so only he sees the Delete-user button.
+      // Idempotent — only updates if currently 'manager', leaves anything else alone.
+      try {
+        const r = await db.query("UPDATE users SET role='owner' WHERE email='bobby@fksports.co.uk' AND role='manager'");
+        if (r.rowCount > 0) console.log("Bobby promoted to role='owner'");
+      } catch(e) { console.error('Owner role promotion error: ' + e.message); }
+
+      // r20c → r20d: Kunal cleanup — soft-delete his user account and ARCHIVE
+      // his open tasks (Bobby has paused all his campaigns, so reassigning is
+      // pointless — they're obsolete). Idempotent — re-runs are safe because
+      // the second pass finds zero open Kunal tasks.
+      try {
+        const kunalRes = await db.query(
+          "SELECT id, name FROM users WHERE name='Kunal'"
+        );
+        if (kunalRes.rows.length > 0) {
+          // 1. Archive open Kunal tasks (status NOT IN complete/dismissed/archived)
+          const archivedRes = await db.query(
+            "UPDATE campaign_tasks SET " +
+              "status='archived', " +
+              "resolved_at=COALESCE(resolved_at, NOW()), " +
+              "archived_at=COALESCE(archived_at, NOW()), " +
+              "dismissed_reason=COALESCE(dismissed_reason, 'Kunal removed from team — campaigns paused') " +
+            "WHERE agent_name='Kunal' AND status NOT IN ('complete','dismissed','archived') " +
+            "RETURNING id"
+          );
+          // 2. Soft-delete Kunal (only if still active — keeps idempotent)
+          const deactivateRes = await db.query("UPDATE users SET is_active=FALSE WHERE name='Kunal' AND COALESCE(is_active,TRUE)=TRUE");
+          // 3. Activity log entry — only if we actually did anything this run
+          if (archivedRes.rowCount > 0 || deactivateRes.rowCount > 0) {
+            try {
+              await db.query(
+                "INSERT INTO activity_log (action, agent_name, campaign_id, details) " +
+                "VALUES ('user_removed', 'Bobby Singh', NULL, $1)",
+                ['Kunal removed (left team, campaigns paused); ' + archivedRes.rowCount + ' open tasks archived']
+              );
+            } catch(_e) { /* activity_log shape may differ — ignore if it does */ }
+            console.log('[r20d] Kunal cleanup: archived ' + archivedRes.rowCount + ' open tasks, soft-deleted user');
+          }
+        }
+      } catch(e) { console.error('[r20d] Kunal cleanup error: ' + e.message); }
+
+      // r21: normalise duplicate agent names that split a single agent across
+      // multiple buckets in the dashboard. "Aryan Tomar" was found mixed with
+      // "Aryan" — always re-canonical to first name. Idempotent.
+      // Touches: amazon_products.owner_agent, campaign_tasks.agent_name,
+      // activity_log.agent_name, users.name. Bobby has already updated Settings
+      // so the users table change should usually be a no-op.
+      try {
+        const aliasUpdates = [
+          { wrong: 'Aryan Tomar',  correct: 'Aryan' },
+          { wrong: 'aryan tomar',  correct: 'Aryan' },
+          { wrong: 'Aryan tomar',  correct: 'Aryan' }
+        ];
+        const tablesAndCols = [
+          { table: 'amazon_products', col: 'owner_agent' },
+          { table: 'campaign_tasks',  col: 'agent_name' },
+          { table: 'activity_log',    col: 'agent_name' },
+          { table: 'users',           col: 'name' }
+        ];
+        let totals = {};
+        for (const { wrong, correct } of aliasUpdates) {
+          for (const { table, col } of tablesAndCols) {
+            try {
+              const r = await db.query('UPDATE ' + table + ' SET ' + col + '=$1 WHERE ' + col + '=$2', [correct, wrong]);
+              if (r.rowCount > 0) {
+                const k = table + '.' + col;
+                totals[k] = (totals[k] || 0) + r.rowCount;
+              }
+            } catch(tErr) {
+              // Some tables may not exist (e.g. users on first boot) — log + continue
+              if (!/does not exist/.test(tErr.message)) console.error('[r21] alias update ' + table + '.' + col + ' (' + wrong + '→' + correct + '): ' + tErr.message);
+            }
+          }
+        }
+        const totalRows = Object.values(totals).reduce(function(s, n){ return s + n; }, 0);
+        if (totalRows > 0) {
+          const breakdown = Object.keys(totals).map(function(k){ return k + '=' + totals[k]; }).join(', ');
+          console.log('[r21] agent alias normalisation: ' + totalRows + ' rows updated (' + breakdown + ')');
+        }
+      } catch(e) { console.error('[r21] agent alias normalisation error: ' + e.message); }
+    } catch(e) { console.error('User init error: ' + e.message); }
+    console.log('Auth tables ready');
+
+    // ── FIX: Reload today alerts using created_date (not created_at) ──────
+    // r35.4: also filter by status — was loading EVERY today's alert task
+    // including completed/dismissed ones, so server restarts resurrected
+    // closed alerts as ghosts on the dashboard banner.
+    try {
+      const todayAlerts = await db.query(
+        "SELECT campaign_id, campaign_name, problem_type, problem_detail, created_date " +
+        "FROM campaign_tasks " +
+        "WHERE task_source='alert' " +
+        "  AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE) " +
+        "  AND status IN ('open','in_progress')"
+      );
+      todayAlerts.rows.forEach(function(row) {
+        const existing = state.alerts.find(function(a){ return String(a.campaignId) === String(row.campaign_id) && a.type === row.problem_type; });
+        if (!existing) {
+          state.alerts.push({
+            campaignId: row.campaign_id,
+            name: row.campaign_name || 'Unknown',
+            type: row.problem_type,
+            time: new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'}),
+            date: new Date().toDateString(),
+            acos: 0,
+            budget: 0
+          });
+        }
+      });
+      console.log('Reloaded ' + todayAlerts.rows.length + ' alerts from DB');
+    } catch(e) { console.error('Alert reload error: ' + e.message); }
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS keyword_dismissals (
+        id SERIAL PRIMARY KEY,
+        search_term TEXT NOT NULL,
+        campaign TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        dismissed_by TEXT,
+        dismissed_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_kw_dismiss_term ON keyword_dismissals(search_term, campaign);
+    `);
+
+    // Google OAuth tokens (for GA4 Data API access via user OAuth flow)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS google_oauth_tokens (
+        id SERIAL PRIMARY KEY,
+        purpose TEXT UNIQUE NOT NULL,
+        refresh_token TEXT NOT NULL,
+        access_token TEXT,
+        access_token_expires_at TIMESTAMP,
+        connected_email TEXT,
+        connected_at TIMESTAMP DEFAULT NOW(),
+        last_used TIMESTAMP
+      );
+    `);
+
+    // Per-product GA4 funnel metrics, refreshed daily, joined to shopifyState
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ga4_product_metrics (
+        page_path TEXT PRIMARY KEY,
+        sessions INT DEFAULT 0,
+        visitors INT DEFAULT 0,
+        cart_additions INT DEFAULT 0,
+        checkouts INT DEFAULT 0,
+        purchases INT DEFAULT 0,
+        engagement_rate REAL DEFAULT 0,
+        avg_engagement_time REAL DEFAULT 0,
+        bounce_rate REAL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    // Archived/dismissed Google campaigns. Two states:
+    //   'dismissed' — agent flagged with reason, still appears on Active tab with pill
+    //   'archived'  — manager has moved out of view, appears only in Archived tab
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS google_campaign_archive (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        campaign_type TEXT,
+        archived_by TEXT,
+        archived_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT,
+        department TEXT DEFAULT 'google',
+        state TEXT DEFAULT 'archived'
+      );
+      CREATE INDEX IF NOT EXISTS idx_archive_archived_at ON google_campaign_archive(archived_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_archive_state ON google_campaign_archive(state);
+    `);
+    // Migrate existing rows that don't have state column
+    await db.query("ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'");
+
+    // ─── New AI/cache tables — isolated init so earlier failures can't block them ───
+    // These were added later. Run them in their own try block so if migrations or
+    // other init queries fail, these still get created.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS landing_page_critiques (
+          product_id TEXT PRIMARY KEY,
+          product_title TEXT,
+          product_url TEXT,
+          generated_at TIMESTAMP DEFAULT NOW(),
+          diagnosis TEXT,
+          friction_json JSONB,
+          actions_json JSONB,
+          funnel_summary JSONB,
+          ad_summary JSONB,
+          page_summary JSONB,
+          raw_ai_text TEXT,
+          score NUMERIC DEFAULT 0
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_score ON landing_page_critiques(score DESC)");
+      // r28: track which model produced this critique so the UI can show Haiku vs Opus
+      await db.query("ALTER TABLE landing_page_critiques ADD COLUMN IF NOT EXISTS model_used TEXT");
+      console.log('[INIT] landing_page_critiques table ready');
+    } catch (e) {
+      console.error('[INIT] landing_page_critiques error: ' + e.message);
+    }
+
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS campaign_ai_cache (
+          campaign_id TEXT PRIMARY KEY,
+          campaign_name TEXT,
+          generated_at TIMESTAMP DEFAULT NOW(),
+          analysis TEXT,
+          model_used TEXT
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_cac_generated_at ON campaign_ai_cache(generated_at DESC)");
+      console.log('[INIT] campaign_ai_cache table ready');
+    } catch (e) {
+      console.error('[INIT] campaign_ai_cache error: ' + e.message);
+    }
+
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS product_page_cache (
+          product_id TEXT PRIMARY KEY,
+          product_url TEXT,
+          fetched_at TIMESTAMP DEFAULT NOW(),
+          page_summary JSONB,
+          rule_friction JSONB,
+          funnel_friction JSONB,
+          ad_friction JSONB
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_ppc_fetched_at ON product_page_cache(fetched_at DESC)");
+      console.log('[INIT] product_page_cache table ready');
+    } catch (e) {
+      console.error('[INIT] product_page_cache error: ' + e.message);
+    }
+
+    // google_state_snapshots — persists the result of each Google Ads script ingest.
+    // Why: googleState lives in process memory only, so any redeploy/restart wipes data
+    // until the next 8am cron runs. With this table, the server boots and immediately
+    // hydrates googleState from the most recent snapshot. Also keeps 30 days of history
+    // for trend analysis later.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_state_snapshots (
+          id SERIAL PRIMARY KEY,
+          received_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          campaigns JSONB,
+          products JSONB,
+          campaigns_count INTEGER DEFAULT 0,
+          products_count INTEGER DEFAULT 0,
+          last_sync_label TEXT
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gss_received_at ON google_state_snapshots(received_at DESC)");
+      console.log('[INIT] google_state_snapshots table ready');
+    } catch (e) {
+      console.error('[INIT] google_state_snapshots error: ' + e.message);
+    }
+
+    // r37 (Batch 2): Search terms per campaign. Populated by Google Ads Script v10 pulling
+    // SEARCH_TERM_VIEW (7d). UPSERT on (campaign_id, search_term) so we don't multiply rows
+    // across ingests — each push overwrites the latest 7d metrics.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_search_terms (
+          campaign_id TEXT NOT NULL,
+          search_term TEXT NOT NULL,
+          campaign_name TEXT,
+          match_type TEXT,
+          product_item_id TEXT,
+          cost NUMERIC DEFAULT 0,
+          clicks INTEGER DEFAULT 0,
+          impressions INTEGER DEFAULT 0,
+          conversions NUMERIC DEFAULT 0,
+          conversions_value NUMERIC DEFAULT 0,
+          status TEXT,
+          period_start DATE,
+          period_end DATE,
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      // v10.1: column may not exist on already-deployed databases. Add it idempotently.
+      try { await db.query("ALTER TABLE google_search_terms ADD COLUMN IF NOT EXISTS product_item_id TEXT"); } catch(_) {}
+      // v10.1: replace old (campaign_id, search_term) primary key with a unique index that
+      // includes product_item_id. Use COALESCE so NULL values (Search campaigns) still upsert
+      // correctly instead of duplicating.
+      try { await db.query("ALTER TABLE google_search_terms DROP CONSTRAINT IF EXISTS google_search_terms_pkey"); } catch(_) {}
+      try { await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_gst_uniq ON google_search_terms(campaign_id, search_term, COALESCE(product_item_id, ''))"); } catch(_) {}
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gst_campaign ON google_search_terms(campaign_id)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gst_cost ON google_search_terms(cost DESC)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gst_product ON google_search_terms(product_item_id) WHERE product_item_id IS NOT NULL");
+      console.log('[INIT] google_search_terms table ready');
+    } catch (e) {
+      console.error('[INIT] google_search_terms error: ' + e.message);
+    }
+
+    // r37: per-campaign per-day metrics for the time-window toggle and real daily trend.
+    // UPSERT on (campaign_id, snapshot_date). Each push overwrites the day's values.
+    // Keeps 60 days of history (auto-pruned).
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_campaign_daily (
+          campaign_id TEXT NOT NULL,
+          snapshot_date DATE NOT NULL,
+          campaign_name TEXT,
+          campaign_type TEXT,
+          spend NUMERIC DEFAULT 0,
+          sales NUMERIC DEFAULT 0,
+          clicks INTEGER DEFAULT 0,
+          impressions INTEGER DEFAULT 0,
+          conversions NUMERIC DEFAULT 0,
+          updated_at TIMESTAMP DEFAULT NOW(),
+          PRIMARY KEY (campaign_id, snapshot_date)
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gcd_campaign ON google_campaign_daily(campaign_id)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gcd_date ON google_campaign_daily(snapshot_date DESC)");
+      console.log('[INIT] google_campaign_daily table ready');
+    } catch (e) {
+      console.error('[INIT] google_campaign_daily error: ' + e.message);
+    }
+
+    // r37: per-campaign device + day-of-week splits. Same UPSERT pattern.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_campaign_segments (
+          campaign_id TEXT NOT NULL,
+          segment_kind TEXT NOT NULL,
+          segment_value TEXT NOT NULL,
+          campaign_name TEXT,
+          cost NUMERIC DEFAULT 0,
+          sales NUMERIC DEFAULT 0,
+          clicks INTEGER DEFAULT 0,
+          impressions INTEGER DEFAULT 0,
+          conversions NUMERIC DEFAULT 0,
+          period_start DATE,
+          period_end DATE,
+          updated_at TIMESTAMP DEFAULT NOW(),
+          PRIMARY KEY (campaign_id, segment_kind, segment_value)
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gcs_campaign ON google_campaign_segments(campaign_id)");
+      console.log('[INIT] google_campaign_segments table ready');
+    } catch (e) {
+      console.error('[INIT] google_campaign_segments error: ' + e.message);
+    }
+
+    // r37: agent decisions on search terms (record-only — does NOT push to Google Ads API).
+    // Agent clicks "Add negative" or "Add exact", we log intent. They then add it in
+    // Google Ads UI themselves. Phase 2 (later) can auto-push via API once we trust the flow.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_keyword_decisions (
+          id SERIAL PRIMARY KEY,
+          campaign_id TEXT NOT NULL,
+          campaign_name TEXT,
+          search_term TEXT NOT NULL,
+          decision_kind TEXT NOT NULL,
+          decided_by TEXT,
+          decided_at TIMESTAMP DEFAULT NOW(),
+          reason TEXT,
+          status TEXT DEFAULT 'pending',
+          applied_at TIMESTAMP,
+          applied_by TEXT
+        );
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gkd_campaign ON google_keyword_decisions(campaign_id)");
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gkd_status ON google_keyword_decisions(status)");
+      console.log('[INIT] google_keyword_decisions table ready');
+    } catch (e) {
+      console.error('[INIT] google_keyword_decisions error: ' + e.message);
+    }
+
+    // r33a: removed the boot-time UPDATE that parsed campaign_name and wrote
+    // the first token as agent_name on every restart. That logic was an early
+    // Amazon migration step that long outlived its purpose and was actively
+    // corrupting Google task data — every restart it overwrote agent_name='Unassigned'
+    // with things like 'Eva Mats' or 'May' parsed from campaign names. Replaced
+    // with a one-shot Google-only cleanup that resets bogus values to 'Unassigned'.
+    try {
+      const res = await db.query(
+        "UPDATE campaign_tasks SET agent_name='Unassigned' " +
+        "WHERE department='google' " +
+        "AND agent_name NOT IN ('Rahul','Anuj','Unassigned')"
+      );
+      if (res.rowCount > 0) console.log('[r33a] reset agent_name to Unassigned on ' + res.rowCount + ' Google tasks');
+    } catch(e) { console.error('[r33a agent-name cleanup] ' + e.message); }
+
+    // r35.13: one-shot re-attribution. The old parser failed on campaign names
+    // like "|ANUJ|KIDS SECTION|" (leading pipe → parts[0]=='') and bucketed
+    // them as Unassigned. Parser now walks past empty parts. Re-extract agent
+    // from campaign_name for any existing Google task currently sitting as
+    // Unassigned. Gated by system_meta so it only runs once across deploys.
+    try {
+      const flag = await db.query("SELECT value FROM system_meta WHERE key = 'r35_13_google_reattrib_done'");
+      if (flag.rows.length === 0) {
+        const candidates = await db.query(
+          "SELECT id, campaign_name FROM campaign_tasks " +
+          "WHERE department='google' AND agent_name='Unassigned'"
+        );
+        let reattributed = 0;
+        for (const row of candidates.rows) {
+          const agent = extractAgentFromCampaign(row.campaign_name || '');
+          if (agent && (agent === 'Rahul' || agent === 'Anuj')) {
+            await db.query("UPDATE campaign_tasks SET agent_name=$1 WHERE id=$2", [agent, row.id]);
+            reattributed++;
+          }
+        }
+        await db.query(
+          "INSERT INTO system_meta (key, value) VALUES ('r35_13_google_reattrib_done', NOW()::text) " +
+          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+        );
+        console.log('[r35.13] re-attributed ' + reattributed + ' of ' + candidates.rows.length + ' Unassigned Google tasks to Rahul/Anuj');
+      }
+    } catch(e) { console.error('[r35.13 reattrib] ' + e.message); }
+  } catch(e) {
+    console.error('Tasks table error: ' + e.message);
+  }
+}
+
+// r29j: bulletproof migrations. Each ALTER TABLE runs in its own try/catch so
+// one failure doesn't block subsequent migrations. Idempotent — safe to run on
+// every boot. This catches the case where the main initTasksTable function
+// errors midway and skips the rest of the schema sync.
+async function ensureCriticalColumns() {
+  if (!db) return;
+  const migrations = [
+    // r28: model tracking on landing_page_critiques (added later, missed in some deploys)
+    ["landing_page_critiques.model_used", "ALTER TABLE landing_page_critiques ADD COLUMN IF NOT EXISTS model_used TEXT"],
+    // archive table state column (added later, missed in some deploys)
+    ["google_campaign_archive.state", "ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS state TEXT DEFAULT 'archived'"],
+    ["google_campaign_archive.department", "ALTER TABLE google_campaign_archive ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'google'"],
+    // campaign_tasks columns frequently re-checked
+    ["campaign_tasks.product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
+    ["campaign_tasks.product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
+    ["campaign_tasks.department", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS department TEXT DEFAULT 'amazon'"],
+    ["campaign_tasks.failure_count", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 1"],
+    ["campaign_tasks.last_resolved_date", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS last_resolved_date TIMESTAMP"],
+    ["campaign_tasks.is_repeat_offender", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS is_repeat_offender BOOLEAN DEFAULT FALSE"],
+    ["campaign_tasks.resolution_note", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS resolution_note TEXT"],
+    ["campaign_tasks.priority", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 2"],
+    ["campaign_tasks.product_image_url", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_image_url TEXT"],
+    // Drop the legacy unique constraint that blocks multiple tasks per campaign per day
+    ["drop legacy unique constraint", "ALTER TABLE campaign_tasks DROP CONSTRAINT IF EXISTS campaign_tasks_campaign_id_created_date_key"],
+    // r29p: activity_log columns referenced across the codebase but never added to schema
+    ["activity_log.actor_name", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor_name TEXT"],
+    ["activity_log.department", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS department TEXT"],
+    ["activity_log.details", "ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS details TEXT"]
+  ];
+  let okCount = 0;
+  let failedList = [];
+  for (const [label, sql] of migrations) {
+    try {
+      await db.query(sql);
+      okCount++;
+    } catch(e) {
+      failedList.push(label + ': ' + e.message);
+    }
+  }
+  console.log('[r29j MIGRATIONS] ' + okCount + '/' + migrations.length + ' applied successfully');
+  if (failedList.length) {
+    console.error('[r29j MIGRATIONS] ' + failedList.length + ' failed:');
+    failedList.forEach(function(f){ console.error('  · ' + f); });
+  }
+
+  // r29o: account-wide funnel snapshot table — used for "vs last 7 days" comparison.
+  // Keyed by snapshot_date (London local). Cron writes one row/day. Lightweight.
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ga4_account_funnel_snapshot (
+        snapshot_date DATE PRIMARY KEY,
+        sessions INT DEFAULT 0,
+        cart_additions INT DEFAULT 0,
+        checkouts INT DEFAULT 0,
+        purchases INT DEFAULT 0,
+        revenue NUMERIC DEFAULT 0,
+        captured_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('[r29o] ga4_account_funnel_snapshot table ready');
+  } catch(e) { console.error('[r29o] ga4_account_funnel_snapshot init: ' + e.message); }
+
+  // r34: task_outcomes — for the Agent Performance page. One row per completed
+  // task whose 7-day after-window has elapsed. Computed nightly. Stores before/
+  // after campaign metrics and the £ impact so the agent's scorecard is just
+  // a SELECT — no recompute on page load. Outcomes:
+  //   breakthrough = before > 16% ACOS, after ≤ 16% (crossed breakeven)
+  //   improved     = ACOS dropped by 5+ points
+  //   flat         = within ±5 points
+  //   worsened     = ACOS rose by 5+ points
+  //   unscoreable  = no spend in either window, or campaign now paused with no after data
+  //   disqualified = backfill-only: task was a bogus scheduler firing (paused campaign,
+  //                  duplicate, or AI judged the resolution note as "this wasn't a real problem")
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS task_outcomes (
+        task_id INTEGER PRIMARY KEY REFERENCES campaign_tasks(id) ON DELETE CASCADE,
+        agent_name TEXT,
+        department TEXT,
+        task_source TEXT,
+        campaign_id TEXT,
+        campaign_name TEXT,
+        problem_type TEXT,
+        product_key TEXT,
+        before_window_start DATE,
+        before_window_end DATE,
+        before_spend NUMERIC DEFAULT 0,
+        before_sales NUMERIC DEFAULT 0,
+        before_acos NUMERIC,
+        after_window_start DATE,
+        after_window_end DATE,
+        after_spend NUMERIC DEFAULT 0,
+        after_sales NUMERIC DEFAULT 0,
+        after_acos NUMERIC,
+        acos_delta NUMERIC,
+        outcome TEXT,
+        disqualified_reason TEXT,
+        weight NUMERIC DEFAULT 1,
+        efficiency_gain_gbp NUMERIC,
+        worsened_waste_gbp NUMERIC,
+        repeat_gap_waste_gbp NUMERIC,
+        scored_at TIMESTAMP DEFAULT NOW(),
+        mistake_mirror_note TEXT,
+        mistake_mirror_at TIMESTAMP
+      )
+    `);
+    await db.query("CREATE INDEX IF NOT EXISTS idx_outcomes_agent_period ON task_outcomes(agent_name, scored_at DESC)");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_outcomes_dept ON task_outcomes(department)");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_outcomes_outcome ON task_outcomes(outcome)");
+    console.log('[r34] task_outcomes table ready');
+  } catch(e) { console.error('[r34] task_outcomes init: ' + e.message); }
+
+  // r34: system_meta — tiny key/value table to track one-off jobs. Used right
+  // now to gate the backfill so it runs exactly once across all deploys.
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS system_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('[r34] system_meta table ready');
+  } catch(e) { console.error('[r34] system_meta init: ' + e.message); }
+}
+
+// r35.5 — rewritten with strict consecutive-day rules and 7d ACOS sanity gate.
+// Previous version (pre-r35.5):
+//   - Fired no_revenue on ≥1 zero-sales day anywhere in the 3-day window
+//   - Fired high_acos on >35% 3-day-average (one bad day could pull avg up)
+//   - 16% breakeven check was on the SAME 3 days that triggered the alert,
+//     so one bad day pushing window-ACOS above 16% defeated the safety net
+//
+// New rules (agreed with Bobby 2026-05-20):
+//   1. no_revenue fires only on 3 CONSECUTIVE days at the end of the window
+//      with spend > 0 AND sales = 0
+//   2. no_activity fires only on 3 CONSECUTIVE days at the end of the window
+//      with zero impressions
+//   3. high_acos fires only on 3 CONSECUTIVE days at the end of the window
+//      with ACOS > 35%
+//   4. ALL three rules gated by 7-day ACOS check: if window ACOS < 16% breakeven,
+//      skip — campaign is profitable overall, agent doesn't need a task
+//   5. Window expanded from 3 days to 7 days so "consecutive" is meaningful
+//
+// "At the end of the window" means the most recent 3 days are bad — because
+// a streak that ended 2 days ago means the campaign already recovered.
+//
+// `days` arrives sorted oldest→newest. We look at the last 3 entries.
+function scoreCampaignDays(days) {
+  if (!days || days.length === 0) return { score: 0 };
+
+  // Window-wide totals (for the 7d ACOS gate and detail strings)
+  const totalSpend = days.reduce(function(s,d){ return s+(d.spend||0); }, 0);
+  const totalSales = days.reduce(function(s,d){ return s+(d.sales||0); }, 0);
+  // Window ACOS (the "healthy campaign" gate). Use total spend / total sales,
+  // not per-day average — averaging hides variance. £244 spend / £1946 sales
+  // = 12.5% ACOS is healthy regardless of any single bad day.
+  const windowAcos = totalSales > 0 ? (totalSpend / totalSales) : Infinity;
+
+  // The last 3 days — most recent first when reading right-to-left in array
+  const recentN = 3;
+  const tail = days.slice(-recentN);
+  const tailIsThree = tail.length === recentN;
+
+  // Check the three "3-consecutive-bad-days" patterns on the tail
+  // no_revenue: every tail day has spend > 0 AND sales = 0
+  const tailAllNoRev = tailIsThree && tail.every(function(d){
+    return (d.spend||0) > 0 && (d.sales||0) === 0;
+  });
+  // no_activity: every tail day has zero impressions
+  const tailAllNoActivity = tailIsThree && tail.every(function(d){
+    return (d.impressions||0) === 0;
+  });
+  // high_acos: every tail day has ACOS > 35%. acos field may be 0 if no sales
+  // (in which case it'd already be caught by no_revenue), so we treat 0-sales-with-spend
+  // as "infinitely high ACOS" for this rule too.
+  const tailAllHighAcos = tailIsThree && tail.every(function(d){
+    const spend = d.spend || 0;
+    const sales = d.sales || 0;
+    if (spend === 0) return false; // no spend, no problem
+    const dayAcos = sales > 0 ? (spend / sales) * 100 : Infinity;
+    return dayAcos > 35;
+  });
+
+  // Window-wide stats for problem detail messages
+  const noActivityDays = days.filter(function(d){ return (d.impressions||0)===0; }).length;
+  const spendDays = days.filter(function(d){ return (d.spend||0)>0; });
+  const noRevDays = spendDays.filter(function(d){ return (d.sales||0)===0; }).length;
+  // avgAcos kept for backwards-compat detail output (some downstream code reads it)
+  const avgAcos = days.filter(function(d){ return d.spend>0; })
+    .reduce(function(s,d,_,a){ return s+(d.acos||0)/a.length; }, 0);
+
+  // Build problem type. Priority: no_activity > no_revenue > high_acos.
+  // If multiple apply, take the most severe.
+  let problemType = null;
+  let problemDetail = null;
+
+  // 7d ACOS gate — applies to ALL problem types. If campaign is profitable
+  // over the 7-day window, don't fire any task. Action Centre can still
+  // monitor it. This is the core fix for the "1 bad day on a healthy campaign"
+  // false positive (Aryan | Baby Swing | SP phrase case 2026-05-20).
+  const BREAKEVEN_ACOS = 0.16;
+  const healthyOverall = totalSales > 0 && windowAcos <= BREAKEVEN_ACOS;
+
+  if (tailAllNoActivity) {
+    problemType = 'no_activity';
+    problemDetail = '3 consecutive days with zero impressions (' + tail.map(function(d){ return d.date; }).join(', ') + ')';
+  } else if (tailAllNoRev) {
+    if (!healthyOverall) {
+      problemType = 'no_revenue';
+      const tailSpend = tail.reduce(function(s,d){return s+(d.spend||0);},0);
+      problemDetail = '3 consecutive days with spend but zero revenue (£' + tailSpend.toFixed(2) + ' wasted, 7d ACOS ' + (windowAcos === Infinity ? '∞' : (windowAcos*100).toFixed(1)+'%') + ')';
+    }
+  } else if (tailAllHighAcos) {
+    if (!healthyOverall) {
+      problemType = 'high_acos';
+      const tailAvgAcos = tail.reduce(function(s,d){
+        const sp = d.spend||0, sa = d.sales||0;
+        return s + (sa>0 ? (sp/sa)*100 : 0);
+      },0) / tail.length;
+      problemDetail = '3 consecutive days with ACOS > 35% (avg ' + tailAvgAcos.toFixed(1) + '%, 7d ACOS ' + (windowAcos*100).toFixed(1) + '%)';
+    }
+  }
+
+  // Score: only generate a score if we have a problem. Score is total wasted
+  // spend on the bad tail (used for prioritisation when there are more
+  // candidates than slots).
+  let score = 0;
+  if (problemType) {
+    if (problemType === 'no_activity') score = 5; // no spend wasted, but campaign is dead
+    else {
+      // Tail spend = wasted spend for prioritisation
+      const tailSpend = tail.reduce(function(s,d){return s+(d.spend||0);},0);
+      score = Math.round(tailSpend);
+    }
+  }
+
+  return {
+    score: score,
+    problemType: problemType,
+    problemDetail: problemDetail,
+    // Returned for downstream compat + logging
+    noActivityDays: noActivityDays,
+    noRevDays: noRevDays,
+    totalSpend: totalSpend.toFixed(2),
+    totalSales: totalSales.toFixed(2),
+    windowAcos: windowAcos === Infinity ? null : +(windowAcos*100).toFixed(1),
+    healthyOverall: healthyOverall,
+    avgAcos: avgAcos.toFixed(1),
+    tailIsThree: tailIsThree
+  };
+}
+
+async function createAlertTask(campaignId, campaignName, agentName, portfolio, problemType, problemDetail) {
+  if (!db) return;
+  try {
+    // r14 timezone fix: use London date, not UTC. (toISOString returns UTC.)
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
+    const existing = await db.query(
+      'SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND created_date=$2 AND problem_type=$3 AND task_source=$4',
+      [String(campaignId), today, problemType, 'alert']
+    );
+    if (existing.rows.length > 0) return;
+    const scoreMap = { out_of_budget: 15, budget_low: 8, high_acos: 10 };
+    await db.query(
+      'INSERT INTO campaign_tasks (campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [String(campaignId), campaignName, agentName||'Unassigned', portfolio||'', problemType, problemDetail, scoreMap[problemType]||8, 'alert']
+    );
+    console.log('Alert task created: ' + campaignName + ' (' + problemType + ')');
+  } catch(e) {
+    console.error('Alert task error: ' + e.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Google task auto-creation (mirrors Amazon's daily scheduler, with Google
+// data sources and a 25%-ACOS threshold). Called by the cron at 03:30 London.
+// Stores tasks in the same campaign_tasks table with department='google' so
+// the Amazon UI never sees them and the Google UI never sees Amazon ones.
+//
+// Two task scopes:
+//   • Campaign-level: when the WHOLE campaign is unhealthy
+//     (no activity OR overall high ACOS OR overall no-revenue-on-spend)
+//   • Product-level: when a single product within a campaign is the issue
+//
+// Target: ~10 tasks created per day. Sorted by wasted-spend score; if more
+// than 10 candidates, top 10 by score wins.
+// ─────────────────────────────────────────────────────────────────────────
+
+const GOOGLE_TASK_AGENTS = ['Rahul', 'Anuj'];        // self-allocate — task starts as 'Unassigned'
+// FK Sports: 25% margin → 21% after Shopify fees → ads must stay under that to be profitable.
+// 20% ACOS = break-even-ish; flag anything above as a problem.
+// 12% ACOS or below = scale opportunity (campaigns deserving more budget).
+const GOOGLE_TASK_ACOS_THRESHOLD = 20;               // % — above this is a problem
+const GOOGLE_TASK_SCALE_ACOS_THRESHOLD = 12;         // % — below this and meaningful spend = scale opportunity
+const GOOGLE_TASK_NO_REV_SPEND_MIN = 15;             // £ — spent more than this with £0 sales
+const GOOGLE_TASK_HIGH_ACOS_SPEND_MIN = 10;          // £ — high ACOS needs at least this much spend
+const GOOGLE_TASK_COST_PER_CONV_THRESHOLD = 12;      // £ — at £60 AOV, cost/conv > £12 = losing money
+const GOOGLE_TASK_LOW_CTR_THRESHOLD = 0.5;           // % — below this with spend = audience/creative issue
+const GOOGLE_TASK_CLICKS_NO_SALES_MIN = 50;          // clicks — got many clicks but 0 sales = page issue
+const GOOGLE_TASK_SCALE_SPEND_MIN = 10;              // £ — must have spent at least this for scale candidate
+const GOOGLE_TASK_DAILY_TARGET = 10;
+
+function looksLikeGoogleAgent(agentName) {
+  return GOOGLE_TASK_AGENTS.includes(agentName) || agentName === 'Unassigned';
+}
+
+async function googleTaskAlreadyExistsToday(campaignId, problemType, productKey) {
+  if (!db) return true;  // fail-safe: assume exists, skip create
+  try {
+    // productKey is null for campaign-level tasks; otherwise a stable identifier per product
+    const r = await db.query(
+      "SELECT id FROM campaign_tasks " +
+      "WHERE department='google' AND campaign_id=$1 AND problem_type=$2 " +
+      "AND COALESCE(product_key, '')=$3 " +
+      "AND created_date=CURRENT_DATE",
+      [String(campaignId), problemType, productKey || '']
+    );
+    return r.rows.length > 0;
+  } catch (e) {
+    console.error('[GTASK] dup-check error: ' + e.message);
+    return true;  // skip on error
+  }
+}
+
+let _gtaskColumnsEnsured = false;
+async function ensureGoogleTaskColumns() {
+  if (!db) return;
+  // r29p: skip after first successful run. The 12 ALTERs are idempotent but were
+  // being called from every per-request handler, flooding logs hundreds of lines
+  // per minute. Once at boot is enough; this stays as a safety net for first deploy
+  // on a fresh DB or after schema reset.
+  if (_gtaskColumnsEnsured) return;
+  const alters = [
+    ["product_key", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_key TEXT"],
+    ["product_title", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_title TEXT"],
+    ["baseline_spend", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_spend NUMERIC DEFAULT 0"],
+    ["baseline_sales", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_sales NUMERIC DEFAULT 0"],
+    ["baseline_acos", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_acos NUMERIC DEFAULT 0"],
+    ["baseline_impressions", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS baseline_impressions INTEGER DEFAULT 0"],
+    ["day7_decision", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision TEXT"],
+    ["day7_decision_at", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_decision_at TIMESTAMP"],
+    ["day7_note", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS day7_note TEXT"],
+    ["task_type", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS task_type TEXT DEFAULT 'problem'"],
+    ["product_image_url", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS product_image_url TEXT"],
+    ["priority", "ALTER TABLE campaign_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 2"]
+  ];
+  let okCount = 0;
+  for (const [name, sql] of alters) {
+    try {
+      await db.query(sql);
+      okCount++;
+    } catch (e) {
+      console.error('[GTASK] could not add column ' + name + ': ' + e.message);
+    }
+  }
+  console.log('[GTASK] columns ensured (first-run): ' + okCount + '/' + alters.length);
+  _gtaskColumnsEnsured = true;
+}
+
+function scoreGoogleTask(spend, sales, problemType) {
+  // Wasted spend = spend that didn't generate sales. Higher = more urgent.
+  if (sales <= 0) return Math.round(spend * 100) / 100;
+  const acos = (spend / sales) * 100;
+  const target = 25;
+  if (acos <= target) return 0;
+  // Excess spend over target ACOS = wasted
+  return Math.round((spend - sales * target / 100) * 100) / 100;
+}
+
+// r29: helper — does the previous resolution note say "wait" or describe an
+// action that needs time to play out? If so we defer the new task. Heuristic only.
+// r35.9 hygiene: removed `previousNoteSaysWait` regex function (no live callers).
+// Was superseded by `aiAgentNoteResolvesNewProblem` below.
+
+// r33e: AI-driven note interpretation. The old regex previousNoteSaysWait
+// missed real agent language like "ACOS under 20%, leave it" or "performing
+// well now". Agents write resolution comments in their own words, not in
+// the specific vocabulary the regex was tuned for. This function asks
+// Haiku to read the previous note + the new problem and decide whether
+// the new problem is already addressed by the note. Cost: ~£0.001/check,
+// only fires when scheduler is about to create a task with a non-empty
+// previous note. Cached for 24h per (taskKey, noteHash) so repeat checks
+// on the same data are free.
+const _noteVerdictCache = {};
+function _hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  return String(h);
+}
+async function aiAgentNoteResolvesNewProblem(opts) {
+  // opts: { campaignName, previousProblemDetail, previousNote, newProblemDetail, newProblemType }
+  const note = String(opts.previousNote || '').trim();
+  if (!note) return { skip: false, reason: 'no previous note to interpret' };
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { skip: false, reason: 'no API key' };
+
+  // Cache key: campaign + note content + new problem type. Same combination = same answer.
+  const cacheKey = (opts.campaignName || '') + '|' + _hashStr(note) + '|' + (opts.newProblemType || '');
+  const cached = _noteVerdictCache[cacheKey];
+  if (cached && Date.now() - cached.at < 24 * 3600 * 1000) {
+    return { skip: cached.skip, reason: cached.reason + ' (cached)' };
+  }
+
+  const prompt =
+    "An agent resolved a previous task with a written note. Today a new task is about to be created on the same campaign. Decide whether the agent's note already addresses the new problem so the new task should be SKIPPED, or whether it's a genuinely new issue that should FIRE.\n\n" +
+    "═══ CAMPAIGN ═══\n" +
+    (opts.campaignName || '(unknown)') + "\n\n" +
+    "═══ PREVIOUS PROBLEM (already resolved) ═══\n" +
+    String(opts.previousProblemDetail || '(not recorded)').slice(0, 400) + "\n\n" +
+    "═══ AGENT'S RESOLUTION NOTE ═══\n" +
+    note.slice(0, 600) + "\n\n" +
+    "═══ NEW PROBLEM DETECTED TODAY ═══\n" +
+    String(opts.newProblemDetail || '').slice(0, 400) + "\n\n" +
+    "═══ JUDGEMENT RULES ═══\n" +
+    "• Our Amazon breakeven ACOS is 16%. If the new problem is something like 'no revenue 1 of 3 days' but the agent's note says the campaign is performing OK (ACOS under 16-20%, working well, leave it), then SKIP — the agent has already judged it as acceptable.\n" +
+    "• If the note says wait / monitor / give it time / pending / let it run, SKIP.\n" +
+    "• If the note describes a fix that should resolve the new problem type (e.g. 'paused bad keywords' resolves a repeat 'high_acos' on the same campaign), SKIP.\n" +
+    "• If the note is dismissive ('not relevant', 'ignore') and the new problem is the same type, SKIP.\n" +
+    "• If the note resolved a DIFFERENT problem type than today's, FIRE — it's a new issue.\n" +
+    "• If the note is vague, empty, or doesn't address the new problem, FIRE.\n\n" +
+    "Return ONLY two lines in this exact format:\n" +
+    "VERDICT: SKIP\n" +
+    "REASON: <one short sentence>\n\n" +
+    "or\n\n" +
+    "VERDICT: FIRE\n" +
+    "REASON: <one short sentence>";
+
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 20000
+    });
+    const text = String((aiResp.data.content[0] && aiResp.data.content[0].text) || '').trim();
+    const verdictMatch = /VERDICT:\s*(SKIP|FIRE)/i.exec(text);
+    const reasonMatch = /REASON:\s*(.+)/i.exec(text);
+    if (!verdictMatch) {
+      // Couldn't parse — be conservative, fire the task so agents aren't blind
+      console.log('[r33e ai-note] unparseable verdict for ' + (opts.campaignName||'?') + ': "' + text.slice(0,100) + '" — defaulting to FIRE');
+      return { skip: false, reason: 'AI verdict unparseable' };
+    }
+    const skip = verdictMatch[1].toUpperCase() === 'SKIP';
+    const reason = (reasonMatch ? reasonMatch[1] : '(no reason given)').trim();
+    _noteVerdictCache[cacheKey] = { skip: skip, reason: reason, at: Date.now() };
+    return { skip: skip, reason: reason };
+  } catch(e) {
+    console.error('[r33e ai-note] ' + e.message);
+    // On API error, be conservative — fire the task so agents aren't blind
+    return { skip: false, reason: 'AI error: ' + e.message };
+  }
+}
+
+// r29: parse most recent resolved task on this target. Returns { failureCount,
+// previousNote, previousResolvedAt, previousProblemDetail } or null if none.
+async function getPreviousTaskContext(department, campaignId, productKey) {
+  if (!db) return null;
+  try {
+    // r33e: agents write their resolution comments into agent_notes (the
+    // free-text field on the task UI), NOT resolution_note (which exists in
+    // the schema but is never written). Reading from resolution_note meant
+    // previousNote was always empty and every "note-aware deferral" check
+    // silently failed, so tasks kept re-firing despite agents leaving
+    // detailed notes like "ACOS under 20%, leave it". Now reads agent_notes
+    // first, falls back to resolution_note for any future writers.
+    const r = await db.query(
+      "SELECT id, failure_count, " +
+      "       COALESCE(NULLIF(TRIM(agent_notes), ''), NULLIF(TRIM(resolution_note), '')) AS effective_note, " +
+      "       last_resolved_date, problem_detail " +
+      "FROM campaign_tasks " +
+      "WHERE department = $1 AND campaign_id = $2 " +
+      "  AND COALESCE(product_key, '') = COALESCE($3, '') " +
+      "  AND status IN ('complete', 'archived') " +
+      "  AND last_resolved_date > NOW() - INTERVAL '30 days' " +
+      "ORDER BY last_resolved_date DESC LIMIT 1",
+      [department, String(campaignId), productKey || null]
+    );
+    if (!r.rows.length) return null;
+    const row = r.rows[0];
+    return {
+      failureCount: row.failure_count || 1,
+      previousNote: row.effective_note || '',
+      previousResolvedAt: row.last_resolved_date,
+      previousProblemDetail: row.problem_detail || ''
+    };
+  } catch(e) {
+    console.error('[r29 prev-task-context] ' + e.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// r34: Agent Performance — outcome scoring engine
+// ─────────────────────────────────────────────────────────────────────────
+// Computes the £ impact of every completed task once 7 days have elapsed
+// after completion. Writes to task_outcomes. Read by the Performance page.
+
+const R34_BREAKEVEN_ACOS = 0.16;          // FK Sports breakeven
+const R34_DELTA_THRESHOLD = 0.05;         // 5 ACOS points = real change (not noise)
+
+// Pull a campaign's spend/sales aggregate for a date range, from daily_snapshots
+// (Amazon) or google_state_snapshots (Google). Returns { spend, sales } both as
+// numbers. Returns nulls if no data found in the window.
+async function r34_campaignWindowMetrics(department, campaignId, productKey, startDate, endDate) {
+  if (!db) return null;
+  try {
+    if (department === 'amazon') {
+      const r = await db.query(
+        "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= $1 AND snapshot_date <= $2",
+        [startDate, endDate]
+      );
+      let spend = 0, sales = 0, daysWithData = 0;
+      r.rows.forEach(function(row){
+        const camps = row.campaigns || [];
+        const match = camps.find(function(c){ return String(c.campaignId) === String(campaignId); });
+        if (match) {
+          spend += parseFloat(match.spend) || 0;
+          sales += parseFloat(match.sales) || 0;
+          daysWithData++;
+        }
+      });
+      return { spend: spend, sales: sales, daysWithData: daysWithData };
+    } else if (department === 'google') {
+      // For Google we have snapshot rows in google_state_snapshots, one per
+      // ingest (multiple per day historically). For each calendar day in window,
+      // pick the LAST snapshot of that day to avoid double-counting; sum across
+      // days. Match campaign at campaign level, or filter to product level if
+      // productKey present.
+      const r = await db.query(
+        "WITH daily_snapshots_g AS ( " +
+        "  SELECT DATE(received_at AT TIME ZONE 'Europe/London') AS d, " +
+        "         products, " +
+        "         ROW_NUMBER() OVER (PARTITION BY DATE(received_at AT TIME ZONE 'Europe/London') ORDER BY received_at DESC) AS rn " +
+        "  FROM google_state_snapshots " +
+        "  WHERE DATE(received_at AT TIME ZONE 'Europe/London') >= $1 AND DATE(received_at AT TIME ZONE 'Europe/London') <= $2 " +
+        ") SELECT d, products FROM daily_snapshots_g WHERE rn = 1",
+        [startDate, endDate]
+      );
+      let spend = 0, sales = 0, daysWithData = 0;
+      r.rows.forEach(function(row){
+        const prods = row.products || [];
+        let dayHadMatch = false;
+        prods.forEach(function(p){
+          if (String(p.campaignId) !== String(campaignId)) return;
+          if (productKey) {
+            // product-level task — only sum rows whose shopifyItemId matches
+            // the product_key (which typically embeds the Shopify product ID).
+            const parts = String(p.shopifyItemId || '').split('_');
+            const partsKey = String(productKey || '').split('_');
+            const shopId = parts.length >= 3 ? parts[2] : null;
+            const keyShop = partsKey.length >= 3 ? partsKey[2] : null;
+            if (!shopId || !keyShop || shopId !== keyShop) return;
+          }
+          spend += parseFloat(p.spend) || 0;
+          sales += parseFloat(p.sales) || 0;
+          dayHadMatch = true;
+        });
+        if (dayHadMatch) daysWithData++;
+      });
+      return { spend: spend, sales: sales, daysWithData: daysWithData };
+    }
+  } catch(e) {
+    console.error('[r34 windowMetrics] ' + e.message);
+    return null;
+  }
+  return null;
+}
+
+// Compute the outcome row for one task. Returns the row object (not yet persisted)
+// or null if not scoreable (e.g. completion was less than 7 days ago).
+async function r34_computeOutcomeForTask(task) {
+  // task = full row from campaign_tasks
+  const completedAt = task.completed_at || task.resolved_at;
+  if (!completedAt) return null;
+  const completedDate = new Date(completedAt);
+  const now = new Date();
+  const daysSinceComplete = (now.getTime() - completedDate.getTime()) / 86400000;
+  if (daysSinceComplete < 7) return null;     // after-window not elapsed yet
+
+  // Before window: 7 days ending the day before created_date (so we capture
+  // pre-task state). After window: 7 days starting the day AFTER completed_at
+  // (excluding completion day itself which mixes pre + post state).
+  const createdDate = new Date(task.created_date || task.created_at || completedAt);
+  const beforeEnd = new Date(createdDate); beforeEnd.setDate(beforeEnd.getDate() - 1);
+  const beforeStart = new Date(beforeEnd); beforeStart.setDate(beforeStart.getDate() - 6);
+  const afterStart = new Date(completedDate); afterStart.setDate(afterStart.getDate() + 1);
+  const afterEnd = new Date(afterStart); afterEnd.setDate(afterEnd.getDate() + 6);
+  const fmt = function(d){ return d.toISOString().slice(0, 10); };
+
+  const before = await r34_campaignWindowMetrics(task.department, task.campaign_id, task.product_key, fmt(beforeStart), fmt(beforeEnd));
+  const after  = await r34_campaignWindowMetrics(task.department, task.campaign_id, task.product_key, fmt(afterStart), fmt(afterEnd));
+
+  if (!before || !after) {
+    return { task_id: task.id, agent_name: task.agent_name, department: task.department, task_source: task.task_source,
+             campaign_id: String(task.campaign_id||''), campaign_name: task.campaign_name, problem_type: task.problem_type, product_key: task.product_key,
+             outcome: 'unscoreable', disqualified_reason: 'no_data' };
+  }
+  if (before.spend < 0.5 && after.spend < 0.5) {
+    return { task_id: task.id, agent_name: task.agent_name, department: task.department, task_source: task.task_source,
+             campaign_id: String(task.campaign_id||''), campaign_name: task.campaign_name, problem_type: task.problem_type, product_key: task.product_key,
+             before_window_start: fmt(beforeStart), before_window_end: fmt(beforeEnd),
+             before_spend: before.spend, before_sales: before.sales,
+             after_window_start: fmt(afterStart), after_window_end: fmt(afterEnd),
+             after_spend: after.spend, after_sales: after.sales,
+             outcome: 'unscoreable', disqualified_reason: 'no_spend_either_window' };
+  }
+
+  const beforeAcos = before.sales > 0 ? (before.spend / before.sales) : (before.spend > 0 ? 99 : null);
+  const afterAcos  = after.sales > 0  ? (after.spend  / after.sales)  : (after.spend  > 0 ? 99 : null);
+  const acosDelta = (beforeAcos != null && afterAcos != null) ? (beforeAcos - afterAcos) : null;
+
+  // Outcome categorisation
+  let outcome = 'flat';
+  if (beforeAcos != null && afterAcos != null) {
+    if (beforeAcos > R34_BREAKEVEN_ACOS && afterAcos <= R34_BREAKEVEN_ACOS) outcome = 'breakthrough';
+    else if (acosDelta >= R34_DELTA_THRESHOLD) outcome = 'improved';
+    else if (acosDelta <= -R34_DELTA_THRESHOLD) outcome = 'worsened';
+    else outcome = 'flat';
+  } else if (afterAcos === null && before.spend > 0) {
+    // campaign now has zero spend (probably paused successfully)
+    outcome = 'flat';     // can't measure but agent likely did the right thing
+  }
+
+  // £ impact maths — the "better" formula:
+  // efficiency_gain = (beforeSales * afterAcos/beforeAcos) - afterSpend
+  // i.e. "what would today's sales have cost at yesterday's efficiency, vs what they actually cost"
+  // Positive = money saved. Only meaningful when both ACOSes exist.
+  let efficiencyGain = null;
+  if (beforeAcos > 0 && afterAcos != null) {
+    const hypotheticalAfterSpend = before.sales * (afterAcos / beforeAcos);
+    efficiencyGain = hypotheticalAfterSpend - after.spend;
+  }
+
+  // Worsened waste = extra spend caused by higher ACOS in after-window
+  let worsenedWaste = null;
+  if (outcome === 'worsened' && beforeAcos > 0) {
+    // What WOULD the campaign have spent at beforeAcos to generate after.sales?
+    const expectedSpend = after.sales * beforeAcos;
+    worsenedWaste = Math.max(0, after.spend - expectedSpend);
+  }
+
+  // Weight by log10 of the larger spend — a £1000 campaign matters more than a £10 one
+  const maxSpend = Math.max(before.spend, after.spend, 1);
+  const weight = Math.log10(maxSpend + 10);
+
+  return {
+    task_id: task.id,
+    agent_name: task.agent_name,
+    department: task.department,
+    task_source: task.task_source,
+    campaign_id: String(task.campaign_id||''),
+    campaign_name: task.campaign_name,
+    problem_type: task.problem_type,
+    product_key: task.product_key,
+    before_window_start: fmt(beforeStart), before_window_end: fmt(beforeEnd),
+    before_spend: before.spend, before_sales: before.sales, before_acos: beforeAcos,
+    after_window_start: fmt(afterStart), after_window_end: fmt(afterEnd),
+    after_spend: after.spend, after_sales: after.sales, after_acos: afterAcos,
+    acos_delta: acosDelta,
+    outcome: outcome,
+    weight: weight,
+    efficiency_gain_gbp: efficiencyGain,
+    worsened_waste_gbp: worsenedWaste,
+    repeat_gap_waste_gbp: null    // filled in by a separate pass below if applicable
+  };
+}
+
+// Compute the "repeat gap waste" for an outcome — the spend on the campaign
+// between this task's completion and the next failure (if any within 14 days).
+async function r34_repeatGapWasteForTask(task) {
+  if (!db) return null;
+  const completedAt = task.completed_at || task.resolved_at;
+  if (!completedAt) return null;
+  try {
+    // Find the next task on the same (campaign_id, problem_type) created within
+    // 14 days after this one was completed. If found = repeat offender; the gap
+    // spend is "waste".
+    const r = await db.query(
+      "SELECT id, created_date FROM campaign_tasks " +
+      "WHERE campaign_id = $1 AND problem_type = $2 AND department = $3 " +
+      "  AND COALESCE(product_key,'') = COALESCE($4,'') " +
+      "  AND created_date > $5 " +
+      "  AND created_date <= ($5::timestamp + INTERVAL '14 days') " +
+      "  AND id != $6 " +
+      "ORDER BY created_date ASC LIMIT 1",
+      [String(task.campaign_id||''), task.problem_type, task.department, task.product_key || null, completedAt, task.id]
+    );
+    if (!r.rows.length) return null;
+    const nextCreated = new Date(r.rows[0].created_date);
+    const fmt = function(d){ return d.toISOString().slice(0, 10); };
+    const gapStart = new Date(completedAt); gapStart.setDate(gapStart.getDate() + 1);
+    if (gapStart >= nextCreated) return 0;
+    const gapEnd = new Date(nextCreated); gapEnd.setDate(gapEnd.getDate() - 1);
+    if (gapEnd < gapStart) return 0;
+    const gap = await r34_campaignWindowMetrics(task.department, task.campaign_id, task.product_key, fmt(gapStart), fmt(gapEnd));
+    if (!gap) return null;
+    // Wasted = spend during the gap (since the fix didn't stick)
+    return gap.spend;
+  } catch(e) {
+    console.error('[r34 repeatGap] ' + e.message);
+    return null;
+  }
+}
+
+// Haiku-aided "is this a real task or a bogus scheduler firing?" check.
+// Used during the one-time backfill. Returns 'REAL' or 'BOGUS'.
+async function r34_aiClassifyHistoricalTask(task) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return 'REAL';   // fail safe — don't disqualify if we can't check
+  const note = String(task.agent_notes || '').trim();
+  if (!note) return 'REAL';     // no note = no obvious dismissal signal, assume real
+  const prompt =
+    "You are classifying historical Amazon/Google PPC tasks. The scheduler that created them had bugs (it was firing on healthy campaigns and on paused campaigns). An agent has marked the task 'complete' with a note.\n\n" +
+    "Decide whether this was a REAL problem the agent actually fixed, or a BOGUS firing the agent correctly dismissed.\n\n" +
+    "═══ TASK ═══\n" +
+    "Campaign: " + (task.campaign_name || '?') + "\n" +
+    "Problem flagged: " + (task.problem_detail || task.problem_type || '?') + "\n" +
+    "Agent's resolution note: " + note.slice(0, 400) + "\n\n" +
+    "═══ JUDGMENT ═══\n" +
+    "• If the note says the campaign was actually fine / under target / performing well / already healthy → BOGUS\n" +
+    "• If the note says the campaign was paused / disabled / archived → BOGUS\n" +
+    "• If the note says 'duplicate', 'already done', 'closed by mistake' → BOGUS\n" +
+    "• If the note describes an actual fix (paused keywords, lowered bids, changed budget, etc.) → REAL\n" +
+    "• If the note is empty or unclear → REAL (give benefit of the doubt)\n\n" +
+    "Return ONLY one word: REAL or BOGUS";
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 10,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 15000
+    });
+    const text = String((aiResp.data.content[0] && aiResp.data.content[0].text) || '').trim().toUpperCase();
+    return text.indexOf('BOGUS') === 0 ? 'BOGUS' : 'REAL';
+  } catch(e) {
+    console.error('[r34 aiClassify] ' + e.message);
+    return 'REAL';
+  }
+}
+
+// AI mistakes-mirror — one specific sentence on what the agent missed.
+// Cost: ~£0.001. Called for repeat-failure tasks only.
+async function r34_aiMistakesMirror(task, repeatGapWaste) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+  const prompt =
+    "You are coaching an Amazon/Google PPC agent. Their previous fix did not stick — the same problem returned within 14 days.\n\n" +
+    "═══ TASK ═══\n" +
+    "Campaign: " + (task.campaign_name || '?') + "\n" +
+    "Problem they fixed: " + (task.problem_detail || task.problem_type || '?') + "\n" +
+    "Their fix note: " + String(task.agent_notes || '(no note)').slice(0, 400) + "\n" +
+    "What happened: same problem returned " + (repeatGapWaste ? '(£' + Math.round(repeatGapWaste) + ' spent in the gap)' : '') + "\n\n" +
+    "═══ COACHING ═══\n" +
+    "In 2-3 sentences, what specifically did the agent miss? What action would have stuck?\n" +
+    "Be specific to THIS campaign and THIS problem. No generic advice.";
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 20000
+    });
+    return String((aiResp.data.content[0] && aiResp.data.content[0].text) || '').trim();
+  } catch(e) {
+    console.error('[r34 mistakesMirror] ' + e.message);
+    return null;
+  }
+}
+
+// Persist one outcome row. Uses UPSERT — safe if backfill is re-run.
+async function r34_persistOutcome(row) {
+  if (!db || !row) return;
+  try {
+    await db.query(
+      "INSERT INTO task_outcomes (" +
+      "  task_id, agent_name, department, task_source, campaign_id, campaign_name, problem_type, product_key, " +
+      "  before_window_start, before_window_end, before_spend, before_sales, before_acos, " +
+      "  after_window_start, after_window_end, after_spend, after_sales, after_acos, " +
+      "  acos_delta, outcome, disqualified_reason, weight, " +
+      "  efficiency_gain_gbp, worsened_waste_gbp, repeat_gap_waste_gbp, " +
+      "  mistake_mirror_note, mistake_mirror_at, scored_at " +
+      ") VALUES (" +
+      "  $1,$2,$3,$4,$5,$6,$7,$8, $9,$10,$11,$12,$13, $14,$15,$16,$17,$18, $19,$20,$21,$22, $23,$24,$25, $26,$27, NOW()" +
+      ") ON CONFLICT (task_id) DO UPDATE SET " +
+      "  outcome = EXCLUDED.outcome, disqualified_reason = EXCLUDED.disqualified_reason, " +
+      "  before_spend = EXCLUDED.before_spend, before_sales = EXCLUDED.before_sales, before_acos = EXCLUDED.before_acos, " +
+      "  after_spend = EXCLUDED.after_spend, after_sales = EXCLUDED.after_sales, after_acos = EXCLUDED.after_acos, " +
+      "  acos_delta = EXCLUDED.acos_delta, weight = EXCLUDED.weight, " +
+      "  efficiency_gain_gbp = EXCLUDED.efficiency_gain_gbp, worsened_waste_gbp = EXCLUDED.worsened_waste_gbp, " +
+      "  repeat_gap_waste_gbp = EXCLUDED.repeat_gap_waste_gbp, " +
+      "  mistake_mirror_note = EXCLUDED.mistake_mirror_note, mistake_mirror_at = EXCLUDED.mistake_mirror_at, " +
+      "  scored_at = NOW()",
+      [row.task_id, row.agent_name, row.department, row.task_source, row.campaign_id, row.campaign_name, row.problem_type, row.product_key,
+       row.before_window_start, row.before_window_end, row.before_spend, row.before_sales, row.before_acos,
+       row.after_window_start, row.after_window_end, row.after_spend, row.after_sales, row.after_acos,
+       row.acos_delta, row.outcome, row.disqualified_reason, row.weight,
+       row.efficiency_gain_gbp, row.worsened_waste_gbp, row.repeat_gap_waste_gbp,
+       row.mistake_mirror_note, row.mistake_mirror_note ? new Date().toISOString() : null]
+    );
+  } catch(e) {
+    console.error('[r34 persistOutcome] task_id=' + row.task_id + ': ' + e.message);
+  }
+}
+
+// Score one task fully: compute outcome, add repeat-gap waste if applicable,
+// generate mistakes-mirror note if it was a repeat failure, persist.
+async function r34_scoreOneTask(task, opts) {
+  opts = opts || {};
+  const doDisqualifyCheck = opts.doDisqualifyCheck === true;
+  const row = await r34_computeOutcomeForTask(task);
+  if (!row) return null;
+
+  // Detect duplicate-chain: another task by same agent on same (campaign_id, problem_type)
+  // closed within 24h of this one. If so AND this isn't the latest, mark disqualified.
+  if (doDisqualifyCheck && db) {
+    try {
+      const dupCheck = await db.query(
+        "SELECT id FROM campaign_tasks WHERE agent_name = $1 AND campaign_id = $2 AND problem_type = $3 " +
+        "  AND department = $4 AND status IN ('complete', 'archived') " +
+        "  AND resolved_at IS NOT NULL " +
+        "  AND ABS(EXTRACT(EPOCH FROM (resolved_at - $5::timestamp))) < 86400 " +
+        "  AND id != $6 AND id > $6",
+        [task.agent_name, String(task.campaign_id||''), task.problem_type, task.department, task.completed_at || task.resolved_at, task.id]
+      );
+      if (dupCheck.rows.length > 0) {
+        row.outcome = 'disqualified';
+        row.disqualified_reason = 'duplicate_chain';
+      }
+    } catch(e) { /* non-fatal */ }
+  }
+
+  // Repeat-gap waste — applies whether or not the outcome is improved/worsened.
+  // The repeat IS the signal that the fix didn't stick.
+  const gapWaste = await r34_repeatGapWasteForTask(task);
+  if (gapWaste != null && gapWaste > 0) {
+    row.repeat_gap_waste_gbp = gapWaste;
+    // Generate mistakes-mirror note for this repeat
+    if (opts.runMistakesMirror !== false) {
+      row.mistake_mirror_note = await r34_aiMistakesMirror(task, gapWaste);
+    }
+  }
+
+  // Backfill-only: AI disqualify check on REAL-vs-BOGUS via resolution note
+  if (doDisqualifyCheck && row.outcome !== 'disqualified') {
+    const verdict = await r34_aiClassifyHistoricalTask(task);
+    if (verdict === 'BOGUS') {
+      row.outcome = 'disqualified';
+      row.disqualified_reason = 'bogus_scheduler_firing';
+      // Don't keep the £ impact numbers — would be misleading
+      row.efficiency_gain_gbp = null;
+      row.worsened_waste_gbp = null;
+      row.repeat_gap_waste_gbp = null;
+    }
+  }
+
+  await r34_persistOutcome(row);
+  return row;
+}
+
+// One-time backfill — runs ONCE across all deploys, gated by system_meta key.
+// Scores all completed tasks from the last 30 days. Includes Haiku-aided
+// disqualify check (REAL vs BOGUS) since this period had buggy scheduler.
+async function r34_runBackfillIfNeeded() {
+  if (!db) return;
+  try {
+    const flag = await db.query("SELECT value FROM system_meta WHERE key = 'r34_backfill_completed_at'");
+    if (flag.rows.length > 0) {
+      console.log('[r34 backfill] already completed at ' + flag.rows[0].value + ' — skipping');
+      return;
+    }
+    console.log('[r34 backfill] starting one-time backfill of historical task outcomes...');
+    const tasks = await db.query(
+      "SELECT * FROM campaign_tasks " +
+      "WHERE status IN ('complete', 'archived') " +
+      "  AND resolved_at IS NOT NULL " +
+      "  AND resolved_at < NOW() - INTERVAL '7 days' " +
+      "  AND resolved_at > NOW() - INTERVAL '30 days' " +
+      "  AND task_source != 'general' " +
+      "  AND id NOT IN (SELECT task_id FROM task_outcomes) " +
+      "ORDER BY resolved_at ASC"
+    );
+    console.log('[r34 backfill] ' + tasks.rows.length + ' eligible tasks to score');
+    let scored = 0, disqualified = 0, unscoreable = 0, errors = 0;
+    for (const task of tasks.rows) {
+      try {
+        const row = await r34_scoreOneTask(task, { doDisqualifyCheck: true, runMistakesMirror: true });
+        if (!row) { unscoreable++; continue; }
+        if (row.outcome === 'disqualified') disqualified++;
+        else if (row.outcome === 'unscoreable') unscoreable++;
+        else scored++;
+      } catch(e) {
+        errors++;
+        console.error('[r34 backfill] task_id=' + task.id + ' error: ' + e.message);
+      }
+    }
+    console.log('[r34 backfill] complete: scored=' + scored + ' disqualified=' + disqualified + ' unscoreable=' + unscoreable + ' errors=' + errors);
+    await db.query(
+      "INSERT INTO system_meta (key, value) VALUES ('r34_backfill_completed_at', NOW()::text) " +
+      "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+    );
+  } catch(e) {
+    console.error('[r34 backfill] outer error: ' + e.message);
+  }
+}
+
+// Going-forward nightly scoring — for tasks completed 7-14 days ago that
+// aren't yet scored. No disqualify check (r33e scheduler shouldn't be firing
+// bogus tasks anymore).
+async function r34_runNightlyScoring() {
+  if (!db) return;
+  try {
+    const tasks = await db.query(
+      "SELECT * FROM campaign_tasks " +
+      "WHERE status IN ('complete', 'archived') " +
+      "  AND resolved_at IS NOT NULL " +
+      "  AND resolved_at < NOW() - INTERVAL '7 days' " +
+      "  AND resolved_at > NOW() - INTERVAL '14 days' " +
+      "  AND task_source != 'general' " +
+      "  AND id NOT IN (SELECT task_id FROM task_outcomes) " +
+      "ORDER BY resolved_at ASC"
+    );
+    if (!tasks.rows.length) {
+      console.log('[r34 nightly] no new tasks to score');
+      return;
+    }
+    console.log('[r34 nightly] scoring ' + tasks.rows.length + ' tasks');
+    let scored = 0;
+    for (const task of tasks.rows) {
+      try {
+        const row = await r34_scoreOneTask(task, { doDisqualifyCheck: false, runMistakesMirror: true });
+        if (row && row.outcome && row.outcome !== 'unscoreable') scored++;
+      } catch(e) {
+        console.error('[r34 nightly] task_id=' + task.id + ' error: ' + e.message);
+      }
+    }
+    console.log('[r34 nightly] complete: ' + scored + ' scored');
+  } catch(e) {
+    console.error('[r34 nightly] outer error: ' + e.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// End r34 scoring engine
+// ─────────────────────────────────────────────────────────────────────────
+
+
+// r29: mark a target as stuck — manager review surface. Idempotent (UPSERT).
+async function markStuck(department, campaignId, productKey, payload) {
+  if (!db) return;
+  try {
+    await db.query(
+      "INSERT INTO stuck_campaigns " +
+      "(campaign_id, product_key, campaign_name, product_title, department, problem_type, failure_count, last_problem_detail, last_resolved_note, last_seen_at) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) " +
+      "ON CONFLICT (campaign_id, COALESCE(product_key,''), department) WHERE status = 'open' " +
+      "DO UPDATE SET last_seen_at=NOW(), failure_count=stuck_campaigns.failure_count + 1, " +
+      "  last_problem_detail=EXCLUDED.last_problem_detail, last_resolved_note=EXCLUDED.last_resolved_note",
+      [
+        String(campaignId), productKey || null, payload.campaignName || '', payload.productTitle || null,
+        department, payload.problemType || null, payload.failureCount || 3,
+        payload.problemDetail || null, payload.previousNote || null
+      ]
+    );
+    console.log('[r29 STUCK] ' + department + ' ' + campaignId + (productKey ? ' / ' + productKey : '') + ' — flagged for manager review');
+  } catch(e) {
+    console.error('[r29 markStuck] ' + e.message);
+  }
+}
+
+// r29: AI-enhanced task description for repeat offenders only. One-shot at task
+// creation. Uses Haiku (fast, cheap). Output replaces the rule-generated
+// problem_detail with a sharper version that reads previous notes.
+// IMPORTANT: this runs ONCE at task creation, never again on viewing the task.
+async function aiEnhanceRepeatTaskDescription(department, taskRow, prevContext) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || !prevContext || !prevContext.previousNote) return null;
+
+  const prompt =
+    "You are writing a sharper task description for a Google Ads / Amazon Ads agent. This is the SECOND time this exact target has tripped the same rule. The agent's previous attempt did not resolve it.\n\n" +
+    "═══ TARGET ═══\n" +
+    "Department: " + department + "\n" +
+    "Campaign: " + (taskRow.campaignName || '?') + "\n" +
+    (taskRow.productTitle ? "Product: " + taskRow.productTitle + "\n" : "") +
+    "Problem type: " + (taskRow.problemType || '?') + "\n\n" +
+    "═══ CURRENT RULE-GENERATED DETAIL ═══\n" + (taskRow.problemDetail || '(none)') + "\n\n" +
+    "═══ PREVIOUS TASK ═══\n" +
+    "Previous problem: " + (prevContext.previousProblemDetail || '(no detail)') + "\n" +
+    "Agent's resolution note from previous task: \"" + (prevContext.previousNote || '(empty)') + "\"\n" +
+    "Resolved on: " + (prevContext.previousResolvedAt || '?') + "\n\n" +
+    "═══ YOUR JOB ═══\n" +
+    "Write a 2-3 sentence sharper task description for this REPEAT failure that:\n" +
+    "1. References what the agent already tried (from their note)\n" +
+    "2. Suggests a DIFFERENT angle to investigate this time (structural change, not the same fix)\n" +
+    "3. Is specific and verifiable — name the campaign element, the keyword, the page, etc.\n\n" +
+    "Return ONLY the description text, no preamble, no quotes, no markdown. Maximum 60 words.";
+
+  try {
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 30000
+    });
+    const text = aiResp.data.content[0].text.trim();
+    return text || null;
+  } catch(e) {
+    console.error('[r29 ai-enhance-repeat] ' + e.message);
+    return null;
+  }
+}
+
+async function createGoogleTask(taskRow) {
+  if (!db) return false;
+  const exists = await googleTaskAlreadyExistsToday(taskRow.campaignId, taskRow.problemType, taskRow.productKey);
+  if (exists) return false;
+
+  // r29f + r33a: if there's an OPEN task on this exact target (any age), append a
+  // "fired again" note to the existing task instead of creating a duplicate.
+  // After 2 re-fires while still open, mark the existing task as repeat offender.
+  //
+  // r33a hardening:
+  //   - Explicit $2::text cast prevents Postgres parameter-type inference issues
+  //     when productKey is null (root cause hypothesis for Eva Mats duplicates).
+  //   - Explicit IS NULL pair check replaces nested COALESCE for clearer semantics.
+  //   - status NOT IN (closed-states) replaces status IN (open-states) so future
+  //     status values (e.g. 'scaling') count as active by default.
+  //   - Always log the result so Railway logs show whether match happened.
+  try {
+    const productKeyParam = taskRow.productKey || null;
+    const openCheck = await db.query(
+      "SELECT id, problem_detail, failure_count, created_date " +
+      "FROM campaign_tasks " +
+      "WHERE department='google' AND campaign_id=$1 " +
+      "  AND ((product_key IS NULL AND $2::text IS NULL) OR product_key = $2::text) " +
+      "  AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+      "ORDER BY created_date DESC LIMIT 1",
+      [String(taskRow.campaignId), productKeyParam]
+    );
+    console.log('[r33a GTASK openCheck] campaign=' + taskRow.campaignId +
+      ' productKey=' + (productKeyParam || 'null') +
+      ' problemType=' + taskRow.problemType +
+      ' → ' + (openCheck.rows.length ? 'found existing task #' + openCheck.rows[0].id : 'NONE — will create new'));
+    if (openCheck.rows.length) {
+      const existing = openCheck.rows[0];
+      const daysSinceCreate = Math.floor((Date.now() - new Date(existing.created_date).getTime()) / 86400000);
+      const newCount = (existing.failure_count || 1) + 1;
+      const refireNote = '\n\n— 🔁 Fired again Day ' + daysSinceCreate + ' (' + new Date().toISOString().slice(0, 10) + '): ' + (taskRow.problemDetail || '');
+      const newDetail = (existing.problem_detail || '') + refireNote;
+      const becomeRepeat = newCount >= 2;
+      await db.query(
+        "UPDATE campaign_tasks SET problem_detail=$1, failure_count=$2, is_repeat_offender=$3, updated_at=NOW() WHERE id=$4",
+        [newDetail, newCount, becomeRepeat, existing.id]
+      );
+      console.log('[r33a GTASK refire] ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') +
+        ' — existing OPEN task #' + existing.id + ' updated (failure_count=' + newCount + ', repeat=' + becomeRepeat + ')');
+      return false;  // didn't create new — updated existing
+    }
+  } catch(e) { console.error('[r33a GTASK openCheck] ' + e.message); }
+
+  // r29: read previous task context BEFORE deciding whether to create
+  const prevCtx = await getPreviousTaskContext('google', taskRow.campaignId, taskRow.productKey);
+  let isRepeatOffender = false;
+  let failureCount = 1;
+
+  if (prevCtx) {
+    failureCount = prevCtx.failureCount + 1;
+
+    // r29 hard cap: 3rd or later failure → no new task, raise to Stuck
+    if (failureCount >= 3) {
+      await markStuck('google', taskRow.campaignId, taskRow.productKey, {
+        campaignName: taskRow.campaignName,
+        productTitle: taskRow.productTitle,
+        problemType: taskRow.problemType,
+        failureCount: failureCount,
+        problemDetail: taskRow.problemDetail,
+        previousNote: prevCtx.previousNote
+      });
+      return false;
+    }
+
+    // r33e: AI-driven note-aware deferral. Was regex (previousNoteSaysWait)
+    // that only matched specific words like "wait"/"monitor". Now Haiku reads
+    // the previous agent note + new problem and decides whether the agent's
+    // note already addresses today's flag. Catches real agent language like
+    // "ACOS under 20%, leave it" or "performing well now". Still bounded by
+    // 7-day staleness check — old notes can't suppress new tasks forever.
+    const daysSince = (Date.now() - new Date(prevCtx.previousResolvedAt).getTime()) / 86400000;
+    if (prevCtx.previousNote && daysSince < 7) {
+      const verdict = await aiAgentNoteResolvesNewProblem({
+        campaignName: taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : ''),
+        previousProblemDetail: prevCtx.previousProblemDetail,
+        previousNote: prevCtx.previousNote,
+        newProblemDetail: taskRow.problemDetail,
+        newProblemType: taskRow.problemType
+      });
+      if (verdict.skip) {
+        console.log('[r33e GTASK ai-defer] ' + taskRow.campaignName + ' — SKIP: ' + verdict.reason + ' (note ' + daysSince.toFixed(1) + 'd old)');
+        return false;
+      }
+      console.log('[r33e GTASK ai-defer] ' + taskRow.campaignName + ' — FIRE: ' + verdict.reason);
+    }
+
+    isRepeatOffender = true;
+    console.log('[GTASK] REPEAT OFFENDER: ' + taskRow.campaignName + (taskRow.productTitle ? ' / ' + taskRow.productTitle : '') + ' (failure #' + failureCount + ')');
+  }
+
+  // Try to enrich with Shopify product image URL (for product-level tasks)
+  let productImageUrl = null;
+  if (taskRow.productKey) {
+    const parts = String(taskRow.productKey).split('_');
+    const possibleShopifyId = parts.length >= 3 ? parts[2] : null;
+    if (possibleShopifyId) {
+      const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === possibleShopifyId; });
+      if (sp && sp.imageUrl) productImageUrl = sp.imageUrl;
+    }
+  }
+
+  // r29 + r33d: repeat offender description.
+  // r33d: AI rewrite is no longer auto. Always use the plain fallback (rule text +
+  // previous agent note). Agent can click "🤖 Sharpen with AI" in the task UI to
+  // get an Opus rewrite on demand (cached 2h).
+  let finalProblemDetail = taskRow.problemDetail;
+  if (isRepeatOffender && prevCtx) {
+    finalProblemDetail = '🔁 Repeat (failure #' + failureCount + '). ' + taskRow.problemDetail +
+      '\n\n— Previous agent note: "' + (prevCtx.previousNote || '').slice(0, 200) + '"';
+  }
+
+  try {
+    await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      " task_type, priority, product_image_url, is_repeat_offender, failure_count) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google',$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+      [
+        String(taskRow.campaignId),
+        taskRow.campaignName,
+        'Unassigned',
+        taskRow.campaignType || '',
+        taskRow.problemType,
+        finalProblemDetail,
+        Math.max(1, Math.round(taskRow.score)),
+        'auto',
+        taskRow.productKey || null,
+        taskRow.productTitle || null,
+        taskRow.baselineSpend || 0,
+        taskRow.baselineSales || 0,
+        taskRow.baselineAcos || 0,
+        taskRow.baselineImpressions || 0,
+        taskRow.taskType || 'problem',
+        taskRow.priority || 2,
+        productImageUrl,
+        isRepeatOffender,
+        failureCount
+      ]
+    );
+    return true;
+  } catch (e) {
+    console.error('[GTASK] insert error: ' + e.message);
+    return false;
+  }
+}
+
+// r35.4: same idempotency guard as Amazon scheduler.
+let _googleSchedulerLastRanAt = 0;
+
+async function runGoogleTaskScheduler() {
+  if (!db) {
+    console.warn('[GTASK] no db — skipping run');
+    return { created: 0 };
+  }
+  // r35.4: idempotency check
+  const _grnNow = Date.now();
+  if (_grnNow - _googleSchedulerLastRanAt < 5 * 60 * 1000) {
+    const secs = Math.round((_grnNow - _googleSchedulerLastRanAt) / 1000);
+    console.log('[r35.4 GTASK] skipped — last ran ' + secs + 's ago (idempotency guard, 5min window)');
+    return { created: 0, skipped: 'idempotency' };
+  }
+  _googleSchedulerLastRanAt = _grnNow;
+  await ensureGoogleTaskColumns();
+
+  const candidates = [];
+
+  // Build a lookup from shopifyItemId → Shopify product (for inventory check on out-of-stock rule)
+  const shopifyById = {};
+  (shopifyState.products || []).forEach(function(sp) {
+    shopifyById[String(sp.id)] = sp;
+  });
+
+  // ─── Campaign-level scan ────────────────────────────────────────────────
+  // Aggregate per-campaign 7d totals from googleState
+  const campaignTotals = {};
+  (googleState.products || []).forEach(function(p) {
+    const cid = String(p.campaignId || '');
+    if (!cid) return;
+    if (!campaignTotals[cid]) {
+      campaignTotals[cid] = {
+        campaignId: cid,
+        campaignName: p.campaignName || '(unnamed)',
+        campaignType: p.campaignType || '',
+        spend: 0, sales: 0, conversions: 0, impressions: 0, clicks: 0
+      };
+    }
+    const t = campaignTotals[cid];
+    t.spend += p.spend || 0;
+    t.sales += p.sales || 0;
+    t.conversions += p.conversions || 0;
+    t.impressions += p.impressions || 0;
+    t.clicks += p.clicks || 0;
+  });
+
+  Object.values(campaignTotals).forEach(function(c) {
+    const acos = c.sales > 0 ? (c.spend / c.sales) * 100 : Infinity;
+    const ctr = c.impressions > 0 ? (c.clicks / c.impressions) * 100 : 0;
+    const costPerConv = c.conversions > 0 ? c.spend / c.conversions : null;
+
+    // Rule 1 (P3): No activity — campaign exists but 0 impressions in last 7d
+    if (c.impressions === 0 && c.spend === 0) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'no_activity', taskType: 'problem', priority: 3,
+        problemDetail: 'Campaign has 0 impressions in the last 7 days. Likely paused, out of budget, or has no eligible products.',
+        score: 5,
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: 0, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 2 (P1): No revenue despite spend >= £15
+    if (c.sales === 0 && c.spend >= GOOGLE_TASK_NO_REV_SPEND_MIN) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'no_revenue', taskType: 'problem', priority: 1,
+        problemDetail: 'Spent £' + c.spend.toFixed(2) + ' over 7 days with £0 attributed sales (' + c.clicks + ' clicks, ' + c.conversions + ' conv).',
+        score: scoreGoogleTask(c.spend, 0, 'no_revenue'),
+        baselineSpend: c.spend, baselineSales: 0, baselineAcos: 0, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 3 (P1): Many clicks, no sales — landing page or product issue
+    if (c.sales === 0 && c.clicks >= GOOGLE_TASK_CLICKS_NO_SALES_MIN) {
+      // Already covered by Rule 2 if spend is high too — but if spend is low and clicks high, this catches it
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'clicks_no_sales', taskType: 'problem', priority: 1,
+        problemDetail: c.clicks + ' clicks but 0 sales in 7 days. Page or product is not closing — check landing page critique and price.',
+        score: scoreGoogleTask(c.spend, 0, 'clicks_no_sales'),
+        baselineSpend: c.spend, baselineSales: 0, baselineAcos: 0, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 4 (P2): High ACOS — campaign selling but losing money
+    if (acos !== Infinity && acos > GOOGLE_TASK_ACOS_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'high_acos', taskType: 'problem', priority: 2,
+        problemDetail: 'ACOS ' + acos.toFixed(0) + '% (target ' + GOOGLE_TASK_ACOS_THRESHOLD + '%). Spend £' + c.spend.toFixed(2) + ', sales £' + c.sales.toFixed(2) + ' over 7 days.',
+        score: scoreGoogleTask(c.spend, c.sales, 'high_acos'),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 5 (P2): High cost per conversion — even when ACOS reads OK, cost/conv > £12 is unprofitable
+    if (costPerConv !== null && costPerConv > GOOGLE_TASK_COST_PER_CONV_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'high_cost_per_conv', taskType: 'problem', priority: 2,
+        problemDetail: 'Cost per conversion £' + costPerConv.toFixed(2) + ' (target under £' + GOOGLE_TASK_COST_PER_CONV_THRESHOLD + '). Spend £' + c.spend.toFixed(2) + ' / ' + c.conversions + ' conv.',
+        score: scoreGoogleTask(c.spend, c.sales, 'high_cost_per_conv'),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos === Infinity ? 0 : acos, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // Rule 6 (P3): Low CTR — ad showing but nobody clicking → wrong audience or weak creative
+    if (ctr < GOOGLE_TASK_LOW_CTR_THRESHOLD && c.spend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN && c.impressions >= 1000) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'low_ctr', taskType: 'problem', priority: 3,
+        problemDetail: 'CTR ' + ctr.toFixed(2) + '% (' + c.clicks + ' clicks of ' + c.impressions + ' impressions). Wrong audience or weak ad creative.',
+        score: Math.round(c.spend),
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos === Infinity ? 0 : acos, baselineImpressions: c.impressions
+      });
+      return;
+    }
+
+    // ─── Scale opportunity (separate task type) ───────────────────────────
+    // Campaign performing well — ACOS under 12% with meaningful spend → could absorb more budget
+    if (acos !== Infinity && acos < GOOGLE_TASK_SCALE_ACOS_THRESHOLD && c.spend >= GOOGLE_TASK_SCALE_SPEND_MIN && c.sales >= 30) {
+      candidates.push({
+        campaignId: c.campaignId, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'scale_opportunity', taskType: 'scale', priority: 4,
+        problemDetail: 'Healthy ACOS ' + acos.toFixed(0) + '% — well under 12% target. Spend £' + c.spend.toFixed(2) + ' generated £' + c.sales.toFixed(2) + '. Consider increasing budget 20-30%.',
+        score: Math.round(c.sales - c.spend),  // profit = headroom for scaling
+        baselineSpend: c.spend, baselineSales: c.sales, baselineAcos: acos, baselineImpressions: c.impressions
+      });
+    }
+  });
+
+  // ─── Product-level scan ────────────────────────────────────────────────
+  (googleState.products || []).forEach(function(p) {
+    const cid = String(p.campaignId || '');
+    const c = campaignTotals[cid];
+    if (!c) return;
+
+    const overallAcos = c.sales > 0 ? (c.spend / c.sales) * 100 : Infinity;
+    const productAcos = p.sales > 0 ? (p.spend / p.sales) * 100 : Infinity;
+    const productSpend = p.spend || 0;
+    const productSales = p.sales || 0;
+    const productClicks = p.clicks || 0;
+    const productKey = p.shopifyItemId || p.productId || (p.adGroupId ? cid + '_' + p.adGroupId : null);
+    const productTitle = p.name || p.productName || p.title || '(unknown product)';
+
+    if (!productKey) return;
+
+    // Skip if the WHOLE campaign already flagged — campaign-level task covers it
+    const campaignAlreadyFlagged = candidates.some(function(t){
+      return !t.productKey && t.campaignId === cid && t.taskType === 'problem';
+    });
+    if (campaignAlreadyFlagged) return;
+
+    // Product-level Rule 1 (P1): Out of stock with ad spend — sale is literally impossible
+    if (productSpend > 0) {
+      const shopifyId = p.shopifyItemId ? String(p.shopifyItemId).split('_')[2] : null;
+      const sp = shopifyId ? shopifyById[shopifyId] : null;
+      if (sp && sp.totalInventory != null && Number(sp.totalInventory) <= 0) {
+        candidates.push({
+          campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+          problemType: 'product_out_of_stock', taskType: 'problem', priority: 1,
+          problemDetail: '"' + productTitle + '" has 0 inventory in Shopify but ads are still spending £' + productSpend.toFixed(2) + ' on it. Sale is impossible — pause this product or restock.',
+          score: scoreGoogleTask(productSpend, 0, 'product_out_of_stock') + 50,  // boost score — this is critical
+          productKey: String(productKey),
+          productTitle: productTitle,
+          baselineSpend: productSpend, baselineSales: productSales, baselineAcos: 0, baselineImpressions: p.impressions || 0
+        });
+        return;
+      }
+    }
+
+    // Product-level Rule 2 (P1): spent > £15 with £0 sales while campaign overall is fine
+    if (productSales === 0 && productSpend >= GOOGLE_TASK_NO_REV_SPEND_MIN) {
+      candidates.push({
+        campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'product_no_revenue', taskType: 'problem', priority: 1,
+        problemDetail: '"' + productTitle + '" has spent £' + productSpend.toFixed(2) + ' with £0 sales in 7 days, while the rest of the campaign performs normally.',
+        score: scoreGoogleTask(productSpend, 0, 'product_no_revenue'),
+        productKey: String(productKey),
+        productTitle: productTitle,
+        baselineSpend: productSpend, baselineSales: 0, baselineAcos: 0, baselineImpressions: p.impressions || 0
+      });
+      return;
+    }
+
+    // Product-level Rule 3 (P1): Many clicks no sales (lower threshold for product than campaign — clicks aren't shared)
+    if (productSales === 0 && productClicks >= 25) {
+      candidates.push({
+        campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'product_clicks_no_sales', taskType: 'problem', priority: 1,
+        problemDetail: '"' + productTitle + '" got ' + productClicks + ' clicks but 0 sales in 7 days. Likely landing page or pricing issue.',
+        score: scoreGoogleTask(productSpend, 0, 'product_clicks_no_sales'),
+        productKey: String(productKey),
+        productTitle: productTitle,
+        baselineSpend: productSpend, baselineSales: 0, baselineAcos: 0, baselineImpressions: p.impressions || 0
+      });
+      return;
+    }
+
+    // Product-level Rule 4 (P2): product ACOS > 20% AND noticeably worse than campaign average
+    if (productAcos !== Infinity && productAcos > GOOGLE_TASK_ACOS_THRESHOLD
+        && productSpend >= GOOGLE_TASK_HIGH_ACOS_SPEND_MIN
+        && (overallAcos === Infinity || productAcos > overallAcos * 1.5)) {
+      candidates.push({
+        campaignId: cid, campaignName: c.campaignName, campaignType: c.campaignType,
+        problemType: 'product_high_acos', taskType: 'problem', priority: 2,
+        problemDetail: '"' + productTitle + '" ACOS ' + productAcos.toFixed(0) + '% (campaign avg ' + (overallAcos === Infinity ? 'N/A' : overallAcos.toFixed(0) + '%') + '). Spent £' + productSpend.toFixed(2) + ', sales £' + productSales.toFixed(2) + '.',
+        score: scoreGoogleTask(productSpend, productSales, 'product_high_acos'),
+        productKey: String(productKey),
+        productTitle: productTitle,
+        baselineSpend: productSpend, baselineSales: productSales, baselineAcos: productAcos, baselineImpressions: p.impressions || 0
+      });
+    }
+  });
+
+  // Sort by priority (P1 > P2 > P3 > P4-scale) then by score descending
+  candidates.sort(function(a, b){
+    const pa = a.priority || 9;
+    const pb = b.priority || 9;
+    if (pa !== pb) return pa - pb;
+    return (b.score || 0) - (a.score || 0);
+  });
+  const top = candidates.slice(0, GOOGLE_TASK_DAILY_TARGET);
+
+  let createdCount = 0;
+  for (const taskRow of top) {
+    const ok = await createGoogleTask(taskRow);
+    if (ok) createdCount++;
+  }
+
+  console.log('[GTASK] daily run: ' + candidates.length + ' candidates, ' + top.length + ' targeted, ' + createdCount + ' new tasks created');
+  return { created: createdCount, candidates: candidates.length };
+}
+
+// r35.4: idempotency guard. Was vulnerable to "Run now" being clicked
+// multiple times within 5 minutes producing duplicates. Now any second
+// invocation within 5 min is a no-op. The variable lives in module scope so
+// cron + manual triggers + boot triggers all share it.
+let _amazonSchedulerLastRanAt = 0;
+
+async function runDailyTaskScheduler() {
+  if (!db) { console.log('No DB - skipping task scheduler'); return; }
+  // r35.4: idempotency check
+  const now = Date.now();
+  if (now - _amazonSchedulerLastRanAt < 5 * 60 * 1000) {
+    const secs = Math.round((now - _amazonSchedulerLastRanAt) / 1000);
+    console.log('[r35.4] runDailyTaskScheduler skipped — last ran ' + secs + 's ago (idempotency guard, 5min window)');
+    return;
+  }
+  _amazonSchedulerLastRanAt = now;
+  console.log('Running daily task scheduler...');
+  const dashUrl = process.env.DASHBOARD_URL || 'https://campaignpulse-setup-production.up.railway.app';
+
+  // r33c: agent eligibility list now comes from users table, not hardcoded ['Aryan','Satyam'].
+  // Adding a new Amazon agent in user management gives them daily-task coverage automatically.
+  const eligibleAgents = await getActiveAmazonAgents();
+  console.log('[r33c] daily scheduler eligible agents: ' + eligibleAgents.join(', '));
+
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+    const result = await db.query(
+      // r35.5: was LIMIT 3 — now 7 to support consecutive-day rules properly.
+      // The new scoreCampaignDays needs at least 3 days in sequence to fire,
+      // and we want enough history that "the most recent 3 days" can be detected
+      // even when sync timing means yesterday's row hasn't landed yet.
+      'SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date <= $1 ORDER BY snapshot_date DESC LIMIT 7',
+      [yesterdayStr]
+    );
+
+    if (!result.rows.length) { console.log('No historical snapshots yet for task scheduler'); return; }
+    console.log('Task scheduler using ' + result.rows.length + ' days of history');
+
+    // r33e: Build a set of currently-ENABLED campaign IDs from the live Amazon sync.
+    // state.campaigns is populated by syncCampaigns() and only contains campaigns
+    // returned by Amazon's report (which excludes archived) AND with our agent-prefix
+    // filter applied. A campaign paused 20 days ago will be ABSENT from state.campaigns,
+    // so the scheduler should skip it. Without this guard, daily_snapshots retains
+    // historical rows for paused campaigns for 3 days and the scheduler kept scoring
+    // them — Aryan reported tasks firing for campaigns paused 20+ days ago.
+    //
+    // r35.4 ROOT CAUSE FIX: filter to ENABLED state only.
+    //
+    // History: r32 (line ~1198) changed the Amazon Ads API stateFilter to
+    // include BOTH 'ENABLED' and 'PAUSED' so that campaigns in paused
+    // portfolios remained visible. That decision pulled paused campaigns into
+    // state.campaigns. The scheduler's variable was NAMED liveEnabledIds and
+    // logged as "currently-enabled" but actually contained "enabled OR paused"
+    // because it derived from the same state.campaigns. So paused campaigns
+    // passed the filter. Agents wrote "Campaign is already paused" on tasks
+    // and the scheduler fired a new task on the same campaign the next day.
+    //
+    // Fix: filter by c.state === 'enabled' (or no state at all — be lenient
+    // if some sync paths didn't set state) when building the ID set. Per-
+    // campaign state IS preserved at line 1654 (`state: (c.state||'').toLowerCase()`).
+    //
+    // Safety fallback: if state.campaigns is empty (e.g. server just booted and
+    // sync hasn't completed yet), skip the filter entirely so we don't block ALL
+    // tasks. Log a warning so this is visible if it persists.
+    const enabledCampaigns = (state.campaigns || []).filter(function(c){
+      // Treat missing state as enabled (lenient — better than dropping all on
+      // a sync that didn't write the field). Empty string -> include.
+      const s = String(c.state || 'enabled').toLowerCase();
+      return s === 'enabled' || s === '';
+    });
+    const liveEnabledIds = new Set(enabledCampaigns.map(function(c){ return String(c.campaignId); }));
+    const useEnabledFilter = state.campaigns && state.campaigns.length > 0;
+    if (!useEnabledFilter) {
+      console.log('[r35.4] WARNING: state.campaigns empty — scheduler running WITHOUT enabled-filter this cycle. Will retry next run.');
+    } else {
+      const pausedCount = state.campaigns.length - enabledCampaigns.length;
+      console.log('[r35.4] scheduler filtering to ' + liveEnabledIds.size + ' ENABLED campaigns (excluded ' + pausedCount + ' paused/disabled)');
+    }
+
+    const agentCampaigns = {};
+    const campHistory = {};
+    let skippedPaused = 0;
+
+    result.rows.forEach(function(snap) {
+      const camps = snap.campaigns || [];
+      camps.forEach(function(c) {
+        if (!c.campaignId) return;
+        // r33e: skip campaigns no longer enabled on Amazon
+        if (useEnabledFilter && !liveEnabledIds.has(String(c.campaignId))) {
+          skippedPaused++;
+          return;
+        }
+        const agent = extractAgentFromCampaign(c.name) || 'Unassigned';
+        if (!eligibleAgents.includes(agent)) return;
+        if (!campHistory[c.campaignId]) {
+          campHistory[c.campaignId] = { campaignId: c.campaignId, name: c.name || '', agent: agent, portfolio: c.portfolio || '', targetingType: c.targetingType || '', days: [] };
+        }
+        campHistory[c.campaignId].days.push({ date: snap.snapshot_date, impressions: c.impressions || 0, spend: c.spend || 0, sales: c.sales || 0, acos: c.acos || 0, dailyBudget: c.dailyBudget || 0 });
+        if (!agentCampaigns[agent]) agentCampaigns[agent] = [];
+        if (!agentCampaigns[agent].find(function(x){ return x.campaignId === c.campaignId; })) {
+          agentCampaigns[agent].push(campHistory[c.campaignId]);
+        }
+      });
+    });
+    if (useEnabledFilter && skippedPaused > 0) {
+      console.log('[r33e] scheduler skipped ' + skippedPaused + ' historical snapshot rows for paused/disabled campaigns');
+    }
+
+    // r35.13c: auto-close stale tasks on campaigns that are now paused/disabled.
+    // r33e already skips creating NEW tasks for paused campaigns, but tasks
+    // created when the campaign was active stay open in the agent's queue.
+    // Bobby surfaced "SP Auto" task on a paused campaign — same root cause.
+    // We close them with a clear note so the agent's list reflects reality.
+    if (useEnabledFilter && state.campaigns && state.campaigns.length > 0) {
+      try {
+        const pausedIds = state.campaigns
+          .filter(function(c){ const s = String(c.state || 'enabled').toLowerCase(); return s !== 'enabled' && s !== ''; })
+          .map(function(c){ return String(c.campaignId); });
+        if (pausedIds.length > 0) {
+          const closeRes = await db.query(
+            "UPDATE campaign_tasks SET status='dismissed', " +
+            "dismissed_reason=COALESCE(dismissed_reason, 'Campaign paused — task auto-closed by scheduler'), " +
+            "resolved_at=NOW() " +
+            "WHERE campaign_id = ANY($1) " +
+            "AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+            "RETURNING id, campaign_id, agent_name",
+            [pausedIds]
+          );
+          if (closeRes.rowCount > 0) {
+            console.log('[r35.13c] auto-closed ' + closeRes.rowCount + ' open tasks on paused campaigns');
+          }
+        }
+      } catch(e) {
+        console.error('[r35.13c] auto-close paused tasks error: ' + e.message);
+      }
+    }
+
+    // r35.5: snapshots arrive DESC (newest first), so each camp.days is newest-first
+    // after push(). The new scoreCampaignDays uses days.slice(-3) which assumes
+    // oldest→newest. Sort each campaign's days before scoring.
+    Object.keys(campHistory).forEach(function(cid){
+      campHistory[cid].days.sort(function(a, b){
+        return String(a.date) < String(b.date) ? -1 : 1;
+      });
+    });
+
+    // r14 timezone fix: London date, not UTC.
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
+
+    for (const agentName of Object.keys(agentCampaigns)) {
+      const agentCamps = agentCampaigns[agentName];
+      const openTasksRes = await db.query(
+        'SELECT COUNT(*) as cnt FROM campaign_tasks WHERE agent_name=$1 AND status IN ($2,$3) AND task_source=$4',
+        [agentName, 'open', 'in_progress', 'daily']
+      );
+      const openCount = parseInt(openTasksRes.rows[0].cnt || 0);
+      if (openCount >= 10) { console.log(agentName + ' already has ' + openCount + ' open tasks - skipping'); continue; }
+
+      const slotsAvailable = Math.min(5, 10 - openCount);
+      if (slotsAvailable <= 0) continue;
+
+      const scored = [];
+      agentCamps.forEach(function(camp) {
+        if (!camp.days.length) return;
+        const scoring = scoreCampaignDays(camp.days);
+        // r35.5: scoring returns problemType directly. No problemType = healthy
+        // (either no 3-consecutive-bad-days, or window ACOS < 16% breakeven).
+        if (!scoring.problemType || scoring.score === 0) {
+          // Log healthy skips for visibility — agents trust the system more if they can
+          // see in logs that the scheduler considered their campaigns and chose not to fire.
+          if (scoring.healthyOverall && camp.days.length >= 3) {
+            console.log('[r35.5] ' + camp.name + ' — skip, healthy overall (7d ACOS ' + scoring.windowAcos + '% ≤ 16% breakeven)');
+          }
+          return;
+        }
+        scored.push({
+          camp: camp,
+          score: scoring.score,
+          problemType: scoring.problemType,
+          problemDetail: scoring.problemDetail,
+          scoring: scoring
+        });
+      });
+
+      scored.sort(function(a,b){ return b.score - a.score; });
+      let newTasksCreated = 0;
+
+      for (const item of scored) {
+        if (newTasksCreated >= slotsAvailable) break;
+        const c = item.camp;
+        const existingToday = await db.query(
+          'SELECT id FROM campaign_tasks WHERE campaign_id=$1 AND created_date=$2 AND task_source=$3',
+          [String(c.campaignId), today, 'daily']
+        );
+        if (existingToday.rows.length > 0) continue;
+
+        // r35.1 — match Google's behaviour: if ANY open daily task exists on
+        // this campaign (any age, not just today), append a "fired again" note
+        // and bump days_persisted + updated_at on it. Do NOT create a new task.
+        //
+        // Before this fix, the Amazon scheduler updated the previous task's
+        // days_persisted but then ALSO inserted a new row, so a campaign with
+        // an unresolved 7-day-old task would accumulate a fresh task every
+        // morning. Satyam ended up with 3+ open tasks on the same campaign
+        // (Baby Stroler KT manual: 6 May + 7 May + 18 May all open).
+        const existingOpen = await db.query(
+          "SELECT id, days_persisted, problem_detail, failure_count, created_date " +
+          "FROM campaign_tasks " +
+          "WHERE campaign_id=$1 AND task_source='daily' " +
+          "  AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+          "ORDER BY created_date ASC LIMIT 1",
+          [String(c.campaignId)]
+        );
+
+        let daysPersisted = 1;
+        let isSuperUrgent = false;
+
+        if (existingOpen.rows.length > 0) {
+          const existing = existingOpen.rows[0];
+          daysPersisted = (existing.days_persisted || 1) + 1;
+          isSuperUrgent = daysPersisted >= 3;
+          const daysSinceCreate = Math.floor((Date.now() - new Date(existing.created_date).getTime()) / 86400000);
+          const refireNote = '\n\n— 🔁 Fired again Day ' + daysSinceCreate + ' (' + new Date().toISOString().slice(0, 10) + '): ' + (item.problemDetail || '');
+          const newDetail = (existing.problem_detail || '') + refireNote;
+          const newFailureCount = (existing.failure_count || 1) + 1;
+          const becomeRepeat = newFailureCount >= 2;
+          await db.query(
+            "UPDATE campaign_tasks SET problem_detail=$1, days_persisted=$2, score=$3, " +
+            "  failure_count=$4, is_repeat_offender=$5, updated_at=NOW() WHERE id=$6",
+            [newDetail, daysPersisted, item.score, newFailureCount, becomeRepeat, existing.id]
+          );
+          console.log('[r35.1 AMZ] ' + c.name + ' — appended fired-again to existing task #' + existing.id + ' (now day ' + daysPersisted + ', failure_count ' + newFailureCount + ')');
+          if (isSuperUrgent) {
+            await sendGoogleChat(['🚨 SUPER URGENT - Day ' + daysPersisted + ' UNRESOLVED', 'Campaign: ' + c.name, 'Agent: ' + agentName, 'Problem: ' + item.problemDetail, 'Score: ' + item.score, 'This has been unresolved for ' + daysPersisted + ' days - manager action needed'].join('\n'));
+          }
+          // CRITICAL: skip the new-task creation below. We updated the existing one.
+          continue;
+        }
+
+        // r29: hard-cap + note-aware repeat detection (same logic as Google)
+        const prevCtxAmz = await getPreviousTaskContext('amazon', String(c.campaignId), null);
+        let isRepeatOffender = false;
+        let failureCount = 1;
+
+        if (prevCtxAmz) {
+          failureCount = prevCtxAmz.failureCount + 1;
+
+          // r29 hard cap: 3rd or later failure → no new task, raise to Stuck
+          if (failureCount >= 3) {
+            await markStuck('amazon', String(c.campaignId), null, {
+              campaignName: c.name,
+              productTitle: null,
+              problemType: item.problemType,
+              failureCount: failureCount,
+              problemDetail: item.problemDetail,
+              previousNote: prevCtxAmz.previousNote
+            });
+            continue;
+          }
+
+          // r33e: AI-driven note-aware deferral (replaces regex). Haiku reads
+          // the agent's previous note + today's flagged problem and decides
+          // whether the note already addresses it. Catches "ACOS under 20%"
+          // and similar agent-language the regex missed.
+          const daysSinceAmz = (Date.now() - new Date(prevCtxAmz.previousResolvedAt).getTime()) / 86400000;
+          if (prevCtxAmz.previousNote && daysSinceAmz < 7) {
+            const verdict = await aiAgentNoteResolvesNewProblem({
+              campaignName: c.name,
+              previousProblemDetail: prevCtxAmz.previousProblemDetail,
+              previousNote: prevCtxAmz.previousNote,
+              newProblemDetail: item.problemDetail,
+              newProblemType: item.problemType
+            });
+            if (verdict.skip) {
+              console.log('[r33e AMZ ai-defer] ' + c.name + ' — SKIP: ' + verdict.reason + ' (note ' + daysSinceAmz.toFixed(1) + 'd old)');
+              continue;
+            }
+            console.log('[r33e AMZ ai-defer] ' + c.name + ' — FIRE: ' + verdict.reason);
+          }
+
+          isRepeatOffender = true;
+          console.log('[REPEAT OFFENDER] ' + c.name + ' (failure #' + failureCount + ')');
+        }
+
+        // r29 + r33d: repeat offender description. AI rewrite no longer auto;
+        // agent can click "🤖 Sharpen with AI" in the task UI for on-demand rewrite.
+        let finalProblemDetailAmz = item.problemDetail;
+        if (isRepeatOffender && prevCtxAmz) {
+          finalProblemDetailAmz = '🔁 Repeat (failure #' + failureCount + '). ' + item.problemDetail +
+            '\n\n— Previous agent note: "' + (prevCtxAmz.previousNote || '').slice(0, 200) + '"';
+        }
+
+        await db.query(
+          'INSERT INTO campaign_tasks (campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, days_persisted, total_wasted, score, task_source, is_repeat_offender, failure_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
+          [String(c.campaignId), c.name, agentName, c.portfolio||'', item.problemType, finalProblemDetailAmz, daysPersisted, parseFloat(item.scoring.totalSpend), item.score, 'daily', isRepeatOffender, failureCount]
+        );
+
+        try {
+          await db.query(
+            'INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+            [String(c.campaignId), c.name, agentName, 'task_created', item.problemDetail + (isRepeatOffender ? ' [REPEAT OFFENDER #' + failureCount + ']' : ''), 'none', 'open']
+          );
+        } catch(e) { console.error('Activity log create error: ' + e.message); }
+
+        const urgencyLabel = isSuperUrgent ? '🚨 SUPER URGENT - Day ' + daysPersisted : (daysPersisted > 1 ? '⚠ Day ' + daysPersisted + ' - Unresolved' : '📋 New Task');
+        const msg = [urgencyLabel, 'Campaign: ' + c.name, 'Problem: ' + item.problemDetail, 'Score: ' + item.score + ' (higher = more urgent)', '', dashUrl + '/tasks'].join('\n');
+        const sent = await sendToAgent(agentName, msg);
+        if (!sent) console.log('No webhook for ' + agentName + ' - task created silently');
+
+        newTasksCreated++;
+        console.log('Daily task created for ' + agentName + ': ' + c.name + ' (Day ' + daysPersisted + ', score ' + item.score + ')');
+      }
+      console.log(agentName + ': ' + newTasksCreated + ' new tasks created, ' + openCount + ' already open');
+    }
+    console.log('Daily task scheduler complete');
+  } catch(e) { console.error('Task scheduler error: ' + e.message); }
+}
+
+// r29: stuck campaigns API — manager review surface for items that have failed 3+ times
+//
+// GET /api/stuck-campaigns?department=amazon|google — list open stuck items
+// POST /api/stuck-campaigns/:id/resolve — manager marks resolved with a note
+app.get('/api/stuck-campaigns', async function(req, res) {
+  if (!db) return res.json({ items: [] });
+  const dept = String(req.query.department || '').toLowerCase();
+  try {
+    const params = [];
+    let where = "WHERE status = 'open'";
+    if (dept === 'amazon' || dept === 'google') {
+      params.push(dept);
+      where += " AND department = $1";
+    }
+    const r = await db.query(
+      "SELECT id, campaign_id, product_key, campaign_name, product_title, department, " +
+      "       problem_type, failure_count, first_seen_at, last_seen_at, " +
+      "       last_resolved_note, last_problem_detail " +
+      "FROM stuck_campaigns " + where + " " +
+      "ORDER BY failure_count DESC, last_seen_at DESC LIMIT 100",
+      params
+    );
+    res.json({ items: r.rows });
+  } catch(e) {
+    console.error('[r29 stuck list] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/stuck-campaigns/:id/resolve', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = parseInt(req.params.id, 10);
+  const resolution = String((req.body && req.body.resolution) || '').trim();
+  if (!resolution) return res.status(400).json({ error: 'Resolution note required' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  if (role !== 'owner' && role !== 'manager' && dept !== 'manager') {
+    return res.status(403).json({ error: 'Manager-only action' });
+  }
+  const actor = (req.user && (req.user.name || req.user.username)) || 'manager';
+  try {
+    await db.query(
+      "UPDATE stuck_campaigns SET status='resolved', resolved_by=$1, resolved_at=NOW(), resolution=$2 WHERE id=$3",
+      [actor, resolution, id]
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[r29 stuck resolve] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// "Wasted" follows the same definition used elsewhere in this app:
+//   spend > 0 AND (sales === 0 || sales === null)
+// Reads from daily_snapshots (the same source as the existing dashboard waste totals).
+//
+// Permissions: managers/owners see all agents. Agents see only their own row,
+// so they can't compare themselves to teammates. We pull the requesting user's
+// name from req.user; if missing, we treat as manager-level (legacy fallback).
+app.get('/api/wasted-by-agent', async function(req, res) {
+  if (!db) return res.json({ today: [], sparklines: {} });
+  try {
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userName = (req.user && req.user.name) || '';
+    const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+
+    // Pull last 7 days of snapshots, oldest → newest so sparklines render in the right order
+    const r = await db.query(
+      "SELECT TO_CHAR(snapshot_date,'YYYY-MM-DD') AS day, campaigns " +
+      "FROM daily_snapshots " +
+      "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '6 days' " +
+      "ORDER BY snapshot_date ASC"
+    );
+
+    // For each day, sum wasted-spend per agent (using the same filter as the rest of the app)
+    const wasteByAgentByDay = {}; // { agentName: { '2026-04-29': 12.34, ... } }
+    const allAgents = new Set();
+    const allDays = [];
+    r.rows.forEach(function(snap) {
+      const day = snap.day;
+      allDays.push(day);
+      const camps = snap.campaigns || [];
+      camps.forEach(function(c) {
+        // Match existing waste definition exactly
+        const spend = parseFloat(c.spend || 0);
+        const sales = parseFloat(c.sales || 0);
+        if (!(spend > 0 && (sales === 0 || c.sales === null))) return;
+        // r20: post-matcher fallback. If agent was not stored on the snapshot
+        // (older snapshots, or campaigns with no portfolio), parse the name.
+        let agent = c.agent || c.agentName || '';
+        if (!agent) {
+          try {
+            const parsed = parseCampaignName(c.name || '');
+            if (parsed && parsed.agent) agent = parsed.agent;
+          } catch(e) {}
+        }
+        // r21: canonicalise — old snapshots can carry "Aryan Tomar" frozen in
+        // the JSON; we map it to "Aryan" at read time.
+        if (agent) {
+          const canon = canonicalAgent(agent);
+          if (canon) agent = canon;
+        }
+        if (!agent) agent = 'Unassigned';
+        allAgents.add(agent);
+        if (!wasteByAgentByDay[agent]) wasteByAgentByDay[agent] = {};
+        wasteByAgentByDay[agent][day] = (wasteByAgentByDay[agent][day] || 0) + spend;
+      });
+    });
+
+    // Today's totals (the most recent day in the range — typically the snapshot for today
+    // if the daily sync has run, otherwise yesterday's). Use the last day in allDays.
+    const todayKey = allDays.length ? allDays[allDays.length - 1] : null;
+    let agentList = Array.from(allAgents);
+    // If non-manager, only return their own row
+    if (!isManagerLevel && userName) {
+      agentList = agentList.filter(function(a){ return a === userName; });
+    }
+
+    const today = agentList.map(function(agent) {
+      const todayWaste = todayKey ? (wasteByAgentByDay[agent][todayKey] || 0) : 0;
+      return { agent: agent, wasted_today: parseFloat(todayWaste.toFixed(2)) };
+    });
+    // Sort: highest wasted first
+    today.sort(function(a, b){ return b.wasted_today - a.wasted_today; });
+
+    // Build sparklines: array of [day, value] for each agent across all 7 days
+    const sparklines = {};
+    agentList.forEach(function(agent) {
+      sparklines[agent] = allDays.map(function(d) {
+        return { date: d, value: parseFloat((wasteByAgentByDay[agent][d] || 0).toFixed(2)) };
+      });
+    });
+
+    res.json({
+      today: today,
+      sparklines: sparklines,
+      todayKey: todayKey,
+      days: allDays,
+      isManagerLevel: isManagerLevel
+    });
+  } catch(e) {
+    console.error('/api/wasted-by-agent error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/dashboard', async function(req, res) {
+  // r16: filter out hidden campaigns from view + totals
+  let hiddenCampaignIds = new Set();
+  if (db) {
+    try {
+      const hr = await db.query("SELECT campaign_id FROM hidden_campaigns");
+      hiddenCampaignIds = new Set(hr.rows.map(function(r){ return String(r.campaign_id); }));
+    } catch(e) {}
+  }
+  const allCampaigns = state.campaigns;
+  const campaigns = allCampaigns.filter(function(c){ return !hiddenCampaignIds.has(String(c.campaignId)); });
+
+  // r30: campaigns already carry spend7d/sales7d/clicks7d/etc + spend30d block from
+  // syncCampaigns (which pulls directly from Amazon Ads API report streams).
+  // Old daily_snapshots-based enrichment removed — was summing trailing-14d attribution
+  // values which produced incorrect totals.
+
+  // r30d: today totals from the todayOnly stream (live, refreshes every ~90 min).
+  // No more inferring from dailySeries7d's lagging row.
+  let totalRevenueToday = 0, totalSpendToday = 0, totalWastedToday = 0, spendNoRevenueTodayCount = 0;
+  let todayHasData = false;
+  campaigns.forEach(function(c) {
+    if (c.todaySpend == null) return;
+    todayHasData = true;
+    const tSpend = parseFloat(c.todaySpend || 0);
+    const tSales = parseFloat(c.todaySales || 0);
+    totalSpendToday += tSpend;
+    totalRevenueToday += tSales;
+    if (tSpend > 0 && tSales === 0) { totalWastedToday += tSpend; spendNoRevenueTodayCount++; }
+  });
+  const blendedAcosToday = totalRevenueToday > 0 ? Math.round((totalSpendToday / totalRevenueToday) * 1000) / 10 : 0;
+
+  // 7-day totals (the "All Campaigns" / Campaign Health page summary)
+  const totalRevenue7d = campaigns.reduce(function(s, c) { return s + (c.sales7d || 0); }, 0);
+  const totalSpend7d = campaigns.reduce(function(s, c) { return s + (c.spend7d || 0); }, 0);
+  const blendedAcos7d = totalRevenue7d > 0 ? Math.round((totalSpend7d / totalRevenue7d) * 1000) / 10 : 0;
+  // r33a: 7-day wasted now uses the same formula as today's wasted and per-agent wasted —
+  // any spend > 0 with sales = 0 counts as wasted. Previously had a £5 floor which made
+  // the 7d tile under-report vs the daily snapshot which used no floor. One canonical
+  // formula across all "wasted" surfaces now.
+  const totalWasted7d = campaigns.filter(function(c){ return (c.spend7d||0) > 0 && (c.sales7d||0) === 0; }).reduce(function(s,c){ return s + (c.spend7d || 0); }, 0);
+  const spendNoRevenue7dCount = campaigns.filter(function(c){ return (c.spend7d||0) > 0 && (c.sales7d||0) === 0; }).length;
+
+  // Headline = 7-day (matches table totals and Amazon Seller Central). Keep totalRevenue/Spend/blendedAcos
+  // pointing at 7-day so dashboard, table, and Amazon UI all agree.
+  const totalRevenue = totalRevenue7d;
+  const totalSpend = totalSpend7d;
+  const blendedAcos = blendedAcos7d;
+  const active = campaigns.filter(function(c) { return c.state === 'enabled'; }).length;
+  const needsAction = campaigns.filter(function(c) {
+    const budgetKnown = (c.budgetRemaining != null);
+    const outOfBudget = budgetKnown && c.budgetRemaining <= 0.01;
+    const budgetLow = budgetKnown && c.budgetPct >= 80;
+    return outOfBudget || c.acos > parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35) || budgetLow;
+  }).length;
+
+  let filteredAlerts = state.alerts.slice(-20);
+  if (db) {
+    try {
+      const dismissed = await db.query("SELECT campaign_id FROM campaign_tasks WHERE task_source='alert' AND status='dismissed' AND DATE(updated_at)=CURRENT_DATE");
+      const dismissedIds = new Set(dismissed.rows.map(function(r){ return String(r.campaign_id); }));
+      if (dismissedIds.size > 0) filteredAlerts = filteredAlerts.filter(function(a){ return !dismissedIds.has(String(a.campaignId)); });
+    } catch(e) {}
+  }
+  // Also filter alerts for hidden campaigns
+  if (hiddenCampaignIds.size > 0) filteredAlerts = filteredAlerts.filter(function(a){ return !hiddenCampaignIds.has(String(a.campaignId)); });
+
+  // r30: compute Shopify 7d / 30d revenue for TACOS calculation in the front-end.
+  // Source: shopifyState.products (each carries revenue7d / revenue30d aggregates).
+  let totalShopifyRevenue7d = 0;
+  let totalShopifyRevenue30d = 0;
+  try {
+    const sp = (shopifyState && shopifyState.products) ? shopifyState.products : [];
+    sp.forEach(function(p){
+      totalShopifyRevenue7d += parseFloat(p.revenue7d || 0);
+      totalShopifyRevenue30d += parseFloat(p.revenue30d || 0);
+    });
+  } catch(e) {
+    // Non-fatal — TACOS just renders as "—" without Shopify totals
+  }
+
+  res.json({
+    metrics: {
+      // Headline (7-day) — matches campaign table totals
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos: blendedAcos,
+      activeCampaigns: active,
+      needsAction: needsAction,
+      // r30c: today actuals (null if Amazon's daily report hasn't filled today yet)
+      todayHasData: todayHasData,
+      totalRevenueToday: todayHasData ? totalRevenueToday.toFixed(2) : null,
+      totalSpendToday: todayHasData ? totalSpendToday.toFixed(2) : null,
+      blendedAcosToday: todayHasData ? blendedAcosToday : null,
+      totalWastedToday: todayHasData ? totalWastedToday.toFixed(2) : null,
+      spendNoRevenueTodayCount: todayHasData ? spendNoRevenueTodayCount : null,
+      // 7-day waste
+      totalWastedSpend: totalWasted7d.toFixed(2),
+      spendNoRevenue: spendNoRevenue7dCount,
+      totalWasted7d: totalWasted7d.toFixed(2),
+      // for TACOS
+      totalShopifyRevenue7d: Math.round(totalShopifyRevenue7d * 100) / 100,
+      totalShopifyRevenue30d: Math.round(totalShopifyRevenue30d * 100) / 100
+    },
+    campaigns: campaigns, alerts: filteredAlerts, exhaustionLog: state.exhaustionLog, lastSync: state.lastSync, error: state.error,
+    hiddenCount: hiddenCampaignIds.size
+  });
+});
+
+// r33d: AI insight cache. Five surfaces (dashboard insight, action-centre insight,
+// keyword analysis, stuck-task critique, repeat-offender description) all share
+// this cache. Each surface has its own key. 2-hour TTL. The button handlers
+// return cached output if fresh; the agent can pass force=true to regenerate.
+// Why a cache: these calls cost £0.05-0.15 each. Double-clicking or refreshing
+// the page shouldn't double-charge. 2 hours matches how often the underlying
+// data meaningfully changes.
+const AI_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const _aiCache = {};  // key → { value, generatedAt }
+
+function aiCacheGet(key) {
+  const entry = _aiCache[key];
+  if (!entry) return null;
+  if (Date.now() - entry.generatedAt > AI_CACHE_TTL_MS) return null;
+  return entry;
+}
+function aiCacheSet(key, value) {
+  _aiCache[key] = { value: value, generatedAt: Date.now() };
+}
+function aiCacheClear(key) { delete _aiCache[key]; }
+
+// r25b: Haiku-then-Opus AI helper. Tries Haiku first; if the response looks
+// thin/error-like, escalates to Opus. The whole thing is wrapped in a single
+// try/catch so callers don't need to handle it. Returns { text, modelUsed }.
+//
+// Why: Opus costs ~5x more than Haiku. For routine campaign/product analysis,
+// Haiku is good enough most of the time, and we save real money. We escalate
+// only when Haiku's output is suspiciously short or empty — meaning it likely
+// gave a generic answer that won't be useful.
+async function aiHaikuThenOpus(prompt, opts) {
+  opts = opts || {};
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('No ANTHROPIC_API_KEY');
+  const maxTokens = opts.max_tokens || 1000;
+  // Models — keep both pinned so behaviour is deterministic between deploys.
+  const HAIKU = 'claude-haiku-4-5-20251001';
+  const OPUS  = 'claude-opus-4-5-20251101';
+  // Min response length below which we consider Haiku's output "thin" and escalate.
+  const MIN_USEFUL_CHARS = opts.min_useful_chars || 80;
+  const headers = { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
+
+  // r26c: force_opus skips Haiku entirely. Used when the agent re-runs an
+  // analysis explicitly because Haiku's first answer wasn't good enough.
+  if (opts.force_opus) {
+    console.log('[ai] force_opus=true → calling Opus directly');
+    const r3 = await axios.post('https://api.anthropic.com/v1/messages',
+      { model: OPUS, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] },
+      { headers: headers, timeout: 60000 }
+    );
+    const opusText3 = (r3.data && r3.data.content && r3.data.content[0] && r3.data.content[0].text) || '';
+    return { text: opusText3, modelUsed: OPUS };
+  }
+
+  // Try Haiku first
+  let haikuText = '';
+  let haikuOK = false;
+  try {
+    const r = await axios.post('https://api.anthropic.com/v1/messages',
+      { model: HAIKU, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] },
+      { headers: headers, timeout: 30000 }
+    );
+    haikuText = (r.data && r.data.content && r.data.content[0] && r.data.content[0].text) || '';
+    haikuOK = haikuText.trim().length >= MIN_USEFUL_CHARS;
+  } catch(e) {
+    console.error('[ai] Haiku call failed: ' + e.message + ' — escalating to Opus');
+  }
+  if (haikuOK) return { text: haikuText, modelUsed: HAIKU };
+
+  // Escalate to Opus
+  console.log('[ai] Escalating to Opus' + (haikuText ? ' (Haiku output was ' + haikuText.length + ' chars, below threshold ' + MIN_USEFUL_CHARS + ')' : ' (Haiku failed)'));
+  const r2 = await axios.post('https://api.anthropic.com/v1/messages',
+    { model: OPUS, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] },
+    { headers: headers, timeout: 60000 }
+  );
+  const opusText = (r2.data && r2.data.content && r2.data.content[0] && r2.data.content[0].text) || '';
+  return { text: opusText, modelUsed: OPUS };
+}
+
+// r25b: AI feedback storage helpers. Used by the 4 AI analysis endpoints to
+// (a) read recent agent feedback before sending to the model, and
+// (b) save new feedback when the agent submits a correction.
+const AI_FEEDBACK_VALID_SCOPES = ['amazon_product', 'amazon_campaign', 'google_product', 'google_campaign'];
+
+async function getAiFeedback(scope, targetId, limit) {
+  if (!db) return [];
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return [];
+  if (!targetId) return [];
+  try {
+    const r = await db.query(
+      "SELECT feedback_text, agent_name, created_at FROM ai_feedback " +
+      "WHERE scope = $1 AND target_id = $2 ORDER BY created_at DESC LIMIT $3",
+      [scope, String(targetId), limit || 5]
+    );
+    return r.rows;
+  } catch(e) {
+    console.error('[r25b] getAiFeedback error: ' + e.message);
+    return [];
+  }
+}
+
+// Build a prompt-ready feedback section. Empty string if no feedback.
+async function buildFeedbackPromptSection(scope, targetId) {
+  const rows = await getAiFeedback(scope, targetId, 5);
+  if (!rows.length) return '';
+  const lines = rows.map(function(r, i) {
+    const dateStr = r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : '';
+    const who = r.agent_name ? ' (by ' + r.agent_name + ')' : '';
+    return (i + 1) + '. [' + dateStr + who + '] ' + r.feedback_text;
+  });
+  // r28: Promote feedback to a prominent block at the END of the prompt with
+  // explicit anti-repeat instruction.
+  // r29: HARD RULE — if agent asked a question, answer it directly in your output.
+  // r29e: If the response format is structured JSON, the answer-to-question goes INSIDE
+  // the JSON output (in summary or first action), not as a preamble. Critical for callers
+  // that JSON.parse the response (Amazon listing critique, Google product critique).
+  return '\n\n═══ AGENT FEEDBACK ON PREVIOUS ANALYSES — MUST READ ═══\n' +
+    'These are messages the same agents have left after seeing your previous analysis on this exact target. Most recent first.\n\n' +
+    lines.join('\n') +
+    '\n\n═══ HOW TO USE THE FEEDBACK — HARD RULES ═══\n' +
+    '1. **ANSWER EVERY QUESTION** the agent asked. If they asked "where did you get the info that 2.5kg is out of stock?", or "why doesn\'t this campaign show in shopping?", you must answer them directly. If your output is structured JSON (summary + actions), put the answers INSIDE the JSON — start the `summary` field with "Answering [agent]\'s question: ...". DO NOT write any text outside the JSON.\n' +
+    '2. **DO NOT REPEAT.** If the agent already TRIED something (e.g. "we already negated X" / "we lowered the bid by 30%"), do NOT recommend that thing again.\n' +
+    '3. **ACCEPT CORRECTIONS.** If the agent CONTRADICTED a fact you stated (e.g. "you said 2.5kg out of stock but it\'s in stock"), accept the correction in your `summary` field. Brief acknowledgement: "Previous analysis incorrectly stated [thing] — correcting that, the real issue is [Y]."\n' +
+    '4. **PIVOT.** If the agent said "the title is fine, our reviews are the problem", focus your new output on the reviews angle. Do not waste an action defending the title.\n' +
+    '5. **NO OVERLAP.** Your output must be SUBSTANTIVELY different from what was given before. If most points have been pushed back on, focus on a NEW angle the previous analysis missed (mobile UX, page speed, image dimensions, schema markup, etc.).\n' +
+    '6. **NO PADDING.** If you have nothing new to say after considering all the feedback, your `summary` should plainly state: "Based on agent feedback, my previous analysis was largely wrong. The remaining issue worth investigating is X." Use 1-2 actions max. Do not invent issues to look thorough.\n' +
+    '7. **OUTPUT IS STILL STRICTLY THE JSON SHAPE SPECIFIED ABOVE.** Even when responding to feedback, do not add commentary, headers, or text outside the JSON object. The agent reads everything through a UI that parses the JSON — anything outside breaks the display.';
+}
+
+// POST /api/ai/feedback — save a new feedback entry. Body: { scope, targetId, feedback }
+app.post('/api/ai/feedback', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const scope = String((req.body && req.body.scope) || '').trim();
+  const targetId = String((req.body && req.body.targetId) || '').trim();
+  const feedback = String((req.body && req.body.feedback) || '').trim();
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return res.status(400).json({ error: 'invalid scope' });
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  if (!feedback) return res.status(400).json({ error: 'feedback text required' });
+  if (feedback.length > 2000) return res.status(400).json({ error: 'feedback too long (max 2000 chars)' });
+
+  const agent = (req.user && req.user.name) || 'unknown';
+  try {
+    const r = await db.query(
+      "INSERT INTO ai_feedback (scope, target_id, feedback_text, agent_name) VALUES ($1, $2, $3, $4) RETURNING id, created_at",
+      [scope, targetId, feedback, agent]
+    );
+    // r35.11: feedback breaks Opus cooldown for product-scoped critiques (mirror
+    // of the task-side feedback break at line ~10642). Only applies to scopes
+    // tied to the ai_escalation_log entity types ('amazon_product' for now).
+    if (scope === 'amazon_product' && feedback.length >= 10) {
+      try {
+        await db.query(
+          "UPDATE ai_escalation_log SET agent_feedback_at = NOW() " +
+          "WHERE entity_type = 'amazon_product' AND entity_id = $1 AND agent_name = $2 " +
+          "  AND agent_feedback_at IS NULL " +
+          "  AND called_at > NOW() - INTERVAL '7 days'",
+          [targetId, agent]
+        );
+      } catch(e) { console.error('[r35.11] product Opus cooldown-break failed: ' + e.message); }
+    }
+    res.json({ ok: true, id: r.rows[0].id, created_at: r.rows[0].created_at });
+  } catch(e) {
+    console.error('[r25b] /api/ai/feedback error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/ai/feedback?scope=...&targetId=... — list feedback for a target
+app.get('/api/ai/feedback', async function(req, res) {
+  if (!db) return res.json({ feedback: [] });
+  const scope = String(req.query.scope || '').trim();
+  const targetId = String(req.query.targetId || '').trim();
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return res.status(400).json({ error: 'invalid scope' });
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  const rows = await getAiFeedback(scope, targetId, 20);
+  res.json({ feedback: rows });
+});
+
+// r27: GET /api/ai/feedback/count?scope=...&targetId=... — used to gate the "Create
+// task" button. Agents must submit feedback before creating a task. Owner/manager
+// bypass. Cheap query (COUNT only).
+app.get('/api/ai/feedback/count', async function(req, res) {
+  if (!db) return res.json({ count: 0 });
+  const scope = String(req.query.scope || '').trim();
+  const targetId = String(req.query.targetId || '').trim();
+  if (AI_FEEDBACK_VALID_SCOPES.indexOf(scope) === -1) return res.status(400).json({ error: 'invalid scope' });
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  try {
+    const r = await db.query(
+      "SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope = $1 AND target_id = $2",
+      [scope, targetId]
+    );
+    res.json({ count: r.rows[0] ? r.rows[0].c : 0 });
+  } catch(e) {
+    console.error('[r27 feedback count] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+app.post('/api/ai/analyse', async function(req, res) {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.json({ error: 'No API key', result: null });
+    const acosTarget = parseFloat(process.env.ACOS_WARNING_THRESHOLD || 12);
+    const acosCritical = parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 35);
+
+    let historicalSummary = '';
+    let campHistory = {};
+    if (db) {
+      try {
+        const result = await db.query('SELECT snapshot_date, metrics, campaigns FROM daily_snapshots ORDER BY snapshot_date DESC LIMIT 7');
+        if (result.rows.length > 0) {
+          result.rows.forEach(function(snap) {
+            const camps = snap.campaigns || [];
+            camps.forEach(function(c) {
+              if (!campHistory[c.campaignId]) campHistory[c.campaignId] = { name: c.name, portfolio: c.portfolio||'', days: [] };
+              campHistory[c.campaignId].days.push({ date: snap.snapshot_date, spend: c.spend||0, sales: c.sales||0, acos: c.acos||0, impressions: c.impressions||0, budget: c.dailyBudget||0 });
+            });
+          });
+          const metrics = result.rows[0].metrics || {};
+          historicalSummary = 'Historical data available: ' + result.rows.length + ' days. Latest day: Revenue £' + metrics.totalRevenue + ', Spend £' + metrics.totalSpend + ', ACOS ' + metrics.blendedAcos + '%, Wasted spend £' + metrics.totalWastedSpend;
+        }
+      } catch(e) { console.error('AI history fetch: ' + e.message); }
+    }
+
+    const scaleList = [], pauseList = [], reduceList = [];
+    Object.values(campHistory).forEach(function(camp) {
+      const days = camp.days;
+      if (!days.length) return;
+      const spendDays = days.filter(function(d){ return d.spend > 0; });
+      if (!spendDays.length) return;
+      const avgAcos = spendDays.reduce(function(s,d){ return s+d.acos; }, 0) / spendDays.length;
+      const totalSpend = days.reduce(function(s,d){ return s+d.spend; }, 0);
+      const totalSales = days.reduce(function(s,d){ return s+d.sales; }, 0);
+      const noRevDays = spendDays.filter(function(d){ return d.sales === 0; }).length;
+      const noActDays = days.filter(function(d){ return d.impressions === 0; }).length;
+      const avgBudget = spendDays.reduce(function(s,d){ return s+d.budget; }, 0) / spendDays.length;
+      if (noActDays >= 3) { pauseList.push({ name: camp.name, portfolio: camp.portfolio, reason: 'Zero impressions for ' + noActDays + ' days', action: 'Pause and review targeting', spend: totalSpend.toFixed(2), acos: '—' }); }
+      else if (noRevDays >= 5 && totalSpend > 10) { pauseList.push({ name: camp.name, portfolio: camp.portfolio, reason: noRevDays + ' days spend with zero revenue, £' + totalSpend.toFixed(2) + ' wasted', action: 'Pause campaign', spend: totalSpend.toFixed(2), acos: avgAcos.toFixed(1) + '%' }); }
+      else if (avgAcos > acosCritical && spendDays.length >= 3) { reduceList.push({ name: camp.name, portfolio: camp.portfolio, reason: avgAcos.toFixed(1) + '% avg ACOS over ' + spendDays.length + ' days (target: ' + acosTarget + '%)', action: 'Reduce bids by 20% or add negative keywords', spend: totalSpend.toFixed(2), acos: avgAcos.toFixed(1) + '%' }); }
+      else if (avgAcos > 0 && avgAcos < acosTarget && totalSales > 20 && spendDays.length >= 3) { scaleList.push({ name: camp.name, portfolio: camp.portfolio, reason: avgAcos.toFixed(1) + '% avg ACOS over ' + spendDays.length + ' days, £' + totalSales.toFixed(2) + ' revenue', action: 'Increase daily budget from £' + avgBudget.toFixed(2) + ' to £' + (avgBudget * 1.5).toFixed(2), spend: totalSpend.toFixed(2), acos: avgAcos.toFixed(1) + '%' }); }
+    });
+
+    if (!Object.keys(campHistory).length) {
+      const allCamps = state.campaigns;
+      allCamps.forEach(function(c) {
+        if (c.acos > 0 && c.acos < acosTarget && c.sales > 5) scaleList.push({ name: c.name, portfolio: c.portfolio||'', reason: c.acos + '% ACOS today', action: 'Increase daily budget from £' + c.dailyBudget + ' to £' + (c.dailyBudget * 1.5).toFixed(2), spend: (c.spend||0).toString(), acos: c.acos + '%' });
+        else if (c.acos > acosCritical && c.spend > 5) reduceList.push({ name: c.name, portfolio: c.portfolio||'', reason: c.acos + '% ACOS today', action: 'Reduce bids or add negative keywords', spend: (c.spend||0).toString(), acos: c.acos + '%' });
+      });
+    }
+
+    let strategicInsight = '';
+    if (apiKey && (scaleList.length || pauseList.length || reduceList.length)) {
+      // r33d: cache 2h per "scale/pause/reduce signature" so repeated dashboard
+      // refreshes don't keep re-paying Opus. Pass force=true in the POST body to
+      // bypass the cache and regenerate (used by the manual "Regenerate" link).
+      const cacheKey = 'dashboard_insight:' + scaleList.length + ':' + pauseList.length + ':' + reduceList.length;
+      const force = req.body && req.body.force === true;
+      const cached = force ? null : aiCacheGet(cacheKey);
+      if (cached) {
+        strategicInsight = cached.value;
+        console.log('[r33d] dashboard insight served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+      } else {
+        const prompt = ['You are an Amazon Advertising expert for FK Sports UK (sports equipment). ACOS target is ' + acosTarget + '%.', historicalSummary, 'Scale candidates (' + scaleList.length + '): ' + scaleList.slice(0,5).map(function(c){ return c.name + ' (' + c.acos + ')'; }).join(', '), 'Pause candidates (' + pauseList.length + '): ' + pauseList.slice(0,5).map(function(c){ return c.name; }).join(', '), 'Reduce budget candidates (' + reduceList.length + '): ' + reduceList.slice(0,5).map(function(c){ return c.name + ' (' + c.acos + ')'; }).join(', '), 'In 3-4 sentences give ONE strategic insight about FK Sports campaign performance that would not be obvious from looking at individual campaigns. Focus on patterns, seasonality, or structural issues. Be specific and actionable.'].join(' ');
+        try {
+          const aiRes = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 500, messages: [{ role: 'user', content: prompt }] }, { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } });
+          strategicInsight = aiRes.data.content[0].text;
+          aiCacheSet(cacheKey, strategicInsight);
+          console.log('[r33d] dashboard insight generated fresh, cached for 2h');
+        } catch(e) { console.error('AI insight error: ' + e.message); }
+      }
+    }
+
+    res.json({ result: { scaleList, pauseList, reduceList, strategicInsight, acosTarget, daysOfData: Object.values(campHistory)[0]?.days?.length || 0 } });
+  } catch(e) { console.error('AI error: ' + e.message); res.json({ error: e.message, result: null }); }
+});
+
+// ── Keyword Intelligence ─────────────────────────────────────────────────
+// r33c: now tracks TWO 7-day windows. `data` = current week (today-7 → today),
+// `priorData` = prior week (today-14 → today-7). Analysis runs only when both
+// arrive. Comparison feeds the AI a richer "what's changed" picture for trending.
+let keywordState = {
+  reportId: null, requested: 0, data: null,
+  priorReportId: null, priorRequested: 0, priorData: null,
+  analysis: null, lastAnalysed: 0
+};
+
+async function requestSearchTermReport() {
+  const now = Date.now();
+  if (keywordState.reportId || (now - keywordState.requested) < 7 * 24 * 60 * 60 * 1000) return;
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  const today = new Date().toISOString().split('T')[0];
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  try {
+    const res = await axios.post('https://advertising-api-eu.amazon.com/reporting/reports', { name: 'CampaignPulse Search Terms ' + today, startDate: weekAgo, endDate: today, configuration: { adProduct: 'SPONSORED_PRODUCTS', groupBy: ['searchTerm'], columns: ['campaignId', 'campaignName', 'adGroupId', 'adGroupName', 'keywordId', 'keyword', 'matchType', 'searchTerm', 'cost', 'clicks', 'impressions', 'purchases14d', 'sales14d'], reportTypeId: 'spSearchTerm', timeUnit: 'SUMMARY', format: 'GZIP_JSON' } }, { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) });
+    keywordState.reportId = res.data.reportId;
+    keywordState.requested = now;
+    console.log('Search term report requested: ' + keywordState.reportId);
+  } catch(e) { console.error('Search term report error: ' + e.message); }
+}
+
+// r33c: pull the PRIOR 7-day window (days 7-14 ago) for week-over-week comparison.
+// Same columns and shape as current week. Cached for 24h since it's historical.
+async function requestPriorSearchTermReport() {
+  const now = Date.now();
+  if (keywordState.priorReportId || (now - keywordState.priorRequested) < 24 * 60 * 60 * 1000) return;
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  const sevenAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const fourteenAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  try {
+    const res = await axios.post('https://advertising-api-eu.amazon.com/reporting/reports', {
+      name: 'CampaignPulse Search Terms PRIOR ' + sevenAgo,
+      startDate: fourteenAgo, endDate: sevenAgo,
+      configuration: {
+        adProduct: 'SPONSORED_PRODUCTS', groupBy: ['searchTerm'],
+        columns: ['campaignId', 'campaignName', 'adGroupId', 'adGroupName', 'keywordId', 'keyword', 'matchType', 'searchTerm', 'cost', 'clicks', 'impressions', 'purchases14d', 'sales14d'],
+        reportTypeId: 'spSearchTerm', timeUnit: 'SUMMARY', format: 'GZIP_JSON'
+      }
+    }, { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) });
+    keywordState.priorReportId = res.data.reportId;
+    keywordState.priorRequested = now;
+    console.log('[r33c] PRIOR search term report requested: ' + keywordState.priorReportId);
+  } catch(e) { console.error('[r33c] PRIOR search term report error: ' + e.message); }
+}
+
+async function checkSearchTermReport() {
+  if (!keywordState.reportId) return;
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  try {
+    const statusRes = await axios.get('https://advertising-api-eu.amazon.com/reporting/reports/' + keywordState.reportId, { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) });
+    const status = statusRes.data.status;
+    console.log('Search term report status: ' + status);
+    if (status === 'COMPLETED') {
+      const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+      const zlib = require('zlib');
+      const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+      keywordState.data = JSON.parse(decompressed.toString());
+      keywordState.reportId = null;
+      console.log('Search term report downloaded: ' + keywordState.data.length + ' records');
+      // r33c: now waits for prior-week data too before analysing
+      await maybeAnalyseKeywords();
+    } else if (status === 'FAILED') { console.log('Search term report failed'); keywordState.reportId = null; }
+  } catch(e) { console.error('Search term check error: ' + e.message); keywordState.reportId = null; }
+}
+
+// r33c: poll the prior-week report. Mirrors checkSearchTermReport.
+async function checkPriorSearchTermReport() {
+  if (!keywordState.priorReportId) return;
+  const token = await getAccessToken();
+  const profileId = await getProfileId();
+  const headers = getHeaders(profileId, token);
+  try {
+    const statusRes = await axios.get('https://advertising-api-eu.amazon.com/reporting/reports/' + keywordState.priorReportId, { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) });
+    const status = statusRes.data.status;
+    console.log('[r33c] PRIOR search term report status: ' + status);
+    if (status === 'COMPLETED') {
+      const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+      const zlib = require('zlib');
+      const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+      keywordState.priorData = JSON.parse(decompressed.toString());
+      keywordState.priorReportId = null;
+      console.log('[r33c] PRIOR search term report downloaded: ' + keywordState.priorData.length + ' records');
+      await maybeAnalyseKeywords();
+    } else if (status === 'FAILED') { console.log('[r33c] PRIOR search term report failed'); keywordState.priorReportId = null; }
+  } catch(e) { console.error('[r33c] PRIOR search term check error: ' + e.message); keywordState.priorReportId = null; }
+}
+
+// r33c: run analysis only when both current and prior windows are loaded.
+// Falls back to current-only analysis if prior is missing (e.g. first boot).
+async function maybeAnalyseKeywords() {
+  if (!keywordState.data) return;
+  if (!keywordState.priorData) {
+    console.log('[r33c] current week ready but prior not yet — kicking off prior pull');
+    requestPriorSearchTermReport().catch(function(){});
+    // Run with current-only data for now; will re-analyse when prior arrives
+    await analyseKeywords();
+    return;
+  }
+  await analyseKeywords();
+}
+
+// ─── r22: Sponsored Products advertisedProduct report ───────────────────────
+// Pulls per-ASIN per-campaign per-day spend/sales/clicks/impressions/units.
+// Cron at 04:30 London requests yesterday's report; ~2-3 min until ready.
+// Each product card aggregates spend across its ASINs from this table — true
+// per-ASIN attribution (no manual mapping, no campaign-name matching).
+//
+// Two-phase async: requestAdvertisedProductReport queues the report, then
+// checkAdvertisedProductReport polls and downloads + persists when ready.
+const advertisedProductState = { reportId: null, requested: 0, dateRequested: null };
+
+// r31b: separate state for the 7-DAY-SUMMARY advertised product report.
+// Pulled once every ~2 hours. Provides ONE row per (ASIN, campaign) with the
+// full 7-day cumulative sales — exactly matching what Amazon Seller Central's
+// Sponsored Products Advertised Product report shows for a 7-day date range.
+// Data stored in amazon_asin_ad_perf_7d (new table, recreated each fetch).
+const advertisedProduct7dState = { reportId: null, requested: 0, last425At: 0, data: null, lastFetched: 0 };
+
+async function requestAdvertisedProduct7dReport() {
+  const tz = 'Europe/London';
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+  const sevenDaysAgo = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(Date.now() - 7*24*60*60*1000));
+  if (advertisedProduct7dState.reportId) {
+    return { ok: false, reason: 'in-flight' };
+  }
+  // 425 backoff
+  const now = Date.now();
+  if (advertisedProduct7dState.last425At && (now - advertisedProduct7dState.last425At) < 60*60*1000) {
+    return { ok: false, reason: 'backoff' };
+  }
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const res = await axios.post(
+      'https://advertising-api-eu.amazon.com/reporting/reports',
+      {
+        name: 'CampaignPulse advertisedProduct 7d ' + today,
+        startDate: sevenDaysAgo,
+        endDate: today,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['advertiser'],
+          columns: [
+            'advertisedAsin', 'campaignId', 'campaignName', 'adGroupId', 'adGroupName',
+            'cost', 'clicks', 'impressions',
+            'sales7d', 'purchases7d', 'unitsSoldClicks7d'
+          ],
+          reportTypeId: 'spAdvertisedProduct',
+          timeUnit: 'SUMMARY',
+          format: 'GZIP_JSON'
+        }
+      },
+      { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
+    );
+    advertisedProduct7dState.reportId = res.data.reportId;
+    advertisedProduct7dState.requested = now;
+    advertisedProduct7dState.last425At = 0;
+    console.log('[r31b ad-perf 7d] report requested — id=' + res.data.reportId);
+    return { ok: true, reportId: res.data.reportId };
+  } catch(e) {
+    const status = e.response && e.response.status;
+    if (status === 425) {
+      advertisedProduct7dState.last425At = now;
+      console.warn('[r31b ad-perf 7d] 425 (Too Early) — 1h backoff');
+      return { ok: false, reason: '425' };
+    }
+    console.error('[r31b ad-perf 7d] request error: ' + (e.response ? JSON.stringify(e.response.data).slice(0, 300) : e.message));
+    return { ok: false, reason: 'error', error: e.message };
+  }
+}
+
+async function checkAdvertisedProduct7dReport() {
+  if (!advertisedProduct7dState.reportId) return { ok: false, reason: 'no-report' };
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const statusRes = await axios.get(
+      'https://advertising-api-eu.amazon.com/reporting/reports/' + advertisedProduct7dState.reportId,
+      { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
+    );
+    const status = statusRes.data.status;
+    if (status === 'FAILED') {
+      console.error('[r31b ad-perf 7d] report FAILED');
+      advertisedProduct7dState.reportId = null;
+      return { ok: false, reason: 'failed' };
+    }
+    if (status !== 'COMPLETED') return { ok: false, reason: 'pending', status: status };
+    const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+    const zlib = require('zlib');
+    const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+    const records = JSON.parse(decompressed.toString());
+    console.log('[r31b ad-perf 7d] downloaded ' + records.length + ' rows');
+    if (!db) {
+      advertisedProduct7dState.reportId = null;
+      return { ok: false, reason: 'no-db' };
+    }
+    // Recreate table fresh each pull — this is a current-snapshot table, not history
+    await db.query(
+      "CREATE TABLE IF NOT EXISTS amazon_asin_ad_perf_7d (" +
+      "  asin TEXT NOT NULL," +
+      "  campaign_id TEXT NOT NULL," +
+      "  ad_group_id TEXT NOT NULL DEFAULT ''," +
+      "  spend NUMERIC(10,2) DEFAULT 0," +
+      "  sales NUMERIC(10,2) DEFAULT 0," +
+      "  clicks INTEGER DEFAULT 0," +
+      "  impressions INTEGER DEFAULT 0," +
+      "  units INTEGER DEFAULT 0," +
+      "  orders INTEGER DEFAULT 0," +
+      "  campaign_name TEXT," +
+      "  fetched_at TIMESTAMP DEFAULT NOW()," +
+      "  PRIMARY KEY (asin, campaign_id, ad_group_id)" +
+      ")"
+    );
+    await db.query("CREATE INDEX IF NOT EXISTS idx_asin_perf_7d_campaign ON amazon_asin_ad_perf_7d(campaign_id)");
+    // Wipe + reinsert — this is a CURRENT view, not history
+    await db.query("DELETE FROM amazon_asin_ad_perf_7d");
+    let inserted = 0, errors = 0;
+    for (const r of records) {
+      const asin = r.advertisedAsin || r.asin;
+      const cid = r.campaignId != null ? String(r.campaignId) : null;
+      const aid = r.adGroupId != null ? String(r.adGroupId) : '';
+      if (!asin || !cid) continue;
+      try {
+        await db.query(
+          "INSERT INTO amazon_asin_ad_perf_7d " +
+          "(asin, campaign_id, ad_group_id, spend, sales, clicks, impressions, units, orders, campaign_name) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) " +
+          "ON CONFLICT (asin, campaign_id, ad_group_id) DO UPDATE SET " +
+          "spend=EXCLUDED.spend, sales=EXCLUDED.sales, clicks=EXCLUDED.clicks, " +
+          "impressions=EXCLUDED.impressions, units=EXCLUDED.units, orders=EXCLUDED.orders, " +
+          "campaign_name=EXCLUDED.campaign_name, fetched_at=NOW()",
+          [
+            asin, cid, aid,
+            parseFloat(r.cost || 0),
+            parseFloat(r.sales7d || 0),
+            parseInt(r.clicks || 0),
+            parseInt(r.impressions || 0),
+            parseInt(r.unitsSoldClicks7d || 0),
+            parseInt(r.purchases7d || 0),
+            r.campaignName || null
+          ]
+        );
+        inserted++;
+      } catch(e) {
+        errors++;
+        if (errors < 5) console.error('[r31b ad-perf 7d] insert error: ' + e.message);
+      }
+    }
+    advertisedProduct7dState.reportId = null;
+    advertisedProduct7dState.lastFetched = Date.now();
+    console.log('[r31b ad-perf 7d] persisted ' + inserted + ' rows (' + errors + ' errors)');
+    return { ok: true, inserted: inserted };
+  } catch(e) {
+    console.error('[r31b ad-perf 7d] check error: ' + e.message);
+    advertisedProduct7dState.reportId = null;
+    return { ok: false, error: e.message };
+  }
+}
+
+// Combined poller: requests a fresh 7d report every 2 hours, polls any in-flight
+async function runAdvertisedProduct7dCycle() {
+  if (advertisedProduct7dState.reportId) {
+    // Poll in-flight
+    await checkAdvertisedProduct7dReport();
+    return;
+  }
+  const sinceLast = Date.now() - advertisedProduct7dState.requested;
+  if (sinceLast > 2 * 60 * 60 * 1000) {  // 2 hour refresh
+    await requestAdvertisedProduct7dReport();
+  }
+}
+
+async function requestAdvertisedProductReport(targetDate) {
+  // targetDate: 'YYYY-MM-DD' — defaults to yesterday in London
+  const tz = 'Europe/London';
+  const reqDate = targetDate || (function(){
+    const y = new Date(Date.now() - 24*60*60*1000);
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(y);
+  })();
+  if (advertisedProductState.reportId) {
+    console.log('[r22 ad-perf] report already in flight (' + advertisedProductState.reportId + '), skipping');
+    return { ok: false, reason: 'in-flight' };
+  }
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const res = await axios.post(
+      'https://advertising-api-eu.amazon.com/reporting/reports',
+      {
+        name: 'CampaignPulse advertisedProduct ' + reqDate,
+        startDate: reqDate,
+        endDate: reqDate,
+        configuration: {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['advertiser'],
+          columns: [
+            'advertisedAsin', 'campaignId', 'campaignName', 'adGroupId', 'adGroupName',
+            'cost', 'clicks', 'impressions',
+            'sales1d', 'sales7d', 'sales14d',
+            'purchases1d', 'purchases7d',
+            'unitsSoldClicks1d', 'unitsSoldClicks7d',
+            'date'
+          ],
+          reportTypeId: 'spAdvertisedProduct',
+          timeUnit: 'DAILY',
+          format: 'GZIP_JSON'
+        }
+      },
+      { headers: Object.assign({}, headers, { 'Content-Type': 'application/json', 'Accept': 'application/json' }) }
+    );
+    advertisedProductState.reportId = res.data.reportId;
+    advertisedProductState.requested = Date.now();
+    advertisedProductState.dateRequested = reqDate;
+    console.log('[r22 ad-perf] report requested for ' + reqDate + ' — id=' + res.data.reportId);
+    return { ok: true, reportId: res.data.reportId };
+  } catch(e) {
+    const status = e.response && e.response.status;
+    const body = e.response && e.response.data;
+    console.error('[r22 ad-perf] request error: ' + (status ? 'HTTP ' + status + ' ' : '') + e.message + (body ? ' ' + JSON.stringify(body).slice(0, 300) : ''));
+    return { ok: false, error: e.message };
+  }
+}
+
+async function checkAdvertisedProductReport() {
+  if (!advertisedProductState.reportId) return { ok: false, reason: 'no-report' };
+  if (!db) return { ok: false, reason: 'no-db' };
+  try {
+    const token = await getAccessToken();
+    const profileId = await getProfileId();
+    const headers = getHeaders(profileId, token);
+    const statusRes = await axios.get(
+      'https://advertising-api-eu.amazon.com/reporting/reports/' + advertisedProductState.reportId,
+      { headers: Object.assign({}, headers, { 'Accept': 'application/json' }) }
+    );
+    const status = statusRes.data.status;
+    console.log('[r22 ad-perf] status=' + status);
+    if (status === 'PENDING' || status === 'PROCESSING') return { ok: false, reason: 'pending', status: status };
+    if (status === 'FAILED') {
+      console.error('[r22 ad-perf] report FAILED — ' + JSON.stringify(statusRes.data).slice(0, 300));
+      advertisedProductState.reportId = null;
+      return { ok: false, reason: 'failed' };
+    }
+    if (status !== 'COMPLETED') return { ok: false, reason: 'unknown-status', status: status };
+    // Download + persist
+    const downloadRes = await axios.get(statusRes.data.url, { responseType: 'arraybuffer' });
+    const zlib = require('zlib');
+    const decompressed = zlib.gunzipSync(Buffer.from(downloadRes.data));
+    const records = JSON.parse(decompressed.toString());
+    console.log('[r22 ad-perf] downloaded ' + records.length + ' records for ' + advertisedProductState.dateRequested);
+
+    let inserted = 0, errors = 0;
+    for (const r of records) {
+      const asin = r.advertisedAsin || r.asin;
+      const cid = r.campaignId != null ? String(r.campaignId) : null;
+      const aid = r.adGroupId != null ? String(r.adGroupId) : '';
+      const date = r.date || advertisedProductState.dateRequested;
+      if (!asin || !cid || !date) continue;
+      try {
+        await db.query(
+          "INSERT INTO amazon_asin_ad_performance " +
+          "(asin, campaign_id, ad_group_id, report_date, spend, sales, clicks, impressions, units, orders, campaign_name, fetched_at) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) " +
+          "ON CONFLICT (asin, campaign_id, ad_group_id, report_date) DO UPDATE SET " +
+          "spend=EXCLUDED.spend, sales=EXCLUDED.sales, clicks=EXCLUDED.clicks, " +
+          "impressions=EXCLUDED.impressions, units=EXCLUDED.units, orders=EXCLUDED.orders, " +
+          "campaign_name=EXCLUDED.campaign_name, fetched_at=NOW()",
+          [
+            asin, cid, aid, date,
+            parseFloat(r.cost || 0),
+            parseFloat(r.sales7d || r.sales14d || r.sales1d || 0),
+            parseInt(r.clicks || 0),
+            parseInt(r.impressions || 0),
+            parseInt(r.unitsSoldClicks7d || r.unitsSoldClicks1d || 0),
+            parseInt(r.purchases7d || r.purchases1d || 0),
+            r.campaignName || null
+          ]
+        );
+        inserted++;
+      } catch(e) {
+        errors++;
+        if (errors < 5) console.error('[r22 ad-perf] insert error: ' + e.message);
+      }
+    }
+    console.log('[r22 ad-perf] persisted ' + inserted + ' rows (' + errors + ' errors) for ' + advertisedProductState.dateRequested);
+    advertisedProductState.reportId = null;
+    return { ok: true, inserted: inserted, errors: errors, date: advertisedProductState.dateRequested };
+  } catch(e) {
+    console.error('[r22 ad-perf] check error: ' + e.message);
+    advertisedProductState.reportId = null;
+    return { ok: false, error: e.message };
+  }
+}
+
+// One-shot helper: fire-and-poll for a single date. Used by the daily cron and
+// also by the admin backfill endpoint.
+async function fetchAdvertisedProductReport(targetDate) {
+  const reqResult = await requestAdvertisedProductReport(targetDate);
+  if (!reqResult.ok) return reqResult;
+  // Poll up to 10 minutes (every 30s)
+  for (let i = 0; i < 20; i++) {
+    await new Promise(function(r){ setTimeout(r, 30000); });
+    const checkResult = await checkAdvertisedProductReport();
+    if (checkResult.ok) return checkResult;
+    if (checkResult.reason === 'failed' || checkResult.reason === 'unknown-status') return checkResult;
+  }
+  return { ok: false, reason: 'timeout', message: 'Report did not complete within 10 minutes' };
+}
+
+async function analyseKeywords(opts) {
+  opts = opts || {};
+  if (!keywordState.data || !keywordState.data.length) return;
+  if (!process.env.ANTHROPIC_API_KEY) { keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); return; }
+
+  // r33d: 2-hour cache. The "signature" key uses data sizes so the cache invalidates
+  // when fresh data arrives but reuses the AI answer if called repeatedly on same data.
+  const havePriorForKey = keywordState.priorData && keywordState.priorData.length > 0;
+  const cacheKey = 'keyword_ai:' + keywordState.data.length + ':' + (havePriorForKey ? keywordState.priorData.length : 'no-prior');
+  if (!opts.force) {
+    const cached = aiCacheGet(cacheKey);
+    if (cached) {
+      keywordState.analysis = cached.value;
+      keywordState.lastAnalysed = cached.generatedAt;
+      console.log('[r33d] keyword AI served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+      return;
+    }
+  }
+  try {
+    const data = keywordState.data;
+    const priorData = keywordState.priorData || [];
+    const havePrior = priorData.length > 0;
+
+    // r33c: build per-term week-over-week comparison map keyed by searchTerm
+    // (normalised lower-case to merge case variants). Each entry holds current
+    // and prior totals so the AI can see what's changed.
+    const termIndex = {};
+    function ingest(rows, slot) {
+      rows.forEach(function(r){
+        const term = String(r.searchTerm || '').trim().toLowerCase();
+        if (!term) return;
+        if (!termIndex[term]) {
+          termIndex[term] = {
+            searchTerm: r.searchTerm,
+            current: { cost: 0, clicks: 0, impressions: 0, purchases: 0, sales: 0 },
+            prior:   { cost: 0, clicks: 0, impressions: 0, purchases: 0, sales: 0 },
+            campaigns: new Set(), matchTypes: new Set()
+          };
+        }
+        const t = termIndex[term];
+        t[slot].cost += parseFloat(r.cost || 0);
+        t[slot].clicks += parseInt(r.clicks || 0);
+        t[slot].impressions += parseInt(r.impressions || 0);
+        t[slot].purchases += parseInt(r.purchases14d || 0);
+        t[slot].sales += parseFloat(r.sales14d || 0);
+        if (r.campaignName) t.campaigns.add(r.campaignName);
+        if (r.matchType) t.matchTypes.add(r.matchType);
+      });
+    }
+    ingest(data, 'current');
+    if (havePrior) ingest(priorData, 'prior');
+
+    // Sorted views the AI will reason over. No hand-picked thresholds — pass the AI
+    // the top of each list and let it decide what's worth flagging.
+    const allTerms = Object.values(termIndex);
+
+    // List 1: top-by-current-spend (overall budget weight)
+    const topBySpend = allTerms.slice().sort(function(a,b){ return b.current.cost - a.current.cost; }).slice(0, 50);
+
+    // List 2: returning terms sorted by impression-growth ratio (current/prior).
+    // Skip terms with zero prior impressions (those go in newcomers list).
+    const returning = allTerms.filter(function(t){ return t.prior.impressions > 0 && t.current.impressions > 0; });
+    returning.forEach(function(t){ t._growth = t.current.impressions / t.prior.impressions; });
+    const topByGrowth = returning.slice().sort(function(a,b){ return (b._growth||0) - (a._growth||0); }).slice(0, 30);
+
+    // List 3: top newcomers — present this week, absent prior week. Sorted by
+    // current impressions (volume of demand).
+    const newcomers = havePrior
+      ? allTerms.filter(function(t){ return t.prior.impressions === 0 && t.current.impressions > 0; })
+                .sort(function(a,b){ return b.current.impressions - a.current.impressions; }).slice(0, 30)
+      : [];
+
+    // List 4: declining — present last week, much smaller this week
+    const decliningPool = havePrior
+      ? returning.filter(function(t){ return (t._growth || 0) < 0.7; })
+      : [];
+    const declining = decliningPool.slice().sort(function(a,b){ return (a._growth||1) - (b._growth||1); }).slice(0, 20);
+
+    function fmtTerm(t) {
+      const c = t.current, p = t.prior;
+      const growth = (p.impressions > 0) ? ((c.impressions / p.impressions) * 100 - 100).toFixed(0) + '%' : 'NEW';
+      const matchType = Array.from(t.matchTypes).join(',') || '-';
+      const campaigns = Array.from(t.campaigns).slice(0,2).join(' / ') || '-';
+      return t.searchTerm + ' | now £' + c.cost.toFixed(2) + ' / ' + c.impressions + ' impr / ' + c.purchases + ' sales' +
+        (havePrior ? (' | prior £' + p.cost.toFixed(2) + ' / ' + p.impressions + ' impr / ' + p.purchases + ' sales') : '') +
+        ' | Δimpr: ' + growth + ' | ' + matchType + ' | ' + campaigns;
+    }
+
+    let dismissedLines = '';
+    try {
+      const dismissed = await db.query('SELECT search_term, campaign, reason FROM keyword_dismissals ORDER BY dismissed_at DESC LIMIT 100');
+      if (dismissed.rows.length > 0) dismissedLines = 'PREVIOUSLY DISMISSED KEYWORDS (do NOT recommend these again):\n' + dismissed.rows.map(function(d){ return d.search_term + ' | Campaign: ' + d.campaign + ' | Reason: ' + d.reason; }).join('\n') + '\n';
+    } catch(e) {}
+
+    const totalCurrentSpend = allTerms.reduce(function(s,t){ return s + t.current.cost; }, 0);
+    const totalCurrentSales = allTerms.reduce(function(s,t){ return s + t.current.sales; }, 0);
+
+    const NL = '\n';
+    const sections = [];
+    sections.push('You are an Amazon Advertising expert for FK Sports UK (fitness equipment).');
+    sections.push('Analyse search-term TRENDING data. Goal: identify rising opportunities, new wasters, and declining terms — NOT just generic negative-keyword suggestions.');
+    sections.push('');
+    sections.push('CURRENT 7-DAY WINDOW: ' + data.length + ' raw rows, ' + allTerms.length + ' unique terms. Total spend £' + totalCurrentSpend.toFixed(2) + ', sales £' + totalCurrentSales.toFixed(2) + '.');
+    if (havePrior) {
+      sections.push('PRIOR 7-DAY WINDOW (for week-over-week comparison): ' + priorData.length + ' raw rows.');
+    } else {
+      sections.push('PRIOR WEEK DATA NOT YET AVAILABLE — treat all analysis as current-week only.');
+    }
+    sections.push('');
+    sections.push('LIST 1 — TOP 50 BY CURRENT SPEND (where the money is going):');
+    sections.push(topBySpend.map(fmtTerm).join(NL));
+    sections.push('');
+    if (havePrior) {
+      sections.push('LIST 2 — TOP 30 RETURNING TERMS BY IMPRESSION GROWTH (week-over-week rising demand on terms we already see):');
+      sections.push(topByGrowth.map(fmtTerm).join(NL));
+      sections.push('');
+      sections.push('LIST 3 — TOP 30 NEWCOMERS (terms with impressions this week but zero last week — new demand we may not have targeted yet):');
+      sections.push(newcomers.map(fmtTerm).join(NL));
+      sections.push('');
+      sections.push('LIST 4 — TOP 20 DECLINING (returning terms with significant impression drop — may no longer need budget):');
+      sections.push(declining.map(fmtTerm).join(NL));
+      sections.push('');
+    }
+    sections.push(dismissedLines);
+    sections.push('Answer these 4 questions, every answer grounded in specific terms from the lists above:');
+    sections.push('Q1: RISING WINNERS — Which terms from LIST 2 (or LIST 1 with positive growth) are gaining demand AND already converting? These are exact-match candidates to capture more of the growth.');
+    sections.push('Q2: NEW WASTERS — Which terms from LIST 3 (newcomers) are already burning spend with no sales? Negative-keyword these now before they grow.');
+    sections.push('Q3: HIDDEN OPPORTUNITIES — Which rising/new terms hint at theme shifts (seasonal, new product category demand, competitor brand searches we should respond to)?');
+    sections.push('Q4: BUDGET FREE-UP — Which declining terms can we let go of to redirect budget?');
+    sections.push('');
+    const jsonFmt = '{"risingWinners":{"summary":"","items":[{"searchTerm":"","weekOverWeekGrowth":"","currentImpressions":0,"currentSales":"£X","action":"","reason":""}]},"newWasters":{"summary":"","items":[{"searchTerm":"","currentSpend":"£X","clicks":0,"action":"add as negative","reason":""}]},"hiddenOpportunities":{"summary":"","items":[{"theme":"","examples":[""],"recommendation":""}]},"budgetFreeup":{"summary":"","items":[{"searchTerm":"","priorImpressions":0,"currentImpressions":0,"action":"","reason":""}]},"keyInsight":"","estimatedWeeklyImpact":"£X"}';
+    sections.push('Return ONLY valid JSON, no other text:');
+    sections.push(jsonFmt);
+    const prompt = sections.join(NL);
+
+    const aiRes = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 4000, messages: [{ role: 'user', content: prompt }] }, { headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' } });
+    const text = aiRes.data.content[0].text;
+    const clean = text.replace(/```json|```/g, '').trim();
+    const jsonStart = clean.indexOf('{');
+    const jsonEnd = clean.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found in response');
+    const parsed = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
+
+    // r33c: keep the legacy field names (wasteReduction/newKeywords/etc) populated
+    // for backward compatibility with the existing index.html keyword tab. Map the
+    // new trending output into the old structure so the UI keeps rendering. New
+    // fields (risingWinners/etc) are added alongside for any future UI work.
+    keywordState.analysis = {
+      // New trending shape
+      risingWinners: parsed.risingWinners || { summary:'', items:[] },
+      newWasters: parsed.newWasters || { summary:'', items:[] },
+      hiddenOpportunities: parsed.hiddenOpportunities || { summary:'', items:[] },
+      budgetFreeup: parsed.budgetFreeup || { summary:'', items:[] },
+      keyInsight: parsed.keyInsight || '',
+      estimatedWeeklyImpact: parsed.estimatedWeeklyImpact || '',
+      windowsAvailable: havePrior ? 'current+prior' : 'current-only',
+      // Legacy shape for existing UI
+      wasteReduction: {
+        totalWasted: '£' + (parsed.newWasters && parsed.newWasters.items || []).reduce(function(s,i){ return s + parseFloat(String(i.currentSpend||'0').replace(/[£,]/g,'')); }, 0).toFixed(2),
+        topWasters: (parsed.newWasters && parsed.newWasters.items || []).map(function(i){
+          return { searchTerm: i.searchTerm, campaign: '', spend: i.currentSpend, clicks: i.clicks, recommendation: i.action || 'Add as negative keyword', reason: i.reason };
+        })
+      },
+      newKeywords: {
+        totalOpportunities: ((parsed.risingWinners && parsed.risingWinners.items) || []).length,
+        topOpportunities: (parsed.risingWinners && parsed.risingWinners.items || []).map(function(i){
+          return { searchTerm: i.searchTerm, campaign: '', purchases: 0, sales: i.currentSales, matchType: 'EXACT', recommendation: i.action || 'Add as exact match', estimatedImpact: i.reason };
+        })
+      },
+      portfolioInsights: {
+        patterns: parsed.keyInsight || '',
+        topPerforming: ((parsed.risingWinners && parsed.risingWinners.items && parsed.risingWinners.items[0]) || {}).searchTerm || '',
+        needsAttention: ((parsed.newWasters && parsed.newWasters.items && parsed.newWasters.items[0]) || {}).searchTerm || ''
+      },
+      structuralChange: parsed.hiddenOpportunities ? { recommendation: parsed.hiddenOpportunities.summary, expectedImpact: '', priority: 'high' } : null,
+      summary: parsed.keyInsight || '',
+      bidChanges: []
+    };
+    keywordState.lastAnalysed = Date.now();
+    // r33d: persist to 2-hour cache so repeat clicks within 2h get cached answer
+    aiCacheSet(cacheKey, keywordState.analysis);
+    console.log('[r33c+r33d] Keyword AI analysis complete (' + keywordState.analysis.windowsAvailable + '), cached 2h');
+  } catch(e) { console.error('Keyword analysis error: ' + e.message); keywordState.analysis = ruleBasedKeywordAnalysis(keywordState.data); }
+}
+
+function ruleBasedKeywordAnalysis(data) {
+  const wasters = data.filter(function(r){ return parseFloat(r.cost||0) > 5 && parseInt(r.purchases14d||0) === 0 && parseInt(r.clicks||0) > 3; }).sort(function(a,b){ return parseFloat(b.cost||0) - parseFloat(a.cost||0); }).slice(0, 10);
+  const converters = data.filter(function(r){ return parseInt(r.purchases14d||0) > 0 && r.matchType !== 'EXACT'; }).sort(function(a,b){ return parseInt(b.purchases14d||0) - parseInt(a.purchases14d||0); }).slice(0, 10);
+  const totalWasted = wasters.reduce(function(s,r){ return s + parseFloat(r.cost||0); }, 0);
+  return { wasteReduction: { totalWasted: '£' + totalWasted.toFixed(2), topWasters: wasters.map(function(r){ return { searchTerm: r.searchTerm, campaign: r.campaignName, spend: '£' + parseFloat(r.cost||0).toFixed(2), recommendation: 'Add as negative keyword', reason: 'Zero conversions after £' + parseFloat(r.cost||0).toFixed(2) + ' spend' }; }), estimatedSaving: '£' + totalWasted.toFixed(2) + '/week' }, newKeywords: { totalOpportunities: converters.length, topOpportunities: converters.map(function(r){ return { searchTerm: r.searchTerm, campaign: r.campaignName, purchases: r.purchases14d, sales: '£' + parseFloat(r.sales14d||0).toFixed(2), recommendation: 'Add as exact match keyword', estimatedImpact: 'Lower ACOS, more targeted traffic' }; }) }, bidChanges: [], portfolioInsights: { patterns: 'Analysis based on last 7 days of search term data', topPerforming: converters[0] ? converters[0].campaignName : 'N/A', needsAttention: wasters[0] ? wasters[0].campaignName : 'N/A' }, summary: 'Found ' + wasters.length + ' wasting search terms and ' + converters.length + ' new keyword opportunities.', estimatedWeeklyImpact: '£' + totalWasted.toFixed(2) + ' saved' };
+}
+
+app.get('/api/keywords/status', function(req, res) { res.json({ reportId: keywordState.reportId, hasData: !!keywordState.data, dataSize: keywordState.data ? keywordState.data.length : 0, hasAnalysis: !!keywordState.analysis, lastAnalysed: keywordState.lastAnalysed, requested: keywordState.requested }); });
+app.get('/api/keywords/analysis', function(req, res) { res.json({ analysis: keywordState.analysis, dataSize: keywordState.data ? keywordState.data.length : 0 }); });
+app.post('/api/keywords/refresh', async function(req, res) {
+  // r33d: fully manual now. Each click triggers fresh report pulls + analysis.
+  // Force flag bypasses the 2h AI cache on the analyseKeywords side.
+  const force = req.body && req.body.force === true;
+  keywordState.requested = 0;
+  keywordState.reportId = null;
+  keywordState.priorRequested = 0;
+  keywordState.priorReportId = null;
+  if (force) {
+    aiCacheClear('keyword_ai:' + (keywordState.data ? keywordState.data.length : 0) + ':' + (keywordState.priorData && keywordState.priorData.length ? keywordState.priorData.length : 'no-prior'));
+  }
+  await requestSearchTermReport();
+  await requestPriorSearchTermReport();
+  res.json({ success: true, reportId: keywordState.reportId, priorReportId: keywordState.priorReportId, force: force });
+});
+
+app.post('/api/keywords/dismiss', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { searchTerm, campaign, reason, dismissedBy } = req.body;
+  if (!searchTerm || !campaign || !reason) return res.status(400).json({ error: 'searchTerm, campaign and reason required' });
+  try {
+    await db.query('INSERT INTO keyword_dismissals (search_term, campaign, reason, dismissed_by) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [searchTerm, campaign, reason, dismissedBy || 'unknown']);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/keywords/dismissals', async function(req, res) {
+  if (!db) return res.json({ dismissals: [] });
+  try {
+    const result = await db.query('SELECT search_term, campaign, reason, dismissed_by, dismissed_at FROM keyword_dismissals ORDER BY dismissed_at DESC');
+    res.json({ dismissals: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/activity', async function(req, res) {
+  if (!db) return res.json({ logs: [] });
+  try {
+    const agent = req.query.agent || '';
+    const department = req.query.department || '';
+    const limit = parseInt(req.query.limit) || 100;
+    const conditions = [];
+    const params = [];
+    if (agent) { params.push(agent); conditions.push('agent_name=$' + params.length); }
+    if (department) { params.push(department); conditions.push('department=$' + params.length); }
+    let query = 'SELECT * FROM activity_log';
+    if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+    query += ' ORDER BY logged_at DESC LIMIT ' + limit;
+    const result = await db.query(query, params);
+    res.json({ logs: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+let agentPerfCache = { data: null, generated: 0 };
+app.get('/api/agent-performance', async function(req, res) {
+  if (!db) return res.json({ analysis: 'No database available.' });
+  if (agentPerfCache.data && Date.now() - agentPerfCache.generated < 60 * 60 * 1000) return res.json({ analysis: agentPerfCache.data, cached: true });
+  try {
+    const logs = await db.query("SELECT agent_name, action, notes, status_before, status_after, campaign_name, logged_at FROM activity_log WHERE logged_at > NOW() - INTERVAL '30 days' ORDER BY logged_at DESC LIMIT 500");
+    const repeats = await db.query("SELECT campaign_name, agent_name, failure_count FROM campaign_tasks WHERE is_repeat_offender=TRUE ORDER BY failure_count DESC LIMIT 20");
+    const summary = await db.query("SELECT agent_name, status, COUNT(*) as count FROM campaign_tasks WHERE created_date > NOW() - INTERVAL '30 days' GROUP BY agent_name, status ORDER BY agent_name, status");
+    const alertResponses = await db.query("SELECT agent_name, action, COUNT(*) as count FROM activity_log WHERE action IN ('budget_added','alert_dismissed','alert_ignored') AND logged_at > NOW() - INTERVAL '30 days' GROUP BY agent_name, action ORDER BY agent_name");
+    const kwActions = await db.query("SELECT dismissed_by as agent_name, reason, COUNT(*) as count FROM keyword_dismissals WHERE dismissed_at > NOW() - INTERVAL '30 days' GROUP BY dismissed_by, reason ORDER BY dismissed_by");
+    const prompt = 'You are analyzing Amazon PPC campaign management performance for FK Sports.\n\nAGENT ACTIVITY LOG (last 30 days):\n' + JSON.stringify(logs.rows, null, 2) + '\n\nREPEAT OFFENDERS:\n' + JSON.stringify(repeats.rows, null, 2) + '\n\nTASK SUMMARY PER AGENT:\n' + JSON.stringify(summary.rows, null, 2) + '\n\nALERT RESPONSE TRACKING:\n' + JSON.stringify(alertResponses.rows, null, 2) + '\n\nKEYWORD ACTIONS PER AGENT:\n' + JSON.stringify(kwActions.rows, null, 2) + '\n\nAnalyze each agent (Aryan, Satyam) performance. For each agent provide:\n1. Overall performance rating (Strong/Average/Needs Improvement)\n2. Tasks completed vs abandoned vs dismissed\n3. Alert response rate\n4. Patterns in their notes\n5. Repeat offender campaigns they own\n6. Keyword intelligence actions\n7. One specific actionable recommendation\n\nBe direct and honest. 4-5 sentences per agent.';
+    const response = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 1500, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
+    const analysis = response.data.content[0].text;
+    agentPerfCache = { data: analysis, generated: Date.now() };
+    res.json({ analysis });
+  } catch(e) { console.error('Agent perf error: ' + e.message); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/login', async function(req, res) {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+  try {
+    const result = await db.query('SELECT * FROM users WHERE email=$1 AND is_active=TRUE', [email.toLowerCase().trim()]);
+    if (!result.rows.length) return res.status(401).json({ error: 'Invalid email or password' });
+    const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
+    const token = uuidv4() + uuidv4();
+    await db.query("INSERT INTO user_sessions (user_id, token, department, role, name, email, expires_at) VALUES ($1,$2,$3,$4,$5,$6,NOW() + INTERVAL '24 hours')", [user.id, token, user.department, user.role, user.name, user.email]);
+    await db.query('UPDATE users SET last_login=NOW() WHERE id=$1', [user.id]);
+    res.json({ success: true, token, name: user.name, department: user.department, role: user.role, email: user.email });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/logout', async function(req, res) {
+  const token = req.headers['x-auth-token'] || '';
+  if (token && db) { try { await db.query('DELETE FROM user_sessions WHERE token=$1', [token]); } catch(e) {} }
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', async function(req, res) {
+  const token = req.headers['x-auth-token'] || '';
+  if (!token || !db) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const result = await db.query('SELECT * FROM user_sessions WHERE token=$1 AND expires_at > NOW()', [token]);
+    if (!result.rows.length) return res.status(401).json({ error: 'Session expired' });
+    const s = result.rows[0];
+    res.json({ name: s.name, department: s.department, role: s.role, email: s.email });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/users', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { name, email, password, department, role } = req.body;
+  if (!name || !email || !password || !department) return res.status(400).json({ error: 'All fields required' });
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    await db.query('INSERT INTO users (name, email, password_hash, department, role) VALUES ($1,$2,$3,$4,$5)', [name, email.toLowerCase().trim(), hash, department, role||'agent']);
+    // Audit log — who created what
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      const deptLabels = { amazon: 'Amazon Advertising', google: 'FK Sports Google', supply_chain: 'Supply Chain', logistics: 'Logistics', manager: 'Manager' };
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'user_created',$2)",
+        [actor, actor + ' created user ' + name + ' (' + (deptLabels[department]||department) + ' ' + (role||'agent') + ')']
+      );
+    } catch(e) { console.error('Audit log error: ' + e.message); }
+    res.json({ success: true });
+  } catch(e) { if (e.code === '23505') return res.status(400).json({ error: 'Email already exists' }); res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/auth/users', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const result = await db.query('SELECT id, name, email, department, role, is_active, created_at, last_login FROM users ORDER BY department, name');
+    res.json({ users: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/change-password', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const token = req.headers['x-auth-token'] || '';
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Both passwords required' });
+  if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  try {
+    const sessionRes = await db.query('SELECT * FROM user_sessions WHERE token=$1 AND expires_at > NOW()', [token]);
+    if (!sessionRes.rows.length) return res.status(401).json({ error: 'Not authenticated' });
+    const userId = sessionRes.rows[0].user_id;
+    const userRes = await db.query('SELECT * FROM users WHERE id=$1', [userId]);
+    if (!userRes.rows.length) return res.status(404).json({ error: 'User not found' });
+    const valid = await bcrypt.compare(currentPassword, userRes.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+    const hash = await bcrypt.hash(newPassword, 10);
+    await db.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, userId]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/auth/users/:id', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { name, department, role, is_active, password } = req.body;
+  try {
+    // Look up the target user before edit so audit log captures their name
+    const beforeRes = await db.query('SELECT name, is_active FROM users WHERE id=$1', [req.params.id]);
+    const targetName = beforeRes.rows.length ? beforeRes.rows[0].name : ('user #' + req.params.id);
+    const wasActive = beforeRes.rows.length ? beforeRes.rows[0].is_active : true;
+
+    if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      await db.query('UPDATE users SET name=$1, department=$2, role=$3, is_active=$4, password_hash=$5 WHERE id=$6', [name, department, role, is_active, hash, req.params.id]);
+    } else {
+      await db.query('UPDATE users SET name=$1, department=$2, role=$3, is_active=$4 WHERE id=$5', [name, department, role, is_active, req.params.id]);
+    }
+
+    // Audit log — different message if this looks like a deactivation
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      let action = 'user_updated';
+      let note = actor + ' updated user ' + targetName;
+      if (wasActive && !is_active) {
+        action = 'user_deactivated';
+        note = actor + ' deactivated user ' + targetName;
+      } else if (!wasActive && is_active) {
+        action = 'user_reactivated';
+        note = actor + ' reactivated user ' + targetName;
+      }
+      if (password) note += ' (password reset)';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,$2,$3)",
+        [actor, action, note]
+      );
+    } catch(e) { console.error('Audit log error: ' + e.message); }
+
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Soft-delete a user — sets is_active=false. Reversible.
+app.post('/api/auth/users/:id/deactivate', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  // Owner-only
+  if (!req.user || (req.user.role || '').toLowerCase() !== 'owner') {
+    return res.status(403).json({ error: 'Owner permission required' });
+  }
+  try {
+    const beforeRes = await db.query('SELECT name FROM users WHERE id=$1', [req.params.id]);
+    const targetName = beforeRes.rows.length ? beforeRes.rows[0].name : ('user #' + req.params.id);
+    await db.query('UPDATE users SET is_active=FALSE WHERE id=$1', [req.params.id]);
+    // Invalidate any active sessions for that user
+    try { await db.query('DELETE FROM user_sessions WHERE user_id=$1', [req.params.id]); } catch(e) {}
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'user_deactivated',$2)",
+        [actor, actor + ' deactivated user ' + targetName]
+      );
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Hard-delete a user — destroys the row permanently. Owner only, requires confirmation.
+// Frontend must send { confirm: 'DELETE' } in body to proceed.
+app.delete('/api/auth/users/:id', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  // Owner-only
+  if (!req.user || (req.user.role || '').toLowerCase() !== 'owner') {
+    return res.status(403).json({ error: 'Owner permission required' });
+  }
+  if ((req.body && req.body.confirm) !== 'DELETE') {
+    return res.status(400).json({ error: 'Confirmation required: send { confirm: "DELETE" } in body' });
+  }
+  // Don't let owner delete themselves — would lock them out
+  try {
+    const target = await db.query('SELECT name, email FROM users WHERE id=$1', [req.params.id]);
+    if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
+    if (target.rows[0].email === (req.user.email || '').toLowerCase()) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    const targetName = target.rows[0].name;
+    // Clean up sessions first
+    try { await db.query('DELETE FROM user_sessions WHERE user_id=$1', [req.params.id]); } catch(e) {}
+    await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'user_deleted',$2)",
+        [actor, actor + ' permanently deleted user ' + targetName]
+      );
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+cron.schedule('0 3 * * *', async function() {
+  if (db) { try { await db.query('DELETE FROM user_sessions WHERE expires_at < NOW()'); } catch(e) { console.error('Session cleanup error: ' + e.message); } }
+}, { timezone: 'Europe/London' });
+
+// r35.4: /api/admin/create-manager removed — was an unauthenticated bootstrap
+// endpoint that reset Bobby's password to a known value. Any visitor could hit
+// it. Original purpose served (Bobby's account exists). If account recovery is
+// needed in future, do it via DB directly or add a properly authenticated reset.
+
+// ── SP-API admin/diagnostic endpoints (r8) ──────────────────────────────────
+// These let us verify SP-API credentials work without waiting for cron.
+// Owner-only — agents and managers can't trigger ad-hoc syncs.
+
+function requireOwner(req, res) {
+  const role = req.user && (req.user.role || '').toLowerCase();
+  if (role !== 'owner') {
+    res.status(403).json({ error: 'Owner permission required' });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/admin/sp-api/status — quick credentials + connectivity check.
+// Does NOT pull data, just verifies a token can be obtained and seller ID fetched.
+app.get('/api/admin/sp-api/status', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  if (!spApiConfigured()) return res.json({
+    ok: false,
+    configured: false,
+    missing: ['SP_API_CLIENT_ID', 'SP_API_CLIENT_SECRET', 'SP_API_REFRESH_TOKEN'].filter(function(k){ return !process.env[k]; })
+  });
+  try {
+    const token = await getSpApiAccessToken();
+    const sellerId = await getSellerId();
+    // Count what we already have in the DB
+    const productCount = db ? (await db.query('SELECT COUNT(*) as c FROM amazon_products')).rows[0].c : 0;
+    const orderCount = db ? (await db.query('SELECT COUNT(*) as c FROM amazon_orders')).rows[0].c : 0;
+    res.json({
+      ok: true,
+      configured: true,
+      tokenObtained: !!token,
+      sellerId: sellerId,
+      counts: { products: parseInt(productCount), orders: parseInt(orderCount) }
+    });
+  } catch(e) {
+    res.json({ ok: false, configured: true, error: e.message });
+  }
+});
+
+// POST /api/admin/sp-api/sync-catalogue — manually triggers catalogue sync.
+// Returns counts of items pulled/upserted/errors. Useful for first-run testing.
+app.post('/api/admin/sp-api/sync-catalogue', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const result = await syncAmazonCatalogue();
+  res.json(result);
+});
+
+// POST /api/admin/sp-api/sync-orders — manually triggers orders sync.
+// Body: { daysBack: 7 } (optional, default 7).
+app.post('/api/admin/sp-api/sync-orders', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const daysBack = parseInt((req.body && req.body.daysBack) || 7);
+  const result = await syncAmazonOrders(daysBack);
+  res.json(result);
+});
+
+// r25c: POST /api/amazon/refresh-sales-now — manager+owner accessible.
+// Pulls only TODAY's orders (1 day window) so it's fast (~30s) and quota-light.
+// Used by the dashboard "Refresh sales" button so the team isn't waiting for
+// the next 06:00/14:00 cron when they want fresh numbers.
+app.post('/api/amazon/refresh-sales-now', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(role) !== -1 || dept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  // Light rate-limit: don't allow more than once every 30s per process. Stops
+  // accidental rapid-fire clicks from burning quota.
+  const now = Date.now();
+  if (global._lastRefreshSalesAt && (now - global._lastRefreshSalesAt) < 30000) {
+    const waitSec = Math.ceil((30000 - (now - global._lastRefreshSalesAt)) / 1000);
+    return res.status(429).json({ error: 'Recently refreshed — wait ' + waitSec + 's' });
+  }
+  global._lastRefreshSalesAt = now;
+  try {
+    const result = await syncAmazonOrders(1); // today only
+    res.json({ ok: true, syncedDays: 1, result: result, refreshedAt: new Date().toISOString() });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r25d: GET /api/amazon/sales-today-debug — diagnostic. Owner only.
+// Shows exactly what's in the DB for today vs what Seller Central would show.
+// Helps figure out where the £-gap comes from (Pending orders, zero-total rows,
+// timezone bucketing issues, refunded orders, etc).
+app.get('/api/amazon/sales-today-debug', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  if (!db) return res.status(500).json({ error: 'no-db' });
+  try {
+    // Today bounds in London time, expressed as UTC for the query
+    // (since purchase_date is stored without timezone, we treat it as UTC literal)
+    const now = new Date();
+    const ldnFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const todayLdn = ldnFmt.format(now); // YYYY-MM-DD in London
+
+    // Build day-start and day-end in London → convert to UTC ISO
+    // Easiest: use a temp Date with the London Y-M-D at 00:00 then offset by the
+    // current London UTC offset. But Postgres can do this directly with AT TIME ZONE.
+    // Approach: ask Postgres to give us today's range using London time.
+
+    // Status breakdown for orders whose London-day matches today
+    const breakdownRes = await db.query(
+      "SELECT status, COUNT(*) AS n, " +
+      "       SUM(CASE WHEN order_total IS NULL THEN 1 ELSE 0 END) AS null_total, " +
+      "       SUM(CASE WHEN order_total = 0 THEN 1 ELSE 0 END) AS zero_total, " +
+      "       SUM(COALESCE(order_total, 0)) AS gross " +
+      "FROM amazon_orders " +
+      "WHERE TO_CHAR((purchase_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1 " +
+      "GROUP BY status ORDER BY gross DESC NULLS LAST",
+      [todayLdn]
+    );
+
+    // Sum from line items as a sanity check (sums product price, no shipping/tax)
+    const itemsSumRes = await db.query(
+      "SELECT SUM(i.item_price * i.quantity) AS items_gross, COUNT(DISTINCT i.order_id) AS orders_with_items " +
+      "FROM amazon_orders o " +
+      "JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "WHERE TO_CHAR((o.purchase_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1 " +
+      "AND o.status NOT IN ('Cancelled','Canceled')",
+      [todayLdn]
+    );
+
+    // Same for the existing dashboard query (so we can confirm what the user sees)
+    const dashboardRes = await db.query(
+      "SELECT SUM(order_total) AS gross, COUNT(*) AS n " +
+      "FROM amazon_orders " +
+      "WHERE purchase_date >= NOW() - INTERVAL '1 days' " +
+      "AND status NOT IN ('Cancelled','Canceled') " +
+      "AND TO_CHAR(purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1",
+      [todayLdn]
+    );
+
+    // Last sync timestamp
+    let lastSync = null;
+    try {
+      const lr = await db.query("SELECT settings->>'last_orders_sync_at' AS hwm FROM app_settings WHERE id = 1");
+      if (lr.rows.length) lastSync = lr.rows[0].hwm;
+    } catch(e) {}
+
+    res.json({
+      today_london: todayLdn,
+      now_utc: now.toISOString(),
+      last_sync_hwm: lastSync,
+      orders_by_status: breakdownRes.rows,
+      total_from_order_total_field: breakdownRes.rows.reduce(function(s,r){ return s + parseFloat(r.gross || 0); }, 0).toFixed(2),
+      total_from_line_items_excludes_tax_shipping: parseFloat(itemsSumRes.rows[0].items_gross || 0).toFixed(2),
+      orders_with_items: parseInt(itemsSumRes.rows[0].orders_with_items || 0),
+      what_dashboard_query_returns: parseFloat(dashboardRes.rows[0].gross || 0).toFixed(2),
+      dashboard_order_count: parseInt(dashboardRes.rows[0].n || 0),
+      hint: 'If many orders show null_total or zero_total, those are Pending — Amazon does not provide their value yet. Compare totals: order_total field includes shipping+VAT, line_items does not.'
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/sp-api/raw?path=/path — diagnostic passthrough.
+// Owner-only. Calls SP-API with the supplied path and returns raw response.
+// Used to inspect endpoint responses when something doesn't parse as expected.
+// Path must start with / and be one of an allow-listed prefix to prevent abuse.
+app.get('/api/admin/sp-api/raw', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const p = String(req.query.path || '');
+  if (!p.startsWith('/')) return res.status(400).json({ error: 'path must start with /' });
+  // Allow-list of safe prefixes — read-only diagnostic only
+  const allowed = ['/sellers/', '/listings/', '/catalog/', '/orders/', '/fba/'];
+  if (!allowed.some(function(prefix){ return p.startsWith(prefix); })) {
+    return res.status(400).json({ error: 'path prefix not in allow-list' });
+  }
+  try {
+    const data = await spApiGet(p);
+    res.json({ ok: true, data: data });
+  } catch(e) {
+    const status = (e.response && e.response.status) || 'no-response';
+    const body = (e.response && e.response.data) || null;
+    res.json({ ok: false, status: status, error: e.message, body: body });
+  }
+});
+
+// GET /api/admin/sp-api/test-listings — owner-only.
+// Probes the Listings endpoint with the configured seller ID and a tiny pageSize
+// so we can see exactly what Amazon's 400 error says without burning much quota.
+// Tries multiple variants because Amazon documents a few different parameter
+// shapes depending on listing type (FBA vs FBM vs vendor) and SP-API role grants.
+app.get('/api/admin/sp-api/test-listings', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  try {
+    const sellerId = await getSellerId();
+    const variants = [
+      { name: 'minimal', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&pageSize=5' },
+      { name: 'with summaries only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries&pageSize=5' },
+      { name: 'identifiers only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=identifiers&pageSize=5' },
+      // r9 probes — finding a way to get parent ASIN data
+      { name: 'summaries+relationships', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries,relationships&pageSize=5' },
+      { name: 'relationships only', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=relationships&pageSize=5' },
+      { name: 'summaries+attributes', path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '?marketplaceIds=' + SP_API_MARKETPLACE_ID + '&includedData=summaries,attributes&pageSize=5' }
+    ];
+    const results = [];
+    for (const v of variants) {
+      try {
+        const data = await spApiGet(v.path);
+        results.push({ variant: v.name, ok: true, itemCount: (data && data.items && data.items.length) || 0, sample: (data && data.items && data.items[0]) ? Object.keys(data.items[0]) : null });
+      } catch(e) {
+        results.push({
+          variant: v.name,
+          ok: false,
+          status: (e.response && e.response.status) || null,
+          body: (e.response && e.response.data) || null,
+          message: e.message
+        });
+      }
+    }
+    res.json({ sellerIdFromState: sellerId, results: results });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// r20 — Admin endpoints for SP-API signal refresh + Sales & Traffic backfill
+// ════════════════════════════════════════════════════════════════════════════
+
+// POST /api/admin/refresh-pricing-signals — manually trigger the 03:30 cron
+// for all active ASINs. Returns counts. Owner+manager only.
+app.post('/api/admin/refresh-pricing-signals', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  try {
+    // Run async, don't make the user wait — but return a quick "started" response.
+    // For one-off ASIN testing pass ?asin=B0...
+    const oneAsin = String(req.query.asin || '').trim();
+    if (oneAsin && /^B[0-9A-Z]{9}$/.test(oneAsin)) {
+      const skuRow = db ? (await db.query('SELECT sku FROM amazon_products WHERE asin=$1 LIMIT 1', [oneAsin])).rows[0] : null;
+      const result = await refreshAmazonPricingSignals({ onlyAsin: oneAsin });
+      const sigRow = db ? (await db.query('SELECT * FROM amazon_pricing_signals WHERE asin=$1', [oneAsin])).rows[0] : null;
+      return res.json({ ok: true, oneAsin: oneAsin, result: result, row: sigRow });
+    }
+    // r21: ?includeAll=1 forces refresh of ALL BUYABLE ASINs (incl. dormant).
+    // Default behaviour now restricts to ASINs sold in last 60 days.
+    const includeAll = req.query.includeAll === '1' || req.query.includeAll === 'true';
+    refreshAmazonPricingSignals({ includeAll: includeAll }).catch(function(e){ console.error('[admin] refresh-pricing-signals: ' + e.message); });
+    res.json({ ok: true, includeAll: includeAll, message: 'Refresh started in background (' + (includeAll ? 'all BUYABLE ASINs' : 'active 60d only') + '). Check logs and amazon_pricing_signals table.' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// r22: POST /api/admin/fetch-ad-performance?date=YYYY-MM-DD — pull a single
+// day's advertisedProduct report. Defaults to yesterday. Owner+manager only.
+// Synchronous (waits for the report to complete, ~2-3 min).
+app.post('/api/admin/fetch-ad-performance', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  const date = String(req.query.date || '').trim();
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  try {
+    // Fire and forget — return immediately so the user doesn't have to wait
+    fetchAdvertisedProductReport(date || null).catch(function(e){ console.error('[admin] fetch-ad-performance: ' + e.message); });
+    res.json({ ok: true, message: 'Report fetch started in background. Check logs in ~2-3 minutes for completion.', date: date || 'yesterday' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r31: POST /api/admin/backfill-snapshot?date=YYYY-MM-DD — rebuild a single day's
+// daily_snapshots row from the daily7d stream. Used after r30c silently skipped
+// snapshot saves on 2026-05-11 (todaySpend == null guard), leaving the row empty.
+// Reads per-day rows from each campaign's dailySeries7d in state.campaigns, picks
+// the rows that match the target date, builds a campaigns array + metrics from
+// those values, upserts into daily_snapshots.
+app.post('/api/admin/backfill-snapshot', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  const targetDate = String(req.query.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return res.status(400).json({ error: 'date=YYYY-MM-DD required' });
+  if (!db) return res.status(500).json({ error: 'db not connected' });
+  try {
+    // r31c: read daily7d report data directly — survives Railway restarts even if
+    // state.campaigns hasn't repopulated yet. Need both:
+    //   1) daily7d stream data (to know per-day metrics on target date)
+    //   2) state.campaigns (to know campaign names/portfolios/budgets)
+    // If state.campaigns is empty, we can still produce a basic snapshot from
+    // daily7d alone using campaign_id keys.
+    const daily7dData = (reportState.daily7d && reportState.daily7d.data) || null;
+    if (!daily7dData || !daily7dData.length) {
+      return res.status(503).json({ error: 'daily7d report not yet downloaded — wait ~15 min after deploy then try again' });
+    }
+    // Filter to target date's rows
+    const dateRows = daily7dData.filter(function(d){ return String(d.date).slice(0, 10) === targetDate; });
+    if (!dateRows.length) {
+      return res.status(404).json({ error: 'no daily7d rows match date ' + targetDate + ' — outside 7-day window or no activity that day' });
+    }
+    // Group by campaignId, sum within that day (should be 1 row per campaign per day, but be safe)
+    const byCampaign = {};
+    dateRows.forEach(function(r) {
+      const cid = String(r.campaignId);
+      if (!byCampaign[cid]) byCampaign[cid] = {
+        campaignId: cid,
+        name: r.campaignName || cid,
+        spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0
+      };
+      byCampaign[cid].spend += parseFloat(r.cost || 0);
+      byCampaign[cid].sales += parseFloat(r.sales1d || 0);
+      byCampaign[cid].clicks += parseInt(r.clicks || 0);
+      byCampaign[cid].impressions += parseInt(r.impressions || 0);
+      byCampaign[cid].conversions += parseInt(r.purchases1d || 0);
+    });
+    // Enrich with live campaign metadata where available
+    const liveById = {};
+    (state.campaigns || []).forEach(function(c){ liveById[String(c.campaignId)] = c; });
+    const dayCampaigns = Object.values(byCampaign).map(function(row) {
+      const live = liveById[row.campaignId] || {};
+      const sp = +row.spend.toFixed(2);
+      const sa = +row.sales.toFixed(2);
+      const ac = sa > 0 ? Math.round((sp / sa) * 1000) / 10 : 0;
+      return {
+        campaignId: row.campaignId,
+        name: live.name || row.name,
+        state: live.state || 'enabled',
+        targetingType: live.targetingType || '',
+        portfolio: live.portfolio || '',
+        agent: live.agent || '',
+        dailyBudget: live.dailyBudget || 0,
+        spend: sp,
+        sales: sa,
+        acos: ac,
+        clicks: row.clicks,
+        impressions: row.impressions,
+        conversions: row.conversions,
+        budgetRemaining: null,
+        budgetPct: 0
+      };
+    });
+    const foundForDate = dayCampaigns.length;
+    const totalRevenue = dayCampaigns.reduce(function(s,c){ return s+(c.sales||0); }, 0);
+    const totalSpend = dayCampaigns.reduce(function(s,c){ return s+(c.spend||0); }, 0);
+    const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend/totalRevenue)*1000)/10 : 0;
+    const metrics = {
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos: blendedAcos,
+      activeCampaigns: dayCampaigns.filter(function(c){ return c.state==='enabled'; }).length,
+      totalCampaigns: dayCampaigns.length,
+      outOfBudget: 0,
+      spendNoRevenue: dayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0); }).length,
+      totalWastedSpend: dayCampaigns.filter(function(c){ return c.spend>0&&(c.sales===0); }).reduce(function(s,c){ return s+(c.spend||0); }, 0).toFixed(2),
+      backfilled: true,
+      backfilledAt: new Date().toISOString()
+    };
+    await db.query(
+      'INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, created_at=NOW()',
+      [targetDate, JSON.stringify(metrics), JSON.stringify(dayCampaigns), JSON.stringify([]), JSON.stringify([])]
+    );
+    console.log('[r31c backfill-snapshot] ' + targetDate + ': ' + foundForDate + ' campaign rows · revenue £' + totalRevenue.toFixed(2) + ' · spend £' + totalSpend.toFixed(2));
+    res.json({
+      ok: true,
+      date: targetDate,
+      campaignsBackfilled: foundForDate,
+      totalRevenue: totalRevenue.toFixed(2),
+      totalSpend: totalSpend.toFixed(2),
+      blendedAcos: blendedAcos
+    });
+  } catch(e) {
+    console.error('[r31c backfill-snapshot] error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r22: POST /api/admin/backfill-ad-performance?days=14 — backfill last N days.
+// Sequential because Amazon Ads has report quota. ~3 min per day.
+app.post('/api/admin/backfill-ad-performance', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  const days = Math.min(parseInt(req.query.days || '14'), 60);
+  // Run async; don't block the response
+  (async function() {
+    console.log('[r22 backfill] starting ' + days + ' days');
+    for (let i = 1; i <= days; i++) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const dateStr = d.toISOString().slice(0, 10);
+      try {
+        const result = await fetchAdvertisedProductReport(dateStr);
+        console.log('[r22 backfill] ' + dateStr + ': ' + JSON.stringify(result));
+      } catch(e) {
+        console.error('[r22 backfill] ' + dateStr + ' error: ' + e.message);
+      }
+      // Brief pause between days to be kind to the report quota
+      await new Promise(function(r){ setTimeout(r, 5000); });
+    }
+    console.log('[r22 backfill] done');
+  })().catch(function(e){ console.error('[r22 backfill] outer error: ' + e.message); });
+  res.json({ ok: true, message: 'Backfill started for ' + days + ' days. Each day takes ~2-3 min, total ~' + (days * 3) + ' min. Check server logs.' });
+});
+
+// r35.10c: GET /api/admin/traffic-state — single endpoint that returns
+// the full state of amazon_traffic_snapshots in one HTTP call. Replaces
+// the SQL-tool-via-Railway diagnostic flow when the SQL tool is being
+// unreliable. Owner-only. Returns counts, date range, sample rows, and
+// counts-by-fill-state so we know in one glance whether data is flowing.
+app.get('/api/admin/traffic-state', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
+  try {
+    const [counts, dateRange, fillState, sampleRows, perDay] = await Promise.all([
+      db.query("SELECT COUNT(*) AS n FROM amazon_traffic_snapshots"),
+      db.query(
+        "SELECT MIN(report_date)::text AS oldest, MAX(report_date)::text AS newest, " +
+        "MAX(fetched_at) AS last_fetch FROM amazon_traffic_snapshots"
+      ),
+      db.query(
+        "SELECT " +
+        "  COUNT(*) FILTER (WHERE sessions IS NOT NULL) AS rows_with_sessions, " +
+        "  COUNT(*) FILTER (WHERE sessions > 0) AS rows_with_nonzero_sessions, " +
+        "  COUNT(*) FILTER (WHERE buy_box_pct IS NOT NULL) AS rows_with_buybox, " +
+        "  COUNT(*) FILTER (WHERE units_ordered IS NOT NULL) AS rows_with_units, " +
+        "  COALESCE(SUM(sessions), 0) AS total_sessions, " +
+        "  COALESCE(SUM(units_ordered), 0) AS total_units " +
+        "FROM amazon_traffic_snapshots"
+      ),
+      db.query(
+        "SELECT asin, report_date::text AS date, buy_box_pct, sessions, " +
+        "  page_views, units_ordered, ordered_product_sales " +
+        "FROM amazon_traffic_snapshots ORDER BY report_date DESC, asin LIMIT 5"
+      ),
+      db.query(
+        "SELECT report_date::text AS date, COUNT(*) AS row_count, " +
+        "  COUNT(*) FILTER (WHERE sessions > 0) AS rows_with_real_sessions " +
+        "FROM amazon_traffic_snapshots " +
+        "GROUP BY report_date ORDER BY report_date DESC LIMIT 30"
+      )
+    ]);
+    res.json({
+      ok: true,
+      totalRows: parseInt(counts.rows[0].n),
+      dateRange: dateRange.rows[0],
+      fillState: fillState.rows[0],
+      sampleRows: sampleRows.rows,
+      perDay: perDay.rows,
+      note: 'totalRows is authoritative. fillState tells you whether Amazon is returning real values or empty payloads. perDay shows row distribution.'
+    });
+  } catch(e) {
+    res.status(500).json({ ok: false, error: e.message, stack: (e.stack || '').slice(0, 600) });
+  }
+});
+
+// r35.10: POST /api/admin/traffic-debug-full?date=YYYY-MM-DD — runs ALL 4
+// steps of fetchSalesAndTrafficReport and returns what happened at each step.
+// Tells us exactly where rows are getting lost. Synchronous (~3 min).
+// Owner only.
+app.post('/api/admin/traffic-debug-full', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  const date = String(req.query.date || '').trim() || new Date(Date.now() - 24*60*60*1000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const trace = { date: date, steps: [] };
+  try {
+    // STEP 1 — createReport
+    trace.steps.push({ step: 1, name: 'createReport', startedAt: new Date().toISOString() });
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: date + 'T00:00:00Z',
+      dataEndTime: date + 'T23:59:59Z',
+      reportOptions: { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
+    });
+    const reportId = createRes && createRes.reportId;
+    trace.steps[trace.steps.length - 1].response = createRes;
+    trace.steps[trace.steps.length - 1].reportId = reportId;
+    trace.steps[trace.steps.length - 1].ok = !!reportId;
+    if (!reportId) {
+      trace.failedAt = 'createReport';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 2 — poll until DONE
+    trace.steps.push({ step: 2, name: 'pollUntilDone', startedAt: new Date().toISOString(), polls: [] });
+    let docId = null;
+    let lastStatus = null;
+    const pollStart = Date.now();
+    const maxWait = 180000;
+    while (Date.now() - pollStart < maxWait) {
+      await new Promise(function(r){ setTimeout(r, 8000); });
+      const status = await spApiGet('/reports/2021-06-30/reports/' + encodeURIComponent(reportId));
+      lastStatus = status;
+      const procStatus = status && status.processingStatus;
+      trace.steps[trace.steps.length - 1].polls.push({ at: new Date().toISOString(), status: procStatus });
+      if (procStatus === 'DONE') {
+        docId = status.reportDocumentId;
+        break;
+      } else if (procStatus === 'CANCELLED' || procStatus === 'FATAL') {
+        trace.steps[trace.steps.length - 1].finalStatus = procStatus;
+        trace.steps[trace.steps.length - 1].fullStatusResponse = status;
+        trace.failedAt = 'pollUntilDone:' + procStatus;
+        return res.status(500).json(trace);
+      }
+    }
+    trace.steps[trace.steps.length - 1].finalStatus = lastStatus && lastStatus.processingStatus;
+    trace.steps[trace.steps.length - 1].docId = docId;
+    trace.steps[trace.steps.length - 1].ok = !!docId;
+    if (!docId) {
+      trace.steps[trace.steps.length - 1].fullStatusResponse = lastStatus;
+      trace.failedAt = 'pollUntilDone:timeout';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 3 — fetch document URL
+    trace.steps.push({ step: 3, name: 'fetchDocumentUrl', startedAt: new Date().toISOString() });
+    const docMeta = await spApiGet('/reports/2021-06-30/documents/' + encodeURIComponent(docId));
+    trace.steps[trace.steps.length - 1].docMeta = docMeta;
+    const docUrl = docMeta && docMeta.url;
+    trace.steps[trace.steps.length - 1].hasUrl = !!docUrl;
+    trace.steps[trace.steps.length - 1].compressionAlgorithm = docMeta && docMeta.compressionAlgorithm;
+    trace.steps[trace.steps.length - 1].ok = !!docUrl;
+    if (!docUrl) {
+      trace.failedAt = 'fetchDocumentUrl';
+      return res.status(500).json(trace);
+    }
+
+    // STEP 4 — download + parse + report shape
+    // r35.11b: mirror the gzip fix from fetchSalesAndTrafficReport. The debug
+    // endpoint had the same bug it was built to diagnose — downloaded as text,
+    // tried to JSON.parse compressed binary. Fixed: arraybuffer download +
+    // conditional zlib.gunzipSync based on docMeta.compressionAlgorithm.
+    trace.steps.push({ step: 4, name: 'downloadAndParse', startedAt: new Date().toISOString() });
+    try {
+      const compression = (docMeta && docMeta.compressionAlgorithm) || null;
+      const docRes = await axios.get(docUrl, { timeout: 60000, responseType: 'arraybuffer' });
+      let bodyText;
+      if (compression === 'GZIP') {
+        const zlib = require('zlib');
+        bodyText = zlib.gunzipSync(Buffer.from(docRes.data)).toString('utf8');
+      } else {
+        bodyText = Buffer.from(docRes.data).toString('utf8');
+      }
+      trace.steps[trace.steps.length - 1].rawBytes = (docRes.data || '').byteLength || 0;
+      trace.steps[trace.steps.length - 1].decompressedBytes = bodyText.length;
+      trace.steps[trace.steps.length - 1].firstChars = bodyText.slice(0, 200);
+      let payload;
+      try {
+        payload = JSON.parse(bodyText);
+        trace.steps[trace.steps.length - 1].parsedOk = true;
+        trace.steps[trace.steps.length - 1].topLevelKeys = Object.keys(payload);
+        const arr = (payload && payload.salesAndTrafficByAsin) || [];
+        trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength = arr.length;
+        if (arr.length > 0) {
+          trace.steps[trace.steps.length - 1].firstRow = arr[0];
+        }
+        // Also report any other top-level shapes Amazon may have used
+        if (payload.salesAndTrafficByDate) trace.steps[trace.steps.length - 1].salesAndTrafficByDateLength = payload.salesAndTrafficByDate.length;
+        trace.steps[trace.steps.length - 1].ok = arr.length > 0;
+      } catch(parseErr) {
+        trace.steps[trace.steps.length - 1].parseError = parseErr.message;
+        trace.steps[trace.steps.length - 1].ok = false;
+        trace.failedAt = 'parse';
+        return res.status(500).json(trace);
+      }
+      if (trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength === 0) {
+        trace.failedAt = 'emptyReport';
+      }
+      trace.summary = 'Report parsed. ' + (trace.steps[trace.steps.length - 1].salesAndTrafficByAsinLength || 0) + ' ASIN rows in payload.';
+    } catch(dlErr) {
+      trace.steps[trace.steps.length - 1].downloadError = dlErr.message;
+      trace.steps[trace.steps.length - 1].errorStack = (dlErr.stack || '').slice(0, 800);
+      trace.steps[trace.steps.length - 1].ok = false;
+      trace.failedAt = 'download';
+      return res.status(500).json(trace);
+    }
+    res.json(trace);
+  } catch(e) {
+    trace.fatalError = e.message;
+    trace.fatalStack = (e.stack || '').slice(0, 1200);
+    res.status(500).json(trace);
+  }
+});
+
+// r23: POST /api/admin/traffic-diagnose?date=YYYY-MM-DD — runs ONE day and
+// returns Amazon's actual response. Use this to figure out why the traffic
+// snapshots table has 0 rows after a backfill attempt. Synchronous (~3 min
+// for one day). Owner+manager only.
+app.post('/api/admin/traffic-diagnose', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured', spApi: { configured: false } });
+  const date = String(req.query.date || '').trim() || new Date(Date.now() - 24*60*60*1000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  // Don't await fetchSalesAndTrafficReport directly — it has 3-min poll. Return
+  // immediately and let caller hit pricing-signals-status / row counts after.
+  // But ALSO try to capture the createReport step result (quick, ~1 sec).
+  try {
+    const createRes = await spApiPost('/reports/2021-06-30/reports', {
+      reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+      marketplaceIds: [SP_API_MARKETPLACE_ID],
+      dataStartTime: date + 'T00:00:00Z',
+      dataEndTime: date + 'T23:59:59Z',
+      reportOptions: { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
+    });
+    const reportId = createRes && createRes.reportId;
+    res.json({
+      ok: !!reportId,
+      step: 'createReport',
+      date: date,
+      reportId: reportId || null,
+      response: createRes,
+      message: reportId
+        ? 'Report queued successfully. Poll /reports/2021-06-30/reports/' + reportId + ' or wait ~3 min and check /api/admin/pricing-signals-status for row counts. If counts stay 0 after polling completes, the report itself returned empty (data not available for this date).'
+        : 'Report request rejected by Amazon. Check the response above for the reason — common causes: insufficient permissions on the SP-API role, marketplace ID mismatch, date in future or > 90 days old.'
+    });
+  } catch(e) {
+    res.status(500).json({
+      ok: false,
+      step: 'createReport',
+      date: date,
+      error: e.message,
+      stack: (e.stack || '').slice(0, 800),
+      hint: 'createReport failed. Check error message — if it mentions "InvalidScopeException" or "Unauthorized", the SP-API role is missing the Amazon Selling Partner Reports scope. If "InvalidDateRange", the date is too old or in the future.'
+    });
+  }
+});
+
+// r35.4: r24 one-shot endpoints removed (were marked "remove in r25", we are at r35).
+
+// POST /api/admin/backfill-traffic?days=30 — pull last N days of traffic reports.
+// Reports come back async, so this is fire-and-forget. Owner+manager only.
+app.post('/api/admin/backfill-traffic', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!spApiConfigured()) return res.status(400).json({ error: 'SP-API not configured' });
+  const days = Math.min(60, Math.max(1, parseInt(req.query.days || '30')));
+  try {
+    // Build date list — yesterday backwards
+    const dates = [];
+    const now = new Date();
+    for (let i = 1; i <= days; i++) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      dates.push(d.toISOString().slice(0, 10));
+    }
+    // r20c: Amazon's Reports API createReport quota is ~15/hour with tight burst
+    // throttling. Without spacing, fire-and-forget hits 429s after the first 4-5
+    // requests and the rest of the backfill is wasted. 4-minute spacing keeps us
+    // safely under the quota and lets each report finish processing before the
+    // next is queued. 30 days × 4 min ≈ 2 hours.
+    const SPACING_MS = 4 * 60 * 1000;
+    const minutes = Math.ceil((days * SPACING_MS) / 60000);
+    res.json({ ok: true, message: 'Backfill started for ' + days + ' days at 4 min spacing (Amazon throttle). Total ~' + minutes + ' min.', dates: dates });
+    // Run sequentially in background with throttle-respecting spacing
+    (async function() {
+      for (let i = 0; i < dates.length; i++) {
+        try { await fetchSalesAndTrafficReport(dates[i]); }
+        catch(e) { console.error('[admin] backfill ' + dates[i] + ': ' + e.message); }
+        // Don't sleep after the last one
+        if (i < dates.length - 1) {
+          await new Promise(function(r){ setTimeout(r, SPACING_MS); });
+        }
+      }
+      console.log('[admin] traffic backfill complete (' + days + ' days)');
+    })();
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/pricing-signals-status — show coverage of the cache.
+// Useful for verifying after deploy that the cron is running.
+app.get('/api/admin/pricing-signals-status', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  if (['owner','manager'].indexOf(role) === -1) return res.status(403).json({ error: 'manager+ only' });
+  if (!db) return res.json({ error: 'no DB' });
+  try {
+    const totals = await db.query("SELECT COUNT(*) AS total, " +
+      "COUNT(your_price) AS with_price, COUNT(lowest_competitor_price) AS with_comp, " +
+      "COUNT(reviews_count) AS with_reviews, COUNT(last_content_update) AS with_content_date, " +
+      "COUNT(fulfillable_qty) AS with_inventory, COUNT(stock_cover_days) AS with_stock_cover, " +
+      "MAX(fetched_at) AS last_refresh FROM amazon_pricing_signals");
+    const traffic = await db.query("SELECT COUNT(DISTINCT asin) AS asins, COUNT(*) AS rows, " +
+      "MAX(report_date) AS latest_date, MIN(report_date) AS earliest_date FROM amazon_traffic_snapshots");
+    res.json({ pricingSignals: totals.rows[0], trafficSnapshots: traffic.rows[0] });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// r9 — Amazon products API: parent-grouped view with sales + ad coverage
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/amazon/products
+// Returns parent products with children nested, plus 7-day sales totals and
+// per-child campaign coverage flag. Used by the Sales Dashboard + Untargeted card.
+//
+// Coverage logic:
+//   - "in_campaign" = true if child ASIN appears in any active campaign in `daily_snapshots`
+//     within the last 7 days (we read from the existing campaigns array in snapshots —
+//     they include `targets` arrays per campaign which list the targeted ASINs).
+//   - This is approximate — auto-targeting campaigns may show ads for a product without
+//     ever explicitly listing the ASIN. We flag those as "auto-targeted only" separately.
+// r12: Amazon-specific product diagnosis engine.
+// Returns { priority, diagnosis, action } for a product based on its sales,
+// ad coverage, ACOS, listing status, and campaign performance.
+//
+// Priority levels:
+//   1 = URGENT — losing money, suspended listing, or major coverage gap on a high-revenue product
+//   2 = ATTENTION — needs action (advertising gap, high ACOS, etc.)
+//   3 = SCALE — performing well, opportunity to grow
+//   4 = INFO — stable / no action needed
+//
+// Diagnosis = factual observation. Action = what to do.
+const ACOS_TARGET = 20; // company target — could come from settings later
+// r35.8: rewritten as a layered diagnostic model. Replaces the old
+// "first-rule-wins" cascade that produced the bug where a product with £7
+// spend, £0 sales, and zero sessions was labelled "Working" — because no
+// single old rule covered "small spend, no return, low traffic".
+//
+// New model thinks in 4 layers (as industry-standard frameworks: Pattern,
+// MyAmazonGuy, OBG, Adverio, SellerMagnet all converge on the same shape):
+//   Layer 1: Can people BUY it? (suspension, Buy Box, content, price)
+//   Layer 2: Are people SEEING it? (sessions vs ad coverage)
+//   Layer 3: Do they BUY when they see it? (CVR — the missing big one)
+//   Layer 4: Ad efficiency (overlay — flags wasted spend / over-target ACOS)
+//
+// Each layer runs all its rules and collects the priorities they hit.
+// The final priority is the WORST (lowest number) seen across all layers.
+//
+// CVR thresholds (agreed with Bobby 2026-05-20):
+//   < 6%       critical — listing converts below ad breakeven (16% margin)
+//   6-10%      weak — eats most of margin
+//   10-12%     mild — below stated 12-15% benchmark
+//   12-15%     good — typical benchmark range
+//   >15%       excellent — Doing Great, scale candidate
+// Minimum sessions before trusting CVR: 30 to flag, 50 to call urgent.
+// AOV used for sanity comments: assumed £50 — change here if real AOV differs.
+function computeAmazonDiagnosis(p) {
+  const parent = p.parent;
+  const inactiveCount = parent.inactive_count || 0;
+  const buyableCount = parent.buyable_count || 0;
+  const hasSales = p.totalSales > 0;
+  const hasSpend = p.campaignSpend > 0;
+  const hasCampaigns = p.campaignCount > 0;
+  const sig = p.signals || {};
+
+  // r35.13b: market-anchored CVR thresholds.
+  // Amazon Sports & Outdoors category CVR average = 8-12% (industry benchmark).
+  // We aim slightly past market (+1-2%) so the team is pushed to compete, not
+  // calibrated to current (3-5%) baseline which would lock the gap in forever.
+  // Bands: <5% critical (far below floor) · 5-8% below market (catching up)
+  //        · 8-11% at market floor · 11-13% at target · >13% excellent/scale
+  const CVR_CRITICAL = 5;        // <5% well below market floor — listing fundamentally broken
+  const CVR_BELOW_MARKET = 8;    // 5-8% below market floor — real lift needed
+  const CVR_AT_FLOOR = 11;       // 8-11% at category average — keep pushing
+  const CVR_AT_MARKET = 13;      // 11-13% hitting target (+1-2% over market)
+                                 // >13% excellent / scale candidate
+  const SESSIONS_MIN_FOR_URGENT = 50;
+  const SESSIONS_MIN_FOR_FLAG = 30;
+  const SESSIONS_MIN_FOR_SCALE = 100;
+  const BUY_BOX_CRITICAL = 50;
+  const BUY_BOX_WARNING = 80;
+  const WASTED_SPEND_MIN = 5;
+
+  // Collect candidate diagnoses across all layers. Each entry =
+  // { priority, evidence, diagnosis, action, layer }
+  const candidates = [];
+  const flags = {
+    listing_issue: false,
+    visibility_issue: false,
+    conversion_issue: false,
+    wasted_spend: false,
+    over_acos: false
+  };
+  const secondary = []; // diagnoses that didn't win but are worth showing
+
+  function add(layer, priority, evidence, diagnosis, action) {
+    candidates.push({ layer: layer, priority: priority, evidence: evidence, diagnosis: diagnosis, action: action });
+  }
+
+  // ─── LAYER 1: Listing / Buy Box / Pricing — Can people buy it? ───────
+  if (inactiveCount > 0 && buyableCount === 0) {
+    flags.listing_issue = true;
+    add(1, 1, 'all variants inactive',
+        'All variants INACTIVE/SUSPENDED — listing not buyable on Amazon',
+        'Investigate suspension reason in Seller Central; relist');
+  } else if (inactiveCount >= 2 && p.totalChildren > 2) {
+    flags.listing_issue = true;
+    add(1, 1, inactiveCount + ' of ' + p.totalChildren + ' variants suspended',
+        inactiveCount + ' of ' + p.totalChildren + ' variants suspended/inactive',
+        'Review suspended ASINs in Seller Central and reinstate');
+  }
+  if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < BUY_BOX_CRITICAL && hasSales) {
+    flags.listing_issue = true;
+    add(1, 1, 'Buy Box ' + sig.buy_box_pct_7d + '% (last 7d)',
+        'Buy Box only ' + sig.buy_box_pct_7d + '% over last 7 days — losing the offer to other sellers',
+        'Check pricing vs competitors and any account/health issues');
+  } else if (sig.buy_box_pct_7d != null && sig.buy_box_days >= 5 && sig.buy_box_pct_7d < BUY_BOX_WARNING && hasSales) {
+    flags.listing_issue = true;
+    add(1, 2, 'Buy Box ' + sig.buy_box_pct_7d + '% (target 90%+)',
+        'Buy Box ' + sig.buy_box_pct_7d + '% over last 7 days (target 90%+)',
+        'Check pricing; ensure stock is sufficient and account health is green');
+  }
+  if (sig.price_vs_lowest != null && sig.price_vs_lowest > 5 && hasSales) {
+    flags.listing_issue = true;
+    add(1, 2, '£' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor',
+        'Priced £' + sig.price_vs_lowest.toFixed(2) + ' above lowest competitor (£' + (sig.your_price || 0).toFixed(2) + ' vs £' + (sig.lowest_competitor_price || 0).toFixed(2) + ')',
+        'Review pricing — likely losing Buy Box and conversions');
+  }
+  if (sig.content_age_days != null && sig.content_age_days > 90 && hasSales) {
+    flags.listing_issue = true;
+    add(1, 2, 'content ' + sig.content_age_days + ' days old',
+        'Listing content not updated for ' + sig.content_age_days + ' days — Amazon SEO benefits from refresh',
+        'Refresh title keywords, bullets, and A+ content');
+  }
+
+  // r35.13: hoisted to top of Layer 2 so coverage rule (and any later rule)
+  // can reference traffic signals.
+  const cvr = sig.cvr_7d;
+  const sess = sig.sessions_7d || 0;
+
+  // ─── LAYER 2: Visibility — Are people seeing it? ─────────────────────
+  if (hasSales && p.totalSales > 50 && !hasCampaigns) {
+    flags.visibility_issue = true;
+    add(2, 2, '£' + p.totalSales.toFixed(0) + ' organic, no ads',
+        '£' + p.totalSales.toFixed(0) + ' organic sales, but no advertising at all',
+        'Launch a Sponsored Products campaign — already has organic demand');
+  }
+  // r35.13: coverage rule now fires whenever there's any signal (sales OR traffic).
+  // Previously gated on hasSales — a multi-variant product with sessions but no sales
+  // was invisible to this rule.
+  if (p.totalChildren >= 3 && p.adCoveragePct < 40 && (hasSales || sess > 0)) {
+    flags.visibility_issue = true;
+    add(2, 2, p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised',
+        'Only ' + p.advertisedChildren + ' of ' + p.totalChildren + ' variants advertised (' + p.adCoveragePct + '% coverage)',
+        'Add remaining variants to existing campaigns (same parent ASIN target)');
+  }
+
+  // ─── LAYER 3: Conversion — Do they buy when they see it? ───────
+  // r35.13b: market-anchored diagnosis. Every band names the Amazon Sports
+  // category benchmark (8-12%) so the agent always sees the target they're
+  // chasing, not just their current number.
+  if (cvr != null && sess >= SESSIONS_MIN_FOR_URGENT && cvr < CVR_CRITICAL) {
+    // CRITICAL — below 5%, far below market floor
+    flags.conversion_issue = true;
+    const ratio = cvr > 0 ? Math.round(8 / cvr) : 0;
+    const gapText = ratio >= 2 ? 'Converting at ~1/' + ratio + ' of market.' : '';
+    add(3, 1, sess + ' sessions, CVR ' + cvr + '%',
+        'CVR ' + cvr + '% vs Amazon Sports category average 8-12%. ' + gapText + ' Listing fundamentals likely broken.',
+        'Audit top-ranking competitor listings — main image, A+ content, lifestyle photos, pricing, review count. Rebuild listing to match category leaders.');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_BELOW_MARKET) {
+    // BELOW MARKET — 5-8%, below market floor but working
+    flags.conversion_issue = true;
+    add(3, 2, sess + ' sessions, CVR ' + cvr + '%',
+        'CVR ' + cvr + '% vs Amazon Sports category 8-12%. Below market floor — real lift available.',
+        'Compare top 3 competitor listings on identical keywords. Identify lift levers: A+ content depth, bullet structure, secondary images, review acquisition.');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_FLAG && cvr < CVR_AT_FLOOR) {
+    // AT FLOOR — 8-11%, hitting category average, push for 11-13% target
+    flags.conversion_issue = true;
+    add(3, 2, sess + ' sessions, CVR ' + cvr + '%',
+        'CVR ' + cvr + '% — at Amazon Sports category floor (8-12%). Push for 11-13% target.',
+        'Tighten one weak point — usually review acquisition or content age. Small lifts compound at this level.');
+  } else if (cvr != null && sess >= SESSIONS_MIN_FOR_SCALE && cvr > CVR_AT_MARKET) {
+    // EXCELLENT — above 13%, above market target, scale candidate
+    add(3, 0, sess + ' sessions, CVR ' + cvr + '%',
+        'CVR ' + cvr + '% — above market target (11-13%). Listing is doing its job.',
+        'Scale ad spend — increase budgets on top-performing campaigns. Apply learnings to similar listings.');
+  }
+  // Note: 11-13% sits in the "at target" band — no flag fires, product
+  // lands in WORKING with no issues. Owner sees this as healthy.
+
+  // ─── LAYER 4: Ad efficiency — wasted spend, ACOS overlay ─────────────
+  // These set flags and contribute candidates. They run alongside Layer 3.
+  if (hasSpend && p.campaignSpend >= WASTED_SPEND_MIN && !hasSales) {
+    flags.wasted_spend = true;
+    // Tier the priority on size of waste so big spends get the urgent badge
+    const urgent = p.campaignSpend >= 20;
+    add(4, urgent ? 1 : 2,
+        '£' + p.campaignSpend.toFixed(0) + ' spend, zero attributed sales',
+        'Spending £' + p.campaignSpend.toFixed(2) + '/wk in ' + p.campaignCount + ' campaigns — zero sales',
+        'Pause campaigns or check listing for issues (image / price / reviews)');
+  }
+  if (hasSales && hasSpend && p.acos > ACOS_TARGET * 2) {
+    flags.over_acos = true;
+    add(4, 1, 'ACOS ' + p.acos + '% (target ' + ACOS_TARGET + '%)',
+        'ACOS ' + p.acos + '% — more than double target (' + ACOS_TARGET + '%) at £' + p.campaignSpend.toFixed(2) + ' spend',
+        'Reduce bids or add negative keywords; review search-term report');
+  } else if (hasSales && hasSpend && p.acos > ACOS_TARGET) {
+    flags.over_acos = true;
+    add(4, 2, 'ACOS ' + p.acos + '% above ' + ACOS_TARGET + '% target',
+        'ACOS ' + p.acos + '% — above ' + ACOS_TARGET + '% target on ' + p.campaignCount + ' campaigns',
+        'Tune bids on top-spending keywords; check search-term waste');
+  }
+
+  // ─── Owner unassigned (admin issue — surfaces as P2 even if otherwise clean) ──
+  if (!parent.owner_agent && hasSales) {
+    add(0, 2, 'no agent assigned',
+        'No agent assigned — sales not attributed in team breakdown',
+        'Assign an owner agent from the dropdown above');
+  }
+
+  // ─── Aggregate: pick the worst priority. ─────────────────────────────
+  // Note priority 0 (doing_great) only wins if nothing else fired.
+  // We sort by priority asc, with "doing_great" (0) treated as best (i.e. only
+  // if no 1/2 exists). To achieve this: filter out 0s when 1+ exists.
+  let primary = null;
+  const nonZero = candidates.filter(function(c){ return c.priority > 0; });
+  if (nonZero.length > 0) {
+    nonZero.sort(function(a, b){ return a.priority - b.priority; });
+    primary = nonZero[0];
+    // collect secondary (other distinct diagnoses)
+    nonZero.slice(1, 4).forEach(function(c) {
+      if (c.diagnosis !== primary.diagnosis) secondary.push({
+        priority: c.priority, evidence: c.evidence, diagnosis: c.diagnosis, action: c.action
+      });
+    });
+  } else {
+    const zeros = candidates.filter(function(c){ return c.priority === 0; });
+    if (zeros.length > 0) primary = zeros[0];
+  }
+
+  // No rule fired at all → fall to priority 3 (working) if has sales,
+  // priority 4 (monitor) otherwise
+  if (!primary) {
+    if (hasSales) {
+      primary = {
+        priority: 3,
+        evidence: '£' + p.totalSales.toFixed(0) + ' sales, ' + p.adCoveragePct + '% coverage',
+        diagnosis: '£' + p.totalSales.toFixed(0) + ' weekly sales, ' + p.adCoveragePct + '% ad coverage' + (cvr != null ? ', CVR ' + cvr + '%' : ''),
+        action: 'No immediate action required'
+      };
+    } else if (!hasSpend && sess === 0) {
+      primary = {
+        priority: 4,
+        evidence: p.totalChildren + ' variant' + (p.totalChildren === 1 ? '' : 's') + ', no traffic',
+        diagnosis: 'No sessions, no sales, no spend in 7 days — not enough signal to judge',
+        action: 'Monitor — consider test ads if listing is buyable'
+      };
+    } else {
+      // r35.13: was priority 3 (WORKING) — wrong. A product with sessions but
+      // no sales, or spend below £5 waste threshold with no sales, isn't
+      // "working" — it's "not enough signal". Bucket as MONITOR instead.
+      const parts = [];
+      if (sess > 0) parts.push(sess + ' sessions');
+      if (hasSpend) parts.push('£' + p.campaignSpend.toFixed(2) + ' spend');
+      parts.push('no sales');
+      primary = {
+        priority: 4,
+        evidence: parts.join(', '),
+        diagnosis: parts.join(', ') + ' — too little signal to flag a specific issue',
+        action: (sess > 0 && !hasCampaigns)
+          ? 'Some organic traffic but no ads — consider a small test campaign'
+          : 'Monitor — wait for more data'
+      };
+    }
+  }
+
+  return {
+    priority: primary.priority,
+    evidence: primary.evidence,
+    diagnosis: primary.diagnosis,
+    action: primary.action,
+    flags: flags,
+    secondary: secondary  // up to 3 additional issues
+  };
+}
+
+// r16b: Debug endpoint — traces the matcher for one specific product
+// Usage: GET /api/admin/match-debug?titleContains=vibration plate
+// Returns: every campaign that should match this product + why each does or doesn't.
+app.get('/api/admin/match-debug', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  // r35.4: owner guard added — debug endpoints shouldn't be accessible to all
+  // authenticated users.
+  if (!requireOwner(req, res)) return;
+  const titleQuery = String(req.query.titleContains || '').toLowerCase();
+  if (!titleQuery) return res.status(400).json({ error: 'titleContains query required' });
+  try {
+    // Find all matching products
+    const prodRes = await db.query(
+      "SELECT sku, asin, title, parent_sku FROM amazon_products WHERE LOWER(title) LIKE $1 LIMIT 5",
+      ['%' + titleQuery + '%']
+    );
+    if (!prodRes.rows.length) return res.json({ error: 'no products with that title', titleQuery: titleQuery });
+
+    // Pull recent campaigns
+    const snapshotsRes = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
+    );
+    const seenCamp = new Set();
+    const recentCampaigns = [];
+    snapshotsRes.rows.forEach(function(snap) {
+      (snap.campaigns || []).forEach(function(c) {
+        if (c.campaignId && !seenCamp.has(c.campaignId)) { seenCamp.add(c.campaignId); recentCampaigns.push(c); }
+      });
+    });
+
+    // Trace each product
+    const results = prodRes.rows.map(function(p) {
+      const titleKw = extractTitleKeywords(p.title || '');
+      const titleKwArr = Array.from(titleKw);
+      // Find campaigns whose name mentions any keyword
+      const candidateCampaigns = recentCampaigns.filter(function(c) {
+        const lower = (c.name || '').toLowerCase();
+        return titleKwArr.some(function(kw){ return lower.indexOf(kw) !== -1; });
+      });
+      const traced = candidateCampaigns.slice(0, 10).map(function(c) {
+        const parsed = parseCampaignName(c.name || '');
+        const hintKw = extractTitleKeywords(parsed.productHint);
+        const hintKwArr = Array.from(hintKw);
+        const overlap = hintKwArr.filter(function(kw){ return titleKw.has(kw); });
+        const wouldMatch = isCampaignMatch(hintKw, titleKw);
+        return {
+          name: c.name,
+          parsed_agent: parsed.agent,
+          parsed_hint: parsed.productHint,
+          hint_keywords: hintKwArr,
+          title_keywords: titleKwArr.slice(0, 15),
+          overlap: overlap,
+          would_match: wouldMatch,
+          reason: wouldMatch ? 'matches' :
+            !parsed.agent ? 'no agent prefix in campaign name (parser rejected)' :
+            hintKwArr.length === 0 ? 'no usable hint keywords (all stop-words?)' :
+            overlap.length === 0 ? 'no keyword overlap' :
+            overlap.length === 1 && overlap[0].length < 5 ? 'only 1 short keyword overlap (need 2+ or 1 distinctive)' :
+            'unknown'
+        };
+      });
+      return {
+        sku: p.sku,
+        parent_sku: p.parent_sku,
+        title: p.title,
+        title_keywords: titleKwArr,
+        candidate_campaigns_count: candidateCampaigns.length,
+        traced: traced
+      };
+    });
+    res.json({
+      totalRecentCampaigns: recentCampaigns.length,
+      products: results
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/amazon/products
+app.get('/api/amazon/products', async function(req, res) {
+  if (!db) return res.json({ products: [] });
+  try {
+    // r14: View filter — 'active' (default) | 'dormant' | 'all' | 'gaps' | 'hidden'
+    // Backwards compat: ?include=all still works.
+    const view = (req.query.view || (req.query.include === 'all' ? 'all' : 'active')).toLowerCase();
+
+    // r16: load hidden parent_skus once
+    const hiddenRes = await db.query("SELECT parent_sku FROM hidden_products");
+    const hiddenSet = new Set(hiddenRes.rows.map(function(r){ return r.parent_sku; }));
+
+    // 1. Pull all SKUs (with status/title/asin/parent/owner)
+    const productsRes = await db.query(
+      "SELECT sku, asin, title, status, image_url, parent_sku, variation_theme, owner_agent, COALESCE(owner_manual,FALSE) AS owner_manual " +
+      "FROM amazon_products " +
+      "WHERE status IS NULL OR status NOT LIKE '%REMOVED%' " +
+      "ORDER BY COALESCE(parent_sku, sku), sku"
+    );
+
+    // 2. Sales last 7 days, by ASIN and by SKU (we use both for matching)
+    const salesRes = await db.query(
+      "SELECT i.asin, i.sku, SUM(i.item_price * i.quantity) AS revenue, SUM(i.quantity) AS units " +
+      "FROM amazon_order_items i " +
+      "JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '7 days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "GROUP BY i.asin, i.sku"
+    );
+    const salesByAsin = {};
+    const salesBySku = {};
+    salesRes.rows.forEach(function(row) {
+      if (row.asin) salesByAsin[row.asin] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
+      if (row.sku) salesBySku[row.sku] = { revenue: parseFloat(row.revenue || 0), units: parseInt(row.units || 0) };
+    });
+
+    // r20: Pricing signals cache + traffic snapshots — load once for the whole request.
+    // Stale > 36h → treated as missing on the UI side. Buy Box rolling 7d avg here.
+    const STALE_HOURS = 36;
+    const signalsRes = await db.query(
+      "SELECT asin, your_price, lowest_competitor_price, price_vs_lowest, " +
+      "reviews_count, reviews_avg, last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, " +
+      "fulfillment_mode, fetched_at, " +
+      "(EXTRACT(EPOCH FROM (NOW() - fetched_at)) / 3600) AS age_hours " +
+      "FROM amazon_pricing_signals"
+    );
+    const signalsByAsin = {};
+    signalsRes.rows.forEach(function(s) {
+      const stale = parseFloat(s.age_hours || 0) > STALE_HOURS;
+      signalsByAsin[s.asin] = {
+        your_price: stale ? null : (s.your_price != null ? parseFloat(s.your_price) : null),
+        lowest_competitor_price: stale ? null : (s.lowest_competitor_price != null ? parseFloat(s.lowest_competitor_price) : null),
+        price_vs_lowest: stale ? null : (s.price_vs_lowest != null ? parseFloat(s.price_vs_lowest) : null),
+        reviews_count: stale ? null : (s.reviews_count != null ? parseInt(s.reviews_count) : null),
+        reviews_avg: stale ? null : (s.reviews_avg != null ? parseFloat(s.reviews_avg) : null),
+        last_content_update: stale ? null : s.last_content_update,
+        fulfillable_qty: stale ? null : (s.fulfillable_qty != null ? parseInt(s.fulfillable_qty) : null),
+        velocity_30d: stale ? null : (s.velocity_30d != null ? parseFloat(s.velocity_30d) : null),
+        stock_cover_days: stale ? null : (s.stock_cover_days != null ? parseFloat(s.stock_cover_days) : null),
+        fulfillment_mode: stale ? null : (s.fulfillment_mode || null),  // r20d
+        signals_stale: stale
+      };
+    });
+    // Buy Box win % rolling 7-day avg per ASIN, plus days-of-data so the UI can
+    // show "Building (N/7d)" until the window is full.
+    // r35.8: also sum sessions + units_ordered over the 7d window so we can
+    // compute CVR (the conversion-rate diagnostic that the new diagnosis model
+    // uses as a primary signal).
+    const trafficRes = await db.query(
+      "SELECT asin, " +
+      "AVG(buy_box_pct) FILTER (WHERE buy_box_pct IS NOT NULL) AS buy_box_avg, " +
+      "COUNT(*) FILTER (WHERE buy_box_pct IS NOT NULL) AS bb_days, " +
+      "SUM(sessions) AS sessions_7d, " +
+      "SUM(units_ordered) AS units_7d " +
+      "FROM amazon_traffic_snapshots " +
+      "WHERE report_date >= CURRENT_DATE - INTERVAL '7 days' " +
+      "GROUP BY asin"
+    );
+    const trafficByAsin = {};
+    trafficRes.rows.forEach(function(t) {
+      trafficByAsin[t.asin] = {
+        buy_box_pct_7d: t.buy_box_avg != null ? parseFloat(parseFloat(t.buy_box_avg).toFixed(1)) : null,
+        buy_box_days: parseInt(t.bb_days || 0),
+        sessions_7d: t.sessions_7d != null ? parseInt(t.sessions_7d) : 0,
+        units_7d: t.units_7d != null ? parseInt(t.units_7d) : 0
+      };
+    });
+
+    // r13: Active-window check — has the ASIN sold in last 60 days?
+    const recentAsinsRes = await db.query(
+      "SELECT DISTINCT i.asin FROM amazon_order_items i " +
+      "JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE o.purchase_date >= NOW() - INTERVAL '60 days' " +
+      "AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin IS NOT NULL"
+    );
+    const activeAsins = new Set();
+    recentAsinsRes.rows.forEach(function(r){ if (r.asin) activeAsins.add(r.asin); });
+
+    // 3. Advertised ASINs from snapshots (last 7d)
+    const snapshotsRes = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'"
+    );
+    const advertisedAsins = new Set();
+    const autoCampaignsExist = { value: false };
+    snapshotsRes.rows.forEach(function(snap) {
+      const camps = snap.campaigns || [];
+      camps.forEach(function(c) {
+        if ((c.targetingType || '').toLowerCase() === 'auto') autoCampaignsExist.value = true;
+        const targets = c.targets || c.asins || c.targetedAsins || [];
+        if (Array.isArray(targets)) {
+          targets.forEach(function(t) {
+            const asin = (typeof t === 'string') ? t : (t && (t.asin || t.value));
+            if (asin && /^B[0-9A-Z]{9}$/.test(asin)) advertisedAsins.add(asin);
+          });
+        }
+      });
+    });
+
+    // r25b + r33a: ALSO mark any ASIN with actual ad spend in last 7 days as "in a campaign".
+    // This catches auto-targeted campaigns where the ASIN isn't listed as a target
+    // but Amazon's ad report still shows spend on it. Without this, kettlebell-style
+    // products show "0 of N ASINs in ads" even when they're getting active ad spend
+    // from auto campaigns — and coverage shows 0% misleadingly.
+    //
+    // r33a: switched source from amazon_asin_ad_performance (stale daily table, often
+    // missing days) to amazon_asin_ad_perf_7d (fresh 7d snapshot refreshed every 2h).
+    try {
+      const adPerfRes = await db.query(
+        "SELECT DISTINCT asin FROM amazon_asin_ad_perf_7d WHERE spend > 0"
+      );
+      adPerfRes.rows.forEach(function(r) {
+        if (r.asin && /^B[0-9A-Z]{9}$/.test(r.asin)) advertisedAsins.add(r.asin);
+      });
+    } catch(e) {
+      // Table may not exist on very old deployments — non-fatal
+      if (!/does not exist/.test(e.message)) console.error('[r25b] ad-perf coverage augment error: ' + e.message);
+    }
+
+    // 3b. Recent campaigns (deduped) for spend/sales/ACOS aggregation
+    const seenCamp = new Set();
+    const recentCampaigns = [];
+    snapshotsRes.rows.forEach(function(snap) {
+      (snap.campaigns || []).forEach(function(c) {
+        if (c.campaignId && !seenCamp.has(c.campaignId)) { seenCamp.add(c.campaignId); recentCampaigns.push(c); }
+      });
+    });
+
+    // ── r13: NEW GROUPING LOGIC ──────────────────────────────────────────────
+    // Build "asinGroup" — one entry per ASIN. All SKUs sharing an ASIN merge here.
+    // This collapses the FBA/FBM duplicate SKU problem.
+    const asinGroup = {}; // asin -> { skus:[], title, image, status_set, owner... }
+    const noAsinGroup = {}; // SKUs that have no ASIN at all (rare): keyed by sku
+    productsRes.rows.forEach(function(p) {
+      if (p.asin) {
+        if (!asinGroup[p.asin]) {
+          asinGroup[p.asin] = {
+            asin: p.asin,
+            skus: [],
+            titles: [],
+            image_url: null,
+            statuses: new Set(),
+            parent_skus: new Set(),
+            owner_agent: null,
+            owner_manual: false,
+            variation_theme: null
+          };
+        }
+        const g = asinGroup[p.asin];
+        g.skus.push(p.sku);
+        if (p.title) g.titles.push(p.title);
+        if (p.image_url && !g.image_url) g.image_url = p.image_url;
+        if (p.status) g.statuses.add(String(p.status).toUpperCase());
+        if (p.parent_sku) g.parent_skus.add(p.parent_sku);
+        // r33e: manual ownership always wins over auto-derived. Without this guard
+        // the first iterated SKU's owner took the slot, so if two SKUs shared an
+        // ASIN and one had owner_manual=TRUE (a deliberate reassignment) and the
+        // other had stale auto-derived owner_agent, the result depended on row
+        // iteration order which is random. Bobby's B0DV5J386N case: save persisted
+        // for the parent-linked row but the parent_sku=NULL sibling kept its stale
+        // 'Satyam' value, and the aggregator picked whichever loaded first.
+        if (p.owner_agent) {
+          if (p.owner_manual) {
+            g.owner_agent = p.owner_agent;
+            g.owner_manual = true;
+          } else if (!g.owner_agent) {
+            g.owner_agent = p.owner_agent;
+          }
+        }
+        if (p.variation_theme && !g.variation_theme) g.variation_theme = p.variation_theme;
+      } else {
+        // SKU with no ASIN — treat as own row
+        noAsinGroup[p.sku] = p;
+      }
+    });
+
+    // ── Now build "parent product" rollups: by parent_sku for variants, otherwise by ASIN.
+    // groupKey = parent_sku if any SKU in the ASIN group has one; else the ASIN itself.
+    // This way: 12kg-FBA + 12kg-Amazon (same ASIN) → one row, AND multiple ASINs that share a parent_sku → one row.
+    const parents = {};
+    Object.values(asinGroup).forEach(function(g) {
+      // Pick a group key: use parent_sku if available, else the ASIN
+      const parentSku = Array.from(g.parent_skus)[0] || null;
+      const groupKey = parentSku || ('asin:' + g.asin);
+      if (!parents[groupKey]) {
+        parents[groupKey] = {
+          parent_sku: groupKey,
+          title: null,
+          variation_theme: null,
+          children: [],
+          image_url: null,
+          standalone: !parentSku,
+          owner_agent: null,
+          owner_manual: false,
+          buyable_count: 0,
+          inactive_count: 0,
+          asins: new Set()
+        };
+      }
+      const parent = parents[groupKey];
+      // Pick the longest title (usually most descriptive)
+      const longestTitle = g.titles.sort(function(a,b){ return b.length - a.length; })[0] || '';
+      if (!parent.title || longestTitle.length > parent.title.length) parent.title = longestTitle;
+      if (!parent.image_url && g.image_url) parent.image_url = g.image_url;
+      if (!parent.variation_theme && g.variation_theme) parent.variation_theme = g.variation_theme;
+      if (!parent.owner_agent && g.owner_agent) parent.owner_agent = g.owner_agent;
+      if (g.owner_manual) parent.owner_manual = true;
+      // Status: count BUYABLE / INACTIVE per ASIN group
+      const isBuyable = g.statuses.has('BUYABLE') || Array.from(g.statuses).some(function(s){ return s.indexOf('BUYABLE') !== -1; });
+      const isInactive = Array.from(g.statuses).some(function(s){ return s.indexOf('INACTIVE') !== -1 || s.indexOf('SUSPENDED') !== -1; });
+      if (isBuyable) parent.buyable_count++;
+      if (isInactive && !isBuyable) parent.inactive_count++;
+      // Child = the ASIN-group itself, NOT each SKU. SKU detail moves to drilldown.
+      const childSales = salesByAsin[g.asin] || { revenue: 0, units: 0 };
+      // Sum sales across all SKUs that map to this ASIN (in case orders attribute by SKU)
+      g.skus.forEach(function(sku) {
+        if (salesBySku[sku] && (!salesByAsin[g.asin] || salesBySku[sku].revenue !== childSales.revenue)) {
+          // Already covered by ASIN aggregate; skip
+        }
+      });
+      parent.asins.add(g.asin);
+      parent.children.push({
+        asin: g.asin,
+        skus: g.skus,           // all the SKUs that share this ASIN (e.g. FBA + FBM)
+        sku_count: g.skus.length,
+        status: Array.from(g.statuses).join(','),
+        in_campaign: advertisedAsins.has(g.asin),
+        active_60d: activeAsins.has(g.asin),
+        sales_7d: childSales.revenue,
+        units_7d: childSales.units,
+        image_url: g.image_url
+      });
+    });
+
+    // ─── r20c: Campaign matcher REMOVED ──────────────────────────────────────
+    // The TF-IDF + parseCampaignName + isCampaignMatch logic that joined campaigns
+    // to product groups is gone. Reasons:
+    //   - Campaign names in the catalog are inconsistent ("Vibration Plate Auto"
+    //     vs "Satyam | Vibration Plate" vs raw ASIN-targeted) and the matcher
+    //     produced too many false positives.
+    //   - Bobby is going to provide manual ASIN→campaign mapping in a future
+    //     revision instead.
+    // What this means for the API response:
+    //   - Each parent now returns camp_spend_7d=0, camp_count=0, campaigns=[]
+    //   - The diagnosis function still works — it has rule-based cases that
+    //     don't depend on per-product campaign attribution.
+    //   - The wasted-by-agent and ad-spend totals on the dashboard come from
+    //     /api/wasted-by-agent (server-side prefix parsing), not from this join.
+    // To revive: the original block lived between this comment and the next
+    // section header. It used parseCampaignName (still in this file at the
+    // bottom), extractTitleKeywords, isCampaignMatch, and an IDF table. Pull
+    // from r20b commit if needed.
+    // r21→r22: Manual mapping was tried and stripped (architecturally wrong —
+    // multiple listings of same product can share campaigns). Replaced with
+    // r22 advertisedProduct report which gives true ASIN-level spend from
+    // Amazon Ads. Stats below come from amazon_asin_ad_performance keyed by
+    // ASIN, aggregated per parent product. See r22 cron block.
+    const groupCampaignStats = {};
+    try {
+      // r22 + r33a: Pull last-7-day per-ASIN ad metrics from the r31b SUMMARY table.
+      // Each ASIN's spend gets attributed to its parent product.
+      //
+      // r33a: switched from amazon_asin_ad_performance (daily table that depends on
+      // the 04:30 cron landing 7 separate days of rows for each ASIN — was only
+      // returning 1 day of data due to cron gaps, causing product cards to show
+      // ~1/10 of real spend) to amazon_asin_ad_perf_7d (single 7d SUMMARY pulled
+      // every 2 hours, always fresh, always complete). Matches what Amazon Seller
+      // Central's Advertised Product report shows for a 7-day window.
+      const adRes = await db.query(
+        "SELECT asin, " +
+        "       SUM(spend) AS spend, SUM(sales) AS sales, " +
+        "       SUM(clicks) AS clicks, SUM(impressions) AS impressions, " +
+        "       SUM(units) AS conversions, " +
+        "       COUNT(DISTINCT campaign_id) AS campaign_count, " +
+        "       array_agg(DISTINCT campaign_id) AS campaign_ids " +
+        "FROM amazon_asin_ad_perf_7d " +
+        "GROUP BY asin"
+      );
+      // Build parent-level aggregates by walking each parent's children ASINs
+      Object.values(parents).forEach(function(parent) {
+        const parentSku = parent.parent_sku;
+        const childAsins = parent.children.map(function(c){ return c.asin; }).filter(Boolean);
+        if (!childAsins.length) return;
+        let g = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
+        const seenCampaigns = new Set();
+        adRes.rows.forEach(function(r){
+          if (childAsins.indexOf(r.asin) === -1) return;
+          g.spend += parseFloat(r.spend || 0);
+          g.sales += parseFloat(r.sales || 0);
+          g.clicks += parseInt(r.clicks || 0);
+          g.impressions += parseInt(r.impressions || 0);
+          g.conversions += parseInt(r.conversions || 0);
+          (r.campaign_ids || []).forEach(function(cid){ if (cid) seenCampaigns.add(cid); });
+        });
+        g.count = seenCampaigns.size;
+        if (g.count > 0 || g.spend > 0) groupCampaignStats[parentSku] = g;
+      });
+    } catch(e) {
+      // r33a: If amazon_asin_ad_perf_7d doesn't exist yet (very fresh boot, first
+      // 7d report still being requested), table creation hasn't run — fall through
+      // to empty stats. Cards will show £0 until the 2-hourly cycle completes.
+      if (!/does not exist/.test(e.message)) console.error('[r33a] ASIN ad perf aggregation: ' + e.message);
+    }
+
+    // r22: pre-fetch active tasks keyed by parent_sku so cards can show
+    // "🛠 Already assigned to X" badge and block double-assign.
+    const activeTaskByParent = {};
+    try {
+      const tRes = await db.query(
+        "SELECT id, campaign_id, agent_name, status FROM campaign_tasks " +
+        "WHERE status NOT IN ('complete','archived','dismissed','cancelled') " +
+        "AND campaign_id LIKE 'product:%'"
+      );
+      tRes.rows.forEach(function(t){
+        const parentSku = t.campaign_id.replace(/^product:/, '');
+        // Last write wins if there are duplicates (shouldn't happen — we block in r22)
+        activeTaskByParent[parentSku] = { id: t.id, agent_name: t.agent_name, status: t.status };
+      });
+    } catch(e) { console.error('[r22] active-task lookup error: ' + e.message); }
+
+    // r23: product snooze removed — snooze is now on campaigns only.
+    const snoozeByParent = {};
+
+    // 5. Compute per-parent aggregates + diagnosis
+    let allParents = Object.values(parents).map(function(parent) {
+      const totalSales = parent.children.reduce(function(s, c){ return s + (c.sales_7d || 0); }, 0);
+      const totalUnits = parent.children.reduce(function(s, c){ return s + (c.units_7d || 0); }, 0);
+      const advertisedChildren = parent.children.filter(function(c){ return c.in_campaign; }).length;
+      const adCoveragePct = parent.children.length ? Math.round(100 * advertisedChildren / parent.children.length) : 0;
+      const cs = groupCampaignStats[parent.parent_sku] || { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, count: 0, campaigns: [] };
+      const acos = cs.sales > 0 ? Math.round((cs.spend / cs.sales) * 1000) / 10 : 0;
+      const costPerConv = cs.conversions > 0 ? cs.spend / cs.conversions : null;
+      // r13: Activity status — has any child sold in last 60 days?
+      const activeRecent = parent.children.some(function(c){ return c.active_60d; });
+
+      // r20: aggregate signals across ASINs in this parent group.
+      // Strategy:
+      //   - Buy Box %: weighted avg by sessions if available, else simple avg.
+      //   - Stock cover: SUM of fulfillable_qty / SUM of velocity_30d.
+      //   - Reviews: sum count, weighted-avg rating by count.
+      //   - Price vs lowest: take the primary (highest-revenue) child's value.
+      //   - Last content update: NEWEST across children (r20d fix — was oldest,
+      //     which made every multi-ASIN parent look stale unfairly).
+      //   - Fulfillment mode: 'mixed' if any child differs, else single mode.
+      const childAsins = parent.children.map(function(c){ return c.asin; }).filter(Boolean);
+      let bbSum = 0, bbDays = 0, bbCount = 0;
+      let invQty = 0, invVel = 0, invHas = false;
+      let revSum = 0, revAvgNum = 0, revHas = false;
+      let lastUpd = null;
+      let staleCount = 0;
+      let fulfillmentModes = new Set();   // r20d: collect distinct modes seen across children
+      let sessionsSum = 0, unitsSum = 0;  // r35.8: parent-level traffic aggregation
+      childAsins.forEach(function(asin) {
+        const sig = signalsByAsin[asin];
+        const tr = trafficByAsin[asin];
+        if (sig) {
+          if (sig.signals_stale) staleCount++;
+          if (sig.fulfillable_qty != null) { invQty += sig.fulfillable_qty; invHas = true; }
+          if (sig.velocity_30d != null) invVel += sig.velocity_30d;
+          if (sig.reviews_count != null) { revSum += sig.reviews_count; revHas = true; if (sig.reviews_avg != null) revAvgNum += sig.reviews_avg * sig.reviews_count; }
+          if (sig.last_content_update) {
+            const d = String(sig.last_content_update).slice(0, 10);
+            if (!lastUpd || d > lastUpd) lastUpd = d;  // most recent wins
+          }
+          if (sig.fulfillment_mode) fulfillmentModes.add(sig.fulfillment_mode);
+        }
+        if (tr) {
+          if (tr.buy_box_pct_7d != null) {
+            bbSum += tr.buy_box_pct_7d; bbCount++;
+            if (tr.buy_box_days > bbDays) bbDays = tr.buy_box_days;
+          }
+          // r35.8: sessions and units sum across child ASINs of this parent
+          sessionsSum += (tr.sessions_7d || 0);
+          unitsSum += (tr.units_7d || 0);
+        }
+      });
+      // Pick the primary child for price (the ASIN with most 7d revenue)
+      let primaryAsin = null, primaryRev = -1;
+      parent.children.forEach(function(c) {
+        if ((c.sales_7d || 0) > primaryRev) { primaryRev = c.sales_7d || 0; primaryAsin = c.asin; }
+      });
+      const primarySig = primaryAsin && signalsByAsin[primaryAsin] ? signalsByAsin[primaryAsin] : null;
+
+      const buyBoxPct7d = bbCount > 0 ? parseFloat((bbSum / bbCount).toFixed(1)) : null;
+      const stockCoverDays = (invHas && invVel > 0) ? parseFloat((invQty / invVel).toFixed(1)) : null;
+      const reviewsCount = revHas ? revSum : null;
+      const reviewsAvg = (revHas && revSum > 0) ? parseFloat((revAvgNum / revSum).toFixed(2)) : null;
+      // Days since last content update
+      let contentAgeDays = null;
+      if (lastUpd) {
+        const last = new Date(lastUpd + 'T00:00:00');
+        contentAgeDays = Math.floor((Date.now() - last.getTime()) / (24*3600*1000));
+      }
+      // r20d: roll fulfillment modes up to a single label for the parent
+      let parentFulfillmentMode = null;
+      if (fulfillmentModes.size === 1) {
+        parentFulfillmentMode = Array.from(fulfillmentModes)[0];   // 'fba' or 'fbm' or 'mixed'
+      } else if (fulfillmentModes.size > 1) {
+        parentFulfillmentMode = 'mixed';
+      }
+
+      const signals = {
+        buy_box_pct_7d: buyBoxPct7d,
+        buy_box_days: bbDays,                        // 0..7 — used by UI to show "Building (N/7d)"
+        stock_cover_days: stockCoverDays,
+        fulfillable_qty: invHas ? invQty : null,
+        velocity_30d: invVel || null,
+        reviews_count: reviewsCount,
+        reviews_avg: reviewsAvg,
+        last_content_update: lastUpd,                // YYYY-MM-DD or null
+        content_age_days: contentAgeDays,            // null or integer
+        your_price: primarySig ? primarySig.your_price : null,
+        lowest_competitor_price: primarySig ? primarySig.lowest_competitor_price : null,
+        price_vs_lowest: primarySig ? primarySig.price_vs_lowest : null,
+        fulfillment_mode: parentFulfillmentMode,     // r20d
+        signals_stale_count: staleCount,
+        // r35.8: parent-level traffic + conversion
+        sessions_7d: sessionsSum || 0,
+        units_7d: unitsSum || 0,                     // traffic-report units (kept for transparency)
+        // r35.13c: CVR now uses ORDERS units, not traffic-report units. The
+        // traffic report can count a "purchase" when the customer clicks an
+        // ad on ASIN A but ends up buying sibling ASIN B — Amazon's
+        // cross-attribution. That inflates CVR for under-converting listings.
+        // Using actual orders against THIS listing's ASINs gives an honest
+        // CVR. For the Rubber Encased Hex Dumbbell case (170 sess, 0 orders,
+        // but traffic-CVR 1.8%), this now correctly shows CVR 0%.
+        cvr_7d: (sessionsSum > 0) ? parseFloat((100 * (totalUnits || 0) / sessionsSum).toFixed(1)) : null
+      };
+
+      const dx = computeAmazonDiagnosis({
+        parent: parent,
+        totalSales: totalSales,
+        totalUnits: totalUnits,
+        adCoveragePct: adCoveragePct,
+        advertisedChildren: advertisedChildren,
+        totalChildren: parent.children.length,
+        campaignSpend: cs.spend,
+        campaignSales: cs.sales,
+        acos: acos,
+        campaignCount: cs.count,
+        autoCampaignsExist: autoCampaignsExist.value,
+        signals: signals
+      });
+      // r35.8: bucket mapping now includes 'doing_great' (priority 0). Old
+      // coverage-gap absorption logic removed — the new diagnosis function
+      // handles all visibility/coverage cases internally so no post-hoc
+      // promotion is needed.
+      // r35.13b: split priority-2 into 'below_market' vs 'underperforming'.
+      //   - below_market = primary issue is CVR below 8% category floor
+      //                    (agent should focus on listing improvements)
+      //   - underperforming = priority 2 for other reasons (Buy Box,
+      //                       coverage, content age, ACOS, etc.)
+      // Agent sees "below market" and knows the gap is to category average,
+      // not just generic underperformance.
+      //   priority 0 = doing_great (gold)
+      //   priority 1 = urgent (red)
+      //   priority 2 = below_market (orange) OR underperforming (amber)
+      //   priority 3 = working (green)
+      //   priority 4 = monitor (grey)
+      let bucket;
+      if (dx.priority === 0) bucket = 'doing_great';
+      else if (dx.priority === 1) bucket = 'urgent';
+      else if (dx.priority === 2) {
+        // If the winning diagnosis is conversion-driven (CVR below market floor),
+        // route to below_market. Otherwise to underperforming.
+        const isCvrDriven = dx.evidence && /^\d+ sessions, CVR /.test(dx.evidence);
+        bucket = isCvrDriven ? 'below_market' : 'underperforming';
+      }
+      else if (dx.priority === 4) bucket = 'monitor';
+      else bucket = 'working';
+      return Object.assign({}, parent, {
+        asins: Array.from(parent.asins),
+        total_sales_7d: parseFloat(totalSales.toFixed(2)),
+        total_units_7d: totalUnits,
+        ad_coverage_pct: adCoveragePct,
+        advertised_children: advertisedChildren,
+        total_children: parent.children.length,
+        camp_spend_7d: parseFloat(cs.spend.toFixed(2)),
+        camp_sales_7d: parseFloat(cs.sales.toFixed(2)),
+        camp_clicks_7d: cs.clicks,
+        camp_impressions_7d: cs.impressions,
+        camp_conversions_7d: cs.conversions,
+        camp_count: cs.count,
+        // r25b: TACOS = total ad spend / total sales (using Shopify truth, not just
+        // Amazon-attributed). Shows real cost-of-sales including organic sales
+        // benefiting from the ads. ACOS uses ad-attributed sales only — TACOS uses ALL
+        // sales, which is what tells you whether ads are economically worthwhile.
+        tacos_pct: (totalSales > 0 && cs.spend > 0) ? parseFloat((100 * cs.spend / totalSales).toFixed(1)) : null,
+        campaigns: cs.campaigns || [],
+        acos: acos,
+        cost_per_conv: costPerConv != null ? parseFloat(costPerConv.toFixed(2)) : null,
+        active_60d: activeRecent,
+        priority: dx.priority,
+        bucket: bucket,
+        diagnosis: dx.diagnosis,
+        action: dx.action,
+        evidence: dx.evidence || null,  // r20c: short evidence line for card subtitle
+        // r35.8: flags drive the per-section coloured pills on the card.
+        // secondary = up to 3 other issues that didn't win the primary diagnosis,
+        // so the agent can see related problems without clicking in.
+        flags: dx.flags || {},
+        secondary: dx.secondary || [],
+        signals: signals,
+        // r35.13b: lift potential — £/wk this listing leaves on the table if
+        // it hit Amazon Sports category floor (8% CVR). Used to sub-rank the
+        // urgent and below_market buckets so agents work biggest gaps first.
+        // Formula: sessions × (target - current)/100 × aov × margin
+        //   target = 8% (Amazon Sports category floor)
+        //   margin = 16% (Bobby's net profit threshold)
+        lift_potential_gbp_wk: (function(){
+          const currentCvr = (signals && signals.cvr_7d) || 0;
+          const sessions = (signals && signals.sessions_7d) || 0;
+          const aov = totalUnits > 0 ? totalSales / totalUnits : 0;
+          const gap = 8 - currentCvr;
+          if (gap <= 0 || sessions === 0 || aov === 0) return 0;
+          return parseFloat((sessions * (gap / 100) * aov * 0.16).toFixed(2));
+        })(),
+        // r22: active task block (so card can show "🛠 Already assigned" badge)
+        active_task: activeTaskByParent[parent.parent_sku] || null,
+        // r22: snooze state — if snoozed, set so frontend can hide from Underperforming
+        snooze: snoozeByParent[parent.parent_sku] || null
+      });
+    });
+
+    // 6. Active filter — Rule 2 from the spec.
+    // Active = has at least one BUYABLE listing AND has sold in last 60 days.
+    // r16: hidden products excluded from all views except 'hidden' itself.
+    const visibleParents = allParents.filter(function(p){ return !hiddenSet.has(p.parent_sku); });
+    const hiddenParents = allParents.filter(function(p){ return hiddenSet.has(p.parent_sku); });
+    const activeProducts = visibleParents.filter(function(p){
+      return p.buyable_count > 0 && p.active_60d;
+    });
+    const dormantProducts = visibleParents.filter(function(p){
+      return !(p.buyable_count > 0 && p.active_60d);
+    });
+
+    // r14: three-way view selector + r15: 'gaps' filter + r16: 'hidden' filter
+    // r20c: new bucket-based views — urgent / underperforming / working — plus
+    // 'all' / 'hidden' kept. Old 'active' / 'dormant' / 'gaps' stay for any older
+    // bookmarks but route to the new buckets.
+    // r35.8: 'doing_great' (gold) and 'monitor' (grey) added.
+    let returnList;
+    if (view === 'dormant') returnList = dormantProducts;
+    else if (view === 'all') returnList = visibleParents;
+    else if (view === 'hidden') returnList = hiddenParents;
+    else if (view === 'urgent') returnList = activeProducts.filter(function(p){ return p.bucket === 'urgent'; });
+    else if (view === 'underperforming' || view === 'gaps') returnList = activeProducts.filter(function(p){ return p.bucket === 'underperforming'; });
+    else if (view === 'below_market') returnList = activeProducts.filter(function(p){ return p.bucket === 'below_market'; });
+    else if (view === 'working') returnList = activeProducts.filter(function(p){ return p.bucket === 'working'; });
+    else if (view === 'doing_great') returnList = activeProducts.filter(function(p){ return p.bucket === 'doing_great'; });
+    else if (view === 'monitor') returnList = activeProducts.filter(function(p){ return p.bucket === 'monitor'; });
+    else returnList = activeProducts;  // default 'active' = legacy alias
+    returnList.sort(function(a, b) {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      // r35.13b: for urgent and below_market buckets, sort by lift_potential desc
+      // (biggest £ gap to market floor first). Agents see highest-impact fixes
+      // at the top. For other buckets, fall back to legacy waste sort.
+      const isLiftBucket = a.bucket === 'urgent' || a.bucket === 'below_market';
+      if (isLiftBucket && a.bucket === b.bucket) {
+        const aLift = a.lift_potential_gbp_wk || 0;
+        const bLift = b.lift_potential_gbp_wk || 0;
+        if (Math.abs(aLift - bLift) > 1) return bLift - aLift;
+      }
+      // Sort by waste-spend descending: highest spend with worst ACOS comes first.
+      // For zero-sales items, total spend itself is the waste signal.
+      const aWaste = (a.camp_spend_7d || 0) - (a.camp_sales_7d || 0) * 0;
+      const bWaste = (b.camp_spend_7d || 0) - (b.camp_sales_7d || 0) * 0;
+      if (Math.abs(aWaste - bWaste) > 0.5) return bWaste - aWaste;
+      return b.total_sales_7d - a.total_sales_7d;
+    });
+
+    // r20c: per-bucket counts in summary so tabs can show badges
+    // r35.8: doing_great + monitor counts added
+    // r35.13b: below_market count added
+    const allActive = activeProducts;
+    const urgentCount = allActive.filter(function(p){ return p.bucket === 'urgent'; }).length;
+    const belowMarketCount = allActive.filter(function(p){ return p.bucket === 'below_market'; }).length;
+    const underCount = allActive.filter(function(p){ return p.bucket === 'underperforming'; }).length;
+    const workingCount = allActive.filter(function(p){ return p.bucket === 'working'; }).length;
+    const doingGreatCount = allActive.filter(function(p){ return p.bucket === 'doing_great'; }).length;
+    const monitorCount = allActive.filter(function(p){ return p.bucket === 'monitor'; }).length;
+
+    res.json({
+      products: returnList,
+      summary: {
+        total_parents_all: visibleParents.length,
+        total_parents_active: activeProducts.length,
+        total_parents_dormant: dormantProducts.length,
+        total_parents_hidden: hiddenParents.length,
+        total_skus: productsRes.rows.length,
+        auto_campaigns_exist: autoCampaignsExist.value,
+        advertised_asins_count: advertisedAsins.size,
+        unassigned_count: returnList.filter(function(p){ return !p.owner_agent; }).length,
+        urgent_count: urgentCount,                         // r20c: bucket counts
+        below_market_count: belowMarketCount,               // r35.13b
+        underperforming_count: underCount,                  // r20c
+        working_count: workingCount,                        // r20c
+        doing_great_count: doingGreatCount,                 // r35.8
+        monitor_count: monitorCount,                        // r35.8
+        attention_count: returnList.filter(function(p){ return p.priority === 2; }).length,  // legacy
+        scale_count: returnList.filter(function(p){ return p.priority === 3; }).length,      // legacy
+        view: view
+      }
+    });
+  } catch(e) {
+    console.error('/api/amazon/products error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── r13: Amazon listing critique (AI) ──────────────────────────────────────
+// GET /api/amazon/listing-critique?asin=B...&cachedOnly=1
+//   - cachedOnly=1 returns cached result or null
+//   - omit cachedOnly: if cache <24h old, returns it; else returns null
+// POST /api/amazon/listing-critique  body: { asin, groupKey, forceRefresh }
+//   - Fetches the live Amazon page, calls Claude with Amazon-specific prompt,
+//     stores result in amazon_critiques. Returns the critique JSON.
+//
+// The prompt is Amazon-specific: title/keyword analysis, bullet structure,
+// pricing across variants, ad-attribution, search-term relevance.
+
+app.get('/api/amazon/listing-critique', async function(req, res) {
+  if (!db) return res.json({ critique: null });
+  const asin = String(req.query.asin || '');
+  const cachedOnly = req.query.cachedOnly === '1' || req.query.cachedOnly === 'true';
+  if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
+  try {
+    const r = await db.query("SELECT critique, cached_at FROM amazon_critiques WHERE asin = $1", [asin]);
+    if (!r.rows.length) {
+      if (cachedOnly) return res.json({ critique: null });
+      return res.json({ critique: null });
+    }
+    const row = r.rows[0];
+    const ageMs = Date.now() - new Date(row.cached_at).getTime();
+    if (cachedOnly || ageMs < 24 * 3600 * 1000) {
+      return res.json({ critique: row.critique, cached_at: row.cached_at });
+    }
+    res.json({ critique: null, cached_at: row.cached_at, expired: true });
+  } catch(e) {
+    console.error('/api/amazon/listing-critique GET: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/amazon/listing-critique', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  const asin = String((req.body && req.body.asin) || '');
+  const groupKey = String((req.body && req.body.groupKey) || '');
+  // r14b: model parameter — 'haiku' (default, ~£0.01) or 'opus' (deep dive, ~£0.05-0.10)
+  // r35.11: agents can run Opus once per 24h per product, broken by feedback note.
+  // Replaces the old r15 hard owner/manager block, making product Opus consistent
+  // with task escalation Opus (r35.9 D). Owner/manager bypass entirely.
+  const requestedModel = String((req.body && req.body.model) || 'haiku').toLowerCase();
+  if (requestedModel === 'opus') {
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+    const userName = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+    if (!isPrivileged) {
+      // Quota key is the groupKey (one Opus per product per agent per 24h)
+      const quotaKey = groupKey || asin;
+      if (!quotaKey) return res.status(400).json({ error: 'product key required for Opus quota' });
+      try {
+        const lastCallRes = await db.query(
+          "SELECT called_at, agent_feedback_at FROM ai_escalation_log " +
+          "WHERE entity_type = 'amazon_product' AND entity_id = $1 AND agent_name = $2 " +
+          "ORDER BY called_at DESC LIMIT 1",
+          [quotaKey, userName]
+        );
+        if (lastCallRes.rows.length > 0) {
+          const lastCall = lastCallRes.rows[0];
+          const hoursAgo = (Date.now() - new Date(lastCall.called_at).getTime()) / 3600000;
+          const cooldownBroken = lastCall.agent_feedback_at != null;
+          if (hoursAgo < 24 && !cooldownBroken) {
+            const hoursLeft = Math.max(1, Math.ceil(24 - hoursAgo));
+            return res.status(429).json({
+              error: 'quota',
+              quotaMessage:
+                'You ran the Opus deep dive on this product ' +
+                Math.floor(hoursAgo) + 'h ago. ' +
+                'Drop a note in the feedback box telling the AI what worked, ' +
+                'what didn\'t, or what to focus on next — then we\'ll run a fresh one ' +
+                'with that context. ' +
+                '(Or come back in ' + hoursLeft + 'h.)',
+              hoursLeft: hoursLeft,
+              feedbackBreaksCooldown: true
+            });
+          }
+        }
+        // Allowed — log the call. agent_feedback_at stays NULL until they leave feedback.
+        await db.query(
+          "INSERT INTO ai_escalation_log (entity_type, entity_id, agent_name) VALUES ('amazon_product', $1, $2)",
+          [quotaKey, userName]
+        );
+      } catch(e) { console.error('[r35.11] product Opus quota check: ' + e.message); }
+    }
+  }
+  const modelId = requestedModel === 'opus' ? 'claude-opus-4-5-20251101' : 'claude-haiku-4-5-20251001';
+  if (!/^B[0-9A-Z]{9}$/.test(asin)) return res.status(400).json({ error: 'invalid asin' });
+  try {
+    const result = await runListingCritique(asin, groupKey, modelId);
+    res.json(result);
+  } catch(e) {
+    console.error('/api/amazon/listing-critique POST: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r14b: extracted helper so bulk mode can call it. Returns { critique, cached_at, model }.
+async function runListingCritique(asin, groupKey, modelId) {
+  // Pull product context from our DB — title, status, price, ad performance for the parent group
+  const prodRes = await db.query(
+    "SELECT sku, asin, title, status, image_url, parent_sku, owner_agent FROM amazon_products WHERE asin = $1 OR parent_sku = $2 OR sku = $2",
+    [asin, groupKey]
+  );
+  if (!prodRes.rows.length) throw new Error('product not found');
+  const primary = prodRes.rows.find(function(r){ return r.asin === asin; }) || prodRes.rows[0];
+  const allTitles = Array.from(new Set(prodRes.rows.map(function(r){ return r.title; }).filter(Boolean)));
+  const childAsins = Array.from(new Set(prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean)));
+  const inactiveCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('INACTIVE') !== -1 || (r.status || '').indexOf('SUSPENDED') !== -1; }).length;
+  const buyableCount = prodRes.rows.filter(function(r){ return (r.status || '').indexOf('BUYABLE') !== -1; }).length;
+
+    // Sales data
+    const salesRes = await db.query(
+      "SELECT SUM(i.item_price * i.quantity) AS revenue, SUM(i.quantity) AS units, COUNT(DISTINCT i.order_id) AS orders " +
+      "FROM amazon_order_items i JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "WHERE i.asin = ANY($1) AND o.purchase_date >= NOW() - INTERVAL '30 days' AND o.status NOT IN ('Cancelled','Canceled')",
+      [childAsins]
+    );
+    const sales30d = salesRes.rows[0] || {};
+
+    // r20: Pull operational signals from cache + 7d Buy Box from traffic snapshots.
+    // These feed into the AI prompt so the critique reasons about pricing, stock,
+    // reviews, content age, and Buy Box win % alongside title/bullets/A+.
+    let signalsContext = '';
+    let signalsHash = '';
+    try {
+      const sigRows = await db.query(
+        "SELECT asin, your_price, lowest_competitor_price, price_vs_lowest, " +
+        "reviews_count, reviews_avg, last_content_update, fulfillable_qty, velocity_30d, stock_cover_days, fetched_at " +
+        "FROM amazon_pricing_signals WHERE asin = ANY($1)", [childAsins]
+      );
+      const trRows = await db.query(
+        "SELECT asin, AVG(buy_box_pct) AS buy_box_avg, COUNT(*) AS days " +
+        "FROM amazon_traffic_snapshots " +
+        "WHERE asin = ANY($1) AND report_date >= CURRENT_DATE - INTERVAL '7 days' AND buy_box_pct IS NOT NULL " +
+        "GROUP BY asin", [childAsins]
+      );
+      const primarySig = sigRows.rows.find(function(r){ return r.asin === asin; }) || sigRows.rows[0] || null;
+      const primaryTr = trRows.rows.find(function(r){ return r.asin === asin; }) || trRows.rows[0] || null;
+      // Aggregate inventory + reviews across the family
+      let totalFulfill = 0, totalVel = 0, totalReviewCount = 0, weightedReviewSum = 0;
+      let oldestContent = null;
+      sigRows.rows.forEach(function(r){
+        if (r.fulfillable_qty != null) totalFulfill += parseInt(r.fulfillable_qty);
+        if (r.velocity_30d != null) totalVel += parseFloat(r.velocity_30d);
+        if (r.reviews_count != null) {
+          totalReviewCount += parseInt(r.reviews_count);
+          if (r.reviews_avg != null) weightedReviewSum += parseFloat(r.reviews_avg) * parseInt(r.reviews_count);
+        }
+        if (r.last_content_update) {
+          const d = String(r.last_content_update).slice(0, 10);
+          if (!oldestContent || d < oldestContent) oldestContent = d;
+        }
+      });
+      const familyStockCover = totalVel > 0 ? (totalFulfill / totalVel).toFixed(1) : null;
+      const familyReviewAvg = totalReviewCount > 0 ? (weightedReviewSum / totalReviewCount).toFixed(2) : null;
+      const contentAge = oldestContent ? Math.floor((Date.now() - new Date(oldestContent + 'T00:00:00').getTime()) / (24*3600*1000)) : null;
+      // Build hash for cache invalidation: one-line digest of all values
+      const hashSrc = [
+        primarySig ? primarySig.your_price : 'np',
+        primarySig ? primarySig.lowest_competitor_price : 'nlc',
+        familyStockCover, totalReviewCount, familyReviewAvg, contentAge,
+        primaryTr ? primaryTr.buy_box_avg : 'nbb', primaryTr ? primaryTr.days : '0'
+      ].join('|');
+      signalsHash = require('crypto').createHash('md5').update(hashSrc).digest('hex').slice(0, 12);
+      // r20c: build signals context line-by-line, OMITTING any signal that's null.
+      // This stops the prompt from instructing the model to reason about Buy Box
+      // (etc.) when we have no data — which previously led the model to invent
+      // numbers or make generic comments. Reviews dropped entirely (SP-API
+      // returns null for FK Sports' catalog and the live-page scrape gave the
+      // wrong number — 8000 instead of 700 because it was the variation rollup).
+      const lines = [];
+      if (primaryTr && primaryTr.buy_box_avg != null) {
+        lines.push('Buy Box win % (last 7 days): ' + parseFloat(primaryTr.buy_box_avg).toFixed(1) + '% (' + primaryTr.days + ' days of data)');
+      }
+      if (primarySig && primarySig.your_price != null) {
+        lines.push('Your price: £' + parseFloat(primarySig.your_price).toFixed(2));
+      }
+      if (primarySig && primarySig.lowest_competitor_price != null) {
+        lines.push('Lowest competitor (new): £' + parseFloat(primarySig.lowest_competitor_price).toFixed(2));
+        if (primarySig.price_vs_lowest != null) {
+          lines.push('Price vs lowest competitor: ' + (primarySig.price_vs_lowest >= 0 ? '+£' : '-£') + Math.abs(parseFloat(primarySig.price_vs_lowest)).toFixed(2) + ' (positive = we are more expensive)');
+        }
+      }
+      // r21: stock cover removed from critique context — data unreliable from
+      // SP-API (FBM availability patchy, FBA inventory often shows 0 for
+      // products with active warehouse stock). Re-enable when fix lands.
+      // if (familyStockCover != null) {
+      //   lines.push('Stock cover: ' + familyStockCover + ' days (' + totalFulfill + ' units fulfillable, ' + totalVel.toFixed(1) + ' units/day velocity)');
+      // }
+      if (oldestContent) {
+        lines.push('Last content update: ' + oldestContent + ' (' + contentAge + ' days ago)' + (contentAge > 90 ? ' STALE' : ''));
+      }
+      if (lines.length) {
+        signalsContext = '\n--- Operational signals (SP-API) ---\n' + lines.join('\n') + '\n';
+      } else {
+        signalsContext = '\n--- Operational signals (SP-API) ---\n(no signals available — assume nothing about Buy Box, stock, pricing, or reviews)\n';
+      }
+    } catch(e) { console.error('[amz-critique] signals context error: ' + e.message); }
+
+    // r22 + r33a: Per-ASIN ad performance — pulled from amazon_asin_ad_perf_7d.
+    // This is the core "are we wasting money?" signal. Summed across child ASINs
+    // for the family card, last 7 days. Does NOT explode response size — it
+    // adds one summary block to the prompt, not per-ASIN-bullets.
+    //
+    // r33a: switched from amazon_asin_ad_performance (stale daily table) to
+    // amazon_asin_ad_perf_7d (fresh 7d snapshot, refreshed every 2h).
+    let adPerfContext = '';
+    try {
+      if (childAsins.length > 0) {
+        const adRes = await db.query(
+          "SELECT asin, " +
+          "       SUM(spend) AS spend, SUM(sales) AS sales, " +
+          "       SUM(clicks) AS clicks, SUM(impressions) AS impressions, " +
+          "       SUM(orders) AS orders, " +
+          "       COUNT(DISTINCT campaign_id) AS campaign_count " +
+          "FROM amazon_asin_ad_perf_7d " +
+          "WHERE asin = ANY($1) " +
+          "GROUP BY asin",
+          [childAsins]
+        );
+        let famSpend = 0, famSales = 0, famClicks = 0, famImpr = 0, famOrders = 0, famCampSet = new Set();
+        const perAsinSummary = [];
+        adRes.rows.forEach(function(r){
+          famSpend += parseFloat(r.spend || 0);
+          famSales += parseFloat(r.sales || 0);
+          famClicks += parseInt(r.clicks || 0);
+          famImpr += parseInt(r.impressions || 0);
+          famOrders += parseInt(r.orders || 0);
+          famCampSet.add(r.asin); // for unique advertised-ASIN count
+          // Per-ASIN one-liner only if >1 ASIN advertised (otherwise redundant with totals)
+          if (childAsins.length > 1) {
+            perAsinSummary.push('  ' + r.asin + ': £' + parseFloat(r.spend||0).toFixed(2) + ' spend, £' + parseFloat(r.sales||0).toFixed(2) + ' sales, ' + r.orders + ' orders');
+          }
+        });
+        if (famSpend > 0 || famImpr > 0) {
+          const ctr = famImpr > 0 ? (famClicks / famImpr * 100).toFixed(2) : '—';
+          const cvr = famClicks > 0 ? (famOrders / famClicks * 100).toFixed(2) : '—';
+          const acos = famSales > 0 ? (famSpend / famSales * 100).toFixed(1) : null;
+          const adAcos = acos != null ? acos + '%' : 'N/A (zero attributed sales)';
+          adPerfContext = '\n--- Ad performance (last 7 days, per-ASIN aggregated) ---\n' +
+            'Total spend: £' + famSpend.toFixed(2) + '\n' +
+            'Attributed sales: £' + famSales.toFixed(2) + '\n' +
+            'ACOS: ' + adAcos + '\n' +
+            'Clicks: ' + famClicks + ' (CTR ' + ctr + '%)\n' +
+            'Orders attributed: ' + famOrders + ' (CVR ' + cvr + '%)\n' +
+            'Active in ' + adRes.rows.length + ' of ' + childAsins.length + ' child ASIN(s)\n' +
+            (perAsinSummary.length ? perAsinSummary.join('\n') + '\n' : '');
+        } else {
+          adPerfContext = '\n--- Ad performance (last 7 days) ---\n(no ad spend on any child ASIN — product is not being advertised)\n';
+        }
+      }
+    } catch(e) {
+      if (!/does not exist/.test(e.message)) console.error('[amz-critique] ad-perf context error: ' + e.message);
+    }
+
+    // Try to fetch the live Amazon page (UK)
+    let livePageContext = '';
+    try {
+      const pageRes = await axios.get('https://www.amazon.co.uk/dp/' + asin, {
+        timeout: 12000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-GB,en;q=0.9'
+        }
+      });
+      // Extract a useful slice (full page is huge — clip)
+      const html = String(pageRes.data || '');
+      // Pull title, bullets, A+ presence, price visibility
+      // r20c: live-page review count REMOVED — the regex was matching the
+      // variation-family rollup (e.g. 8,432 across all colours/sizes) rather
+      // than the current ASIN's count. Reviews now come ONLY from SP-API
+      // operational signals if available; otherwise treated as unknown.
+      const titleMatch = html.match(/<span[^>]*id="productTitle"[^>]*>([\s\S]*?)<\/span>/);
+      const bulletsMatch = html.match(/<div[^>]*id="feature-bullets"[\s\S]*?<\/div>/);
+      const priceMatch = html.match(/class="a-offscreen"[^>]*>([£$€]?[\d,.]+)/);
+      const aplusPresent = /aplus-3p-fixed-width|aplus-module/.test(html);
+      const titleClean = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : '(not found)';
+      const bulletsClean = bulletsMatch ? bulletsMatch[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1500) : '(not found)';
+      livePageContext =
+        '\n--- Live Amazon page ---\n' +
+        'Title on page: ' + titleClean.slice(0, 300) + '\n' +
+        'Bullets: ' + bulletsClean.slice(0, 1200) + '\n' +
+        'Price visible: ' + (priceMatch ? priceMatch[1] : '(not found)') + '\n' +
+        'A+ content present: ' + (aplusPresent ? 'YES' : 'NO') + '\n';
+    } catch(e) {
+      livePageContext = '\n--- Live Amazon page ---\n(could not fetch — Amazon may have blocked the request)\n';
+    }
+
+    // r14b: pull product-relevant search-term data from in-memory keywordState (Advertising API report)
+    // We filter to terms whose campaignName matches this product's title keywords (same logic as deriveProductOwners).
+    let searchTermContext = '';
+    try {
+      const titleKw = extractTitleKeywords(allTitles[0] || '');
+      if (titleKw.size > 0 && Array.isArray(keywordState && keywordState.data) && keywordState.data.length > 0) {
+        // Filter records whose campaignName has ≥2 keyword overlap with this product
+        const relevant = keywordState.data.filter(function(r) {
+          const campKw = extractTitleKeywords((r.campaignName || ''));
+          let overlap = 0;
+          campKw.forEach(function(k){ if (titleKw.has(k)) overlap++; });
+          return overlap >= 2;
+        });
+        if (relevant.length > 0) {
+          // Top wasted (high spend, zero sales)
+          const wasters = relevant
+            .filter(function(r){ return parseFloat(r.cost||0) > 1 && parseInt(r.purchases14d||0) === 0; })
+            .sort(function(a,b){ return parseFloat(b.cost||0) - parseFloat(a.cost||0); })
+            .slice(0, 10);
+          // Top converters (most purchases relative to spend)
+          const converters = relevant
+            .filter(function(r){ return parseInt(r.purchases14d||0) > 0; })
+            .sort(function(a,b){ return parseFloat(b.sales14d||0) - parseFloat(a.sales14d||0); })
+            .slice(0, 10);
+          if (wasters.length || converters.length) {
+            searchTermContext = '\n--- Search-term performance (last 7 days, this products campaigns) ---\n';
+            if (wasters.length) {
+              searchTermContext += 'WASTED SEARCH TERMS (zero sales after spend — candidates for negative keywords):\n';
+              wasters.forEach(function(r){
+                searchTermContext += '  • "' + r.searchTerm + '" → £' + parseFloat(r.cost||0).toFixed(2) + ' spend, ' + (r.clicks||0) + ' clicks, 0 purchases — campaign: ' + r.campaignName + '\n';
+              });
+            }
+            if (converters.length) {
+              searchTermContext += 'CONVERTING SEARCH TERMS (worth amplifying with bid increases or as exact-match keywords):\n';
+              converters.forEach(function(r){
+                searchTermContext += '  • "' + r.searchTerm + '" → ' + r.purchases14d + ' purchases, £' + parseFloat(r.sales14d||0).toFixed(2) + ' sales, ' + (r.matchType||'') + ' match — campaign: ' + r.campaignName + '\n';
+              });
+            }
+          }
+        }
+      }
+    } catch(e) { console.error('[amz-critique] search-term context error: ' + e.message); }
+
+    // r25b: pull agent feedback for this product (keyed by parent_sku/groupKey)
+    let feedbackContext = '';
+    try {
+      feedbackContext = await buildFeedbackPromptSection('amazon_product', groupKey || asin);
+    } catch(e) { /* non-fatal */ }
+
+    // Build the prompt — Amazon-specific
+    const prompt = [
+      'You are an Amazon Marketplace listing-optimisation expert reviewing an FK Sports product on Amazon UK.',
+      '',
+      'PRODUCT CONTEXT (from Seller Central / SP-API):',
+      'Primary ASIN: ' + asin,
+      'Total ASINs in family: ' + childAsins.length,
+      'Stored title(s): ' + allTitles.slice(0, 3).join(' || '),
+      'Listing status: ' + buyableCount + ' BUYABLE, ' + inactiveCount + ' INACTIVE',
+      'Sales last 30 days: £' + parseFloat(sales30d.revenue || 0).toFixed(2) + ', ' + (sales30d.units || 0) + ' units, ' + (sales30d.orders || 0) + ' orders',
+      'Owner agent: ' + (primary.owner_agent || 'unassigned'),
+      livePageContext,
+      signalsContext,
+      adPerfContext,
+      searchTermContext,
+      feedbackContext,
+      '',
+      'TASK: figure out why this listing might not be selling well and identify the highest-impact fixes. Focus on what is visible from the live page and the operational signals that ARE provided.',
+      '',
+      'PRIMARY review areas (always do these):',
+      '1. Title quality — keyword density (front-loaded important terms?), brand placement, length (~150-200 chars optimal), no stuffing',
+      '2. Bullet points — feature vs benefit framing, scanability, keyword inclusion, missing benefits',
+      '3. A+ content — is it present? If not, that is a known conversion lift',
+      '4. Image quality (qualitative observation only — note if hero image looks weak, lifestyle missing, etc. Do NOT invent image counts — Amazon page does not expose this reliably)',
+      '5. Ad performance — review the "Ad performance" block above. If spend > £20 AND attributed sales = £0 over 7 days, that is a P1 wasted-spend problem — diagnose and recommend (likely conversion-rate issue: pricing, listing quality, or targeting). If CTR < 0.3% on 1000+ impressions, the listing is failing to attract clicks — diagnose. If CTR is healthy but CVR is < 5%, the page is failing to convert clicks to orders. If search-term data is also provided, identify wasted-spend terms vs converters.',
+      '',
+      'CONDITIONAL — only address these when the corresponding data is present in "Operational signals" above:',
+      '- Buy Box: if Buy Box win % is given AND below 80%, that is a P1 conversion issue. Diagnose and recommend.',
+      '- Pricing: if "Price vs lowest competitor" is given AND positive, recommend a price review.',
+      '- Content freshness: if Last content update is given AND > 90 days, recommend refresh.',
+      '',
+      'CRITICAL RULES — read carefully:',
+      '- DO NOT estimate or guess review counts, ratings, Buy Box %, competitor prices, or any other numeric value. If a value is not in the Operational signals block above, treat it as UNKNOWN. Do not say "with X reviews" or "rated Y stars" unless that exact number is in the signals.',
+      '- DO NOT invent competitor names, ASINs, or prices.',
+      '- Image count, video presence, and review count are NOT reliably extractable from the page — do not state numeric facts about them.',
+      '- Be specific where you have data; be silent where you do not.',
+      '',
+      'Rank fixes by IMPACT. Higher-impact fixes first.',
+      '',
+      'Return ONLY valid JSON (no markdown fences, no preamble) in this shape:',
+      '{',
+      '  "summary": "2-3 sentence overall assessment of why this listing may be underperforming",',
+      '  "issues": [',
+      '    { "title": "Short heading", "severity": "high|medium|low", "problem": "What is wrong (qualitative or specific number from signals only)", "fix": "Specific action to take", "impact": "Estimated effect" }',
+      '  ]',
+      '}',
+      '',
+      'Provide 3-7 issues. Be specific (avoid generic advice). If the listing looks broadly fine, say so — fewer issues is acceptable.'
+    ].join('\n');
+
+    // Call Claude with the requested model
+    // r29r: raised max_tokens 2000 → 4096. AI was hitting the limit mid-response with
+    // detailed summary + 5-7 issues, causing JSON truncation and parse failures.
+    const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: modelId,
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      timeout: 60000
+    });
+
+    let critique = null;
+    let partialRecovery = false;
+    const text = aiRes.data && aiRes.data.content && aiRes.data.content[0] && aiRes.data.content[0].text || '';
+    // r29e: more forgiving parse. AI sometimes wraps the JSON in backticks or preamble
+    // despite instructions — strip everything before first { and after last }.
+    let cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace > 0 && lastBrace > firstBrace) {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    }
+    try {
+      critique = JSON.parse(cleaned);
+    } catch(parseErr) {
+      // r29r: if standard parse fails, try to recover partial JSON by regexing fields
+      // out of the raw text. Better to show summary + 2-3 issues than to fail entirely.
+      console.warn('[amz-critique] JSON parse failed, attempting recovery: ' + parseErr.message);
+      critique = _recoverPartialAmzCritique(text);
+      if (critique) {
+        partialRecovery = true;
+        console.log('[amz-critique] recovered partial: summary=' + (critique.summary ? 'yes' : 'no') + ', issues=' + (critique.issues ? critique.issues.length : 0));
+      } else {
+        console.error('[amz-critique] recovery also failed.');
+        console.error('[amz-critique] raw response (first 500 chars): ' + text.substring(0, 500));
+        throw new Error('AI returned malformed response. Try Re-analyse — usually transient.');
+      }
+    }
+    if (partialRecovery) {
+      critique._partial = true;  // surface to UI so user knows
+      critique._partialNote = 'AI response was truncated; showing what we could recover. Re-analyse for full output.';
+    }
+
+    // Cache result — store the model used + r20 signals hash so a fresh signal
+    // pull invalidates the cached critique on next read.
+    try {
+      const cachePayload = Object.assign({}, critique, { _model: modelId, _signals_hash: signalsHash || null });
+      await db.query(
+        "INSERT INTO amazon_critiques (asin, critique, cached_at) VALUES ($1, $2, NOW()) " +
+        "ON CONFLICT (asin) DO UPDATE SET critique = $2, cached_at = NOW()",
+        [asin, JSON.stringify(cachePayload)]
+      );
+    } catch(e) { console.error('[amz-critique] Cache write failed: ' + e.message); }
+
+    return { critique: critique, cached_at: new Date().toISOString(), model: modelId, signals_hash: signalsHash };
+}
+
+// r14b: Bulk critique — runs Haiku-based critique on all active products in background.
+// State is held in memory; client polls /api/amazon/listing-critique-batch/status.
+const bulkCritiqueState = { running: false, total: 0, done: 0, failed: 0, startedAt: null, finishedAt: null, currentAsin: null };
+
+app.post('/api/amazon/listing-critique-batch', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  if (bulkCritiqueState.running) return res.status(409).json({ error: 'A bulk run is already in progress', state: bulkCritiqueState });
+
+  // Build list of ASINs to critique — active products only (BUYABLE + sold in 60d).
+  // We critique one ASIN per parent group (the first child).
+  try {
+    const productsRes = await db.query(
+      "SELECT DISTINCT ON (COALESCE(p.parent_sku, p.sku)) p.asin, p.parent_sku, p.sku " +
+      "FROM amazon_products p " +
+      "WHERE p.asin IS NOT NULL " +
+      "AND (p.status LIKE '%BUYABLE%') " +
+      "AND EXISTS (" +
+      "  SELECT 1 FROM amazon_order_items i JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "  WHERE i.asin = p.asin AND o.purchase_date >= NOW() - INTERVAL '60 days' AND o.status NOT IN ('Cancelled','Canceled')" +
+      ")"
+    );
+    const targets = productsRes.rows.map(function(r){ return { asin: r.asin, groupKey: r.parent_sku || r.sku }; });
+    if (targets.length === 0) return res.json({ ok: true, queued: 0, message: 'no active products to critique' });
+
+    bulkCritiqueState.running = true;
+    bulkCritiqueState.total = targets.length;
+    bulkCritiqueState.done = 0;
+    bulkCritiqueState.failed = 0;
+    bulkCritiqueState.startedAt = new Date().toISOString();
+    bulkCritiqueState.finishedAt = null;
+    bulkCritiqueState.currentAsin = null;
+
+    // Fire-and-forget — process serially so we don't hammer the API
+    (async function() {
+      for (const t of targets) {
+        bulkCritiqueState.currentAsin = t.asin;
+        try {
+          await runListingCritique(t.asin, t.groupKey, 'claude-haiku-4-5-20251001');
+          bulkCritiqueState.done++;
+        } catch(e) {
+          console.error('[bulk-critique] ' + t.asin + ' failed: ' + e.message);
+          bulkCritiqueState.failed++;
+        }
+        // 500ms gap between calls to avoid rate-limit
+        await new Promise(function(r){ setTimeout(r, 500); });
+      }
+      bulkCritiqueState.running = false;
+      bulkCritiqueState.finishedAt = new Date().toISOString();
+      bulkCritiqueState.currentAsin = null;
+      console.log('[bulk-critique] Finished. Done=' + bulkCritiqueState.done + ', Failed=' + bulkCritiqueState.failed);
+    })().catch(function(e){
+      bulkCritiqueState.running = false;
+      bulkCritiqueState.finishedAt = new Date().toISOString();
+      console.error('[bulk-critique] Outer fail: ' + e.message);
+    });
+
+    res.json({ ok: true, queued: targets.length, state: bulkCritiqueState });
+  } catch(e) {
+    console.error('/api/amazon/listing-critique-batch: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/amazon/listing-critique-batch/status', function(req, res) {
+  res.json(bulkCritiqueState);
+});
+
+// ── r16: Hide / unhide for products and campaigns ─────────────────────────
+// Hidden items are excluded from the main view and from totals. Anyone can hide/restore.
+// They live in dedicated "Hidden" tabs/filters. Independent: product-hide and campaign-hide
+// don't affect each other.
+
+// PRODUCTS
+app.post('/api/amazon/products/:groupKey/hide', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const groupKey = String(req.params.groupKey || '').trim();
+  if (!groupKey) return res.status(400).json({ error: 'groupKey required' });
+  const reason = (req.body && req.body.reason) || '';
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(
+      "INSERT INTO hidden_products (parent_sku, hidden_by, reason) VALUES ($1, $2, $3) " +
+      "ON CONFLICT (parent_sku) DO UPDATE SET hidden_by = $2, hidden_at = NOW(), reason = $3",
+      [groupKey, actor, reason]
+    );
+    res.json({ ok: true, hidden: groupKey });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/amazon/products/:groupKey/restore', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const groupKey = String(req.params.groupKey || '').trim();
+  try {
+    await db.query("DELETE FROM hidden_products WHERE parent_sku = $1", [groupKey]);
+    res.json({ ok: true, restored: groupKey });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/amazon/hidden-products', async function(req, res) {
+  if (!db) return res.json({ products: [] });
+  try {
+    const r = await db.query("SELECT parent_sku, hidden_by, hidden_at, reason FROM hidden_products ORDER BY hidden_at DESC");
+    res.json({ hidden: r.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// r17: Create a campaign_task from a product action ("Assign as task" button on product modal)
+// Body: { note: string, agent?: string (override owner), problemType?: string }
+// r22: Block double-assignment. If this product already has an active task, reject.
+//      No-ASIN products: allow task creation if owner/manager (skip critique requirement);
+//      agents still need critique, since their workflow depends on the subtasks.
+app.post('/api/amazon/products/:groupKey/assign-task', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const groupKey = String(req.params.groupKey || '').trim();
+  if (!groupKey) return res.status(400).json({ error: 'groupKey required' });
+  const note = String((req.body && req.body.note) || '').trim();
+  if (!note) return res.status(400).json({ error: 'Note required' });
+  const overrideAgent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
+  const problemType = String((req.body && req.body.problemType) || 'product_action').trim();
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+
+  // r27: feedback-required gate (matches Google rule). Agents must have
+  // submitted ≥1 feedback row for this product's AI critique before assigning.
+  // Owner/manager bypass.
+  if (!isPriv) {
+    try {
+      const fc = await db.query(
+        "SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope = 'amazon_product' AND target_id = $1",
+        [groupKey]
+      );
+      if (!fc.rows[0] || fc.rows[0].c < 1) {
+        return res.status(403).json({ error: 'Submit feedback on the AI critique before assigning a task. Open the product → Run AI → write feedback → then assign.' });
+      }
+    } catch(e) { console.error('[r27 amazon assign-task feedback gate] ' + e.message); }
+  }
+  try {
+    // r22: gather ALL SKUs for this groupKey, not just one. Pick the best-ASIN row.
+    // r35.11: standalone products (no parent_sku in DB) get a synthetic groupKey
+    // like 'asin:B0DGZP02CY' from the products endpoint. The old SQL couldn't find
+    // them because they had no real parent_sku and the synthetic 'asin:...' string
+    // doesn't match any sku either. Detect the synthetic prefix and look up by ASIN.
+    let prodRes;
+    if (groupKey.startsWith('asin:')) {
+      const lookupAsin = groupKey.slice(5);
+      prodRes = await db.query(
+        "SELECT sku, asin, title, owner_agent FROM amazon_products " +
+        "WHERE asin = $1 " +
+        "ORDER BY sku ASC",
+        [lookupAsin]
+      );
+    } else {
+      prodRes = await db.query(
+        "SELECT sku, asin, title, owner_agent FROM amazon_products " +
+        "WHERE parent_sku = $1 OR (parent_sku IS NULL AND sku = $1) " +
+        "ORDER BY (asin IS NULL) ASC, sku ASC",
+        [groupKey]
+      );
+    }
+    if (!prodRes.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const p = prodRes.rows[0];
+    const allAsins = prodRes.rows.map(function(r){ return r.asin; }).filter(Boolean);
+
+    // r22: block double-assignment. If an open task already references this
+    // product (by parent_sku in campaign_id, or by any of its ASINs in the
+    // problem_detail), don't let another one be created.
+    try {
+      const existing = await db.query(
+        "SELECT id, agent_name, status FROM campaign_tasks " +
+        "WHERE status NOT IN ('complete','archived','dismissed','cancelled') " +
+        "AND (campaign_id = $1 OR campaign_id LIKE $2)",
+        ['product:' + groupKey, '%' + groupKey + '%']
+      );
+      if (existing.rows.length > 0) {
+        const e = existing.rows[0];
+        return res.status(409).json({
+          error: 'task_exists',
+          message: 'This product already has an active task assigned to ' + (e.agent_name || 'an agent') + ' (status: ' + e.status + '). Mark that task complete before creating a new one.',
+          existing_task_id: e.id
+        });
+      }
+    } catch(dupErr) { console.error('[r22] dup-task check error: ' + dupErr.message); }
+
+    // r22: AI critique handling
+    //   - If the product has at least one ASIN AND a cached critique → seed subtasks (r21 flow)
+    //   - If the product has NO ASIN at all (data quality issue) AND user is owner/manager:
+    //       allow task creation without subtasks. The note is the agent's instruction.
+    //   - Else: block, ask for critique first.
+    let issues = [];
+    if (!p.asin && allAsins.length === 0) {
+      // No ASIN at all on any sibling row. Owner/manager can override.
+      if (!isPriv) {
+        return res.status(400).json({
+          error: 'no_asin_for_critique',
+          message: 'This product has no ASIN, so AI critique cannot run. Ask a manager or owner to assign this task manually with clear instructions.'
+        });
+      }
+      // Owner override: allow task creation, no subtasks. Note is the brief.
+    } else {
+      // r35.13c: gate now accepts a cached critique on ANY ASIN of the product
+      // group, not just the first by sort order. The products endpoint orders
+      // ASINs by insertion to a Set (depends on asinGroup iteration); the
+      // assign-task endpoint orders by `ORDER BY sku`. These two orders can
+      // differ, so the critique saved against asins[0] from the UI couldn't
+      // be found by the gate's primary-ASIN pick. Tasks were blocked even
+      // though the user had run critique. Fix: query by any of the ASINs.
+      const critAsins = Array.from(new Set([p.asin].concat(allAsins).filter(Boolean)));
+      const critRes = await db.query(
+        "SELECT critique, cached_at FROM amazon_critiques WHERE asin = ANY($1) " +
+        "ORDER BY cached_at DESC LIMIT 1",
+        [critAsins]
+      );
+      if (!critRes.rows.length) {
+        return res.status(412).json({
+          error: 'no_critique',
+          message: 'Run AI critique on this product before assigning as a task. Each fix becomes a subtask the agent must complete or dismiss.'
+        });
+      }
+      const critique = critRes.rows[0].critique || {};
+      issues = Array.isArray(critique.issues) ? critique.issues : [];
+      if (!issues.length) {
+        return res.status(412).json({
+          error: 'empty_critique',
+          message: 'AI critique exists but found no issues to act on. Re-run the critique or pick a different product.'
+        });
+      }
+    }
+
+    const agentName = overrideAgent || p.owner_agent || 'Unassigned';
+    const productLabel = (p.title || groupKey).slice(0, 200);
+    const r = await db.query(
+      "INSERT INTO campaign_tasks (campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source) " +
+      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+      [
+        'product:' + groupKey,
+        productLabel,
+        agentName,
+        '',
+        problemType,
+        note,
+        8,
+        'product_action'
+      ]
+    );
+    const taskId = r.rows[0].id;
+
+    // r21: seed subtasks from critique issues. Body = "title — fix" so the agent
+    // sees both what's wrong and what to do. Severity is preserved as a prefix.
+    let subtaskCount = 0;
+    for (let i = 0; i < issues.length; i++) {
+      const iss = issues[i] || {};
+      const title = String(iss.title || '').trim();
+      const fix = String(iss.fix || iss.problem || '').trim();
+      const severity = String(iss.severity || '').trim().toLowerCase();
+      if (!title && !fix) continue;
+      const body = (severity && severity !== 'low' ? '[' + severity.toUpperCase() + '] ' : '') +
+                   (title ? title + (fix ? ' — ' + fix : '') : fix);
+      try {
+        await db.query(
+          "INSERT INTO task_subtasks (task_id, position, body, status) VALUES ($1, $2, $3, 'open')",
+          [taskId, i, body.slice(0, 1000)]
+        );
+        subtaskCount++;
+      } catch(subErr) { console.error('[r21] subtask insert error: ' + subErr.message); }
+    }
+    res.json({ ok: true, taskId: taskId, agent: agentName, subtaskCount: subtaskCount });
+  } catch(e) {
+    console.error('/api/amazon/products/:groupKey/assign-task error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r21: SUBTASKS ──────────────────────────────────────────────────────────
+// Subtasks are seeded from cached AI critique when a product card is assigned
+// as a task. Agents cannot delete them — only complete or dismiss-with-reason.
+// Card cannot move to status='complete' until every subtask is in
+// ('complete','dismissed').
+
+// GET /api/tasks/:id/subtasks — list all subtasks for a task
+app.get('/api/tasks/:id/subtasks', async function(req, res) {
+  if (!db) return res.json({ subtasks: [] });
+  try {
+    const r = await db.query(
+      "SELECT id, task_id, position, body, status, dismiss_reason, " +
+      "completed_at, completed_by, dismissed_at, dismissed_by " +
+      "FROM task_subtasks WHERE task_id=$1 ORDER BY position ASC, id ASC",
+      [parseInt(req.params.id)]
+    );
+    res.json({ subtasks: r.rows });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks GET error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/subtasks/:sid/complete — mark a subtask done (toggleable)
+app.post('/api/tasks/:id/subtasks/:sid/complete', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    const cur = await db.query("SELECT status FROM task_subtasks WHERE id=$1 AND task_id=$2", [parseInt(req.params.sid), parseInt(req.params.id)]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Subtask not found' });
+    const isComplete = cur.rows[0].status === 'complete';
+    if (isComplete) {
+      // Toggle back to open
+      await db.query("UPDATE task_subtasks SET status='open', completed_at=NULL, completed_by=NULL WHERE id=$1", [parseInt(req.params.sid)]);
+      return res.json({ ok: true, status: 'open' });
+    }
+    // Cannot complete a dismissed subtask without un-dismissing first
+    if (cur.rows[0].status === 'dismissed') {
+      return res.status(400).json({ error: 'Subtask is dismissed. Un-dismiss it first if you want to mark complete.' });
+    }
+    await db.query(
+      "UPDATE task_subtasks SET status='complete', completed_at=NOW(), completed_by=$1 WHERE id=$2",
+      [actor, parseInt(req.params.sid)]
+    );
+    res.json({ ok: true, status: 'complete' });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks/:sid/complete error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/subtasks/:sid/dismiss — body: { reason }. Mark as dismissed
+// with a required reason. Idempotent — re-posting updates the reason.
+app.post('/api/tasks/:id/subtasks/:sid/dismiss', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'Dismiss reason is required' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    const cur = await db.query("SELECT status FROM task_subtasks WHERE id=$1 AND task_id=$2", [parseInt(req.params.sid), parseInt(req.params.id)]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Subtask not found' });
+    await db.query(
+      "UPDATE task_subtasks SET status='dismissed', dismiss_reason=$1, dismissed_at=NOW(), dismissed_by=$2 WHERE id=$3",
+      [reason.slice(0, 500), actor, parseInt(req.params.sid)]
+    );
+    res.json({ ok: true, status: 'dismissed' });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks/:sid/dismiss error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/subtasks/:sid/reopen — un-dismiss or un-complete back to open
+app.post('/api/tasks/:id/subtasks/:sid/reopen', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const r = await db.query(
+      "UPDATE task_subtasks SET status='open', completed_at=NULL, completed_by=NULL, dismissed_at=NULL, dismissed_by=NULL, dismiss_reason=NULL " +
+      "WHERE id=$1 AND task_id=$2 RETURNING id",
+      [parseInt(req.params.sid), parseInt(req.params.id)]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Subtask not found' });
+    res.json({ ok: true, status: 'open' });
+  } catch(e) {
+    console.error('/api/tasks/:id/subtasks/:sid/reopen error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r22: AMAZON DAY-7 REVIEW ───────────────────────────────────────────────
+// Mirrors the Google day7 flow on the same campaign_tasks table. At day 7+,
+// agent must hit Carry on / Archive / Stop with a note before the task can
+// proceed. The day7_decision columns are shared (Google added them in r17,
+// just enabling them for Amazon now).
+
+// GET /api/tasks/:id/review-metrics — last 7 days vs prior 7 days for the
+// underlying campaign or product. Used to populate the day-7 review modal.
+app.get('/api/tasks/:id/review-metrics', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = parseInt(req.params.id);
+  try {
+    const tr = await db.query("SELECT id, campaign_id, campaign_name, created_date FROM campaign_tasks WHERE id=$1", [id]);
+    if (!tr.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const t = tr.rows[0];
+    // Two windows: last 7 days, and the 7 days before that (for trend)
+    let recent = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, days: 0 };
+    let prior  = { spend: 0, sales: 0, clicks: 0, impressions: 0, conversions: 0, days: 0 };
+    try {
+      // Walk last 14 days of snapshots, bucket into recent (0-6) vs prior (7-13)
+      const sn = await db.query(
+        "SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS day, campaigns " +
+        "FROM daily_snapshots " +
+        "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' " +
+        "ORDER BY snapshot_date DESC"
+      );
+      sn.rows.forEach(function(snap, idx) {
+        if (!t.campaign_id) return;
+        const c = (snap.campaigns || []).find(function(x){ return String(x.campaignId) === String(t.campaign_id); });
+        if (!c) return;
+        const bucket = idx < 7 ? recent : prior;
+        bucket.spend += parseFloat(c.spend || 0);
+        bucket.sales += parseFloat(c.sales || 0);
+        bucket.clicks += parseInt(c.clicks || 0);
+        bucket.impressions += parseInt(c.impressions || 0);
+        bucket.conversions += parseInt(c.orders || c.purchases || c.conversions || 0);
+        bucket.days++;
+      });
+    } catch(e) { console.error('[r22 review-metrics] snapshot lookup: ' + e.message); }
+
+    function trend(rec, pri) {
+      if (!pri || pri === 0) return null;
+      return ((rec - pri) / pri) * 100;
+    }
+    res.json({
+      task: { id: t.id, campaign_id: t.campaign_id, campaign_name: t.campaign_name, created_date: t.created_date },
+      recent_7d: {
+        spend: parseFloat(recent.spend.toFixed(2)),
+        sales: parseFloat(recent.sales.toFixed(2)),
+        clicks: recent.clicks,
+        impressions: recent.impressions,
+        conversions: recent.conversions,
+        acos: recent.sales > 0 ? Math.round((recent.spend / recent.sales) * 1000) / 10 : null,
+        days_with_data: recent.days
+      },
+      prior_7d: {
+        spend: parseFloat(prior.spend.toFixed(2)),
+        sales: parseFloat(prior.sales.toFixed(2)),
+        clicks: prior.clicks,
+        impressions: prior.impressions,
+        conversions: prior.conversions,
+        acos: prior.sales > 0 ? Math.round((prior.spend / prior.sales) * 1000) / 10 : null,
+        days_with_data: prior.days
+      },
+      trend_pct: {
+        spend: trend(recent.spend, prior.spend),
+        sales: trend(recent.sales, prior.sales),
+        clicks: trend(recent.clicks, prior.clicks)
+      }
+    });
+  } catch(e) {
+    console.error('/api/tasks/:id/review-metrics error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/tasks/:id/day7-decision — body: { decision: 'carry_on'|'archive'|'stop', note }
+app.post('/api/tasks/:id/day7-decision', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = parseInt(req.params.id);
+  const decision = String((req.body && req.body.decision) || '').trim().toLowerCase();
+  const note = String((req.body && req.body.note) || '').trim();
+  if (['carry_on','archive','stop'].indexOf(decision) === -1) {
+    return res.status(400).json({ error: 'decision must be one of: carry_on, archive, stop' });
+  }
+  if (!note) return res.status(400).json({ error: 'note required for day-7 decision' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    // Translate decision into status side-effect:
+    // - carry_on: keeps status, just records the decision
+    // - archive: status=archived
+    // - stop: status=dismissed (with note)
+    let newStatus = null;
+    if (decision === 'archive') newStatus = 'archived';
+    if (decision === 'stop') newStatus = 'dismissed';
+    if (newStatus) {
+      await db.query(
+        "UPDATE campaign_tasks SET day7_decision=$1, day7_decision_at=NOW(), day7_note=$2, status=$3, archived_at=CASE WHEN $3='archived' THEN NOW() ELSE archived_at END WHERE id=$4",
+        [decision, note, newStatus, id]
+      );
+    } else {
+      await db.query(
+        "UPDATE campaign_tasks SET day7_decision=$1, day7_decision_at=NOW(), day7_note=$2 WHERE id=$3",
+        [decision, note, id]
+      );
+    }
+    try {
+      const t = (await db.query("SELECT campaign_id, campaign_name, agent_name FROM campaign_tasks WHERE id=$1", [id])).rows[0] || {};
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1, $2, $3, $4, $5)",
+        [t.campaign_id || '', t.campaign_name || '', actor, 'day7_' + decision, note]
+      );
+    } catch(_) {}
+    res.json({ ok: true, decision: decision, new_status: newStatus });
+  } catch(e) {
+    console.error('/api/tasks/:id/day7-decision error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r21: PRODUCT OWNER REASSIGN ────────────────────────────────────────────
+// Reassign a product to a different agent (owner+manager only). Mapping system
+// was stripped — owner reassign remains because it's how we ensure no
+// duplicate ownership.
+
+// POST /api/amazon/products/:parentSku/owner — reassign product owner.
+// body: { agent: 'Aryan' } (or 'Unassigned'). Owner+manager only.
+app.post('/api/amazon/products/:parentSku/owner', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPriv = role === 'owner' || role === 'manager' || dept === 'manager';
+  if (!isPriv) return res.status(403).json({ error: 'Owner or manager only' });
+  const parentSku = String(req.params.parentSku || '').trim();
+  const newAgent = String((req.body && req.body.agent) || '').trim();
+  if (!parentSku) return res.status(400).json({ error: 'parentSku required' });
+  if (!newAgent) return res.status(400).json({ error: 'agent required (use "Unassigned" to clear)' });
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    // Canonicalise the agent name before storing
+    const canonical = newAgent.toLowerCase() === 'unassigned' ? null : (canonicalAgent(newAgent) || newAgent);
+    // r26c: handle asin: prefix the same way as PUT endpoint
+    let r;
+    if (parentSku.indexOf('asin:') === 0) {
+      const asin = parentSku.substring(5);
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE WHERE asin=$2 RETURNING sku",
+        [canonical, asin]
+      );
+    } else {
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2) RETURNING sku",
+        [canonical, parentSku]
+      );
+    }
+    // Audit-log it
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1, $2, $3, $4, $5)",
+        ['product:' + parentSku, parentSku, actor, 'owner_reassigned', 'Owner set to ' + (canonical || 'Unassigned')]
+      );
+    } catch(_) {}
+    res.json({ ok: true, rows_updated: r.rowCount, owner_agent: canonical });
+  } catch(e) {
+    console.error('/api/amazon/products/:parentSku/owner error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── r22: PRODUCT SNOOZE ────────────────────────────────────────────────────
+// ─── r23: CAMPAIGN SNOOZE / DISMISS ─────────────────────────────────────────
+// Hide an underperforming campaign for N days. Used on the Underperforming
+// page (/page-stuck) — replaces the old "Work on it (1 week)" fixed-duration
+// flag with proper 1d/3d/7d/30d options. Snoozed campaigns auto-return to
+// the Underperforming list when the timer expires.
+
+// POST /api/amazon/campaigns/:campaignId/snooze
+//   body: { days: 1|3|7|30, reason: string, action?: 'snooze'|'dismiss' }
+app.post('/api/amazon/campaigns/:campaignId/snooze', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  const days = parseInt((req.body && req.body.days) || 0);
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if ([1, 3, 7, 30].indexOf(days) === -1) return res.status(400).json({ error: 'days must be 1, 3, 7, or 30' });
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'reason required' });
+  const action = (String((req.body && req.body.action) || 'snooze').toLowerCase() === 'dismiss') ? 'dismiss' : 'snooze';
+  const campaignName = String((req.body && req.body.campaignName) || '').trim() || null;
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(
+      "INSERT INTO amazon_campaign_snooze (campaign_id, campaign_name, snoozed_until, snoozed_by, snoozed_at, snooze_reason, snooze_action) " +
+      "VALUES ($1, $2, NOW() + ($3 || ' days')::interval, $4, NOW(), $5, $6) " +
+      "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name=EXCLUDED.campaign_name, snoozed_until=EXCLUDED.snoozed_until, " +
+      "snoozed_by=EXCLUDED.snoozed_by, snoozed_at=NOW(), snooze_reason=EXCLUDED.snooze_reason, snooze_action=EXCLUDED.snooze_action",
+      [campaignId, campaignName, days, actor, reason, action]
+    );
+    // Audit log
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1, $2, $3, $4, $5)",
+        [campaignId, campaignName || '', actor, 'campaign_' + action + '_' + days + 'd', reason]
+      );
+    } catch(_) {}
+    res.json({ ok: true, days: days, action: action });
+  } catch(e) {
+    console.error('/api/amazon/campaigns/:campaignId/snooze error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/amazon/campaigns/:campaignId/snooze — un-snooze
+app.delete('/api/amazon/campaigns/:campaignId/snooze', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  try {
+    const r = await db.query("DELETE FROM amazon_campaign_snooze WHERE campaign_id=$1 RETURNING campaign_id", [campaignId]);
+    res.json({ ok: true, removed: r.rowCount > 0 });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// CAMPAIGNS
+app.post('/api/campaigns/:campaignId/hide', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  const campaignName = (req.body && req.body.campaignName) || '';
+  const reason = (req.body && req.body.reason) || '';
+  const actor = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(
+      "INSERT INTO hidden_campaigns (campaign_id, campaign_name, hidden_by, reason) VALUES ($1, $2, $3, $4) " +
+      "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name = $2, hidden_by = $3, hidden_at = NOW(), reason = $4",
+      [campaignId, campaignName, actor, reason]
+    );
+    res.json({ ok: true, hidden: campaignId });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/campaigns/:campaignId/restore', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '').trim();
+  try {
+    await db.query("DELETE FROM hidden_campaigns WHERE campaign_id = $1", [campaignId]);
+    res.json({ ok: true, restored: campaignId });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/campaigns/hidden', async function(req, res) {
+  if (!db) return res.json({ hidden: [] });
+  try {
+    const r = await db.query("SELECT campaign_id, campaign_name, hidden_by, hidden_at, reason FROM hidden_campaigns ORDER BY hidden_at DESC");
+    res.json({ hidden: r.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/amazon/top-products?date=YYYY-MM-DD&limit=5
+// Returns top N ASINs by revenue for a given day. Joins amazon_orders + amazon_order_items
+// (filtered by date) to amazon_products (for title + image).
+// If date is omitted or empty, defaults to today (London).
+app.get('/api/amazon/top-products', async function(req, res) {
+  if (!db) return res.json({ products: [], totals: {} });
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '5'), 50);
+    let dateFilter;
+    let dateParam;
+    if (req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)) {
+      dateFilter = "TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = $1";
+      dateParam = [req.query.date];
+    } else {
+      // Default to today London time
+      dateFilter = "TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') = TO_CHAR(NOW() AT TIME ZONE 'Europe/London', 'YYYY-MM-DD')";
+      dateParam = [];
+    }
+
+    // Day totals (gross, orders, units)
+    const totalsRes = await db.query(
+      "SELECT SUM(o.order_total) AS gross, COUNT(*) AS orders, SUM(o.num_items) AS units " +
+      "FROM amazon_orders o " +
+      "WHERE " + dateFilter +
+      " AND o.status NOT IN ('Cancelled','Canceled')",
+      dateParam
+    );
+    const totals = {
+      gross: parseFloat((totalsRes.rows[0] && totalsRes.rows[0].gross) || 0),
+      orders: parseInt((totalsRes.rows[0] && totalsRes.rows[0].orders) || 0),
+      units: parseInt((totalsRes.rows[0] && totalsRes.rows[0].units) || 0)
+    };
+
+    // Top N ASINs by revenue. Group by ASIN (since SKU variants may share ASIN sometimes).
+    const topRes = await db.query(
+      "SELECT i.asin, MAX(i.title) AS title, MAX(p.image_url) AS image_url, " +
+      "       SUM(i.item_price * i.quantity) AS revenue, " +
+      "       SUM(i.quantity) AS units " +
+      "FROM amazon_order_items i " +
+      "JOIN amazon_orders o ON o.order_id = i.order_id " +
+      "LEFT JOIN amazon_products p ON p.asin = i.asin " +
+      "WHERE " + dateFilter.replace(/o\./g, 'o.') +
+      " AND o.status NOT IN ('Cancelled','Canceled') " +
+      "AND i.asin IS NOT NULL " +
+      "GROUP BY i.asin " +
+      "ORDER BY revenue DESC " +
+      "LIMIT " + limit,
+      dateParam
+    );
+
+    const products = topRes.rows.map(function(r) {
+      return {
+        asin: r.asin,
+        title: r.title,
+        image_url: r.image_url,
+        revenue: parseFloat(r.revenue || 0),
+        units: parseInt(r.units || 0)
+      };
+    });
+
+    res.json({ products: products, totals: totals });
+  } catch(e) {
+    console.error('/api/amazon/top-products error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// ── r12: Auto-derive product owner agent from campaign data ─────────────────
+// Strategy: campaign names follow the pattern "Agent | Product Name | ..."
+// or "Agent @ Product Name". Examples:
+//   "Satyam | Yoga Mat KT"
+//   "Aryan @ Dumbbell rack | Exact kw"
+//
+// For each campaign:
+//   1. Extract leading agent token (everything before first | or @)
+//   2. Extract the product hint (the next segment, before the second separator)
+//   3. Match the product hint against amazon_products.title via case-insensitive
+//      keyword overlap. A campaign "matches" a product if its hint shares 2+
+//      meaningful keywords with the product title.
+//
+// For each parent product group, tally which agent's campaigns match most often.
+// Most-frequent agent wins, written to amazon_products.owner_agent.
+// Manual overrides (owner_manual=TRUE) are never overwritten.
+async function deriveProductOwners() {
+  if (!db) return { ok: false, error: 'no-db' };
+  try {
+    // 1. Pull all products with parent grouping + titles
+    const productsRes = await db.query(
+      "SELECT sku, asin, parent_sku, title FROM amazon_products WHERE title IS NOT NULL"
+    );
+    if (!productsRes.rows.length) return { ok: true, parents_scanned: 0, message: 'no products with titles' };
+
+    // 2. Build group → product info lookup, and a list of (group_key, title_keywords)
+    const groupTitles = {}; // group_key -> { title, keywords:Set }
+    productsRes.rows.forEach(function(p) {
+      const groupKey = p.parent_sku || p.sku;
+      if (!groupTitles[groupKey]) {
+        // Use first title we see for the group
+        const title = p.title || '';
+        groupTitles[groupKey] = { title: title, keywords: extractTitleKeywords(title) };
+      }
+    });
+
+    // 3. Pull recent campaigns from daily_snapshots (last 14 days)
+    const snapshotsRes = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC"
+    );
+    if (!snapshotsRes.rows.length) {
+      return { ok: true, parents_scanned: 0, rows_updated: 0, message: 'no snapshots in last 14 days' };
+    }
+    // Deduplicate campaigns across days by campaignId — we want each campaign counted once
+    const seenCampaigns = new Set();
+    const campaigns = [];
+    snapshotsRes.rows.forEach(function(snap) {
+      (snap.campaigns || []).forEach(function(c) {
+        if (c.campaignId && !seenCampaigns.has(c.campaignId)) {
+          seenCampaigns.add(c.campaignId);
+          campaigns.push(c);
+        }
+      });
+    });
+
+    // 4. For each campaign, extract agent + product hint, then find matching parent products
+    // groupAgentCounts[group_key][agent] = match_count
+    // r17: Use TF-IDF distinctiveness — pick the BEST matching product, not every product that overlaps.
+    // This stops "Satyam | Weight Plates" from being credited to both Weight Plates AND Vibration Plates.
+    const groupAgentCounts = {};
+    const debugStats = { campaignsWithAgent: 0, campaignsMatched: 0, totalMatches: 0 };
+
+    // Build IDF map across all parent titles
+    const titleDocCount = Object.keys(groupTitles).length || 1;
+    const wordDocFreq = {};
+    Object.values(groupTitles).forEach(function(g){
+      g.keywords.forEach(function(kw){ wordDocFreq[kw] = (wordDocFreq[kw] || 0) + 1; });
+    });
+    function _idf(kw) {
+      const df = wordDocFreq[kw] || 0;
+      if (df === 0) return 1.5;
+      return Math.log(titleDocCount / df);
+    }
+    function _tfidfScore(hintKw, titleKw) {
+      let s = 0;
+      hintKw.forEach(function(kw){ if (titleKw.has(kw)) s += _idf(kw); });
+      return s;
+    }
+    const _MATCH_THRESHOLD = 0.5;
+
+    campaigns.forEach(function(c) {
+      const parsed = parseCampaignName(c.name || '');
+      if (!parsed.agent) return;
+      debugStats.campaignsWithAgent++;
+      const agent = parsed.agent;
+      const hintKeywords = extractTitleKeywords(parsed.productHint);
+      if (hintKeywords.size === 0) return;
+      // Find the SINGLE best matching product (TF-IDF weighted)
+      let bestKey = null, bestScore = 0;
+      Object.keys(groupTitles).forEach(function(groupKey) {
+        const titleKw = groupTitles[groupKey].keywords;
+        const score = _tfidfScore(hintKeywords, titleKw);
+        if (score > bestScore) { bestScore = score; bestKey = groupKey; }
+      });
+      let matchedThisCampaign = false;
+      if (bestKey && bestScore >= _MATCH_THRESHOLD) {
+        if (!groupAgentCounts[bestKey]) groupAgentCounts[bestKey] = {};
+        groupAgentCounts[bestKey][agent] = (groupAgentCounts[bestKey][agent] || 0) + 1;
+        matchedThisCampaign = true;
+        debugStats.totalMatches++;
+      }
+      if (matchedThisCampaign) debugStats.campaignsMatched++;
+    });
+
+    // 5. For each group, pick top agent and update DB (skip rows with owner_manual=TRUE)
+    let updated = 0;
+    for (const groupKey of Object.keys(groupAgentCounts)) {
+      const counts = groupAgentCounts[groupKey];
+      let topAgent = null;
+      let topCount = 0;
+      Object.keys(counts).forEach(function(a) {
+        if (counts[a] > topCount) { topCount = counts[a]; topAgent = a; }
+      });
+      if (!topAgent) continue;
+      try {
+        const r = await db.query(
+          "UPDATE amazon_products SET owner_agent=$1 " +
+          "WHERE (parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)) " +
+          "AND COALESCE(owner_manual, FALSE) = FALSE",
+          [topAgent, groupKey]
+        );
+        if (r.rowCount > 0) updated += r.rowCount;
+      } catch(e) { console.error('[derive-owners] Update error for ' + groupKey + ': ' + e.message); }
+    }
+
+    console.log('[derive-owners] Stats: ' + debugStats.campaignsWithAgent + ' campaigns parsed, ' + debugStats.campaignsMatched + ' matched, ' + debugStats.totalMatches + ' total matches → ' + updated + ' rows updated across ' + Object.keys(groupAgentCounts).length + ' parent groups');
+    return {
+      ok: true,
+      parents_scanned: Object.keys(groupAgentCounts).length,
+      rows_updated: updated,
+      campaigns_parsed: debugStats.campaignsWithAgent,
+      campaigns_matched: debugStats.campaignsMatched
+    };
+  } catch(e) {
+    console.error('[derive-owners] FAILED: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Parse a campaign name like "Satyam | Yoga Mat KT" → { agent, productHint }
+// Supports both "|" and "@" as the agent separator.
+// r16c: when no agent prefix exists (e.g. "Vibration Pate Auto"), use the whole name
+// as the product hint. Agent is null but matching still works.
+function parseCampaignName(name) {
+  if (!name) return { agent: null, productHint: '' };
+  const str = String(name);
+  // r21: try alias map first — handles multi-word prefixes ("Aryan Tomar | x")
+  // and case variations ("aryan | x"). Fall back to the strict single-word
+  // regex if no alias matches, so genuinely unknown prefixes still surface
+  // in the unknown-agents UI.
+  const beforeSep = str.split(/[|@]/)[0].trim();
+  if (beforeSep) {
+    const canon = canonicalAgent(beforeSep);
+    // r33b: check against live agent alias map (DB-backed) instead of dead AGENT_ALIASES dict.
+    // Falls back to hardcoded set if cache empty.
+    const liveMap = (_agentAliasCache && Object.keys(_agentAliasCache).length > 0)
+      ? _agentAliasCache : AGENT_ALIASES_FALLBACK;
+    const knownCanonicals = new Set(Object.values(liveMap));
+    if (canon && knownCanonicals.has(canon)) {
+      const rest = str.split(/[|@]/).slice(1).join('|') || '';
+      const hint = rest.split(/[|@]/)[0].trim();
+      return { agent: canon, productHint: hint };
+    }
+  }
+  const m = str.match(/^\s*([A-Za-z]{3,15})\s*[|@]\s*(.*)$/);
+  if (m) {
+    const agent = m[1].trim();
+    const rest = m[2] || '';
+    const hint = rest.split(/[|@]/)[0].trim();
+    return { agent: agent, productHint: hint };
+  }
+  // No agent prefix — use the whole name as hint (split on first | if present, else whole string)
+  const fallback = str.split(/[|@]/)[0].trim();
+  return { agent: null, productHint: fallback };
+}
+
+// Extract meaningful lowercase keywords from a title or product hint.
+// r15: improved version — strips plurals/'s', handles compounds (kettlebell ↔ kettle bell),
+// keeps short distinctive words, less aggressive stop-word filter.
+const TITLE_STOPWORDS = new Set([
+  'the','and','for','with','from','your','our','this','that','are','was','will',
+  'kt','exact','kw','keyword','kws','sd','sb','sp','auto','manual','match',
+  'amazon','amazo','amaz','prod','product','products','listing','set','pcs','pack','new',
+  'test','testing','old','best','top','main','sub','low','high','any','test','phrase',
+  'fk','sports','fksports'
+]);
+
+// Singular form: strip trailing 's' if word is >3 chars and ends in plural suffix.
+// Examples: kettlebells -> kettlebell, mats -> mat, plates -> plate, dumbbells -> dumbbell
+function singularize(word) {
+  if (!word || word.length <= 3) return word;
+  if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y';     // bunnies -> bunny
+  if (word.endsWith('ses') && word.length > 4) return word.slice(0, -2);            // ?
+  if (word.endsWith('xes') && word.length > 4) return word.slice(0, -2);            // boxes -> box
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) return word.slice(0, -1);
+  return word;
+}
+
+// Split a compound into atoms. "kettlebell" -> ["kettlebell", "kettle", "bell"].
+// We only do this for known fitness compounds so we don't over-split.
+const COMPOUND_PARTS = {
+  'kettlebell': ['kettlebell', 'kettle', 'bell'],
+  'kettlebells': ['kettlebell', 'kettle', 'bell'],
+  'dumbbell': ['dumbbell', 'dumb', 'bell'],
+  'dumbbells': ['dumbbell', 'dumb', 'bell'],
+  'barbell': ['barbell', 'bar', 'bell'],
+  'barbells': ['barbell', 'bar', 'bell'],
+  'trampoline': ['trampoline'],
+  'rebounder': ['rebounder', 'trampoline'],   // synonyms!
+  'spinbike': ['spinbike', 'spin', 'bike'],
+  'treadmill': ['treadmill', 'tread'],
+  'rowing': ['rowing', 'rower'],
+  'rower': ['rower', 'rowing']
+};
+
+function extractTitleKeywords(text) {
+  if (!text) return new Set();
+  const out = new Set();
+  String(text).toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .forEach(function(t) {
+      if (!t) return;
+      if (TITLE_STOPWORDS.has(t)) return;
+      if (/^\d+$/.test(t)) return;
+      // Singularize and add
+      const sing = singularize(t);
+      if (sing.length >= 3) out.add(sing);
+      // If it's a known compound, add its atoms too
+      if (COMPOUND_PARTS[t]) COMPOUND_PARTS[t].forEach(function(p){ out.add(singularize(p)); });
+      if (COMPOUND_PARTS[sing]) COMPOUND_PARTS[sing].forEach(function(p){ out.add(singularize(p)); });
+    });
+  return out;
+}
+
+// r15: keyword overlap score — number of shared keywords + bonus for distinctive (long) ones
+function keywordOverlapScore(setA, setB) {
+  let score = 0;
+  setA.forEach(function(kw) {
+    if (setB.has(kw)) {
+      score += 1;
+      if (kw.length >= 6) score += 0.5;  // distinctive word bonus (kettlebell, trampoline)
+    }
+  });
+  return score;
+}
+
+// r15: A campaign matches a product if either:
+//   - 2+ shared keywords, OR
+//   - 1 shared keyword that is distinctive (>=5 chars), OR
+//   - r16: 1 shared keyword of any length, when ALL the campaign's hint keywords appear in the title
+//     (handles "Bell Set" matching "Kettlebell Heavy Set" — every keyword is in title, so it's a real match)
+function isCampaignMatch(hintKw, titleKw) {
+  if (hintKw.size === 0) return false;
+  let overlap = 0;
+  let hasDistinctive = false;
+  hintKw.forEach(function(kw) {
+    if (titleKw.has(kw)) {
+      overlap++;
+      if (kw.length >= 5) hasDistinctive = true;
+    }
+  });
+  if (overlap >= 2) return true;
+  if (overlap >= 1 && hasDistinctive) return true;
+  // r16: every hint keyword is in title (small hint, fully matched)
+  if (overlap >= 1 && overlap === hintKw.size) return true;
+  return false;
+}
+
+// PUT /api/amazon/products/:groupKey/owner — manually set the owner agent.
+// groupKey = parent_sku for variants, or the SKU itself for standalones.
+// Body: { agent: 'Aryan' } or { agent: null } to clear.
+// Sets owner_manual=TRUE so future auto-derive runs don't overwrite this.
+// Manager/owner only.
+app.put('/api/amazon/products/:groupKey/owner', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+  if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
+  try {
+    const groupKey = req.params.groupKey;
+    const rawAgent = req.body && req.body.agent ? String(req.body.agent).trim() : null;
+    // r26b: canonicalise via the same alias map the rest of the system uses,
+    // so "Aryan" / "aryan" / "Aryan Kumar" all collapse to the same canonical name.
+    const agent = rawAgent ? (typeof canonicalAgent === 'function' ? (canonicalAgent(rawAgent) || rawAgent) : rawAgent) : null;
+
+    // r26c: groupKey can take three forms (matching the products endpoint at line 4539):
+    //   - "asin:B00R2K8SZ0"  → standalone product, no parent_sku, only one ASIN
+    //   - "<parent_sku>"     → variant family with shared parent
+    //   - "<sku>"            → standalone product whose own SKU is the groupKey
+    // The previous WHERE clause only handled forms 2 and 3 — form 1 silently matched
+    // zero rows so the PUT looked like it succeeded but DB was unchanged.
+    //
+    // r33e: when reassigning by parent_sku (form 2), ALSO catch any sibling
+    // SKUs sharing the same ASIN whose parent_sku is NULL. Bobby found case
+    // B0DV5J386N had two rows — one parent-linked, one with parent_sku=NULL —
+    // pointing to the same physical product. Updating only the parent-linked
+    // row meant the orphan kept its old owner_agent='Satyam' from auto-derive,
+    // and the products aggregator would randomly pick whichever row iterated
+    // first. Save looked like it reverted on refresh. Now any sibling sharing
+    // an ASIN with the updated rows gets the same owner.
+    let r;
+    if (groupKey.indexOf('asin:') === 0) {
+      const asin = groupKey.substring(5);
+      console.log('[r26c owner-PUT] asin-form key, asin=' + asin + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
+      r = await db.query(
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
+        "WHERE asin=$2 " +
+        "RETURNING sku, asin, owner_agent, owner_manual",
+        [agent, asin]
+      );
+    } else {
+      console.log('[r26c owner-PUT] sku/parent-form key=' + groupKey + ' rawAgent=' + JSON.stringify(rawAgent) + ' canonical=' + JSON.stringify(agent));
+      r = await db.query(
+        "WITH primary_match AS (" +
+        "  SELECT sku, asin FROM amazon_products " +
+        "  WHERE parent_sku=$2 OR (parent_sku IS NULL AND sku=$2)" +
+        ") " +
+        "UPDATE amazon_products SET owner_agent=$1, owner_manual=TRUE " +
+        "WHERE sku IN (SELECT sku FROM primary_match) " +
+        "   OR (asin IS NOT NULL AND asin IN (SELECT asin FROM primary_match WHERE asin IS NOT NULL)) " +
+        "RETURNING sku, asin, parent_sku, owner_agent, owner_manual",
+        [agent, groupKey]
+      );
+    }
+    console.log('[r26c owner-PUT] rows updated: ' + r.rowCount + ', sample: ' + JSON.stringify(r.rows.slice(0, 3)));
+
+    if (r.rowCount === 0) {
+      console.warn('[r26c owner-PUT] WARNING — zero rows matched for groupKey=' + groupKey);
+      return res.status(404).json({ success: false, error: 'No products matched groupKey=' + groupKey, rows_updated: 0 });
+    }
+
+    // Audit log
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'product_owner_set',$2)",
+        [actor, actor + ' set owner of ' + groupKey + ' to ' + (agent || 'Unassigned')]
+      );
+    } catch(e) {}
+    res.json({ success: true, rows_updated: r.rowCount, group: groupKey, owner: agent, persisted: r.rows });
+  } catch(e) {
+    console.error('[r26c owner-PUT] error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r18: GET /api/amazon/merge-candidates — suggest groups of parents that should likely be merged.
+// Logic: cluster parents by shared distinctive keywords (TF-IDF top words). Parents sharing 2+
+// distinctive words are likely the same product family.
+app.get('/api/amazon/merge-candidates', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const productsRes = await db.query(
+      "SELECT sku, parent_sku, title FROM amazon_products WHERE title IS NOT NULL"
+    );
+    // Build parents map (use parent_sku if present, else sku)
+    const parents = {};
+    productsRes.rows.forEach(function(p) {
+      const key = p.parent_sku || p.sku;
+      if (!parents[key]) parents[key] = { key: key, titles: [], skus: [] };
+      parents[key].titles.push(p.title);
+      parents[key].skus.push(p.sku);
+    });
+    const parentKeys = Object.keys(parents);
+    // Pick representative title for each (longest)
+    parentKeys.forEach(function(k){
+      const titles = parents[k].titles;
+      parents[k].title = titles.sort(function(a, b){ return b.length - a.length; })[0];
+      parents[k].keywords = extractTitleKeywords(parents[k].title);
+    });
+    // IDF map
+    const docCount = parentKeys.length || 1;
+    const wordDocFreq = {};
+    parentKeys.forEach(function(k){
+      parents[k].keywords.forEach(function(kw){ wordDocFreq[kw] = (wordDocFreq[kw] || 0) + 1; });
+    });
+    function _idf(kw){ const df = wordDocFreq[kw] || 0; if (df === 0) return 0; return Math.log(docCount / df); }
+    // For each parent, get its top-3 most distinctive (highest IDF) words
+    parentKeys.forEach(function(k){
+      const kws = Array.from(parents[k].keywords).sort(function(a, b){ return _idf(b) - _idf(a); });
+      parents[k].topWords = kws.slice(0, 3);
+    });
+    // Group parents by their top-2 most distinctive words (sorted as a key)
+    const clusters = {};
+    parentKeys.forEach(function(k){
+      const top = parents[k].topWords.slice(0, 2).sort();
+      if (top.length < 2) return;
+      const clusterKey = top.join('|');
+      if (!clusters[clusterKey]) clusters[clusterKey] = [];
+      clusters[clusterKey].push({
+        key: k,
+        title: parents[k].title,
+        sku_count: parents[k].skus.length,
+        topWords: parents[k].topWords
+      });
+    });
+    // Only return clusters with 2+ parents (those are merge candidates)
+    const candidates = Object.keys(clusters)
+      .filter(function(c){ return clusters[c].length >= 2; })
+      .map(function(c){ return { signature: c, parents: clusters[c] }; })
+      .sort(function(a, b){ return b.parents.length - a.parents.length; });
+    res.json({ clusters: candidates, totalParents: parentKeys.length });
+  } catch(e) {
+    console.error('/api/amazon/merge-candidates error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/derive-product-owners — manually trigger the auto-derive job (owner only).
+app.post('/api/admin/derive-product-owners', async function(req, res) {
+  if (!requireOwner(req, res)) return;
+  const result = await deriveProductOwners();
+  res.json(result);
+});
+
+// r18: POST /api/amazon/products/merge — merge multiple parent groups into one.
+// Body: { canonicalKey: 'Vibration Plates Grey Ama', mergeKeys: ['asin:B0...', 'Vib Plates Amazon'], confirmed: true }
+// Effect: every SKU whose parent_sku matches any mergeKey (or sku matches a standalone)
+// gets parent_sku updated to canonicalKey. Owner can manually pick the canonical title.
+// r35.9: opened to active staff (Amazon/Google/manager/logistics agents). Owner/manager
+// bypass confirmed check (legacy behaviour). Agents MUST send confirmed:true.
+// Every merge is audit-logged with actor name + source/canonical keys.
+app.post('/api/amazon/products/merge', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+
+  // r35.9: agents can also merge, but only with explicit confirmation and only
+  // if they're active staff (have a real department).
+  if (!isManagerLevel) {
+    const allowedDepts = ['amazon', 'google', 'logistics', 'accounts', 'warehouse'];
+    if (allowedDepts.indexOf(userDept) === -1) {
+      return res.status(403).json({ error: 'You don\'t have permission to merge products. Ask a manager.' });
+    }
+    const confirmed = req.body && req.body.confirmed === true;
+    if (!confirmed) {
+      return res.status(400).json({
+        error: 'confirmation_required',
+        message: 'Tick "I confirm these are the same Amazon listing" before merging.'
+      });
+    }
+  }
+
+  const canonicalKey = String((req.body && req.body.canonicalKey) || '').trim();
+  const mergeKeys = Array.isArray(req.body && req.body.mergeKeys) ? req.body.mergeKeys.map(function(k){ return String(k).trim(); }).filter(Boolean) : [];
+  if (!canonicalKey) return res.status(400).json({ error: 'canonicalKey required' });
+  if (!mergeKeys.length) return res.status(400).json({ error: 'mergeKeys required' });
+  // Don't allow merging a key into itself (no-op safeguard)
+  const sources = mergeKeys.filter(function(k){ return k !== canonicalKey; });
+  if (!sources.length) return res.status(400).json({ error: 'No keys to merge after excluding canonical' });
+
+  try {
+    let totalUpdated = 0;
+    for (const srcKey of sources) {
+      // Update both:
+      //   (a) rows whose parent_sku = srcKey  → set parent_sku = canonicalKey
+      //   (b) rows whose sku = srcKey AND parent_sku IS NULL (standalone parent itself) → also reparent
+      const r1 = await db.query(
+        "UPDATE amazon_products SET parent_sku = $1 WHERE parent_sku = $2",
+        [canonicalKey, srcKey]
+      );
+      const r2 = await db.query(
+        "UPDATE amazon_products SET parent_sku = $1 WHERE sku = $2 AND (parent_sku IS NULL OR parent_sku = sku)",
+        [canonicalKey, srcKey]
+      );
+      totalUpdated += (r1.rowCount || 0) + (r2.rowCount || 0);
+    }
+    // Audit log
+    try {
+      const actor = (req.user && req.user.name) || 'System';
+      const actorRole = isManagerLevel ? 'manager' : ('agent:' + userDept);
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes) VALUES ('','',$1,$1,'product_merge',$2)",
+        [actor, actor + ' (' + actorRole + ') merged [' + sources.join(', ') + '] into ' + canonicalKey + ' (' + totalUpdated + ' rows)']
+      );
+    } catch(e) {}
+    // r26: removed automatic deriveProductOwners() call. See catalogue-sync comment.
+    // Merging products no longer retriggers the TF-IDF reassignment.
+    res.json({
+      ok: true,
+      canonical: canonicalKey,
+      merged: sources,
+      rows_updated: totalUpdated,
+      derive: { ok: true, skipped: true, note: 'auto-derive intentionally disabled in r26' }
+    });
+  } catch(e) {
+    console.error('/api/amazon/products/merge error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/amazon/agents — list of agents available as product owners.
+// Returns active users in the Amazon department. Used to populate the owner-assignment dropdown.
+app.get('/api/amazon/agents', async function(req, res) {
+  if (!db) return res.json({ agents: [] });
+  try {
+    const r = await db.query(
+      "SELECT DISTINCT name FROM users " +
+      "WHERE COALESCE(is_active,TRUE)=TRUE " +
+      "AND LOWER(COALESCE(department,'')) IN ('amazon','manager') " +
+      "ORDER BY name ASC"
+    );
+    res.json({ agents: r.rows.map(function(row){ return row.name; }) });
+  } catch(e) {
+    console.error('/api/amazon/agents error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r24: GET /api/amazon/campaign-detail/:campaignId — power the All Campaigns row
+// modal. Returns 7-day spend/sales/ACOS history (from daily_snapshots), top ASINs
+// inside the campaign by spend (from amazon_asin_ad_performance, last 7 days),
+// recent tasks (from campaign_tasks). Plain-English health summary computed
+// client-side from the live campaign object — server just feeds the data.
+app.get('/api/amazon/campaign-detail/:campaignId', async function(req, res) {
+  if (!db) return res.json({ history: [], topAsins: [], recentTasks: [] });
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  try {
+    // r30: 1) 7-day daily history pulled live from state.campaigns (which carries
+    // dailySeries7d from the Amazon Ads API daily7d report). No more daily_snapshots
+    // dependency — those rows had wrong attribution data.
+    const liveCamp = (state.campaigns || []).find(function(c){ return String(c.campaignId) === campaignId; });
+    const history = (liveCamp && Array.isArray(liveCamp.dailySeries7d))
+      ? liveCamp.dailySeries7d.map(function(d) {
+          const acos = (d.sales > 0) ? +(100 * d.spend / d.sales).toFixed(1) : null;
+          return {
+            date: d.date,
+            spend: +d.spend.toFixed(2),
+            sales: +d.sales.toFixed(2),
+            acos: acos,
+            impressions: d.impressions || 0,
+            clicks: d.clicks || 0
+          };
+        })
+      : [];
+
+    // 2) Top ASINs in this campaign — last 7 days.
+    // r31b: PREFER amazon_asin_ad_perf_7d (a CURRENT 7-day snapshot from a single
+    // SUMMARY report) over amazon_asin_ad_performance (which stored each day's
+    // 7-day-trailing values — summing them overcounts due to overlapping windows).
+    // The 7d snapshot matches Amazon Seller Central's Advertised Product report
+    // for a 7-day date range, which is the source of truth.
+    let topAsins = [];
+    try {
+      const asin7dRows = await db.query(
+        "SELECT a.asin, " +
+        "       a.spend::numeric AS spend, " +
+        "       a.sales::numeric AS sales, " +
+        "       a.clicks::int AS clicks, " +
+        "       a.impressions::int AS impressions, " +
+        "       a.units::int AS units, " +
+        "       MAX(p.title) AS title, " +
+        "       MAX(p.image_url) AS image_url " +
+        "FROM amazon_asin_ad_perf_7d a " +
+        "LEFT JOIN amazon_products p ON p.asin = a.asin " +
+        "WHERE a.campaign_id = $1 " +
+        "GROUP BY a.asin, a.spend, a.sales, a.clicks, a.impressions, a.units " +
+        "ORDER BY a.spend DESC " +
+        "LIMIT 8",
+        [campaignId]
+      );
+      if (asin7dRows.rows.length > 0) {
+        topAsins = asin7dRows.rows.map(function(r) {
+          const sp = parseFloat(r.spend || 0);
+          const sa = parseFloat(r.sales || 0);
+          return {
+            asin: r.asin,
+            title: r.title || null,
+            image_url: r.image_url || null,
+            spend: +sp.toFixed(2),
+            sales: +sa.toFixed(2),
+            acos: sa > 0 ? +(100 * sp / sa).toFixed(1) : null,
+            clicks: r.clicks || 0,
+            impressions: r.impressions || 0,
+            units: r.units || 0,
+            source: '7d_summary'
+          };
+        });
+      }
+    } catch(e) {
+      if (!/does not exist/.test(e.message)) console.error('[r31b] asin 7d lookup: ' + e.message);
+    }
+    // r33a: removed the daily-table fallback block. Was: "if 7d snapshot empty,
+    // fall back to summing amazon_asin_ad_performance daily rows". That fallback
+    // produced wrong numbers (daily-summed overlapping attribution windows) and
+    // depended on the same 04:30 cron that's been failing. With the primary path
+    // now solidly on the 2h-refreshed snapshot, the fallback only added risk.
+
+    // 3) Recent tasks on this campaign — last 30 days, any status
+    const taskRows = await db.query(
+      "SELECT id, agent_name, status, problem_type, problem_detail, created_date, task_stage " +
+      "FROM campaign_tasks " +
+      "WHERE campaign_id = $1 " +
+      "  AND department = 'amazon' " +
+      "  AND created_date >= CURRENT_DATE - INTERVAL '30 days' " +
+      "ORDER BY created_date DESC " +
+      "LIMIT 10",
+      [campaignId]
+    );
+    const recentTasks = taskRows.rows.map(function(r) {
+      return {
+        id: r.id,
+        agent: r.agent_name,
+        status: r.status,
+        problem_type: r.problem_type,
+        problem_detail: r.problem_detail,
+        created_date: r.created_date,
+        task_stage: r.task_stage
+      };
+    });
+
+    res.json({
+      campaignId: campaignId,
+      // r31: authoritative totals block — these are the headline numbers the modal
+      // displays. Sourced from summary7d (matches Amazon Seller Central's 7-day view).
+      // history[] is for the per-day SPARKLINE shape only; do not sum it for display
+      // totals — daily sales1d rows undercount because cross-day attribution is invisible.
+      totals: liveCamp ? {
+        spend7d: liveCamp.spend7d != null ? liveCamp.spend7d : null,
+        sales7d: liveCamp.sales7d != null ? liveCamp.sales7d : null,
+        acos7d: liveCamp.acos7d != null ? liveCamp.acos7d : null,
+        clicks7d: liveCamp.clicks7d || 0,
+        impressions7d: liveCamp.impressions7d || 0,
+        conversions7d: liveCamp.conversions7d || 0,
+        costPerConv7d: liveCamp.costPerConv7d != null ? liveCamp.costPerConv7d : null,
+        // Today actuals (live from todayOnly stream)
+        todaySpend: liveCamp.todaySpend != null ? liveCamp.todaySpend : null,
+        todaySales: liveCamp.todaySales != null ? liveCamp.todaySales : null,
+        todayAcos: liveCamp.todayAcos != null ? liveCamp.todayAcos : null
+      } : null,
+      history: history,
+      topAsins: topAsins,
+      recentTasks: recentTasks
+    });
+  } catch(e) {
+    console.error('/api/amazon/campaign-detail error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r18: GET /api/amazon/unknown-agents — surface agent prefixes appearing in campaign names
+// that don't match any existing user. Lets the owner spot when a new agent shows up
+// in the data and prompt them to create a user account.
+// r21: paired with GET /api/tasks/orphaned below for orphaned task view.
+app.get('/api/amazon/unknown-agents', async function(req, res) {
+  if (!db) return res.json({ unknown: [] });
+  try {
+    // Existing user names (lowercased)
+    const ur = await db.query(
+      "SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE"
+    );
+    const knownNames = new Set(ur.rows.map(function(r){ return (r.name || '').toLowerCase(); }));
+    // r21 + r33b: also seed every alias and canonical from the live agent alias map
+    // (DB-backed cache, falls back to hardcoded {aryan, aryan tomar, satyam}) so
+    // "Aryan Tomar" and "aryan" are never flagged as unknown even if a user record
+    // is somehow missing.
+    const liveMap = (_agentAliasCache && Object.keys(_agentAliasCache).length > 0)
+      ? _agentAliasCache : AGENT_ALIASES_FALLBACK;
+    Object.keys(liveMap).forEach(function(k){ knownNames.add(k); });
+    Object.values(liveMap).forEach(function(v){ knownNames.add(v.toLowerCase()); });
+    // Recent campaign names from snapshots
+    const sr = await db.query(
+      "SELECT campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days'"
+    );
+    // Extract every agent prefix found
+    const prefixCounts = {};
+    sr.rows.forEach(function(snap){
+      (snap.campaigns || []).forEach(function(c){
+        const parsed = parseCampaignName(c.name || '');
+        if (parsed.agent) {
+          const lower = parsed.agent.toLowerCase();
+          if (!knownNames.has(lower)) {
+            prefixCounts[parsed.agent] = (prefixCounts[parsed.agent] || 0) + 1;
+          }
+        }
+      });
+    });
+    const unknown = Object.keys(prefixCounts).map(function(name){
+      return { name: name, campaignCount: prefixCounts[name] };
+    }).sort(function(a, b){ return b.campaignCount - a.campaignCount; });
+    res.json({ unknown: unknown });
+  } catch(e) {
+    console.error('/api/amazon/unknown-agents error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r21: GET /api/tasks/orphaned — Amazon tasks assigned to agent names NOT in
+// active Amazon-department users. Owner+manager only. Used by the "Unknown
+// agents" modal on the Amazon Tasks page so orphaned work can be reassigned
+// or archived. Scoped to department='amazon' — Google tasks have their own
+// flow (Rahul/Anuj are seeded distinct from Amazon agents).
+app.get('/api/tasks/orphaned', async function(req, res) {
+  if (!db) return res.json({ tasks: [] });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Owner or manager role required' });
+  try {
+    // Active Amazon agents only — Google agents (Rahul/Anuj) shouldn't make
+    // an Amazon task look "assigned"; they live in a different department.
+    const ur = await db.query(
+      "SELECT name FROM users WHERE COALESCE(is_active,TRUE)=TRUE " +
+      "AND LOWER(COALESCE(department,'')) IN ('amazon','manager')"
+    );
+    const activeNames = ur.rows.map(function(r){ return r.name; }).filter(Boolean);
+    if (activeNames.length === 0) return res.json({ tasks: [] });
+    // Find open/in-progress Amazon tasks where agent_name is NULL or NOT in active Amazon users.
+    // department defaults to 'amazon' on the column so legacy rows pre-r17 are included via COALESCE.
+    const tr = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, status, problem_type, " +
+      "problem_detail, created_date, days_persisted FROM campaign_tasks " +
+      "WHERE COALESCE(department,'amazon')='amazon' " +
+      "AND status IN ('open','in_progress','scaling') " +
+      "AND (agent_name IS NULL OR NOT (agent_name = ANY($1))) " +
+      "ORDER BY created_date DESC LIMIT 200",
+      [activeNames]
+    );
+    res.json({ tasks: tr.rows, activeAgents: activeNames });
+  } catch(e) {
+    console.error('/api/tasks/orphaned error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/amazon/sales-by-agent?days=7
+// Returns sales per agent per day — used for the team-transparency panel that all
+// users (not just managers) can see. Each agent's numbers come from orders containing
+// products where amazon_products.owner_agent matches.
+//
+// r21 fix: previous version inflated agent totals by joining LEFT JOIN amazon_products
+// directly — every duplicate SKU sharing an ASIN multiplied the line item. Now we
+// collapse line items per (order_id, asin) first, then join to ONE owner_agent
+// per ASIN (using MAX(owner_agent) — assumes consistent owner across SKUs sharing
+// an ASIN; flagged in /api/admin/sales-gap-diagnosis if not).
+app.get('/api/amazon/sales-by-agent', async function(req, res) {
+  if (!db) return res.json({ agents: [], days: [] });
+  try {
+    const days = Math.min(parseInt(req.query.days || '7'), 30);
+    const r = await db.query(
+      "WITH unique_lines AS (" +
+      "  SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+      "         i.order_id, i.asin, " +
+      "         SUM(i.item_price * i.quantity) AS gross, " +
+      "         SUM(i.quantity) AS units " +
+      "  FROM amazon_orders o " +
+      "  JOIN amazon_order_items i ON i.order_id = o.order_id " +
+      "  WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+      "  AND o.status NOT IN ('Cancelled','Canceled') " +
+      "  GROUP BY day, i.order_id, i.asin" +
+      "), " +
+      "agent_for_asin AS (" +
+      "  SELECT asin, MAX(owner_agent) AS owner_agent " +
+      "  FROM amazon_products " +
+      "  WHERE asin IS NOT NULL " +
+      "  GROUP BY asin" +
+      ") " +
+      "SELECT ul.day, " +
+      "       COALESCE(a.owner_agent, 'Unassigned') AS agent, " +
+      "       SUM(ul.gross) AS gross, " +
+      "       SUM(ul.units) AS units " +
+      "FROM unique_lines ul " +
+      "LEFT JOIN agent_for_asin a ON a.asin = ul.asin " +
+      "GROUP BY ul.day, COALESCE(a.owner_agent, 'Unassigned') " +
+      "ORDER BY ul.day ASC, agent ASC"
+    );
+    const dayMap = {};
+    const agentSet = new Set();
+    r.rows.forEach(function(row) {
+      const d = row.day;
+      const a = row.agent;
+      agentSet.add(a);
+      if (!dayMap[d]) dayMap[d] = {};
+      dayMap[d][a] = { gross: parseFloat(row.gross || 0), units: parseInt(row.units || 0) };
+    });
+    const dayList = Object.keys(dayMap).sort();
+    const agentList = Array.from(agentSet);
+    res.json({ days: dayList, agents: agentList, byDay: dayMap });
+  } catch(e) {
+    console.error('/api/amazon/sales-by-agent error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Returns Amazon sales numbers for the last N days, day-by-day. Powers the
+// net-sales panel on the Amazon dashboard (mirrors Google's Shopify panel).
+// r11: For non-manager users, filters to orders containing only their owned products.
+app.get('/api/amazon/sales-summary', async function(req, res) {
+  if (!db) return res.json({ days: [], totals: {} });
+  try {
+    const days = Math.min(parseInt(req.query.days || '7'), 30);
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userName = (req.user && req.user.name) || '';
+    const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+    // Optional ?agent=Aryan filter (managers only — agents always see their own)
+    const agentFilter = (req.query.agent && isManagerLevel) ? String(req.query.agent) : (isManagerLevel ? null : userName);
+
+    let query;
+    let params = [];
+    if (agentFilter) {
+      // r21 fix: same duplicate-SKU inflation as sales-by-agent. Dedupe lines per
+      // (order_id, asin) before joining to amazon_products, then keep only ASINs
+      // owned by this agent.
+      query = "WITH unique_lines AS (" +
+        "  SELECT TO_CHAR(o.purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+        "         i.order_id, i.asin, " +
+        "         SUM(i.item_price * i.quantity) AS gross, " +
+        "         SUM(i.quantity) AS units " +
+        "  FROM amazon_orders o " +
+        "  JOIN amazon_order_items i ON i.order_id = o.order_id " +
+        "  WHERE o.purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+        "  AND o.status NOT IN ('Cancelled','Canceled') " +
+        "  GROUP BY day, i.order_id, i.asin" +
+        "), " +
+        "agent_for_asin AS (" +
+        "  SELECT asin, MAX(owner_agent) AS owner_agent " +
+        "  FROM amazon_products " +
+        "  WHERE asin IS NOT NULL " +
+        "  GROUP BY asin" +
+        ") " +
+        "SELECT ul.day, " +
+        "       SUM(ul.gross) AS gross, " +
+        "       COUNT(DISTINCT ul.order_id) AS order_count, " +
+        "       SUM(ul.units) AS units " +
+        "FROM unique_lines ul " +
+        "JOIN agent_for_asin a ON a.asin = ul.asin " +
+        "WHERE a.owner_agent = $1 " +
+        "GROUP BY ul.day ORDER BY ul.day ASC";
+      params = [agentFilter];
+    } else {
+      // Manager view — full company numbers
+      query = "SELECT TO_CHAR(purchase_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS day, " +
+        "       SUM(order_total) AS gross, " +
+        "       COUNT(*) AS order_count, " +
+        "       SUM(num_items) AS units " +
+        "FROM amazon_orders " +
+        "WHERE purchase_date >= NOW() - INTERVAL '" + days + " days' " +
+        "AND status NOT IN ('Cancelled','Canceled') " +
+        "GROUP BY day ORDER BY day ASC";
+    }
+    const r = await db.query(query, params);
+    const dayRows = r.rows.map(function(row) {
+      return {
+        date: row.day,
+        gross: parseFloat(row.gross || 0),
+        orders: parseInt(row.order_count || 0),
+        units: parseInt(row.units || 0)
+      };
+    });
+
+    // r17: pull per-day ad spend from daily_snapshots so the table can show Ad Spend + Net
+    // r21: also pull campaigns array as fallback. Older snapshots sometimes have
+    // metrics.totalSpend null (early r17 snapshots wrote campaigns but skipped
+    // metrics roll-up). Sum campaigns[].spend in that case so historical days
+    // don't show "—" gaps for spend.
+    try {
+      const spendRes = await db.query(
+        "SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS day, " +
+        "       (metrics->>'totalSpend')::float AS spend, " +
+        "       campaigns " +
+        "FROM daily_snapshots " +
+        "WHERE snapshot_date >= CURRENT_DATE - INTERVAL '" + days + " days' " +
+        "ORDER BY snapshot_date ASC"
+      );
+      const spendByDay = {};
+      spendRes.rows.forEach(function(row){
+        let spend = row.spend != null ? parseFloat(row.spend) : null;
+        // r21 fallback: if metrics.totalSpend missing, derive from campaigns
+        if ((spend == null || isNaN(spend)) && Array.isArray(row.campaigns)) {
+          spend = row.campaigns.reduce(function(s, c){ return s + parseFloat(c.spend || 0); }, 0);
+        }
+        if (spend != null && !isNaN(spend)) spendByDay[row.day] = spend;
+      });
+      dayRows.forEach(function(d){ d.spend = spendByDay[d.date] != null ? spendByDay[d.date] : null; });
+    } catch(e) {
+      // If snapshots/metrics not present, leave spend as null — frontend handles it
+      console.error('[sales-summary] spend lookup failed: ' + e.message);
+    }
+
+    const totals = {
+      gross: dayRows.reduce(function(s, d){ return s + d.gross; }, 0),
+      orders: dayRows.reduce(function(s, d){ return s + d.orders; }, 0),
+      units: dayRows.reduce(function(s, d){ return s + d.units; }, 0),
+      spend: dayRows.reduce(function(s, d){ return s + (d.spend || 0); }, 0)
+    };
+    res.json({ days: dayRows, totals: totals, agentFilter: agentFilter, isManagerLevel: isManagerLevel });
+  } catch(e) {
+    console.error('/api/amazon/sales-summary error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+app.post('/api/tasks/:id/escalation-analysis', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    const task = taskRes.rows[0];
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    // r33d: 2h cache. Key includes failure_count + updated_at minute so it
+    // invalidates if the agent adds notes or task progresses.
+    const force = req.body && req.body.force === true;
+    const cacheKey = 'stuck_critique:' + task.id + ':' + (task.failure_count || 0) + ':' + (task.days_persisted || 0);
+    if (!force) {
+      const cached = aiCacheGet(cacheKey);
+      if (cached) {
+        // r35.9: cache hits don't count toward quota — agent gets a free re-view.
+        console.log('[r33d] stuck-task critique served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+        return res.json({ analysis: cached.value, cached: true });
+      }
+    }
+
+    // r35.9 D — per-agent Opus quota. 24h cooldown per (task, agent),
+    // broken by leaving a feedback note. Owner/manager bypass entirely.
+    const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+    const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+    const userName = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const isManagerLevel =
+      ['owner', 'manager'].indexOf(userRole) !== -1 ||
+      userDept === 'manager';
+    if (!isManagerLevel) {
+      try {
+        const lastCallRes = await db.query(
+          "SELECT called_at, agent_feedback_at FROM ai_escalation_log " +
+          "WHERE entity_type = 'task' AND entity_id = $1 AND agent_name = $2 " +
+          "ORDER BY called_at DESC LIMIT 1",
+          [String(task.id), userName]
+        );
+        if (lastCallRes.rows.length > 0) {
+          const lastCall = lastCallRes.rows[0];
+          const hoursAgo = (Date.now() - new Date(lastCall.called_at).getTime()) / 3600000;
+          const cooldownBroken = lastCall.agent_feedback_at != null;
+          if (hoursAgo < 24 && !cooldownBroken) {
+            const hoursLeft = Math.max(1, Math.ceil(24 - hoursAgo));
+            return res.status(429).json({
+              error: 'quota',
+              quotaMessage:
+                'Oh, you ran this deep AI analysis ' +
+                Math.floor(hoursAgo) + 'h ago on this task. ' +
+                'Drop a quick note in the feedback box telling the AI what worked, ' +
+                'what didn\'t, or what to focus on next — then we\'ll run a fresh one ' +
+                'with that context. ' +
+                '(Or come back in ' + hoursLeft + 'h.)',
+              hoursLeft: hoursLeft,
+              feedbackBreaksCooldown: true
+            });
+          }
+        }
+      } catch(e) { console.error('[r35.9 D] quota check failed (allowing through): ' + e.message); }
+    }
+
+    const history = await db.query('SELECT action, notes, logged_at FROM activity_log WHERE task_id=$1 ORDER BY logged_at ASC', [task.id]);
+    const snapshots = await db.query("SELECT snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date > NOW() - INTERVAL '7 days' ORDER BY snapshot_date DESC LIMIT 7");
+    let campHistory = [];
+    snapshots.rows.forEach(function(snap) {
+      const c = (snap.campaigns||[]).find(function(x){ return String(x.campaignId) === String(task.campaign_id); });
+      if (c) campHistory.push({ date: snap.snapshot_date, spend: c.spend, sales: c.sales, acos: c.acos, impressions: c.impressions });
+    });
+    const prompt = 'You are analyzing an Amazon PPC campaign task escalated after ' + task.days_persisted + ' days.\n\nCAMPAIGN: ' + task.campaign_name + '\nAGENT: ' + task.agent_name + '\nPROBLEM: ' + task.problem_detail + '\nDAYS OPEN: ' + task.days_persisted + '\nSCORE: ' + task.score + '\nREPEAT OFFENDER: ' + (task.is_repeat_offender ? 'YES - has failed ' + task.failure_count + ' times' : 'No') + '\n\nAGENT NOTES HISTORY:\n' + JSON.stringify(history.rows, null, 2) + '\n\nCAMPAIGN PERFORMANCE (last 7 days):\n' + JSON.stringify(campHistory, null, 2) + '\n\nProvide:\n1. Root cause analysis\n2. Is the agent\'s approach working?\n3. Specific recommended fix\n4. If agent requests 7-day scaling window - justified? Yes/No with reason.\n\nBe direct, specific, actionable. 3-4 sentences max per point.';
+    const response = await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-5-20251101', max_tokens: 800, messages: [{ role: 'user', content: prompt }] }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
+    const analysis = response.data.content[0].text;
+    aiCacheSet(cacheKey, analysis);
+
+    // r35.9 D — log the call against this agent's quota (skipped for managers).
+    if (!isManagerLevel) {
+      try {
+        await db.query(
+          "INSERT INTO ai_escalation_log (entity_type, entity_id, agent_name) VALUES ('task', $1, $2)",
+          [String(task.id), userName]
+        );
+      } catch(e) { console.error('[r35.9 D] quota log insert failed: ' + e.message); }
+    }
+
+    console.log('[r33d] stuck-task critique generated fresh, cached 2h');
+    res.json({ analysis: analysis });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// r33d: NEW endpoint for "Sharpen with AI" on a repeat-offender task. Reuses
+// aiEnhanceRepeatTaskDescription, returns the rewritten description text.
+// 2h cache so re-clicks return the same answer cheaply.
+app.post('/api/tasks/:id/sharpen-description', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    const task = taskRes.rows[0];
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (!task.is_repeat_offender) {
+      return res.status(400).json({ error: 'Task is not a repeat offender — AI sharpening is only useful when previous attempts have failed.' });
+    }
+    const force = req.body && req.body.force === true;
+    const cacheKey = 'sharpen:' + task.id + ':' + (task.failure_count || 0);
+    if (!force) {
+      const cached = aiCacheGet(cacheKey);
+      if (cached) {
+        console.log('[r33d] sharpen-description served from cache');
+        // r35.4: must return both keys here too — frontend reads `sharpened`.
+        // Was only returning `analysis`, so first cached click failed with
+        // "Error: No suggestion returned" even though AI text was available.
+        return res.json({ analysis: cached.value, sharpened: cached.value, cached: true });
+      }
+    }
+    // Build prevContext shape that aiEnhanceRepeatTaskDescription expects
+    const prevContext = {
+      previousNote: task.agent_notes || '',
+      previousResolvedAt: task.updated_at,
+      failureCount: task.failure_count || 1
+    };
+    const taskRow = {
+      campaignName: task.campaign_name,
+      productTitle: task.product_title || null,
+      problemType: task.problem_type,
+      problemDetail: task.problem_detail
+    };
+    const department = task.department || 'amazon';
+    const aiText = await aiEnhanceRepeatTaskDescription(department, taskRow, prevContext);
+    if (!aiText) return res.status(500).json({ error: 'AI could not generate a sharper description' });
+    aiCacheSet(cacheKey, aiText);
+    // r35.4: return both keys. Frontend (sharpenWithAI in index.html line 3622)
+    // expects `data.sharpened`. Server was returning `{ analysis: ... }` only,
+    // so the button has been broken since r33d. Return both for safety in case
+    // any other caller relies on `analysis`.
+    res.json({ analysis: aiText, sharpened: aiText });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/snapshots', async function(req, res) {
+  const dates = await getSnapshotDates();
+  res.json({ dates: dates.map(function(r) { const d = typeof r.snapshot_date === 'string' ? r.snapshot_date : new Date(r.snapshot_date).toISOString().split('T')[0]; return { date: d, metrics: r.metrics }; })});
+});
+
+app.post('/api/tasks/:id/reopen', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    await db.query('UPDATE campaign_tasks SET status=$1, resolved_at=NULL, updated_at=NOW() WHERE id=$2', ['open', req.params.id]);
+    // r33c: agent eligibility from users table, not hardcoded list.
+    const eligibleAgents = await getActiveAmazonAgents();
+    const agentName = (task.agent_name && eligibleAgents.includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
+    await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', agentName, 'reopened', 'Task reopened — moved back to Due', task.status, 'open', parseInt(req.params.id)]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// r18: POST /api/tasks/:id/reassign — change the agent assigned to a task.
+// Body: { agent: 'Aryan' } (or 'Unassigned')
+// Manager + owner only.
+app.post('/api/tasks/:id/reassign', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const isManagerLevel = ['owner','manager'].indexOf(userRole) !== -1 || (req.user && (req.user.department || '').toLowerCase() === 'manager');
+  if (!isManagerLevel) return res.status(403).json({ error: 'Manager permission required' });
+  const newAgent = String((req.body && req.body.agent) || '').trim();
+  if (!newAgent) return res.status(400).json({ error: 'Agent required' });
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    const oldAgent = task.agent_name || 'Unassigned';
+    await db.query('UPDATE campaign_tasks SET agent_name=$1, updated_at=NOW() WHERE id=$2', [newAgent, req.params.id]);
+    const actor = (req.user && req.user.name) || 'System';
+    await db.query(
+      "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id) VALUES ($1, $2, $3, $4, 'reassigned', $5, $6)",
+      [task.campaign_id || '', task.campaign_name || '', newAgent, actor, actor + ' reassigned task from ' + oldAgent + ' to ' + newAgent, parseInt(req.params.id)]
+    );
+    res.json({ success: true, oldAgent: oldAgent, newAgent: newAgent });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/tasks/:id/toggle-note', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const taskRes = await db.query('SELECT notes_ignored FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const currentIgnored = taskRes.rows[0].notes_ignored || false;
+    await db.query('UPDATE campaign_tasks SET notes_ignored=$1, updated_at=NOW() WHERE id=$2', [!currentIgnored, req.params.id]);
+    res.json({ success: true, notes_ignored: !currentIgnored });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/stuck-campaigns/action', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId, campaignName, action, notes } = req.body;
+  if (!campaignId || !action || !notes) return res.status(400).json({ error: 'Missing fields' });
+  try {
+    const agentName = extractAgentFromCampaign(campaignName||'') || 'Unknown';
+    if (action === 'review') {
+      const flagDeadline = new Date(); flagDeadline.setDate(flagDeadline.getDate() + 7);
+      await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1,$2,$3,$4,$5)', [String(campaignId), campaignName, agentName, 'stuck_flagged_1week', 'Agent will work on this for 1 week. Plan: ' + notes + '. Deadline: ' + flagDeadline.toLocaleDateString('en-GB')]);
+    } else if (action === 'pause') {
+      await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1,$2,$3,$4,$5)', [String(campaignId), campaignName, agentName, 'stuck_paused', 'Campaign paused from underperforming page. Reason: ' + notes]);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/activity/log', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId, campaignName, action, notes, agentName } = req.body;
+  try {
+    const agent = agentName || extractAgentFromCampaign(campaignName||'') || 'Unknown';
+    await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1,$2,$3,$4,$5)', [String(campaignId||''), campaignName||'', agent, action||'', notes||'']);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/campaigns/:id/spend-breakdown', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const campaignId = req.params.id;
+    // Pull last 14 days of snapshots (newest first from DB, sorted ascending in result)
+    const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date ASC LIMIT 14");
+    const breakdown = [];
+    // r21: track snapshot days where the campaign was MISSING — distinguishes
+    // "campaign didn't exist yet" (first appearance), "campaign was paused"
+    // (in snapshot with zero values), and "snapshot didn't run" (day absent
+    // from snapshots entirely). The frontend uses this to explain the day-2
+    // bug class where only 1 row appears.
+    const allSnapshotDays = snapshots.rows.map(function(s) {
+      return typeof s.snapshot_date === 'string' ? s.snapshot_date : new Date(s.snapshot_date).toISOString().slice(0,10);
+    });
+    const daysWithCampaign = [];
+    snapshots.rows.forEach(function(snap) {
+      const c = (snap.campaigns||[]).find(function(x){ return String(x.campaignId) === String(campaignId); });
+      // r7a fix: include EVERY day the campaign existed in the snapshot, not just days with activity.
+      // Previous filter `c.spend > 0 || c.sales > 0` hid days where the campaign was paused/zero-impression,
+      // making older tasks look like they had only 1 row of data when in fact 5+ days had passed.
+      if (c) {
+        const d = typeof snap.snapshot_date === 'string' ? snap.snapshot_date : new Date(snap.snapshot_date).toLocaleDateString('en-GB', {timeZone:'Europe/London', year:'numeric', month:'2-digit', day:'2-digit'}).split('/').reverse().join('-');
+        daysWithCampaign.push(d);
+        breakdown.push({
+          date: d,
+          spend: parseFloat(c.spend||0).toFixed(2),
+          sales: parseFloat(c.sales||0).toFixed(2),
+          acos: c.acos||0,
+          impressions: c.impressions||0,
+          clicks: c.clicks||0,
+          // r7a addition: conversions / orders count for the day
+          conversions: parseInt(c.orders||c.purchases||c.conversions||0)
+        });
+      }
+    });
+    // Show newest first in the UI table (matches the original look)
+    breakdown.reverse();
+    // r21: build a coverage note so the UI can explain "1 row" vs "campaign young"
+    const missingDays = allSnapshotDays.filter(function(d){ return daysWithCampaign.indexOf(d) === -1; });
+    let note = null;
+    if (breakdown.length === 0) {
+      note = 'No daily data found — campaign may not be in any snapshot yet.';
+    } else if (allSnapshotDays.length > 0 && breakdown.length < allSnapshotDays.length) {
+      // Campaign appeared in some snapshots but not others.
+      // Most common case: campaign was created recently — earlier snapshots predate it.
+      const earliestWith = daysWithCampaign.sort()[0];
+      note = 'Campaign first appears in snapshot on ' + earliestWith +
+             '. Earlier days (' + missingDays.length + ') predate the campaign or had a snapshot run that did not include it.';
+    }
+    res.json({
+      breakdown: breakdown,
+      coverage: {
+        snapshot_days_total: allSnapshotDays.length,
+        days_campaign_present: daysWithCampaign.length,
+        days_campaign_missing: missingDays.length,
+        missing_dates: missingDays
+      },
+      note: note
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/campaign-analysis/:campaignId', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'No API key' });
+  try {
+    const campaignId = req.params.campaignId;
+    // r26d: cache control. Three modes:
+    //   ?cached_only=1   → return cached row if any, else null. Never calls AI.
+    //   ?model=opus      → always run Opus fresh, overwrite cache. Skip Haiku.
+    //   (no params)      → if cache exists, return it. Else run Haiku, save, return.
+    const cachedOnly = String(req.query.cached_only || '') === '1';
+    const forceOpus = String(req.query.model || '').toLowerCase() === 'opus';
+
+    // r26e: Opus is restricted to owner+manager (matches the rule on Amazon
+    // listing critique and Google landing-page critique). Agents can run Haiku
+    // unlimited; Opus requires manager privilege for cost control.
+    if (forceOpus) {
+      const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+      const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+      const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+      if (!isPrivileged) {
+        return res.status(403).json({ error: 'Opus (deeper analysis) is restricted to managers and owner. Use Haiku instead.' });
+      }
+    }
+
+    // Cache lookup
+    let cachedRow = null;
+    try {
+      const cacheRes = await db.query(
+        "SELECT model_used, analysis_text, total_spend, total_sales, acos_7d, days_no_revenue, days_no_activity, generated_at " +
+        "FROM campaign_ai_analysis WHERE campaign_id = $1",
+        [String(campaignId)]
+      );
+      if (cacheRes.rows.length) cachedRow = cacheRes.rows[0];
+    } catch(e) { console.error('[r26d cache lookup] ' + e.message); }
+
+    // Mode 1: cached-only
+    if (cachedOnly) {
+      if (cachedRow) {
+        return res.json({
+          analysis: cachedRow.analysis_text,
+          modelUsed: cachedRow.model_used,
+          totalSpend: parseFloat(cachedRow.total_spend || 0),
+          totalSales: parseFloat(cachedRow.total_sales || 0),
+          acos7d: cachedRow.acos_7d != null ? parseFloat(cachedRow.acos_7d) : null,
+          daysNoRevenue: cachedRow.days_no_revenue,
+          daysNoActivity: cachedRow.days_no_activity,
+          cached: true,
+          generatedAt: cachedRow.generated_at
+        });
+      }
+      return res.json({ analysis: null, cached: false });
+    }
+
+    // Mode 2: default (no model param) — return cache if available, never re-run unless explicitly forced
+    if (!forceOpus && cachedRow) {
+      return res.json({
+        analysis: cachedRow.analysis_text,
+        modelUsed: cachedRow.model_used,
+        totalSpend: parseFloat(cachedRow.total_spend || 0),
+        totalSales: parseFloat(cachedRow.total_sales || 0),
+        acos7d: cachedRow.acos_7d != null ? parseFloat(cachedRow.acos_7d) : null,
+        daysNoRevenue: cachedRow.days_no_revenue,
+        daysNoActivity: cachedRow.days_no_activity,
+        cached: true,
+        generatedAt: cachedRow.generated_at
+      });
+    }
+
+    // Mode 3: cache miss (or forceOpus) — run AI fresh
+    const snapshots = await db.query("SELECT TO_CHAR(snapshot_date, 'YYYY-MM-DD') as snapshot_date, campaigns FROM daily_snapshots WHERE snapshot_date >= CURRENT_DATE - INTERVAL '14 days' ORDER BY snapshot_date DESC LIMIT 14");
+    let history = [];
+    let liveMeta = null;
+    snapshots.rows.forEach(function(snap) {
+      const c = (snap.campaigns||[]).find(function(x){ return String(x.campaignId) === String(campaignId); });
+      if (c) {
+        if (!liveMeta) liveMeta = { name: c.name, agent: c.agent || '', portfolio: c.portfolio || '', targetingType: c.targetingType || '', dailyBudget: c.dailyBudget || 0 };
+        history.push({ date: snap.snapshot_date, spend: parseFloat(c.spend||0), sales: parseFloat(c.sales||0), acos: parseFloat(c.acos||0), impressions: parseInt(c.impressions||0), clicks: parseInt(c.clicks||0) });
+      }
+    });
+    if (!history.length) return res.json({ analysis: 'No historical data found for this campaign.' });
+
+    const totalSpend = history.reduce(function(s,d){ return s+parseFloat(d.spend||0); }, 0);
+    const totalSales = history.reduce(function(s,d){ return s+parseFloat(d.sales||0); }, 0);
+    const acos7d = totalSales > 0 ? (100 * totalSpend / totalSales) : null;
+    const daysNoRevenue = history.filter(function(d){ return d.sales === 0 && d.spend > 0; }).length;
+    const daysNoActivity = history.filter(function(d){ return d.impressions === 0; }).length;
+    const totalClicks = history.reduce(function(s,d){ return s + d.clicks; }, 0);
+    const totalImpressions = history.reduce(function(s,d){ return s + d.impressions; }, 0);
+    const ctr = totalImpressions > 0 ? (100 * totalClicks / totalImpressions) : 0;
+
+    // Live (today) numbers if available — pulled from in-memory state
+    const liveToday = (state.campaigns || []).find(function(c){ return String(c.campaignId) === String(campaignId); });
+
+    // Search-term level data for THIS campaign — wasted vs converting
+    let waste = [], converting = [];
+    try {
+      const ks = (typeof keywordState !== 'undefined') ? keywordState : null;
+      if (ks && Array.isArray(ks.data)) {
+        const rel = ks.data.filter(function(r){ return r.campaignName && (liveMeta && liveMeta.name) && r.campaignName === liveMeta.name; });
+        waste = rel.filter(function(r){ return parseFloat(r.cost||0) > 1 && parseInt(r.purchases14d||0) === 0; })
+                   .sort(function(a,b){ return parseFloat(b.cost||0) - parseFloat(a.cost||0); }).slice(0, 8);
+        converting = rel.filter(function(r){ return parseInt(r.purchases14d||0) > 0; })
+                        .sort(function(a,b){ return parseFloat(b.sales14d||0) - parseFloat(a.sales14d||0); }).slice(0, 6);
+      }
+    } catch(e) {}
+
+    const dismissed = await db.query('SELECT search_term, reason FROM keyword_dismissals WHERE campaign ILIKE $1 LIMIT 30', ['%' + campaignId + '%']);
+    const feedbackSection = await buildFeedbackPromptSection('amazon_campaign', campaignId);
+
+    // ── r26: rebuilt Amazon-specific prompt. Forces evidence; bans generic advice ──
+    const lines = [];
+    lines.push('You are an Amazon PPC expert analysing ONE campaign for FK Sports UK (sports + fitness equipment seller, Amazon UK marketplace).');
+    lines.push('');
+    lines.push('═══ CAMPAIGN ═══');
+    lines.push('Name: ' + (liveMeta ? liveMeta.name : '(unknown)'));
+    lines.push('Targeting: ' + (liveMeta && liveMeta.targetingType ? liveMeta.targetingType.toUpperCase() : 'unknown'));
+    lines.push('Owner agent: ' + (liveMeta && liveMeta.agent ? liveMeta.agent : 'unassigned'));
+    lines.push('Portfolio: ' + (liveMeta && liveMeta.portfolio ? liveMeta.portfolio : '—'));
+    lines.push('Daily budget: £' + (liveMeta && liveMeta.dailyBudget ? parseFloat(liveMeta.dailyBudget).toFixed(2) : '?'));
+    lines.push('');
+    lines.push('═══ TODAY (live) ═══');
+    if (liveToday) {
+      lines.push('Spend: £' + parseFloat(liveToday.spend || 0).toFixed(2) + ' / £' + parseFloat(liveToday.dailyBudget || 0).toFixed(2));
+      lines.push('Sales: £' + parseFloat(liveToday.sales || 0).toFixed(2));
+      lines.push('Today ACOS: ' + parseFloat(liveToday.acos || 0).toFixed(1) + '%');
+      lines.push('Budget used: ' + parseFloat(liveToday.budgetPct || 0).toFixed(0) + '%');
+      lines.push('Out of budget: ' + (liveToday.budgetRemaining <= 0.01 && liveToday.dailyBudget > 0 ? 'YES' : 'no'));
+    } else {
+      lines.push('(no live data — campaign not in current sync)');
+    }
+    lines.push('');
+    lines.push('═══ LAST 14 DAYS ═══');
+    lines.push('Total spend: £' + totalSpend.toFixed(2));
+    lines.push('Total ad-attributed sales: £' + totalSales.toFixed(2));
+    lines.push('14d ACOS: ' + (acos7d != null ? acos7d.toFixed(1) + '%' : 'N/A (no sales)'));
+    lines.push('14d CTR: ' + ctr.toFixed(2) + '%');
+    lines.push('Days with spend & zero sales: ' + daysNoRevenue + ' / ' + history.length);
+    lines.push('Days with zero impressions: ' + daysNoActivity + ' / ' + history.length);
+    lines.push('');
+    lines.push('Daily breakdown (newest first):');
+    history.slice(0, 7).forEach(function(d){
+      lines.push('  ' + d.date + ': £' + d.spend.toFixed(2) + ' spend / £' + d.sales.toFixed(2) + ' sales / ACOS ' + d.acos.toFixed(1) + '% / ' + d.impressions + ' impr / ' + d.clicks + ' clicks');
+    });
+    lines.push('');
+
+    if (waste.length > 0) {
+      lines.push('═══ WASTED SEARCH TERMS (this campaign, last 7 days, zero conversions) ═══');
+      waste.forEach(function(w){
+        lines.push('  "' + w.searchTerm + '" → £' + parseFloat(w.cost||0).toFixed(2) + ', ' + (w.clicks||0) + ' clicks, 0 purchases (' + (w.matchType||'') + ')');
+      });
+      lines.push('');
+    }
+    if (converting.length > 0) {
+      lines.push('═══ CONVERTING SEARCH TERMS (this campaign, last 7 days) ═══');
+      converting.forEach(function(c){
+        lines.push('  "' + c.searchTerm + '" → ' + (c.purchases14d||0) + ' purchases, £' + parseFloat(c.sales14d||0).toFixed(2) + ' sales (' + (c.matchType||'') + ' match)');
+      });
+      lines.push('');
+    }
+    if (dismissed.rows.length > 0) {
+      lines.push('═══ ALREADY DISMISSED / ACTIONED (do NOT recommend these) ═══');
+      dismissed.rows.slice(0, 15).forEach(function(d){
+        lines.push('  "' + d.search_term + '" — ' + (d.reason || 'previously actioned'));
+      });
+      lines.push('');
+    }
+    if (feedbackSection) {
+      lines.push(feedbackSection);
+      lines.push('');
+    }
+
+    lines.push('═══ TASK ═══');
+    lines.push('Answer in this exact format. Be specific. Quote real numbers from above.');
+    lines.push('');
+    lines.push('1. ROOT CAUSE (one sentence): What is the single biggest reason this campaign is in trouble (or doing well)? Name a specific number or term.');
+    lines.push('');
+    lines.push('2. RECOMMENDED ACTION (one sentence + a £ or term): Tell the agent the ONE thing to do. Be concrete.');
+    lines.push('   - For wasted-spend campaigns: name 2-3 search terms to negate (from the wasted list above).');
+    lines.push('   - For high-ACOS auto campaigns: recommend bid reduction by % AND say which terms to negate.');
+    lines.push('   - For high-ACOS manual campaigns: recommend bid changes on specific keywords or pause.');
+    lines.push('   - For low-spend / no-activity campaigns: bid is too low, raise by 25-50% or pause.');
+    lines.push('   - For scaling candidates: increase daily budget by £X (suggest a specific number based on current daily budget).');
+    lines.push('');
+    lines.push('3. CONTINUE OR PAUSE: Continue / Continue with changes / Pause. One word + 1 sentence reason.');
+    lines.push('');
+    lines.push('═══ RULES ═══');
+    lines.push('- Cite real numbers from the data above. NEVER invent.');
+    lines.push('- For an AUTO campaign with high ACOS, the fix is almost always negative keywords (from the wasted list). Recommend specific terms by name.');
+    lines.push('- For a MANUAL campaign with high ACOS, the fix is bid reduction or pausing specific keywords.');
+    lines.push('- DO NOT recommend things already in the dismissed list.');
+    lines.push('- DO NOT use generic phrases: "monitor closely", "optimise targeting", "review performance", "consider adjusting", "improve conversion", "review keywords".');
+    lines.push('- DO NOT recommend listing edits, A+ content, or anything outside the campaign itself.');
+    lines.push('- DO NOT recommend re-running the AI or contacting Amazon support.');
+    lines.push('- If agent feedback says "we already tried X", recommend something different.');
+    lines.push('- If the data is genuinely thin (< 3 days, < £5 spend), say so. Do not invent diagnoses.');
+    lines.push('- British English. £ for money. Direct tone, no fluff. 60-100 words total.');
+
+    const prompt = lines.join('\n');
+    // r26c: forceOpus already determined at top of handler. Pass it through.
+    const ai = await aiHaikuThenOpus(prompt, { max_tokens: 400, min_useful_chars: 80, force_opus: forceOpus });
+
+    // r26d: persist to cache (upsert). Re-runs replace the prior row.
+    try {
+      await db.query(
+        "INSERT INTO campaign_ai_analysis (campaign_id, model_used, analysis_text, total_spend, total_sales, acos_7d, days_no_revenue, days_no_activity, generated_at) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) " +
+        "ON CONFLICT (campaign_id) DO UPDATE SET model_used = EXCLUDED.model_used, analysis_text = EXCLUDED.analysis_text, total_spend = EXCLUDED.total_spend, total_sales = EXCLUDED.total_sales, acos_7d = EXCLUDED.acos_7d, days_no_revenue = EXCLUDED.days_no_revenue, days_no_activity = EXCLUDED.days_no_activity, generated_at = NOW()",
+        [String(campaignId), ai.modelUsed, ai.text, totalSpend.toFixed(2), totalSales.toFixed(2), acos7d != null ? acos7d.toFixed(2) : null, daysNoRevenue, daysNoActivity]
+      );
+    } catch(e) { console.error('[r26d cache save] ' + e.message); }
+
+    res.json({ analysis: ai.text, modelUsed: ai.modelUsed, totalSpend, totalSales, acos7d: acos7d, daysNoRevenue, daysNoActivity, cached: false });
+  } catch(e) { console.error('Campaign analysis error: ' + e.message); res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/stuck-campaigns', async function(req, res) {
+  if (!db) return res.json({ noActivity: [], noRevenue: [] });
+  try {
+    const result = await db.query('SELECT snapshot_date, campaigns FROM daily_snapshots ORDER BY snapshot_date DESC LIMIT 7');
+    const snapshots = result.rows;
+    if (snapshots.length < 3) return res.json({ noActivity: [], noRevenue: [], days: snapshots.length });
+    // r23: pre-fetch active snoozes so we can hide snoozed campaigns from the list.
+    // Auto-cleanup expired ones on every read.
+    const snoozedSet = new Set();
+    try {
+      await db.query("DELETE FROM amazon_campaign_snooze WHERE snoozed_until <= NOW()");
+      const sRes = await db.query("SELECT campaign_id FROM amazon_campaign_snooze WHERE snoozed_until > NOW()");
+      sRes.rows.forEach(function(r){ snoozedSet.add(String(r.campaign_id)); });
+    } catch(e) {
+      if (!/does not exist/.test(e.message)) console.error('[r23] campaign-snooze lookup: ' + e.message);
+    }
+    const campHistory = {};
+    snapshots.forEach(function(snap) {
+      const camps = snap.campaigns || [];
+      const date = snap.snapshot_date;
+      camps.forEach(function(c) {
+        if (snoozedSet.has(String(c.campaignId))) return;  // r23: skip snoozed
+        if (!campHistory[c.campaignId]) campHistory[c.campaignId] = { name: c.name, portfolio: c.portfolio||'', agent: c.agent||'', targetingType: c.targetingType||'', days: [] };
+        campHistory[c.campaignId].days.push({ date, impressions: c.impressions||0, spend: c.spend||0, sales: c.sales||0, acos: c.acos||0, dailyBudget: c.dailyBudget||0 });
+      });
+    });
+    const noActivity = [], noRevenue = [];
+    Object.values(campHistory).forEach(function(camp) {
+      const days = camp.days;
+      if (days.length < 3) return;
+      const last3 = days.slice(0, 3);
+      if (last3.every(function(d){ return d.impressions === 0; })) { const totalSpend = last3.reduce(function(s,d){ return s+d.spend; }, 0); noActivity.push(Object.assign({}, camp, { daysNoActivity: last3.length, totalSpend: totalSpend.toFixed(2), lastBudget: last3[0].dailyBudget })); }
+      const last7 = days.slice(0, Math.min(7, days.length));
+      const spendDays = last7.filter(function(d){ return d.spend > 0; });
+      if (spendDays.length >= 3 && last7.every(function(d){ return d.spend === 0 || d.sales === 0; })) { const totalSpend = last7.reduce(function(s,d){ return s+d.spend; }, 0); const avgAcos = spendDays.length > 0 ? spendDays.reduce(function(s,d){ return s+d.acos; }, 0) / spendDays.length : 0; noRevenue.push(Object.assign({}, camp, { daysNoRevenue: spendDays.length, totalWastedSpend: totalSpend.toFixed(2), avgAcos: avgAcos.toFixed(1) })); }
+    });
+    noActivity.sort(function(a,b){ return b.daysNoActivity - a.daysNoActivity; });
+    noRevenue.sort(function(a,b){ return parseFloat(b.totalWastedSpend) - parseFloat(a.totalWastedSpend); });
+    res.json({ noActivity, noRevenue, daysOfData: snapshots.length });
+  } catch(e) { console.error('Stuck campaigns error: ' + e.message); res.json({ noActivity: [], noRevenue: [], error: e.message }); }
+});
+
+// ─── r26: Action Centre — unified P1/P2/P3 view ──────────────────────────────
+// Replaces the old /api/ai/analyse + /api/stuck-campaigns + All Campaigns badges.
+// Returns categorised, scored items in three buckets so the UI can show a single
+// list of "what to do today" instead of forcing the agent to bounce between pages.
+//
+// Scoring rules (P1 = fix now, P2 = look at, P3 = scale, in priority order):
+//   P1 — out_of_budget (if dailyBudget > 0 and remaining ≤ £0.01)
+//   P1 — no_revenue (3+ days spend with no sales in last 7d)
+//   P1 — wasted_spend (today: spend > £5 AND sales = 0)
+//   P1 — chronic_acos (7d ACOS > 40% on £20+ spend)
+//   P1 — keyword_waste — search term: 7d spend > £10 with 0 conversions, joined to its campaign
+//   P1 — no_activity (3+ days zero impressions)
+//   P2 — high_acos (today ACOS 25-40% with spend > £5, but not chronic)
+//   P2 — budget_low (≥80% used today, not exhausted)
+//   P3 — scale (low ACOS < 15% on £20+ 7d spend, headroom in budget)
+//   P3 — keyword_convert — converting search term not yet exact-match (purchases > 0, not exact)
+//
+// Snoozed items are excluded. Each row returns enough data for the front-end
+// to render the row + actions without another fetch.
+let _acCacheMs = 0;
+let _acCachePayload = null;
+const AC_CACHE_TTL = 5 * 60 * 1000;  // 5 min — cheap to recompute, no AI in default path
+
+app.get('/api/amazon/action-centre', async function(req, res) {
+  if (!db) return res.json({ fixnow: [], lookat: [], scale: [] });
+  const force = req.query.force === '1' || req.query.force === 'true';
+  const wantInsight = req.query.withInsight === 'true' || req.query.withInsight === '1';
+  // r33d: payload cache reused on default load, but insight is handled separately
+  // (rebuilt below only when wantInsight). When serving from cache without
+  // insight requested, strip any cached insight so we don't return stale text.
+  if (!force && _acCachePayload && (Date.now() - _acCacheMs) < AC_CACHE_TTL) {
+    if (wantInsight) {
+      // wantInsight=true means full rebuild so the insight cache key reflects
+      // current fixnow state. Don't serve cached payload.
+    } else {
+      return res.json(Object.assign({}, _acCachePayload, { strategicInsight: '' }));
+    }
+  }
+
+  try {
+    // ── 1. Snoozed campaigns: skip these entirely ──────────────────────────
+    const snoozedSet = new Set();
+    try {
+      await db.query("DELETE FROM amazon_campaign_snooze WHERE snoozed_until <= NOW()");
+      const sRes = await db.query("SELECT campaign_id FROM amazon_campaign_snooze WHERE snoozed_until > NOW()");
+      sRes.rows.forEach(function(r){ snoozedSet.add(String(r.campaign_id)); });
+    } catch(e) {}
+
+    // ── 2. Live campaign list — from in-memory state (already enriched with 7d/30d
+    //      data and dailySeries7d by syncCampaigns; see r30 changes there) ─────
+    const liveCampaigns = (state.campaigns || []).filter(function(c){
+      return !snoozedSet.has(String(c.campaignId));
+    });
+
+    // ── 3. Build P1/P2/P3 items ─────────────────────────────────────────────
+    const fixnow = [], lookat = [], scale = [];
+    let totalWasted = 0;
+
+    // r30: 7-day data now lives directly on each campaign (set in syncCampaigns).
+    // No more summing daily_snapshots — that was storing trailing-14d-attribution values
+    // which couldn't be safely summed. New data comes from Amazon Ads API report
+    // streams directly (summary7d + daily7d) all using consistent attribution.
+    liveCampaigns.forEach(function(c) {
+      const id = String(c.campaignId);
+      const days = Array.isArray(c.dailySeries7d) ? c.dailySeries7d : [];
+      const spend7 = parseFloat(c.spend7d || 0);
+      const sales7 = parseFloat(c.sales7d || 0);
+      const acos7d = sales7 > 0 ? +((100 * spend7 / sales7).toFixed(1)) : null;
+      const clicks7 = parseInt(c.clicks7d || 0);
+      const impressions7 = parseInt(c.impressions7d || 0);
+      const ctr7 = parseFloat(c.ctr7d || 0);
+      const conv7 = parseInt(c.conversions7d || 0);
+      const dailyBudget = parseFloat(c.dailyBudget || 0);
+      // r30: budgetRemaining and budgetPct are null when today's daily report
+      // hasn't arrived yet from Amazon. Don't fire out-of-budget / budget-low rules
+      // on stale yesterday data. budgetKnown = false means skip those two rules.
+      const budgetKnown = (c.budgetRemaining != null);
+      const budgetPct = budgetKnown ? parseFloat(c.budgetPct || 0) : 0;
+      const budgetRemaining = budgetKnown ? parseFloat(c.budgetRemaining || 0) : 0;
+      const todaySpend = parseFloat(c.todaySpend || 0);
+
+      // Check rules in priority order; assign FIRST match only (don't double-list)
+      let placed = false;
+      // r33c: per-campaign margin leak — same 16% breakeven formula as the
+      // headline marginLeak7d aggregate. Exposed on every row (not just P1
+      // chronic_acos pushes) so the frontend can filter/sort the All tab by it
+      // when the Margin leak tile is clicked.
+      let rowMarginLeak = 0;
+      if (spend7 > 0) {
+        if (sales7 === 0) {
+          rowMarginLeak = spend7;
+        } else {
+          const profitable = sales7 * 0.16;
+          if (spend7 > profitable) rowMarginLeak = spend7 - profitable;
+        }
+      }
+      const baseRow = {
+        campaignId: id,
+        campaignName: c.name,
+        targetId: id,
+        title: c.name,
+        spend7d: +spend7.toFixed(2),
+        sales7d: +sales7.toFixed(2),
+        acos7d: acos7d,
+        agent: c.agent || '',
+        targetingType: c.targetingType || '',
+        marginLeak: +rowMarginLeak.toFixed(2)
+      };
+      const viewBtn = { label: 'View', handler: 'acViewCampaign(\'' + id + '\')', style: 'ghost' };
+      const snoozeBtn = { label: 'Snooze 7d', handler: 'acSnoozeCampaign(\'' + id + '\', 7)', style: 'ghost' };
+
+      // P1 — out of budget today (only if today's daily data has arrived)
+      if (!placed && budgetKnown && dailyBudget > 0 && budgetRemaining <= 0.01) {
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'out_of_budget', severity: 'p1',
+          problem: 'Out of budget. Spent £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' today and stopped serving.',
+          evidence: '7d: spend £' + spend7.toFixed(2) + ' · sales £' + sales7.toFixed(2) + ' · ACOS ' + (acos7d != null ? acos7d.toFixed(1) + '%' : 'no sales'),
+          actions: [
+            { label: 'Add £20', handler: 'acAddBudget(\'' + id + '\', 20)', style: 'primary' },
+            { label: 'Add £50', handler: 'acAddBudget(\'' + id + '\', 50)', style: 'ghost' },
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P1 — chronic high ACOS (7-day, sustained, real spend)
+      // r32: 16% is Bobby's breakeven. Anything >25% loses money on every sale → P1.
+      // Spend floor lowered to £10 so we catch smaller campaigns burning margin.
+      if (!placed && acos7d != null && acos7d > 25 && spend7 > 10) {
+        // Margin leak = spend above what would have been profitable at 16% target ACOS
+        const profitableSpend = sales7 * 0.16;
+        const marginLeak = Math.max(0, spend7 - profitableSpend);
+        totalWasted += marginLeak;
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'chronic_acos', severity: 'p1',
+          problem: 'ACOS at ' + acos7d.toFixed(0) + '% over 7 days on £' + spend7.toFixed(0) + ' spend. Losing money on every sale (breakeven 16%).',
+          evidence: '7d: spend £' + spend7.toFixed(2) + ' · sales £' + sales7.toFixed(2) + ' · ACOS ' + acos7d.toFixed(1) + '% · margin leak £' + marginLeak.toFixed(2),
+          actions: [
+            { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+            snoozeBtn,
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P1 — no revenue over 7d with real spend
+      // r30: replaces both old "wasted today" and "no_revenue 3 days" rules.
+      // If 7d spend ≥ £15 and sales = £0, that's a problem — exact same shape as Google's rule.
+      if (!placed && spend7 >= 15 && sales7 === 0) {
+        totalWasted += spend7;
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'no_revenue', severity: 'p1',
+          problem: 'Spent £' + spend7.toFixed(2) + ' over 7 days with £0 sales (' + clicks7 + ' clicks, ' + conv7 + ' conv).',
+          evidence: '7d: £' + spend7.toFixed(2) + ' spend · 0 sales · ' + clicks7 + ' clicks · ' + impressions7 + ' impressions',
+          actions: [
+            { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+            snoozeBtn,
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P1 — many clicks no sales (landing page / product problem)
+      if (!placed && sales7 === 0 && clicks7 >= 50) {
+        fixnow.push(Object.assign({}, baseRow, {
+          kind: 'clicks_no_sales', severity: 'p1',
+          problem: clicks7 + ' clicks but £0 sales in 7 days. Page or product is not closing.',
+          evidence: '7d: ' + clicks7 + ' clicks · £' + spend7.toFixed(2) + ' spend · CTR ' + ctr7.toFixed(2) + '%',
+          actions: [
+            viewBtn,
+            snoozeBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P1 — no activity 3+ consecutive days (zero impressions)
+      if (!placed && days.length >= 3) {
+        const last3 = days.slice(-3);
+        if (last3.every(function(d){ return (d.impressions || 0) === 0; })) {
+          fixnow.push(Object.assign({}, baseRow, {
+            kind: 'no_activity', severity: 'p1',
+            problem: 'Zero impressions for 3+ days. Either bids are too low to show, or targeting is exhausted.',
+            evidence: 'Last 3 days: 0 impressions on £' + dailyBudget.toFixed(0) + ' daily budget',
+            actions: [
+              { label: 'Pause', handler: 'acViewCampaign(\'' + id + '\')', style: 'primary' },
+              snoozeBtn,
+              viewBtn
+            ]
+          }));
+          placed = true;
+        }
+      }
+
+      // P2 — high ACOS, above 16% breakeven but not yet chronic (>25%)
+      // r32: 16-25% = eroding margin but still some profit. Worth flagging early.
+      if (!placed && acos7d != null && acos7d > 16 && acos7d <= 25 && spend7 > 10) {
+        lookat.push(Object.assign({}, baseRow, {
+          kind: 'high_acos', severity: 'p2',
+          problem: 'ACOS ' + acos7d.toFixed(1) + '% over 7 days on £' + spend7.toFixed(2) + ' spend. Above 16% breakeven.',
+          evidence: '7d: ACOS ' + acos7d.toFixed(1) + '% · £' + spend7.toFixed(2) + ' spend · £' + sales7.toFixed(2) + ' sales',
+          actions: [ snoozeBtn, viewBtn ]
+        }));
+        placed = true;
+      }
+
+      // P2 — budget low (today's spend approaching cap) — only when today's data is in
+      if (!placed && budgetKnown && budgetPct >= 80 && budgetPct < 100 && dailyBudget > 0) {
+        lookat.push(Object.assign({}, baseRow, {
+          kind: 'budget_low', severity: 'p2',
+          problem: 'Used ' + budgetPct.toFixed(0) + '% of today\'s £' + dailyBudget.toFixed(2) + ' budget. Likely to exhaust before evening.',
+          evidence: 'Today: £' + todaySpend.toFixed(2) + ' / £' + dailyBudget.toFixed(2) + ' · 7d ACOS ' + (acos7d != null ? acos7d.toFixed(1) + '%' : '—'),
+          actions: [
+            { label: 'Add £10', handler: 'acAddBudget(\'' + id + '\', 10)', style: 'primary' },
+            { label: 'Add £25', handler: 'acAddBudget(\'' + id + '\', 25)', style: 'ghost' },
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+
+      // P3 — scale candidate (well below 16% breakeven, real spend, budget headroom)
+      // r32: ≤13% gives buffer below breakeven so scaling stays profitable
+      if (!placed && acos7d != null && acos7d <= 13 && spend7 > 20 && budgetPct < 90) {
+        scale.push(Object.assign({}, baseRow, {
+          kind: 'scale', severity: 'p3',
+          problem: 'Healthy ACOS ' + acos7d.toFixed(1) + '% on £' + spend7.toFixed(0) + ' over 7 days. Room to grow.',
+          evidence: '7d: £' + spend7.toFixed(2) + ' spend · £' + sales7.toFixed(2) + ' sales · today ' + budgetPct.toFixed(0) + '% budget used',
+          actions: [
+            { label: '+25% budget', handler: 'acAddBudget(\'' + id + '\', ' + Math.max(5, Math.round(dailyBudget * 0.25)) + ')', style: 'primary' },
+            viewBtn
+          ]
+        }));
+        placed = true;
+      }
+    });
+
+    // ── 5. Keyword Intelligence rows: wasted terms (P1) and converting non-exact (P3) ──
+    let keywordWasteCount = 0;
+    try {
+      // Wasted terms — high spend, zero conversions, last 7d
+      // We pull from the in-memory keywordState which holds the most recent search-term report.
+      const ks = (typeof keywordState !== 'undefined') ? keywordState : null;
+      if (ks && Array.isArray(ks.data)) {
+        const top = ks.data
+          .filter(function(r){ return parseFloat(r.cost || 0) > 10 && parseInt(r.purchases14d || 0) === 0; })
+          .sort(function(a,b){ return parseFloat(b.cost || 0) - parseFloat(a.cost || 0); })
+          .slice(0, 12);
+        top.forEach(function(t) {
+          const term = t.searchTerm || '';
+          const camp = t.campaignName || '';
+          const safeTerm = term.replace(/'/g, "\\'");
+          const safeCamp = camp.replace(/'/g, "\\'");
+          fixnow.push({
+            kind: 'keyword_waste', severity: 'p1',
+            title: term,
+            campaignName: camp,
+            problem: 'Search term "' + term + '" has cost £' + parseFloat(t.cost || 0).toFixed(2) + ' over 7 days with zero purchases. Add as negative.',
+            evidence: 'Term: "' + term + '" · spend £' + parseFloat(t.cost||0).toFixed(2) + ' · ' + (t.clicks||0) + ' clicks · 0 purchases · in: ' + camp,
+            actions: [
+              { label: 'Add as negative', handler: "acAddNegative('" + safeTerm + "','" + safeCamp + "')", style: 'primary' },
+              { label: 'Dismiss', handler: "acAddNegative('" + safeTerm + "','" + safeCamp + "')", style: 'ghost' }
+            ]
+          });
+          totalWasted += parseFloat(t.cost || 0);
+          keywordWasteCount++;
+        });
+
+        // Converting terms not exact-match — P3
+        const conv = ks.data
+          .filter(function(r){ return parseInt(r.purchases14d || 0) > 0 && (r.matchType || '').toLowerCase() !== 'exact'; })
+          .sort(function(a,b){ return parseFloat(b.sales14d || 0) - parseFloat(a.sales14d || 0); })
+          .slice(0, 8);
+        conv.forEach(function(t) {
+          const term = t.searchTerm || '';
+          const camp = t.campaignName || '';
+          const safeTerm = term.replace(/'/g, "\\'");
+          const safeCamp = camp.replace(/'/g, "\\'");
+          scale.push({
+            kind: 'keyword_convert', severity: 'p3',
+            title: term,
+            campaignName: camp,
+            problem: 'Term "' + term + '" produced ' + (t.purchases14d || 0) + ' purchases on ' + (t.matchType || 'broad') + ' match. Convert to exact for better control.',
+            evidence: 'Term: "' + term + '" · ' + (t.purchases14d || 0) + ' purchases · £' + parseFloat(t.sales14d||0).toFixed(2) + ' sales · ' + (t.matchType || 'broad') + ' match · in: ' + camp,
+            actions: [
+              { label: 'Add as exact', handler: "acAddExact('" + safeTerm + "','" + safeCamp + "')", style: 'primary' }
+            ]
+          });
+        });
+      }
+    } catch(e) { console.error('[r26 action-centre] keyword pull error: ' + e.message); }
+
+    // ── 6. Sort each bucket by score (a crude heuristic — wasted £ then 7d spend) ──
+    function sortByImpact(a, b) {
+      const ax = (a.spend7d || 0) + (a.kind === 'out_of_budget' ? 1000 : 0);
+      const bx = (b.spend7d || 0) + (b.kind === 'out_of_budget' ? 1000 : 0);
+      return bx - ax;
+    }
+    fixnow.sort(sortByImpact);
+    lookat.sort(sortByImpact);
+    scale.sort(function(a, b){ return (b.spend7d || 0) - (a.spend7d || 0); });
+
+    // ── 7. Strategic insight — r33d: NOT auto-generated. Returns empty string
+    // unless query parameter ?withInsight=true. Agent clicks the "💡 Get pattern
+    // insight" button on the Fix Now tab which calls /api/action-centre?withInsight=true.
+    // 2-hour cache keyed by fix-now item signature. Saves £5+/day vs old auto-fire
+    // on every Action Centre payload build.
+    let strategicInsight = '';
+    const wantInsight = req.query.withInsight === 'true' || req.query.withInsight === '1';
+    const forceInsight = req.query.force === 'true' || req.query.force === '1';
+    try {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (apiKey && wantInsight && fixnow.length > 0) {
+        const cacheKey = 'ac_insight:' + fixnow.length + ':' + (fixnow.map(function(r){ return r.kind + r.campaignId; }).slice(0, 10).join('|'));
+        const cached = forceInsight ? null : aiCacheGet(cacheKey);
+        if (cached) {
+          strategicInsight = cached.value;
+          console.log('[r33d] action-centre insight served from cache (' + Math.round((Date.now() - cached.generatedAt) / 60000) + ' min old)');
+        } else {
+          const summary = {
+            totalCampaigns: liveCampaigns.length,
+            fixNowCount: fixnow.length,
+            totalWasted: totalWasted.toFixed(0),
+            topProblems: fixnow.slice(0, 5).map(function(r){ return r.kind + ': ' + r.title; })
+          };
+          const prompt = 'You are an Amazon PPC expert reviewing FK Sports UK (fitness equipment seller). ' +
+            'Account-level summary across last 7 days:\n' + JSON.stringify(summary, null, 2) + '\n\n' +
+            'In ONE sentence (max 25 words), describe the SINGLE biggest pattern across the account that the team should know about today. ' +
+            'Be specific — name a problem type, a campaign type (auto vs manual), or a £ figure. ' +
+            'No generic advice ("monitor your campaigns"). If nothing notable, say so plainly.';
+          const aiRes = await aiHaikuThenOpus(prompt, { max_tokens: 100, min_useful_chars: 30 });
+          strategicInsight = (aiRes.text || '').trim();
+          aiCacheSet(cacheKey, strategicInsight);
+          console.log('[r33d] action-centre insight generated fresh, cached 2h');
+        }
+      }
+    } catch(e) { console.error('[r33d action-centre] insight error: ' + e.message); }
+
+    // r32: for each row with a campaignId, look up if there's an open task in campaign_tasks
+    // for the same campaign + problem_type. Shows "Task #X · status · View" chip in UI.
+    // Only enrich rows that have campaignId (skip keyword-only rows).
+    async function enrichWithTasks(rows) {
+      for (const row of rows) {
+        if (!row.campaignId) continue;
+        try {
+          const tRes = await db.query(
+            "SELECT id, status FROM campaign_tasks " +
+            "WHERE campaign_id = $1 AND problem_type = $2 AND status IN ('open','in_progress','escalated') " +
+            "ORDER BY created_date DESC LIMIT 1",
+            [row.campaignId, row.kind]
+          );
+          if (tRes.rows.length > 0) {
+            row.linkedTask = { id: tRes.rows[0].id, status: tRes.rows[0].status };
+          }
+        } catch(e) {}
+      }
+    }
+    await enrichWithTasks(fixnow);
+    await enrichWithTasks(lookat);
+    await enrichWithTasks(scale);
+
+    // r32: compute both "Wasted £" definitions across ALL live campaigns (not just rule matches)
+    // Definition A: today spend > 0 AND today sales = £0 (literal wasted money — no sale)
+    // Definition C: spend7d above what would be profitable at 16% breakeven (margin leak)
+    let wastedToday = 0;       // Definition A
+    let wastedTodayCount = 0;
+    let marginLeak7d = 0;      // Definition C
+    let marginLeak7dCount = 0;
+    const BREAKEVEN_ACOS = 0.16;
+    liveCampaigns.forEach(function(c) {
+      const tSpend = parseFloat(c.todaySpend || 0);
+      const tSales = parseFloat(c.todaySales || 0);
+      const s7 = parseFloat(c.spend7d || 0);
+      const sa7 = parseFloat(c.sales7d || 0);
+      // Definition A: today spend with no sale
+      if (tSpend > 0 && tSales === 0) {
+        wastedToday += tSpend;
+        wastedTodayCount++;
+      }
+      // Definition C: margin leak above 16% breakeven
+      // Either zero sales (full spend wasted) or ACOS above 16%
+      if (s7 > 0) {
+        if (sa7 === 0) {
+          marginLeak7d += s7;
+          marginLeak7dCount++;
+        } else {
+          const profitableSpend = sa7 * BREAKEVEN_ACOS;
+          if (s7 > profitableSpend) {
+            marginLeak7d += s7 - profitableSpend;
+            marginLeak7dCount++;
+          }
+        }
+      }
+    });
+
+    const payload = {
+      fixnow: fixnow,
+      lookat: lookat,
+      scale: scale,
+      strategicInsight: strategicInsight,
+      // r32: legacy totalWasted (rule-match-driven) kept for back-compat
+      totalWasted: +totalWasted.toFixed(2),
+      // r32: new explicit fields — Definition A and C side by side
+      wastedToday: +wastedToday.toFixed(2),
+      wastedTodayCount: wastedTodayCount,
+      marginLeak7d: +marginLeak7d.toFixed(2),
+      marginLeak7dCount: marginLeak7dCount,
+      breakevenAcos: BREAKEVEN_ACOS * 100,
+      keywordWasteCount: keywordWasteCount,
+      generatedAt: new Date().toISOString()
+    };
+    _acCachePayload = payload;
+    _acCacheMs = Date.now();
+    res.json(payload);
+  } catch(e) {
+    console.error('[r26 action-centre] error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r26: campaign-snooze endpoint — used by Action Centre row buttons.
+// Manager+owner only (matches existing r23 snooze style).
+app.post('/api/amazon/campaign-snooze', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(role) !== -1 || dept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Manager+ only' });
+  const campaignId = String((req.body && req.body.campaignId) || '');
+  const days = Math.max(1, Math.min(30, parseInt((req.body && req.body.days) || 7)));
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  try {
+    const until = new Date(Date.now() + days * 86400000);
+    const actor = (req.user && req.user.name) || 'unknown';
+    await db.query(
+      "INSERT INTO amazon_campaign_snooze (campaign_id, snoozed_until, snoozed_by, snooze_reason, snooze_action) " +
+      "VALUES ($1, $2, $3, $4, 'snooze') " +
+      "ON CONFLICT (campaign_id) DO UPDATE SET snoozed_until=EXCLUDED.snoozed_until, snoozed_by=EXCLUDED.snoozed_by, snoozed_at=NOW()",
+      [campaignId, until, actor, 'Action Centre snooze ' + days + 'd']
+    );
+    // Bust the AC cache so the row disappears immediately
+    _acCachePayload = null;
+    res.json({ ok: true, snoozedUntil: until.toISOString() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/snapshots/:date', async function(req, res) {
+  const snap = await getDailySnapshot(req.params.date);
+  if (!snap) return res.status(404).json({ error: 'No snapshot for ' + req.params.date });
+  res.json({ date: snap.snapshot_date, metrics: snap.metrics, campaigns: snap.campaigns, exhaustionLog: snap.exhaustion_log, alerts: snap.alerts });
+});
+
+app.get('/api/settings', async function(req, res) {
+  try { if (!db) return res.json({ settings: null }); const result = await db.query('SELECT settings FROM app_settings WHERE id = 1'); res.json({ settings: result.rows[0]?.settings || {} }); } catch(e) { res.json({ settings: null, error: e.message }); }
+});
+
+app.post('/api/settings', async function(req, res) {
+  try {
+    const { settings } = req.body;
+    if (!settings) return res.status(400).json({ error: 'No settings provided' });
+    if (db) await db.query('UPDATE app_settings SET settings = $1, updated_at = NOW() WHERE id = 1', [JSON.stringify(settings)]);
+    if (settings.acosCritical) process.env.ACOS_CRITICAL_THRESHOLD = String(settings.acosCritical);
+    if (settings.acosWarning) process.env.ACOS_WARNING_THRESHOLD = String(settings.acosWarning);
+    if (settings.budgetLowPct) process.env.BUDGET_LOW_PERCENT = String(settings.budgetLowPct);
+    console.log('Settings updated: ' + JSON.stringify(settings));
+    res.json({ success: true });
+  } catch(e) { console.error('Settings save error: ' + e.message); res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/tasks', async function(req, res) {
+  if (!db) return res.json({ tasks: [] });
+  try {
+    // r33c: was hardcoded ('Aryan','Satyam'). Now dynamic from users table.
+    const eligibleAgents = await getActiveAmazonAgents();
+    const result = await db.query(
+      "SELECT * FROM campaign_tasks WHERE agent_name = ANY($1::text[]) ORDER BY score DESC, created_date DESC LIMIT 500",
+      [eligibleAgents]
+    );
+    // r21: bulk-fetch subtask counts for all tasks in one query — no N+1
+    const taskIds = result.rows.map(function(r){ return r.id; });
+    const subtaskCounts = {};
+    if (taskIds.length > 0) {
+      try {
+        const subRes = await db.query(
+          "SELECT task_id, status, COUNT(*)::int AS cnt FROM task_subtasks " +
+          "WHERE task_id = ANY($1::int[]) GROUP BY task_id, status",
+          [taskIds]
+        );
+        subRes.rows.forEach(function(row) {
+          if (!subtaskCounts[row.task_id]) subtaskCounts[row.task_id] = { open: 0, complete: 0, dismissed: 0, total: 0 };
+          subtaskCounts[row.task_id][row.status] = row.cnt;
+          subtaskCounts[row.task_id].total += row.cnt;
+        });
+      } catch(subErr) { console.error('[r21] subtask count fetch error: ' + subErr.message); }
+    }
+    // r35.9 F — dedupe badge. Group OPEN/IN-PROGRESS tasks by normalised
+    // display name within the same department. Any task in a group of 2+
+    // gets `dedupe_count` populated, plus the sibling task IDs. Frontend
+    // shows a 🔗 badge with "merge into this" / "this is duplicate of #X"
+    // option. After r35.5's consecutive-day fix, this should fire rarely.
+    const dedupeGroups = {};
+    result.rows.forEach(function(t) {
+      if (['open', 'in_progress'].indexOf(t.status) === -1) return;
+      const name = String(t.campaign_name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (!name) return;
+      const dept = String(t.department || '').toLowerCase();
+      const groupKey = dept + '::' + name;
+      if (!dedupeGroups[groupKey]) dedupeGroups[groupKey] = [];
+      dedupeGroups[groupKey].push(t.id);
+    });
+
+    // r7b: enrich each row with computed timeline fields so the frontend doesn't
+    // have to know about working days. working_days_open is the canonical age count;
+    // task_stage is recomputed live (the cron persists it but live computation is
+    // safer for tasks that haven't been reviewed by the cron yet).
+    const today = new Date();
+    const tasks = result.rows.map(function(t) {
+      const wdo = workingDaysBetween(t.created_date, today);
+      const liveStage = stageForWorkingDay(wdo);
+      const milestone = milestoneInfo(wdo);
+      // Created today AND no first_action AND it's now past 23:59 of creation day → not started warning.
+      // For now we treat any task with same-day created_date and no first_action as "not started"
+      // (display layer decides whether to show grace-period or warning styling).
+      const createdTodayLondon = workingDaysBetween(t.created_date, today) === 0 && toLondonDate(t.created_date).getTime() === toLondonDate(today).getTime();
+      const notStarted = !t.first_action_at && wdo >= 1; // no action on/before yesterday
+      // r22: Day-7 review pattern (mirrors Google flow). At wdo >= 7, agent
+      // must hit Carry on / Archive / Stop with note before task can move on.
+      // The Google day7_decision columns are reused for Amazon since they're
+      // on the same campaign_tasks table.
+      const atDay7 = wdo >= 7 && !t.day7_decision && t.status !== 'complete' && t.status !== 'archived' && t.status !== 'dismissed';
+      // r35.9 F — populate dedupe_count + sibling IDs for the badge.
+      // Only meaningful for open/in_progress tasks (closed tasks aren't in the
+      // group map either, so any match would be coincidental).
+      let dedupe_count = 1;
+      let dedupe_sibling_ids = [];
+      if (['open', 'in_progress'].indexOf(t.status) !== -1) {
+        const dedupeName = String(t.campaign_name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const dedupeDept = String(t.department || '').toLowerCase();
+        const dedupeKey = dedupeDept + '::' + dedupeName;
+        const group = dedupeGroups[dedupeKey] || [];
+        dedupe_sibling_ids = group.filter(function(id){ return id !== t.id; });
+        dedupe_count = dedupe_sibling_ids.length + 1;
+      }
+      return Object.assign({}, t, {
+        working_days_open: wdo,
+        task_stage: liveStage,
+        next_milestone: milestone.next,
+        next_milestone_label: milestone.label,
+        not_started_warning: notStarted,
+        created_today: createdTodayLondon,
+        subtask_counts: subtaskCounts[t.id] || { open: 0, complete: 0, dismissed: 0, total: 0 },
+        at_day7: atDay7,
+        dedupe_count: dedupe_count,
+        dedupe_sibling_ids: dedupe_sibling_ids
+      });
+    });
+    res.json({ tasks });
+  } catch(e) { res.json({ tasks: [], error: e.message }); }
+});
+
+
+// r35.9 F — Option 2 task merge: "close one, point to other".
+// Agent looking at duplicate tasks (dedupe_count > 1) picks the real one
+// and dismisses the rest with a "merged into #X" reason. Both tasks remain
+// in the activity log for audit. Reversible — agent can reopen the dismissed
+// task if they change their mind.
+// Body: { canonicalId: 123 }  — the surviving task ID. The :id in the URL
+// is the task being dismissed.
+app.post('/api/tasks/:id/merge-into', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const dismissId = parseInt(req.params.id, 10);
+  const canonicalId = parseInt((req.body && req.body.canonicalId) || 0, 10);
+  if (!dismissId || !canonicalId) return res.status(400).json({ error: 'canonicalId required in body' });
+  if (dismissId === canonicalId) return res.status(400).json({ error: 'Cannot merge a task into itself' });
+  try {
+    // Verify both tasks exist and both still open/in_progress
+    const both = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, department, status FROM campaign_tasks WHERE id = ANY($1::int[])",
+      [[dismissId, canonicalId]]
+    );
+    if (both.rows.length !== 2) return res.status(404).json({ error: 'One or both tasks not found' });
+    const dismissTask = both.rows.find(function(r){ return r.id === dismissId; });
+    const canonicalTask = both.rows.find(function(r){ return r.id === canonicalId; });
+    if (['complete','dismissed','archived','cancelled'].indexOf(dismissTask.status) !== -1) {
+      return res.status(409).json({ error: 'Task #' + dismissId + ' is already ' + dismissTask.status });
+    }
+    if (['complete','dismissed','archived','cancelled'].indexOf(canonicalTask.status) !== -1) {
+      return res.status(409).json({ error: 'Canonical task #' + canonicalId + ' is already ' + canonicalTask.status + ' — pick a different one' });
+    }
+    // Soft sanity check — campaign + department should match
+    if (String(dismissTask.campaign_name || '').trim().toLowerCase() !==
+        String(canonicalTask.campaign_name || '').trim().toLowerCase()) {
+      return res.status(400).json({ error: 'Campaign names don\'t match — merge is for true duplicates only' });
+    }
+    if (String(dismissTask.department) !== String(canonicalTask.department)) {
+      return res.status(400).json({ error: 'Cannot merge tasks across departments' });
+    }
+    const actor = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const reason = 'Merged into #' + canonicalId + ' by ' + actor;
+    // Dismiss the loser. Append a note recording the merge target.
+    const endOfDay = new Date(); endOfDay.setHours(23, 59, 59, 999);
+    await db.query(
+      "UPDATE campaign_tasks SET status='dismissed', dismissed_reason=$1, " +
+      "agent_notes = COALESCE(agent_notes,'') || E'\\n🔀 ' || $1, " +
+      "updated_at=NOW(), resolved_at=NOW(), suppressed_until=$2 " +
+      "WHERE id=$3",
+      [reason, endOfDay.toISOString(), dismissId]
+    );
+    // Note on the survivor that it absorbed a duplicate
+    await db.query(
+      "UPDATE campaign_tasks SET " +
+      "agent_notes = COALESCE(agent_notes,'') || E'\\n🔀 Duplicate task #' || $1 || ' merged in by ' || $2 || ' on ' || NOW()::date, " +
+      "updated_at=NOW() WHERE id=$3",
+      [dismissId, actor, canonicalId]
+    );
+    // Audit log for both
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id) " +
+        "VALUES ($1,$2,$3,$3,'task_merge',$4,$5,'dismissed',$6)",
+        [
+          dismissTask.campaign_id || '',
+          dismissTask.campaign_name || '',
+          dismissTask.agent_name || actor,
+          'Merged into #' + canonicalId + ' (duplicate task)',
+          dismissTask.status,
+          dismissId
+        ]
+      );
+    } catch(logErr) { console.error('[r35.9 F merge] activity log: ' + logErr.message); }
+    res.json({ ok: true, dismissed: dismissId, canonical: canonicalId, message: 'Merged #' + dismissId + ' into #' + canonicalId });
+  } catch(e) {
+    console.error('[r35.9 F merge-into] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/tasks/:id/status', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { status, notes, dismissedReason, pausedReason, escalationReason } = req.body;
+  try {
+    const taskRes = await db.query('SELECT * FROM campaign_tasks WHERE id=$1', [req.params.id]);
+    const task = taskRes.rows[0] || {};
+    const statusBefore = task.status || 'unknown';
+    // r21: gate completion behind subtasks. If any subtask is still 'open',
+    // refuse the complete transition with an actionable message. Dismissed
+    // counts as resolved. Tasks without subtasks (e.g. legacy / non-product
+    // tasks) skip this check.
+    if (status === 'complete') {
+      try {
+        const pendRes = await db.query(
+          "SELECT COUNT(*)::int AS cnt FROM task_subtasks WHERE task_id=$1 AND status='open'",
+          [req.params.id]
+        );
+        const pending = pendRes.rows[0] && pendRes.rows[0].cnt || 0;
+        if (pending > 0) {
+          return res.status(409).json({
+            error: 'subtasks_pending',
+            message: 'Cannot mark complete — ' + pending + ' subtask' + (pending === 1 ? '' : 's') + ' still open. Tick or dismiss each one first.',
+            pending: pending
+          });
+        }
+      } catch(gateErr) { console.error('[r21] subtask gate check error: ' + gateErr.message); }
+    }
+    let query, params;
+    if (status === 'dismissed') { const endOfDay = new Date(); endOfDay.setHours(23, 59, 59, 999); query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, dismissed_reason=$3, updated_at=NOW(), resolved_at=NOW(), suppressed_until=$4 WHERE id=$5'; params = [status, notes||'', dismissedReason||notes||'', endOfDay.toISOString(), req.params.id]; }
+    else if (status === 'paused') { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, paused_reason=$3, updated_at=NOW(), resolved_at=NOW() WHERE id=$4'; params = [status, notes||pausedReason||'', pausedReason||notes||'', req.params.id]; }
+    else if (status === 'in_progress') { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), first_action_at=COALESCE(first_action_at, NOW()) WHERE id=$3'; params = [status, notes||'', req.params.id]; }
+    else if (status === 'scaling') { const deadline = new Date(); deadline.setDate(deadline.getDate() + 7); query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, escalation_reason=$3, scaling_deadline=$4, updated_at=NOW(), first_action_at=COALESCE(first_action_at, NOW()) WHERE id=$5'; params = [status, notes||'', escalationReason||notes||'', deadline.toISOString(), req.params.id]; }
+    else if (status === 'complete') { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW(), last_resolved_date=NOW() WHERE id=$3'; params = [status, notes||'', req.params.id]; }
+    else { query = 'UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW() WHERE id=$3'; params = [status, notes||'', req.params.id]; }
+    await db.query(query, params);
+
+    // r35.9 D — if the agent submitted non-trivial notes, mark this as
+    // feedback for any pending Opus escalation log row (breaks the 24h
+    // cooldown so the next AI run gets the fresh context).
+    try {
+      const noteStr = String(notes || '').trim();
+      if (noteStr.length >= 10) {
+        const actor = (req.user && (req.user.name || req.user.username)) || '';
+        if (actor) {
+          await db.query(
+            "UPDATE ai_escalation_log SET agent_feedback_at = NOW() " +
+            "WHERE entity_type = 'task' AND entity_id = $1 AND agent_name = $2 " +
+            "  AND agent_feedback_at IS NULL " +
+            "  AND called_at > NOW() - INTERVAL '7 days'",
+            [String(req.params.id), actor]
+          );
+        }
+      }
+    } catch(e) { console.error('[r35.9 D] feedback-break update failed: ' + e.message); }
+
+    try {
+      // r33c: agent eligibility from users table, not hardcoded list.
+      const eligibleAgents = await getActiveAmazonAgents();
+      const logAgent = (task.agent_name && eligibleAgents.includes(task.agent_name)) ? task.agent_name : extractAgentFromCampaign(task.campaign_name||'') || 'Unknown';
+      await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [task.campaign_id||'', task.campaign_name||'', logAgent, status, notes||'', statusBefore, status, parseInt(req.params.id)]);
+    } catch(logErr) { console.error('Activity log error: ' + logErr.message); }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/tasks/:id/archive', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  try {
+    // r33d: capture who archived, when, and why. Also log to activity_log so
+    // archive history is auditable. Reason is optional — agents may archive
+    // dismissed/complete tasks for tidiness with no specific note.
+    const taskRes = await db.query("SELECT campaign_id, campaign_name, agent_name, status FROM campaign_tasks WHERE id=$1", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    const statusBefore = task.status;
+    const actor = (req.user && (req.user.name || req.user.username)) || 'unknown';
+    const noteAppend = reason
+      ? '\n[r33d archived by ' + actor + ' on ' + new Date().toISOString().slice(0,10) + ']: ' + reason
+      : '\n[r33d archived by ' + actor + ' on ' + new Date().toISOString().slice(0,10) + ']';
+    await db.query(
+      'UPDATE campaign_tasks SET status=$1, archived_at=NOW(), updated_at=NOW(), agent_notes=COALESCE(agent_notes,\'\') || $2 WHERE id=$3',
+      ['archived', noteAppend, id]
+    );
+    try {
+      await db.query(
+        'INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [task.campaign_id||'', task.campaign_name||'', actor, 'archived', reason || '(no reason)', statusBefore, 'archived', parseInt(id)]
+      );
+    } catch(logErr) { /* non-fatal */ }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// r29k: cancel an Amazon task — mirrors the Google endpoint pattern.
+// Manager can cancel any; agent can cancel own task within 30 min.
+app.post('/api/tasks/:id/cancel', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'A cancel reason is required.' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    if (task.status === 'cancelled') return res.status(400).json({ error: 'Task already cancelled.' });
+
+    const u = req.user || {};
+    const userRole = (u.role || '').toLowerCase();
+    const userDept = (u.department || '').toLowerCase();
+    const actor = u.name || u.username || 'unknown';
+    const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+    if (!isPrivileged) {
+      if (task.agent_name !== actor) {
+        return res.status(403).json({ error: 'You can only cancel tasks assigned to you. Manager can cancel any task.' });
+      }
+      const ageMinutes = (Date.now() - new Date(task.created_at || task.created_date).getTime()) / 60000;
+      if (ageMinutes > 60) {
+        return res.status(403).json({ error: 'Agents can only cancel tasks within 60 minutes of creation. Ask manager to cancel.' });
+      }
+    }
+
+    await db.query(
+      "UPDATE campaign_tasks SET status='cancelled', dismissed_reason=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2",
+      [reason, id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, department, task_id) " +
+        "VALUES ($1,$2,$3,$4,'task_cancelled',$5,$6,'cancelled','amazon',$7)",
+        [task.campaign_id, task.campaign_name, task.agent_name, actor, reason, task.status, parseInt(id, 10)]
+      );
+    } catch(e) { console.error('[AMZ TASK cancel log] ' + e.message); }
+
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[AMZ TASK cancel] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/tasks/run-now', async function(req, res) {
+  runDailyTaskScheduler().catch(function(e){ console.error('Manual task run error: ' + e.message); });
+  res.json({ success: true, message: 'Task scheduler triggered' });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Google task endpoints
+// All operate on department='google' rows in campaign_tasks. Mirror the
+// Amazon endpoints but namespaced under /api/google/tasks/*.
+// ─────────────────────────────────────────────────────────────────────────
+
+app.get('/api/google/tasks', async function(req, res) {
+  if (!db) return res.json({ tasks: [], summary: {} });
+  try {
+    // Idempotent — if columns already exist, this is a no-op. Safety net to ensure
+    // the schema is present before we query it (some boots may have skipped it).
+    await ensureGoogleTaskColumns();
+    // Filters: ?status=open|in_progress|discussion|complete|all  ?agent=Rahul|Anuj|Unassigned|all  ?day7=true
+    const statusFilter = req.query.status || 'active';   // 'active' = not complete/archived
+    const agentFilter = req.query.agent || 'all';
+    const typeFilter = req.query.type || 'all';          // 'problem' | 'scale' | 'all'
+    const repeatFilter = req.query.repeat === 'true' || req.query.repeat === '1'; // r25b
+
+    let where = "department='google'";
+    const params = [];
+    // r29n: 'active' default also excludes cancelled tasks — they were cluttering the list
+    if (statusFilter === 'active') where += " AND status NOT IN ('complete','archived','cancelled')";
+    else if (statusFilter && statusFilter !== 'all') {
+      params.push(statusFilter);
+      where += " AND status=$" + params.length;
+    }
+    if (agentFilter && agentFilter !== 'all') {
+      params.push(agentFilter);
+      where += " AND agent_name=$" + params.length;
+    }
+    if (typeFilter && typeFilter !== 'all') {
+      params.push(typeFilter);
+      where += " AND COALESCE(task_type, 'problem')=$" + params.length;
+    }
+    if (repeatFilter) {
+      where += " AND is_repeat_offender = TRUE";
+    }
+    const r = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, " +
+      "       days_persisted, total_wasted, score, status, agent_notes, dismissed_reason, paused_reason, " +
+      "       task_source, product_key, product_title, product_image_url, task_type, priority, " +
+      "       baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      "       day7_decision, day7_decision_at, day7_note, " +
+      "       is_repeat_offender, failure_count, " +
+      "       created_date, updated_at, resolved_at, first_action_at " +
+      "FROM campaign_tasks WHERE " + where + " ORDER BY priority ASC, score DESC, created_date DESC LIMIT 500",
+      params
+    );
+
+    // r7b: working-day-aware timeline fields. Use the same helpers as Amazon
+    // so both dashboards count days the same way (Sundays excluded).
+    const now = new Date();
+    const tasks = r.rows.map(function(row) {
+      const wdo = workingDaysBetween(row.created_date, now);
+      const liveStage = stageForWorkingDay(wdo);
+      const milestone = milestoneInfo(wdo);
+      // Legacy daysOpen stays as a CALENDAR-day count (Google UI uses it elsewhere).
+      // working_days_open and task_stage are the new authoritative timeline fields.
+      const created = row.created_date ? new Date(row.created_date).getTime() : now.getTime();
+      const daysOpenCalendar = Math.max(0, Math.floor((now.getTime() - created) / 86400000));
+      const notStarted = !row.first_action_at && wdo >= 1;
+      return Object.assign({}, row, {
+        daysOpen: daysOpenCalendar,
+        atDay7: wdo >= 7 && !row.day7_decision,
+        atDay4: wdo >= 4 && wdo < 7,
+        working_days_open: wdo,
+        task_stage: liveStage,
+        next_milestone: milestone.next,
+        next_milestone_label: milestone.label,
+        not_started_warning: notStarted
+      });
+    });
+
+    // Workload summary
+    const summary = { byAgent: {}, totals: { active: 0, day7: 0, unassigned: 0, completed: 0, repeat: 0 } };
+    GOOGLE_TASK_AGENTS.forEach(function(a){ summary.byAgent[a] = { open: 0, in_progress: 0, discussion: 0, day7: 0 }; });
+    summary.byAgent['Unassigned'] = { open: 0, in_progress: 0, discussion: 0, day7: 0 };
+
+    // Run a separate query for ALL tasks (not just filtered) to compute the workload summary
+    const allRes = await db.query(
+      "SELECT agent_name, status, created_date, day7_decision, is_repeat_offender FROM campaign_tasks WHERE department='google'"
+    );
+    allRes.rows.forEach(function(row) {
+      const agent = row.agent_name || 'Unassigned';
+      const bucket = summary.byAgent[agent] || (summary.byAgent[agent] = { open: 0, in_progress: 0, discussion: 0, day7: 0 });
+      if (row.status === 'complete' || row.status === 'archived') {
+        summary.totals.completed++;
+        return;
+      }
+      summary.totals.active++;
+      if (agent === 'Unassigned') summary.totals.unassigned++;
+      // r25b: count active repeat offenders for the badge
+      if (row.is_repeat_offender) summary.totals.repeat++;
+      const created = row.created_date ? new Date(row.created_date).getTime() : now;
+      const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
+      if (daysOpen >= 7 && !row.day7_decision) {
+        bucket.day7++;
+        summary.totals.day7++;
+      } else if (row.status === 'in_progress') {
+        bucket.in_progress++;
+      } else if (row.status === 'discussion') {
+        bucket.discussion++;
+      } else {
+        bucket.open++;
+      }
+    });
+
+    res.json({ tasks: tasks, summary: summary });
+  } catch (e) {
+    console.error('[GTASK] /api/google/tasks error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Take ownership of an unassigned task (or steal from another agent).
+// Used for the self-allocate workflow: agent clicks "Take it" on the task board.
+app.post('/api/google/tasks/:id/take', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const u = req.user || {};
+    const me = req.body.agent || u.name || u.username || '';
+    const actor = u.name || u.username || me;     // who clicked (logged-in user)
+    if (!me) return res.status(400).json({ error: 'Could not determine agent name' });
+    if (!GOOGLE_TASK_AGENTS.includes(me)) return res.status(400).json({ error: 'Only Rahul or Anuj can take tasks' });
+    await db.query(
+      "UPDATE campaign_tasks SET agent_name=$1, updated_at=NOW() WHERE id=$2 AND department='google'",
+      [me, req.params.id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) VALUES ($1,$2,$3,$4,'take',$5,$6,'google')",
+        ['', '', me, actor, 'Took task', parseInt(req.params.id)]
+      );
+    } catch(e) { console.error('[GTASK] take log error: ' + e.message); }
+    res.json({ success: true, agent: me });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r35.5: Amazon "take task" — mirrors Google's take endpoint. An Amazon agent
+// can claim a task currently assigned to a different agent (e.g. when one
+// agent is off, another picks up the work). Manager/owner can also take.
+//
+// Active-agent check uses the users table (not a hardcoded list) so adding a
+// new Amazon agent in user management gives them claim ability automatically.
+app.post('/api/amazon/tasks/:id/take', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  try {
+    const u = req.user || {};
+    const me = req.body.agent || u.name || u.username || '';
+    const actor = u.name || u.username || me;
+    if (!me) return res.status(400).json({ error: 'Could not determine agent name' });
+    // Allow owner/manager + any active Amazon agent
+    const role = String(u.role || '').toLowerCase();
+    const isPrivileged = role === 'owner' || role === 'manager' || role === 'admin';
+    if (!isPrivileged) {
+      const active = await getActiveAmazonAgents();
+      if (!active.includes(me)) {
+        return res.status(403).json({ error: 'Only active Amazon agents (or owner/manager) can take tasks' });
+      }
+    }
+    // Only allow taking tasks that belong to the Amazon department (department
+    // column may be empty for older Amazon rows — exclude only explicit 'google').
+    const upd = await db.query(
+      "UPDATE campaign_tasks SET agent_name=$1, updated_at=NOW() " +
+      "WHERE id=$2 AND (department IS NULL OR department <> 'google') RETURNING id, campaign_name",
+      [me, req.params.id]
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'Task not found or is not an Amazon task' });
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id) VALUES ($1,$2,$3,$4,'take',$5,$6)",
+        ['', upd.rows[0].campaign_name || '', me, actor, 'Took task', parseInt(req.params.id)]
+      );
+    } catch(e) { console.error('[r35.5 AMZ take] log error: ' + e.message); }
+    res.json({ success: true, agent: me });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reassign — manager moves a task to a different agent (or unassigns it).
+// Required: target agent name, note explaining why.
+// Logs as 'reassigned' with from→to in notes, and actor_name = manager who clicked.
+app.post('/api/google/tasks/:id/reassign', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const u = req.user || {};
+  const actor = u.name || u.username || '';
+  const role = u.role || '';
+  const isManager = ['manager','admin'].includes(role) || ['Bobby','Satyam','bobby','satyam'].includes(actor);
+  if (!isManager) return res.status(403).json({ error: 'Only managers can reassign tasks' });
+
+  const targetAgent = (req.body.agent || '').trim();
+  const note = (req.body.note || '').trim();
+  if (!targetAgent) return res.status(400).json({ error: 'Target agent required (Rahul, Anuj, or Unassigned)' });
+  if (!['Rahul', 'Anuj', 'Unassigned'].includes(targetAgent)) return res.status(400).json({ error: 'agent must be Rahul, Anuj, or Unassigned' });
+  if (!note) return res.status(400).json({ error: 'A note explaining the reassignment is required' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [req.params.id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+    const fromAgent = task.agent_name || 'Unassigned';
+    if (fromAgent === targetAgent) return res.status(400).json({ error: 'Task is already assigned to ' + targetAgent });
+
+    await db.query(
+      "UPDATE campaign_tasks SET agent_name=$1, reassigned_at=NOW(), reassigned_from=$2, updated_at=NOW() WHERE id=$3",
+      [targetAgent, fromAgent, req.params.id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'reassigned',$5,$6,$7,$8,'google')",
+        [task.campaign_id || '', task.campaign_name || '', targetAgent, actor, note, fromAgent, targetAgent, parseInt(req.params.id)]
+      );
+    } catch (e) { console.error('[GTASK] reassign log error: ' + e.message); }
+
+    res.json({ success: true, from: fromAgent, to: targetAgent });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update Google task status. Mirrors /api/tasks/:id/status but enforces dept,
+// records dismiss reason requirement, and writes activity log with department='google'.
+app.post('/api/google/tasks/:id/status', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const status = req.body.status;
+  const notes = (req.body.notes || '').trim();
+  const dismissedReason = (req.body.dismissedReason || '').trim();
+
+  if (!status) return res.status(400).json({ error: 'status required' });
+
+  // ALL status transitions now require a note explaining what the agent is doing.
+  // The only no-note flow is "take" (separate endpoint, just claims ownership).
+  const noteRequiredStatuses = ['in_progress', 'discussion', 'complete', 'dismissed', 'paused', 'reopened', 'scale_promoted'];
+  if (noteRequiredStatuses.includes(status)) {
+    if (status === 'dismissed') {
+      if (!dismissedReason) return res.status(400).json({ error: 'A reason is required to dismiss a task.' });
+    } else {
+      if (!notes) return res.status(400).json({ error: 'A note is required for this action — describe what you are doing.' });
+    }
+  }
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found (or not a Google task)' });
+    const task = taskRes.rows[0];
+    const before = task.status;
+
+    let q, p, finalStatus = status;
+    if (status === 'dismissed') {
+      q = "UPDATE campaign_tasks SET status='dismissed', dismissed_reason=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2";
+      p = [dismissedReason, id];
+    } else if (status === 'in_progress') {
+      q = "UPDATE campaign_tasks SET status='in_progress', updated_at=NOW(), first_action_at=COALESCE(first_action_at, NOW()) WHERE id=$1";
+      p = [id];
+    } else if (status === 'discussion') {
+      q = "UPDATE campaign_tasks SET status='discussion', updated_at=NOW() WHERE id=$1";
+      p = [id];
+    } else if (status === 'complete') {
+      q = "UPDATE campaign_tasks SET status='complete', updated_at=NOW(), resolved_at=NOW() WHERE id=$1";
+      p = [id];
+    } else if (status === 'paused') {
+      q = "UPDATE campaign_tasks SET status='paused', paused_reason=$1, updated_at=NOW() WHERE id=$2";
+      p = [notes, id];
+    } else if (status === 'reopened') {
+      // Reopened means: go back to in_progress, but log it as a distinct action so history shows it
+      q = "UPDATE campaign_tasks SET status='in_progress', updated_at=NOW(), resolved_at=NULL WHERE id=$1";
+      p = [id];
+      finalStatus = 'in_progress';
+    } else if (status === 'scale_promoted') {
+      // Promote a problem task to a scale task. Keep it open with task_type='scale' so it shows under Scale filter.
+      q = "UPDATE campaign_tasks SET task_type='scale', status='in_progress', updated_at=NOW() WHERE id=$1";
+      p = [id];
+      finalStatus = 'in_progress';
+    } else {
+      q = "UPDATE campaign_tasks SET status=$1, updated_at=NOW() WHERE id=$2";
+      p = [status, id];
+    }
+    await db.query(q, p);
+
+    // Always write activity log with: agent_name (task owner), actor_name (who clicked), action, notes.
+    // This is critical for audit — when a manager acts on an agent's task, we record both.
+    const u = req.user || {};
+    const actor = u.name || u.username || task.agent_name || 'system';
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'google')",
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', actor, status, notes || dismissedReason, before, finalStatus, parseInt(id)]
+      );
+    } catch (e) { console.error('[GTASK] activity_log error: ' + e.message); }
+
+    res.json({ success: true, status: finalStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get full action history for a task — chronological list of every state change with notes.
+// Used by the task popup modal to show what's been done.
+app.get('/api/google/tasks/:id/history', async function(req, res) {
+  if (!db) return res.json({ history: [] });
+  try {
+    const taskIdNum = parseInt(req.params.id, 10);
+    if (!Number.isFinite(taskIdNum)) return res.json({ history: [] });
+    // r29p: query uses real column names from CREATE TABLE (line ~1819).
+    // logged_at (not created_at). Aliased to created_at so front-end stays compatible.
+    // Doesn't filter on department or actor_name — those columns don't exist on this table.
+    const r = await db.query(
+      "SELECT id, action, notes, status_before, status_after, agent_name, " +
+      "       logged_at AS created_at " +
+      "FROM activity_log WHERE task_id=$1 ORDER BY logged_at ASC",
+      [taskIdNum]
+    );
+    res.json({ history: r.rows });
+  } catch (e) {
+    console.error('[GTASK history] ' + e.message);
+    res.json({ history: [], _error: e.message });
+  }
+});
+
+// r29k: Cancel a task — soft delete with reason. Used when an agent creates a task
+// by mistake or with a wrong description. Cancelled tasks are EXCLUDED from
+// repeat-offender / failure_count math — getPreviousTaskContext ignores them.
+//
+// Permissions:
+//   - Manager / owner: can cancel any task
+//   - Agent (Rahul/Anuj): can cancel a task they own that's <30 minutes old
+// Reason is required.
+app.post('/api/google/tasks/:id/cancel', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'A cancel reason is required.' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found (or not a Google task)' });
+    const task = taskRes.rows[0];
+
+    if (task.status === 'cancelled') return res.status(400).json({ error: 'Task already cancelled.' });
+
+    const u = req.user || {};
+    const userRole = (u.role || '').toLowerCase();
+    const userDept = (u.department || '').toLowerCase();
+    const actor = u.name || u.username || 'unknown';
+    const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+
+    // Agent can only cancel their own task within 30 min of creation
+    if (!isPrivileged) {
+      if (task.agent_name !== actor) {
+        return res.status(403).json({ error: 'You can only cancel tasks assigned to you. Manager can cancel any task.' });
+      }
+      const ageMinutes = (Date.now() - new Date(task.created_at || task.created_date).getTime()) / 60000;
+      if (ageMinutes > 60) {
+        return res.status(403).json({ error: 'Agents can only cancel tasks within 60 minutes of creation. Ask manager to cancel.' });
+      }
+    }
+
+    await db.query(
+      "UPDATE campaign_tasks SET status='cancelled', dismissed_reason=$1, updated_at=NOW(), resolved_at=NOW() WHERE id=$2",
+      [reason, id]
+    );
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, department, task_id) " +
+        "VALUES ($1,$2,$3,$4,'task_cancelled',$5,$6,'cancelled','google',$7)",
+        [task.campaign_id, task.campaign_name, task.agent_name, actor, reason, task.status, parseInt(id, 10)]
+      );
+    } catch(e) { console.error('[GTASK cancel log] ' + e.message); }
+
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[GTASK cancel] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// r35.2 — General task creation. For tasks that aren't tied to a specific
+// campaign or product: ad-hoc work like "research competitor X", "audit
+// portfolio for orphan keywords", "review reporting setup". Stores in the
+// same campaign_tasks table with task_source='general', campaign_id='',
+// problem_type='general'. The title acts as the campaign_name for display.
+// Scoring engine (r34) ignores general tasks since there's no ACOS to measure.
+//
+// Auth: agents can create for themselves only. Manager/owner for any agent.
+app.post('/api/tasks/general-create', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { department, agentName, title, description, priority, deadline } = req.body || {};
+
+  // Validate
+  if (!department || !['amazon','google'].includes(String(department).toLowerCase())) {
+    return res.status(400).json({ error: 'department must be amazon or google' });
+  }
+  if (!agentName || !String(agentName).trim()) {
+    return res.status(400).json({ error: 'agentName required' });
+  }
+  if (!title || !String(title).trim()) {
+    return res.status(400).json({ error: 'title required' });
+  }
+  const cleanTitle = String(title).trim().slice(0, 200);
+  const cleanDesc = String(description || '').trim().slice(0, 4000);
+  const dept = String(department).toLowerCase();
+
+  // Priority: low | normal | high. Maps to a score for sort order.
+  const validPriorities = { low: 50, normal: 100, high: 200 };
+  const priorityKey = validPriorities[String(priority || '').toLowerCase()] != null
+    ? String(priority).toLowerCase() : 'normal';
+  const score = validPriorities[priorityKey];
+
+  // Deadline (optional). Must parse as YYYY-MM-DD if provided.
+  let deadlineParam = null;
+  if (deadline) {
+    const d = String(deadline).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      return res.status(400).json({ error: 'deadline must be YYYY-MM-DD' });
+    }
+    deadlineParam = d;
+  }
+
+  // Auth: agent can create for themselves only; manager/owner for anyone
+  const myName = (req.user && req.user.name) || '';
+  const myRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const myDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(myRole) !== -1 || myDept === 'manager';
+  const canonMe = (typeof canonicalAgent === 'function' ? canonicalAgent(myName) : myName) || myName;
+  const canonTarget = (typeof canonicalAgent === 'function' ? canonicalAgent(agentName) : agentName) || agentName;
+  if (!isPrivileged && canonMe.toLowerCase() !== canonTarget.toLowerCase()) {
+    return res.status(403).json({ error: 'You can only create general tasks for yourself.' });
+  }
+
+  // Build problem_detail = description + (optional deadline line). Keep title
+  // separate as campaign_name so the existing task UI renders it as the headline.
+  let problemDetail = cleanDesc || cleanTitle;
+  if (deadlineParam) {
+    problemDetail = '📅 Deadline: ' + deadlineParam + '\n\n' + problemDetail;
+  }
+
+  try {
+    const insertRes = await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, " +
+      " days_persisted, total_wasted, score, task_source, department, deadline, is_repeat_offender, failure_count) " +
+      "VALUES ('', $1, $2, '', 'general', $3, 1, 0, $4, 'general', $5, $6, FALSE, 1) " +
+      "RETURNING id",
+      [cleanTitle, agentName, problemDetail, score, dept, deadlineParam]
+    );
+    const newId = insertRes.rows[0].id;
+
+    // Activity log
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) " +
+        "VALUES ('', $1, $2, $3, 'general_task_created', $4, $5, $6)",
+        [cleanTitle, agentName, myName || 'System',
+         'Created general task — priority ' + priorityKey + (deadlineParam ? ', deadline ' + deadlineParam : ''),
+         newId, dept]
+      );
+    } catch(_e) { /* non-fatal */ }
+
+    res.json({ success: true, taskId: newId, agent: agentName, title: cleanTitle });
+  } catch(e) {
+    console.error('[r35.2 general-create] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// Manual task creation — used by the "Assign" buttons on campaign rows / product cards / product modal.
+// The manager picks an agent and writes a brief, server creates a task with task_source='manual'.
+app.post('/api/google/tasks/manual-create', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  await ensureGoogleTaskColumns();
+
+  const { campaignId, campaignName, campaignType, productKey, productTitle, agentName, brief, taskType, subtaskBodies, feedbackScope, feedbackTargetId } = req.body;
+  // General tasks (no campaignId, no productKey) are allowed for owner/manager only — used for cross-campaign
+  // work like "audit negative keyword list" or "review competitor pricing".
+  const isGeneralTask = !campaignId && !productKey;
+  if (!campaignId && !isGeneralTask) return res.status(400).json({ error: 'campaignId required' });
+  if (!agentName) return res.status(400).json({ error: 'agentName required (Rahul, Anuj, or Unassigned)' });
+  if (!brief || !brief.trim()) return res.status(400).json({ error: 'A brief is required — describe what the agent should do.' });
+  if (!['Rahul', 'Anuj', 'Unassigned'].includes(agentName)) return res.status(400).json({ error: 'agentName must be Rahul, Anuj, or Unassigned' });
+
+  const userRole = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const userDept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(userRole) !== -1 || userDept === 'manager';
+
+  if (isGeneralTask && !isPrivileged) {
+    return res.status(403).json({ error: 'Only owner/manager can create general (uncategorised) tasks. Anchor your task to a campaign or product.' });
+  }
+
+  // r29l + r33a: prevent duplicate open task on same target. If an open task already
+  // exists on this campaign+product combo, refuse with a useful message pointing the
+  // user to the existing task. Manager bypass — they may have valid reasons.
+  // General tasks skip this check (no campaign target to dedupe on).
+  //
+  // r33a fixes: created_at → created_date (column was misnamed, query threw every call).
+  // Also hardened with explicit $2::text cast and IS NULL pair check for safety.
+  if (!isPrivileged && !isGeneralTask) {
+    try {
+      const productKeyParam = productKey || null;
+      const existingOpen = await db.query(
+        "SELECT id, status, agent_name FROM campaign_tasks " +
+        "WHERE department='google' AND campaign_id=$1 " +
+        "  AND ((product_key IS NULL AND $2::text IS NULL) OR product_key = $2::text) " +
+        "  AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+        "ORDER BY created_date DESC LIMIT 1",
+        [String(campaignId), productKeyParam]
+      );
+      if (existingOpen.rows.length) {
+        const exTask = existingOpen.rows[0];
+        return res.status(409).json({
+          error: 'A task is already open on this ' + (productKey ? 'product' : 'campaign') + ' (#' + exTask.id + ', assigned to ' + exTask.agent_name + ', status: ' + exTask.status + '). Cancel or complete that one first before creating a new task.',
+          existingTaskId: exTask.id
+        });
+      }
+    } catch(e) { console.error('[r29l duplicate-open-task check] ' + e.message); }
+  }
+
+  // r27: feedback-required gate. Agents must have submitted ≥1 feedback row for
+  // this scope/target before creating a task. Owner/manager bypass.
+  // Front-end also enforces but we double-check server-side.
+  if (!isPrivileged && feedbackScope && feedbackTargetId) {
+    try {
+      const fc = await db.query(
+        "SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope = $1 AND target_id = $2",
+        [feedbackScope, feedbackTargetId]
+      );
+      if (!fc.rows[0] || fc.rows[0].c < 1) {
+        return res.status(403).json({ error: 'Submit AI feedback before creating a task. Agents must run AI, submit feedback, then create task.' });
+      }
+    } catch(e) { console.error('[r27 google manual-create feedback gate] ' + e.message); }
+  }
+
+  // Pull baseline metrics from current googleState if available
+  let baselineSpend = 0, baselineSales = 0, baselineAcos = 0, baselineImpressions = 0;
+  let resolvedCampaignName = campaignName || '';
+  let resolvedCampaignType = campaignType || '';
+  let resolvedProductTitle = productTitle || null;
+  let productImageUrl = null;
+
+  if (productKey) {
+    // Product-level task — find the product row.
+    // r29k: front-end sometimes sends just the Shopify product ID (e.g. "15233063518591")
+    // because that's what the AI critique surfaces. Server's googleState rows use a
+    // compound key (something_something_<shopifyId>_something). Match against both.
+    const productRow = (googleState.products || []).find(function(p){
+      const pk = p.shopifyItemId || p.productId || (p.adGroupId ? String(p.campaignId) + '_' + p.adGroupId : null);
+      if (String(pk) === String(productKey)) return true;
+      // Also try matching the embedded shopify id portion of shopifyItemId
+      if (p.shopifyItemId) {
+        const parts = String(p.shopifyItemId).split('_');
+        const embeddedShopifyId = parts.length >= 3 ? parts[2] : null;
+        if (embeddedShopifyId && String(embeddedShopifyId) === String(productKey)) return true;
+      }
+      return false;
+    });
+    if (productRow) {
+      baselineSpend = productRow.spend || 0;
+      baselineSales = productRow.sales || 0;
+      baselineAcos = baselineSales > 0 ? (baselineSpend / baselineSales) * 100 : 0;
+      baselineImpressions = productRow.impressions || 0;
+      resolvedCampaignName = resolvedCampaignName || productRow.campaignName;
+      resolvedCampaignType = resolvedCampaignType || productRow.campaignType;
+      resolvedProductTitle = resolvedProductTitle || productRow.name || productRow.productName;
+    }
+    // r29k: image lookup. Try compound-key split first (when productKey IS a compound key),
+    // then treat productKey as a raw shopify id directly.
+    let shopifyId = null;
+    const parts = String(productKey).split('_');
+    if (parts.length >= 3) shopifyId = parts[2];
+    else if (/^\d+$/.test(String(productKey))) shopifyId = String(productKey);
+    if (shopifyId) {
+      const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === shopifyId; });
+      if (sp) {
+        if (sp.imageUrl) productImageUrl = sp.imageUrl;
+        // r29k: also pull product title from Shopify if we didn't get it from googleState
+        if (!resolvedProductTitle && sp.title) resolvedProductTitle = sp.title;
+      }
+    }
+  } else {
+    // Campaign-level — aggregate
+    const cProducts = (googleState.products || []).filter(function(p){ return String(p.campaignId) === String(campaignId); });
+    cProducts.forEach(function(p){
+      baselineSpend += p.spend || 0;
+      baselineSales += p.sales || 0;
+      baselineImpressions += p.impressions || 0;
+    });
+    baselineAcos = baselineSales > 0 ? (baselineSpend / baselineSales) * 100 : 0;
+    if (cProducts.length && !resolvedCampaignName) resolvedCampaignName = cProducts[0].campaignName;
+    if (cProducts.length && !resolvedCampaignType) resolvedCampaignType = cProducts[0].campaignType;
+  }
+
+  const finalTaskType = taskType === 'scale' ? 'scale' : 'problem';
+  const problemType = productKey ? 'product_manual_assign' : (isGeneralTask ? 'general_manual' : 'manual_assign');
+  // For general tasks, use a sentinel so the NOT NULL constraint is satisfied and
+  // the row is easy to identify as a non-campaign task.
+  const insertCampaignId = isGeneralTask ? '__general__' : String(campaignId);
+  const insertCampaignName = isGeneralTask ? '(General task)' : (resolvedCampaignName || '(unnamed campaign)');
+
+  try {
+    const r = await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      " task_type, priority, product_image_url, status) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,'manual','google',$8,$9,$10,$11,$12,$13,$14,$15,$16,'open') RETURNING id",
+      [
+        insertCampaignId,
+        insertCampaignName,
+        agentName,
+        resolvedCampaignType || '',
+        problemType,
+        brief.trim(),
+        Math.max(1, Math.round(baselineSpend)),
+        productKey || null,
+        resolvedProductTitle,
+        baselineSpend,
+        baselineSales,
+        baselineAcos,
+        baselineImpressions,
+        finalTaskType,
+        2,
+        productImageUrl
+      ]
+    );
+    const newId = r.rows[0] && r.rows[0].id;
+    // r27: insert subtasks if provided. One row per body string. Reuses the
+    // same task_subtasks table Amazon uses — subtasks are generic by task_id.
+    let subCount = 0;
+    if (Array.isArray(subtaskBodies) && subtaskBodies.length && newId) {
+      for (let i = 0; i < subtaskBodies.length; i++) {
+        const body = String(subtaskBodies[i] || '').trim();
+        if (!body) continue;
+        try {
+          await db.query(
+            "INSERT INTO task_subtasks (task_id, position, body, status) VALUES ($1, $2, $3, 'open')",
+            [newId, i, body]
+          );
+          subCount++;
+        } catch(e) { console.error('[r27 google subtask insert] ' + e.message); }
+      }
+    }
+    // Log it
+    const u = req.user || {};
+    const actor = u.name || u.username || 'manager';
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'manual_create',$5,'',$6,$7,'google')",
+        [insertCampaignId, insertCampaignName, agentName, actor, brief.trim() + (subCount ? ' (' + subCount + ' subtasks)' : ''), 'open', newId]
+      );
+    } catch(e) { console.error('[GTASK] manual-create log error: ' + e.message); }
+    res.json({ success: true, id: newId, subtaskCount: subCount });
+  } catch (e) {
+    console.error('[GTASK] manual-create error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r25a: dismiss a product within a campaign — creates a campaign_tasks row
+// with status='dismissed' so it appears in the existing Dismissed tab and
+// follows the existing auto-archive rule. No new table needed.
+app.post('/api/google/tasks/dismiss-product', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  await ensureGoogleTaskColumns();
+
+  const { campaignId, campaignName, campaignType, productKey, productTitle, reason } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!productKey) return res.status(400).json({ error: 'productKey required' });
+  if (!reason || !reason.trim()) return res.status(400).json({ error: 'A reason is required when dismissing a product' });
+
+  const u = req.user || {};
+  const actor = u.name || u.username || 'unknown';
+
+  // Pull baseline metrics from current googleState if available
+  let baselineSpend = 0, baselineSales = 0, baselineAcos = 0, baselineImpressions = 0;
+  let resolvedCampaignName = campaignName || '';
+  let resolvedCampaignType = campaignType || '';
+  let resolvedProductTitle = productTitle || null;
+  let productImageUrl = null;
+
+  const productRow = (googleState.products || []).find(function(p){
+    const pk = p.shopifyItemId || p.productId || (p.adGroupId ? String(p.campaignId) + '_' + p.adGroupId : null);
+    return String(pk) === String(productKey);
+  });
+  if (productRow) {
+    baselineSpend = productRow.spend || 0;
+    baselineSales = productRow.sales || 0;
+    baselineAcos = baselineSales > 0 ? (baselineSpend / baselineSales) * 100 : 0;
+    baselineImpressions = productRow.impressions || 0;
+    resolvedCampaignName = resolvedCampaignName || productRow.campaignName;
+    resolvedCampaignType = resolvedCampaignType || productRow.campaignType;
+    resolvedProductTitle = resolvedProductTitle || productRow.name || productRow.productName;
+  }
+  // Best-effort image lookup from shopify (same as manual-create)
+  const parts = String(productKey).split('_');
+  const shopifyId = parts.length >= 3 ? parts[2] : null;
+  if (shopifyId) {
+    const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === shopifyId; });
+    if (sp && sp.imageUrl) productImageUrl = sp.imageUrl;
+  }
+
+  try {
+    // Insert directly with status='dismissed'. resolved_at set so day7 timer doesn't trigger.
+    const r = await db.query(
+      "INSERT INTO campaign_tasks " +
+      "(campaign_id, campaign_name, agent_name, portfolio, problem_type, problem_detail, score, task_source, " +
+      " department, product_key, product_title, baseline_spend, baseline_sales, baseline_acos, baseline_impressions, " +
+      " task_type, priority, product_image_url, status, resolved_at, agent_notes) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,'manual','google',$8,$9,$10,$11,$12,$13,'problem',3,$14,'dismissed',NOW(),$15) RETURNING id",
+      [
+        String(campaignId),
+        resolvedCampaignName || '(unnamed campaign)',
+        actor,
+        resolvedCampaignType || '',
+        'product_dismissed',
+        reason.trim(),
+        Math.max(1, Math.round(baselineSpend)),
+        productKey,
+        resolvedProductTitle,
+        baselineSpend,
+        baselineSales,
+        baselineAcos,
+        baselineImpressions,
+        productImageUrl,
+        'Dismissed by ' + actor + ': ' + reason.trim()
+      ]
+    );
+    const newId = r.rows[0] && r.rows[0].id;
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, task_id, department) VALUES ($1,$2,$3,$4,'product_dismissed',$5,'','dismissed',$6,'google')",
+        [String(campaignId), resolvedCampaignName || '', actor, actor, 'Product dismissed: ' + (resolvedProductTitle || productKey) + ' — ' + reason.trim(), newId]
+      );
+    } catch(e) { console.error('[GTASK] dismiss-product log error: ' + e.message); }
+    res.json({ success: true, id: newId });
+  } catch (e) {
+    console.error('[GTASK] dismiss-product error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Day 7 decision endpoint — mandatory carry_on / archive / stop with note
+app.post('/api/google/tasks/:id/day7-decision', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const id = req.params.id;
+  const decision = req.body.decision;
+  const note = req.body.note || '';
+
+  const allowed = ['carry_on', 'archive', 'stop'];
+  if (!allowed.includes(decision)) return res.status(400).json({ error: 'decision must be carry_on, archive, or stop' });
+  if (!note.trim()) return res.status(400).json({ error: 'A note explaining the decision is required.' });
+
+  try {
+    const taskRes = await db.query("SELECT * FROM campaign_tasks WHERE id=$1 AND department='google'", [id]);
+    if (!taskRes.rows.length) return res.status(404).json({ error: 'Task not found' });
+    const task = taskRes.rows[0];
+
+    // Apply the decision
+    let newStatus = task.status;
+    if (decision === 'archive') newStatus = 'archived';
+    if (decision === 'stop') newStatus = 'complete';   // marked done; manager pauses in Google Ads manually
+    // 'carry_on' keeps current status, just records decision
+
+    await db.query(
+      "UPDATE campaign_tasks SET day7_decision=$1, day7_decision_at=NOW(), day7_note=$2, " +
+      "status=$3, updated_at=NOW(), " +
+      "resolved_at=CASE WHEN $1 IN ('archive','stop') THEN NOW() ELSE resolved_at END " +
+      "WHERE id=$4",
+      [decision, note, newStatus, id]
+    );
+
+    const u2 = req.user || {};
+    const actor2 = u2.name || u2.username || task.agent_name || 'system';
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) VALUES ($1,$2,$3,$4,$5,$6,$7,'google')",
+        [task.campaign_id || '', task.campaign_name || '', task.agent_name || '', actor2, 'day7_' + decision, note, parseInt(id)]
+      );
+    } catch(e) { console.error('[GTASK] day7 log error: ' + e.message); }
+
+    res.json({ success: true, decision: decision, newStatus: newStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual trigger — POST to force the daily Google task scheduler to run NOW
+app.post('/api/google/tasks/run-now', async function(req, res) {
+  try {
+    await ensureGoogleTaskColumns();   // safety net before scheduler tries to insert
+    const result = await runGoogleTaskScheduler();
+    res.json({ success: true, result: result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lookup: which Google tasks are open for a given campaign? Used by the campaign
+// view to show the "📋 Active task — Day 3 of 7" badge inline.
+app.get('/api/google/tasks/by-campaign/:campaignId', async function(req, res) {
+  if (!db) return res.json({ tasks: [] });
+  try {
+    await ensureGoogleTaskColumns();
+    const r = await db.query(
+      "SELECT id, agent_name, status, problem_type, product_title, created_date, day7_decision " +
+      "FROM campaign_tasks WHERE department='google' AND campaign_id=$1 AND status NOT IN ('complete','archived','dismissed','cancelled') " +
+      "ORDER BY created_date DESC",
+      [String(req.params.campaignId)]
+    );
+    const now = Date.now();
+    res.json({
+      tasks: r.rows.map(function(row) {
+        const created = row.created_date ? new Date(row.created_date).getTime() : now;
+        const daysOpen = Math.max(0, Math.floor((now - created) / 86400000));
+        return Object.assign({}, row, { daysOpen: daysOpen, atDay7: daysOpen >= 7 && !row.day7_decision });
+      })
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/snapshot', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  // r35.4: owner guard added — was unprotected. This endpoint can overwrite
+  // historical daily_snapshots rows so it needs to be locked down.
+  if (!requireOwner(req, res)) return;
+  try {
+    const { date, metrics, campaigns } = req.body;
+    if (!date || !campaigns) return res.status(400).json({ error: 'date and campaigns required' });
+    await db.query('INSERT INTO daily_snapshots (snapshot_date, metrics, campaigns, exhaustion_log, alerts) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (snapshot_date) DO UPDATE SET metrics=$2, campaigns=$3, exhaustion_log=$4, alerts=$5, created_at=NOW()', [date, JSON.stringify(metrics||{}), JSON.stringify(campaigns), JSON.stringify([]), JSON.stringify([])]);
+    console.log('Manual snapshot inserted for ' + date + ' (' + campaigns.length + ' campaigns)');
+    res.json({ success: true, date: date, campaigns: campaigns.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/health', function(req, res) { res.json({ status: 'ok', lastSync: state.lastSync, campaigns: state.campaigns.length, error: state.error }); });
+app.get('/api/portfolios', function(req, res) { res.json({ portfolios: state.portfolios, count: Object.keys(state.portfolios).length }); });
+app.post('/api/sync', function(req, res) { syncCampaigns(); res.json({ success: true }); });
+
+app.post('/api/campaigns/:id/budget', async function(req, res) {
+  const id = req.params.id;
+  const amount = parseFloat(req.body.amount || 0);
+  const campaign = state.campaigns.find(function(c) { return String(c.campaignId) === String(id) || c.campaignId == id; });
+  console.log('Budget request for id: ' + id + ', found: ' + (campaign ? campaign.name : 'NOT FOUND') + ', total campaigns: ' + state.campaigns.length);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found: ' + id });
+  try {
+    const newBudget = campaign.dailyBudget + amount;
+    await updateBudget(id, newBudget);
+    const log = state.exhaustionLog.find(function(e) { return e.campaign === campaign.name && e.action === 'Pending'; });
+    if (log) { log.added = '+£' + amount; log.action = 'Budget added'; log.resolvedAt = new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'}); if (log.time) { const outParts = log.time.split(':'); const resParts = log.resolvedAt.split(':'); const gapMins = (parseInt(resParts[0]) * 60 + parseInt(resParts[1])) - (parseInt(outParts[0]) * 60 + parseInt(outParts[1])); log.gap = gapMins > 0 ? gapMins + ' min' : '< 1 min'; } }
+    // r25a: write the updated exhaustion log to today's snapshot so the change
+    // survives restarts AND an agent approving in a later session sees the
+    // "Budget added" status persist on the report. Was previously only updating
+    // the in-memory state.exhaustionLog, which got wiped on every redeploy.
+    if (db && log) {
+      try {
+        const todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+        await db.query(
+          "UPDATE daily_snapshots SET exhaustion_log = $1 WHERE snapshot_date = $2",
+          [JSON.stringify(state.exhaustionLog), todayStr]
+        );
+      } catch(persistErr) { console.error('[r25a] exhaustionLog persist error: ' + persistErr.message); }
+    }
+    if (db) { try { await db.query("UPDATE campaign_tasks SET status=$1, agent_notes=$2, updated_at=NOW(), resolved_at=NOW() WHERE campaign_id=$3 AND status IN ($4,$5) AND task_source=$6 AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)", ['complete', 'Budget +£' + amount + ' added', String(id), 'open', 'in_progress', 'alert']); } catch(e) { console.error('Auto-close task error: ' + e.message); } }
+    // r35.4: also remove from in-memory state.alerts so the dashboard banner
+    // clears immediately. Without this the banner stayed visible until the
+    // next analyseCampaigns cycle (which wouldn't actually clear it because
+    // the filter at line 1446 only checks date, not whether the campaign is
+    // still problematic).
+    state.alerts = state.alerts.filter(function(a) { return String(a.campaignId) !== String(id); });
+    const approvalAgent = extractAgentFromCampaign(campaign.name) || '';
+    const approvalMsg = ['✅ Budget added', campaign.name, '+£' + amount + ' added. New budget: £' + newBudget.toFixed(2)].join('\n');
+    if (approvalAgent) await sendToAgent(approvalAgent, approvalMsg);
+    if (db) { try { await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1,$2,$3,$4,$5)', [String(id), campaign.name, approvalAgent || 'Unknown', 'budget_added', '+£' + amount.toFixed(2) + ' added. Was £' + campaign.dailyBudget.toFixed(2) + ' → Now £' + newBudget.toFixed(2)]); } catch(logErr) { console.error('Budget activity log error: ' + logErr.message); } }
+    syncCampaigns();
+    res.json({ success: true, newBudget: newBudget });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/alerts/:campaignId/dismiss', async function(req, res) {
+  const id = req.params.campaignId;
+  const reason = req.body.reason || 'No reason given';
+  const alert = state.alerts.find(function(a) { return String(a.campaignId) === String(id); });
+  state.alerts = state.alerts.filter(function(a) { return String(a.campaignId) !== String(id); });
+  // r35.4: also close any open alert task in the DB for today. Was leaving
+  // DB rows open while state.alerts was cleared — two sources of truth diverging.
+  // Scoped to today to avoid wiping historical records (same scope as budget-add fix).
+  if (db) {
+    try {
+      await db.query(
+        "UPDATE campaign_tasks SET status='dismissed', dismissed_reason=$1, agent_notes=$2, " +
+        "  updated_at=NOW(), resolved_at=NOW() " +
+        "WHERE campaign_id=$3 AND task_source='alert' " +
+        "  AND status IN ('open','in_progress') " +
+        "  AND created_date = ((NOW() AT TIME ZONE 'Europe/London')::DATE)",
+        [reason, 'Dismissed via banner: ' + reason, String(id)]
+      );
+    } catch(e) { console.error('[r35.4 dismiss] alert task close error: ' + e.message); }
+  }
+  if (db && alert) {
+    try {
+      const agentName = extractAgentFromCampaign(alert.name||'') || 'Unknown';
+      await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1,$2,$3,$4,$5)', [String(id), alert.name || 'Unknown campaign', agentName, 'alert_dismissed', 'Alert dismissed. Reason: ' + reason + '. ACOS at time: ' + (alert.acos||'—') + '%. Alert type: ' + (alert.type||'—')]);
+    } catch(logErr) { console.error('Alert dismiss log error: ' + logErr.message); }
+  }
+  res.json({ success: true });
+});
+
+// ── Google Ads Ingest Endpoint ────────────────────────────────────────────
+app.post('/api/google/ingest', async function(req, res) {
+  const secret = req.headers['x-google-secret'] || req.body.secret;
+  const expectedSecret = process.env.GOOGLE_INGEST_SECRET || 'fksports-google-2024';
+  if (secret !== expectedSecret) {
+    // r33e: log auth failures — helps spot misconfigured scripts pushing to the wrong env
+    console.warn('[r33e INGEST] 401 unauthorized push attempt — secret mismatch');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const campaigns = req.body.campaigns || [];
+    const now = new Date();
+    const ukHour = parseInt(now.toLocaleString('en-GB', {timeZone:'Europe/London', hour:'2-digit', hour12:false}));
+    const alertsSuppressed = ukHour >= 22 || ukHour < 8;
+    const dateStr = now.toDateString();
+    const timeStr = now.toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'});
+    const ACOS_CRIT = parseFloat(process.env.ACOS_CRITICAL_THRESHOLD || 20);
+    const BUDGET_LOW = parseFloat(process.env.BUDGET_LOW_PERCENT || 20);
+
+    const products = req.body.products || [];
+
+    // r33e: diagnostic logging — verbose stamp on every successful ingest so
+    // problems like "script pushing to wrong URL" become visible from a single
+    // log line. Previously the only log was a generic "Google ingest received"
+    // and a 56-hour stale-data bug went unnoticed because nobody knew which
+    // host/env the script was pushing to. Now we log:
+    //   - the hostname this server thinks it's running on
+    //   - the bearer/auth identity of the caller (none for shared-secret)
+    //   - how the previous and new payloads differ (campaigns + products counts)
+    //   - sample row spend so it's visible at a glance whether data is fresh
+    const previousReceivedAt = googleState.lastReceivedAt;
+    const previousCampaignsCount = (googleState.campaigns || []).length;
+    const previousProductsCount = (googleState.products || []).length;
+    const hostHeader = req.headers['host'] || '?';
+    const userAgent = req.headers['user-agent'] || '?';
+    const sampleSpend = products.slice(0, 3).map(function(p){ return (p.spend != null ? '£'+p.spend : '-') + ' ' + String(p.name || p.campaignName || '').slice(0, 40); }).join(' | ');
+    const hoursSincePrev = previousReceivedAt ? ((now.getTime() - new Date(previousReceivedAt).getTime()) / 3600000).toFixed(1) : 'n/a';
+
+    // Google agents (Rahul/Anuj) not yet active — default to null instead of
+    // mis-extracting campaign name as agent. Re-enable when webhooks configured.
+    googleState.campaigns = campaigns.map(function(c) {
+      return Object.assign({}, c, { agentName: null, department: 'google' });
+    });
+    googleState.products = products.map(function(p) {
+      return Object.assign({}, p, { agentName: null, department: 'google' });
+    });
+    googleState.lastSync = timeStr;
+    googleState.lastReceivedAt = now.toISOString();
+    googleState.error = null;
+    googleState.lastSnapshot = { campaigns, products, lastSync: timeStr };
+
+    console.log('[r33e INGEST] ✓ received on host=' + hostHeader + ' ua=' + userAgent.slice(0,50));
+    console.log('[r33e INGEST] payload: ' + campaigns.length + ' campaigns, ' + products.length + ' products (was ' + previousCampaignsCount + ' camps / ' + previousProductsCount + ' prods, ' + hoursSincePrev + 'h ago)');
+    console.log('[r33e INGEST] sample rows: ' + sampleSpend);
+
+    // Persist this ingest to DB so a redeploy doesn't lose data.
+    // Also prune snapshots older than 30 days to keep the table small.
+    if (db) {
+      try {
+        await db.query(
+          "INSERT INTO google_state_snapshots (received_at, campaigns, products, campaigns_count, products_count, last_sync_label) " +
+          "VALUES ($1, $2, $3, $4, $5, $6)",
+          [now.toISOString(), JSON.stringify(googleState.campaigns), JSON.stringify(googleState.products), campaigns.length, products.length, timeStr]
+        );
+        // r33e: verify INSERT landed — query back to confirm and log size
+        const verify = await db.query("SELECT COUNT(*)::int AS c, MAX(received_at) AS latest FROM google_state_snapshots");
+        console.log('[r33e INGEST] DB snapshot persisted: total snapshots=' + verify.rows[0].c + ', latest=' + verify.rows[0].latest);
+        await db.query("DELETE FROM google_state_snapshots WHERE received_at < NOW() - INTERVAL '30 days'");
+      } catch(e) {
+        console.error('[r33e INGEST] snapshot save FAILED: ' + e.message);
+      }
+    }
+
+    // r37 (Batch 2): Persist v10 script fields if present.
+    // All four are OPTIONAL — if the script is still v9.1, these are undefined
+    // and we skip silently. Once v10 is installed they start populating.
+    //
+    // Counts logged so it's obvious in Railway logs which script version pushed.
+    if (db) {
+      let r37Stats = { searchTerms: 0, daily: 0, segments: 0 };
+
+      // Search terms (top N per campaign, last 7d)
+      // v10.2: script no longer sends productItemId (Google's API forbids the segment on
+      // search_term_view). product_item_id will always be NULL going forward. The column
+      // and unique index are kept for forward compat in case Google ever re-enables this.
+      // DELETE-before-INSERT pattern is retained because terms drop in/out of the top 50 each run.
+      const searchTerms = req.body.searchTerms || [];
+      if (Array.isArray(searchTerms) && searchTerms.length) {
+        try {
+          // Collect distinct campaign IDs appearing in this push
+          const incomingCampaignIds = Array.from(new Set(searchTerms.map(function(s){ return String(s.campaignId || ''); }).filter(Boolean)));
+          // Wipe stale rows for those campaigns so terms that dropped out of top 50 get removed
+          if (incomingCampaignIds.length) {
+            await db.query("DELETE FROM google_search_terms WHERE campaign_id = ANY($1)", [incomingCampaignIds]);
+          }
+          for (const st of searchTerms) {
+            if (!st || !st.campaignId || !st.searchTerm) continue;
+            await db.query(
+              "INSERT INTO google_search_terms " +
+              "(campaign_id, search_term, campaign_name, match_type, product_item_id, cost, clicks, impressions, conversions, conversions_value, status, period_start, period_end, updated_at) " +
+              "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW()) " +
+              "ON CONFLICT (campaign_id, search_term, COALESCE(product_item_id, '')) DO UPDATE SET " +
+              "campaign_name=EXCLUDED.campaign_name, match_type=EXCLUDED.match_type, " +
+              "cost=EXCLUDED.cost, clicks=EXCLUDED.clicks, impressions=EXCLUDED.impressions, " +
+              "conversions=EXCLUDED.conversions, conversions_value=EXCLUDED.conversions_value, " +
+              "status=EXCLUDED.status, period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, " +
+              "updated_at=NOW()",
+              [
+                String(st.campaignId), String(st.searchTerm),
+                st.campaignName || null, st.matchType || null,
+                st.productItemId || null,  // v10.2: always null going forward (kept for forward compat)
+                Number(st.cost) || 0, Number(st.clicks) || 0, Number(st.impressions) || 0,
+                Number(st.conversions) || 0, Number(st.conversionsValue) || 0,
+                st.status || null, st.periodStart || null, st.periodEnd || null
+              ]
+            );
+            r37Stats.searchTerms++;
+          }
+        } catch(e) { console.error('[v10.2 INGEST search_terms] ' + e.message); }
+      }
+
+      // Daily campaign metrics (30d, one row per campaign per day) — UPSERT on (campaign_id, snapshot_date)
+      const dailyMetrics = req.body.dailyMetrics || [];
+      if (Array.isArray(dailyMetrics) && dailyMetrics.length) {
+        try {
+          for (const d of dailyMetrics) {
+            if (!d || !d.campaignId || !d.date) continue;
+            await db.query(
+              "INSERT INTO google_campaign_daily " +
+              "(campaign_id, snapshot_date, campaign_name, campaign_type, spend, sales, clicks, impressions, conversions, updated_at) " +
+              "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW()) " +
+              "ON CONFLICT (campaign_id, snapshot_date) DO UPDATE SET " +
+              "campaign_name=EXCLUDED.campaign_name, campaign_type=EXCLUDED.campaign_type, " +
+              "spend=EXCLUDED.spend, sales=EXCLUDED.sales, clicks=EXCLUDED.clicks, " +
+              "impressions=EXCLUDED.impressions, conversions=EXCLUDED.conversions, updated_at=NOW()",
+              [
+                String(d.campaignId), d.date,
+                d.campaignName || null, d.campaignType || null,
+                Number(d.spend) || 0, Number(d.sales) || 0, Number(d.clicks) || 0,
+                Number(d.impressions) || 0, Number(d.conversions) || 0
+              ]
+            );
+            r37Stats.daily++;
+          }
+          // Prune anything older than 60 days
+          await db.query("DELETE FROM google_campaign_daily WHERE snapshot_date < CURRENT_DATE - INTERVAL '60 days'");
+        } catch(e) { console.error('[r37 INGEST daily] ' + e.message); }
+      }
+
+      // Device + day-of-week segments — both go into google_campaign_segments
+      const deviceSegments = req.body.deviceSegments || [];
+      const dayOfWeekSegments = req.body.dayOfWeekSegments || [];
+      const allSegments = [];
+      if (Array.isArray(deviceSegments)) deviceSegments.forEach(function(s){ if (s) allSegments.push(Object.assign({}, s, { kind: 'device' })); });
+      if (Array.isArray(dayOfWeekSegments)) dayOfWeekSegments.forEach(function(s){ if (s) allSegments.push(Object.assign({}, s, { kind: 'day_of_week' })); });
+      if (allSegments.length) {
+        try {
+          for (const s of allSegments) {
+            if (!s.campaignId || !s.kind || !s.value) continue;
+            await db.query(
+              "INSERT INTO google_campaign_segments " +
+              "(campaign_id, segment_kind, segment_value, campaign_name, cost, sales, clicks, impressions, conversions, period_start, period_end, updated_at) " +
+              "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW()) " +
+              "ON CONFLICT (campaign_id, segment_kind, segment_value) DO UPDATE SET " +
+              "campaign_name=EXCLUDED.campaign_name, cost=EXCLUDED.cost, sales=EXCLUDED.sales, " +
+              "clicks=EXCLUDED.clicks, impressions=EXCLUDED.impressions, conversions=EXCLUDED.conversions, " +
+              "period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, updated_at=NOW()",
+              [
+                String(s.campaignId), s.kind, String(s.value),
+                s.campaignName || null,
+                Number(s.cost) || 0, Number(s.sales) || 0, Number(s.clicks) || 0,
+                Number(s.impressions) || 0, Number(s.conversions) || 0,
+                s.periodStart || null, s.periodEnd || null
+              ]
+            );
+            r37Stats.segments++;
+          }
+        } catch(e) { console.error('[r37 INGEST segments] ' + e.message); }
+      }
+
+      if (r37Stats.searchTerms || r37Stats.daily || r37Stats.segments) {
+        console.log('[r37 INGEST v10] persisted: ' + r37Stats.searchTerms + ' search terms, ' + r37Stats.daily + ' daily rows, ' + r37Stats.segments + ' segments');
+      } else {
+        console.log('[r37 INGEST] script appears to be v9.1 (no v10 fields present) — that is fine, will populate once v10 installed');
+      }
+    }
+
+    if (!alertsSuppressed) {
+      for (const c of googleState.campaigns) {
+        if (c.state !== 'ENABLED' && c.state !== 'enabled') continue;
+        const spend = parseFloat(c.spend || 0);
+        const sales = parseFloat(c.sales || 0);
+        const budget = parseFloat(c.dailyBudget || 0);
+        const remaining = parseFloat(c.budgetRemaining || 0);
+        const acos = sales > 0 ? Math.round((spend/sales)*100*10)/10 : 0;
+        const outOfBudget = remaining <= 0.01 && budget > 0;
+        const budgetLow = !outOfBudget && budget > 0 && ((remaining/budget)*100) <= BUDGET_LOW;
+        const acosHigh = acos > ACOS_CRIT && spend > 1;
+        let alertType = null;
+        if (outOfBudget) alertType = 'out_of_budget';
+        else if (acosHigh) alertType = 'acos_high';
+        else if (budgetLow) alertType = 'budget_low';
+        if (!alertType) continue;
+        const already = googleState.alerts.find(function(a) { return String(a.campaignId) === String(c.campaignId) && a.date === dateStr && a.type === alertType; });
+        if (already) continue;
+        googleState.alerts.push({ campaignId: c.campaignId, name: c.name, type: alertType, time: timeStr, date: dateStr, acos: acos, budget: budget, department: 'google' });
+        const dashUrl = process.env.DASHBOARD_URL || 'https://app.fksports.co.uk';
+        let msg = '';
+        if (alertType === 'out_of_budget') msg = '🚨 Out of Budget (Google)\n' + c.name + '\nSpent £' + spend.toFixed(2) + ' of £' + budget.toFixed(2) + '\n' + dashUrl;
+        else if (alertType === 'budget_low') msg = '⚡ Budget Low (Google)\n' + c.name + '\n£' + remaining.toFixed(2) + ' remaining\n' + dashUrl;
+        else if (alertType === 'acos_high') msg = '📈 High ACoS (Google)\n' + c.name + '\nACoS: ' + acos + '%\n' + dashUrl;
+        const agent = c.agentName;
+        if (agent) { try { await sendToAgent(agent, msg); } catch(e) { console.error('Google alert send error: ' + e.message); } }
+        if (db) { try { await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes) VALUES ($1,$2,$3,$4,$5)', [String(c.campaignId), c.name, agent||'Unknown', alertType, msg]); } catch(e) {} }
+      }
+    }
+    res.json({ success: true, campaignsReceived: campaigns.length, productsReceived: products.length });
+  } catch(e) {
+    console.error('Google ingest error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Returns freshness/staleness info for the Google Ads ingest. Used by the dashboard
+// to show a red banner if the script hasn't pushed data in > 30 hours.
+app.get('/api/google/data-freshness', function(req, res) {
+  const lastReceivedAt = googleState.lastReceivedAt;
+  if (!lastReceivedAt) {
+    return res.json({ stale: true, neverReceived: true, ageHours: null, lastReceivedAt: null });
+  }
+  const ageMs = Date.now() - new Date(lastReceivedAt).getTime();
+  const ageHours = ageMs / 36e5;
+  const STALE_THRESHOLD_HOURS = 30;
+  res.json({
+    stale: ageHours > STALE_THRESHOLD_HOURS,
+    neverReceived: false,
+    ageHours: Math.round(ageHours * 10) / 10,
+    lastReceivedAt: lastReceivedAt,
+    lastSync: googleState.lastSync,
+    thresholdHours: STALE_THRESHOLD_HOURS
+  });
+});
+
+// ── Google Ads Dashboard Endpoint ─────────────────────────────────────────
+app.get('/api/google/dashboard', async function(req, res) {
+  const camps = googleState.campaigns || [];
+  const alerts = googleState.alerts || [];
+  const totalSpend = camps.reduce(function(s,c){ return s+(parseFloat(c.spend)||0); }, 0);
+  const totalRevenue = camps.reduce(function(s,c){ return s+(parseFloat(c.sales)||0); }, 0);
+  const blendedAcos = totalRevenue > 0 ? Math.round((totalSpend/totalRevenue)*100*10)/10 : 0;
+  const outOfBudget = camps.filter(function(c){ return c.budgetRemaining <= 0.01 && c.dailyBudget > 0; }).length;
+  const spendNoRevenue = camps.filter(function(c){ return c.spend > 0 && (c.sales === 0 || c.sales === null); }).length;
+  res.json({ metrics: { totalSpend: totalSpend.toFixed(2), totalRevenue: totalRevenue.toFixed(2), blendedAcos, outOfBudget, spendNoRevenue, totalCampaigns: camps.length, activeCampaigns: camps.filter(function(c){ return c.state === "ENABLED" || c.state === "enabled"; }).length }, campaigns: camps, products: googleState.products || [], alerts: alerts, lastSync: googleState.lastSync, error: googleState.error });
+});
+
+// ── Shopify Integration ───────────────────────────────────────────────────
+let shopifyState = {
+  products: [],
+  lastSync: null,
+  error: null
+};
+
+async function syncShopifyProducts() {
+  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  const store = process.env.SHOPIFY_STORE;
+  if (!token || !store) { console.log('Shopify credentials not configured'); return; }
+
+  try {
+    console.log('Syncing Shopify products...');
+
+    // Fetch all products including draft/archived (needed to flag inactive products in ads)
+    const prodRes = await axios.get('https://' + store + '/admin/api/2021-07/products.json?limit=250', {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const rawProducts = prodRes.data.products || [];
+
+    // Fetch last 30 days of orders WITH PAGINATION (FK Sports does 150+ orders/day,
+    // so a single page of 250 captures less than 2 days). Walk Link headers until done.
+    const now = Date.now();
+    const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+    // Window: [startOfToday - 7 days, startOfToday) where "today" means London time.
+    // Container runs UTC so we have to compute London-midnight explicitly otherwise
+    // orders placed between 00:00 and 01:00 London time get misbucketed.
+    const startOfToday = londonMidnightToday();
+    const cutoff7Start = startOfToday - 7 * 24 * 60 * 60 * 1000;  // 7 days ago at London 00:00
+    const cutoff7End   = startOfToday;                              // today at London 00:00
+    const todayStart   = startOfToday;
+    const todayEnd     = todayStart + 24 * 60 * 60 * 1000;
+
+    // Per-product totals over 7 and 30 day windows (7d EXCLUDES today)
+    const sales30 = {};        // net (gross - discount - refund) over last 30 days incl. today
+    const units30 = {};
+    const sales7 = {};         // last 7 COMPLETE days (excludes today)
+    const units7 = {};
+    const salesToday = {};     // today only (incomplete)
+    const unitsToday = {};
+
+    // Per-product daily breakdown: pid -> { 'YYYY-MM-DD': { gross, discount, refund, net } }
+    const dailyByPid = {};
+
+    // Store-wide daily breakdown for the dashboard "Daily breakdown" card
+    // (pid is keyed too so the modal can show top products per day)
+    const dailyAll = {};       // 'YYYY-MM-DD' -> { gross, discount, refund, net, byPid: { pid: net } }
+
+    function getDay(map, key) {
+      if (!map[key]) map[key] = { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0, units: 0 };
+      return map[key];
+    }
+    function getDayAll(key) {
+      if (!dailyAll[key]) dailyAll[key] = { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0, byPid: {} };
+      return dailyAll[key];
+    }
+
+    let totalOrders = 0;
+    try {
+      // Paginated fetch. We use updated_at_min (NOT created_at_min) so orders that
+      // were created earlier but had a refund issued in the last 30 days come back too.
+      // Without this we silently miss refunds on orders older than 30 days.
+      let url = 'https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&updated_at_min=' + since30;
+      let pageCount = 0;
+      const maxPages = 20; // safety cap (5,000 orders should be enough for 30 days even at peak)
+      while (url && pageCount < maxPages) {
+        pageCount++;
+        const orderRes = await axios.get(url, {
+          headers: { 'X-Shopify-Access-Token': token }
+        });
+        const orders = orderRes.data.orders || [];
+        totalOrders += orders.length;
+
+        orders.forEach(function(order) {
+          // IMPORTANT: do NOT early-return on cancelled orders. Shopify sets
+          // cancelled_at when a fully-refunded order is automatically cancelled,
+          // so virtually every refunded order has cancelled_at != null.
+          // We do skip GROSS/DISCOUNT/SHIPPING for cancelled orders below
+          // (matches Shopify Analytics) but the REFUND must still be processed
+          // because real money was returned to the customer.
+          const orderIsCancelled = !!order.cancelled_at;
+
+          const orderTime = new Date(order.created_at).getTime();
+          const dayKey = londonDateKey(new Date(orderTime));
+          const isWithin7 = orderTime >= cutoff7Start && orderTime < cutoff7End;
+          const isToday = orderTime >= todayStart && orderTime < todayEnd;
+          // The order may have been CREATED outside our 30-day window but is in our
+          // result set because of a recent refund. We track this so we know to
+          // process refunds (which are dated by their issue) but skip gross/discount
+          // for orders whose creation falls outside any window of interest.
+          const orderInLast30 = orderTime >= new Date(since30).getTime();
+
+          // Gross/discount/shipping for this order are only tallied if:
+          //   1. The order is NOT cancelled (Shopify Analytics excludes cancelled orders)
+          //   2. The order was CREATED in our 30-day window
+          // Refunds further down are processed regardless of either condition.
+          if (orderInLast30 && !orderIsCancelled) {
+            // Shipping at the order level (not per line). Apply to the store-wide
+            // day total only, because shipping isn't attributable to any one product.
+            const shippingTotal = (order.shipping_lines || []).reduce(function(s, sl){
+              return s + parseFloat(sl.price || 0);
+            }, 0);
+            if (shippingTotal > 0) {
+              const ad = getDayAll(dayKey);
+              ad.shipping += shippingTotal;
+              ad.net += shippingTotal;
+            }
+
+            // ── Store-wide totals: use Shopify's PRE-COMPUTED order fields ─────────
+            // Path 1 — instead of summing line_items + discount_allocations ourselves
+            // (which had drift vs Shopify Analytics), use Shopify's own per-order
+            // numbers. These already match Analytics' "Total sales breakdown".
+            //   subtotal_price        = gross sales − discounts (i.e. what Shopify shows)
+            //   total_discounts       = discounts as Shopify reports them
+            //   gross sales (derived) = subtotal_price + total_discounts
+            const orderSubtotal  = parseFloat(order.subtotal_price || 0);     // already discount-applied
+            const orderDiscounts = parseFloat(order.total_discounts || 0);
+            const orderGross     = orderSubtotal + orderDiscounts;            // back-out gross
+            const orderNetForDay = orderSubtotal;                              // line-net at order level
+
+            const ad = getDayAll(dayKey);
+            ad.gross    += orderGross;
+            ad.discount += orderDiscounts;
+            ad.net      += orderNetForDay;
+            // shipping was already added above
+
+            // ── Per-product totals: keep our line-item math (drives product cards & AI) ──
+            (order.line_items || []).forEach(function(item) {
+              const pid = String(item.product_id);
+              const gross = parseFloat(item.price || 0) * (item.quantity || 0);
+              const discountAllocated = (item.discount_allocations || []).reduce(function(s, da){
+                return s + parseFloat(da.amount || 0);
+              }, 0);
+              const lineNet = Math.max(0, gross - discountAllocated);
+
+              sales30[pid] = (sales30[pid] || 0) + lineNet;
+              units30[pid] = (units30[pid] || 0) + (item.quantity || 0);
+              if (isWithin7) {
+                sales7[pid] = (sales7[pid] || 0) + lineNet;
+                units7[pid] = (units7[pid] || 0) + (item.quantity || 0);
+              }
+              if (isToday) {
+                salesToday[pid] = (salesToday[pid] || 0) + lineNet;
+                unitsToday[pid] = (unitsToday[pid] || 0) + (item.quantity || 0);
+              }
+
+              // Per-product daily breakdown (sparkline & per-product modal)
+              if (!dailyByPid[pid]) dailyByPid[pid] = {};
+              const d = getDay(dailyByPid[pid], dayKey);
+              d.gross += gross;
+              d.discount += discountAllocated;
+              d.net += lineNet;
+              d.units = (d.units || 0) + (item.quantity || 0);  // r37: per-day units for prev-week Units 7d
+
+              // Store-wide byPid attribution (top products per day) — keep line-item
+              // share since order-level numbers can't be split per product.
+              ad.byPid[pid] = (ad.byPid[pid] || 0) + lineNet;
+            });
+          } // end gross/discount/shipping section (only runs for non-cancelled orders in window)
+
+          // REFUNDS — process for ALL orders regardless of order age, because we
+          // switched to updated_at_min and want to catch refunds on old orders.
+          // Option B: assign to the day the refund was issued (ref.created_at).
+          (order.refunds || []).forEach(function(ref) {
+            const refundTime = new Date(ref.created_at || order.created_at).getTime();
+            const refundDayKey = londonDateKey(new Date(refundTime));
+            const refundIsWithin7 = refundTime >= cutoff7Start && refundTime < cutoff7End;
+            const refundIsToday = refundTime >= todayStart && refundTime < todayEnd;
+            (ref.refund_line_items || []).forEach(function(rli) {
+              const pid = String(rli.line_item ? rli.line_item.product_id : '');
+              if (!pid) return;
+              const refundAmount = parseFloat(rli.subtotal || 0); // subtotal of refunded line (already discount-adjusted)
+              if (!refundAmount) return;
+
+              // Subtract from net totals
+              sales30[pid] = (sales30[pid] || 0) - refundAmount;
+              if (refundIsWithin7) sales7[pid] = (sales7[pid] || 0) - refundAmount;
+              if (refundIsToday) salesToday[pid] = (salesToday[pid] || 0) - refundAmount;
+
+              // Per-product daily — apply on refund date
+              if (!dailyByPid[pid]) dailyByPid[pid] = {};
+              const d = getDay(dailyByPid[pid], refundDayKey);
+              d.refund += refundAmount;
+              d.net -= refundAmount;
+
+              // Store-wide daily — apply on refund date
+              const ad = getDayAll(refundDayKey);
+              ad.refund += refundAmount;
+              ad.net -= refundAmount;
+              ad.byPid[pid] = (ad.byPid[pid] || 0) - refundAmount;
+            });
+          });
+        });
+
+        // Look at Link header for next page cursor
+        const linkHeader = orderRes.headers && orderRes.headers.link;
+        let nextUrl = null;
+        if (linkHeader) {
+          const m = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+          if (m) nextUrl = m[1];
+        }
+        url = nextUrl;
+      }
+      if (pageCount >= maxPages) {
+        console.log('Shopify pagination stopped at safety cap of ' + maxPages + ' pages — some old orders may not be included');
+      }
+      console.log('Shopify orders fetched: ' + totalOrders + ' across ' + pageCount + ' page(s); using updated_at_min (catches refunds on older orders); cancelled orders excluded');
+      // Stash store-wide daily for the dashboard
+      shopifyState.dailyBreakdown = dailyAll;
+    } catch(e) { console.log('Shopify orders skipped: ' + e.message); }
+
+    shopifyState.products = rawProducts.map(function(p) {
+      const pid = String(p.id);
+      const price = parseFloat((p.variants && p.variants[0] && p.variants[0].price) || 0);
+      const inventory = (p.variants || []).reduce(function(s, v) { return s + (v.inventory_quantity || 0); }, 0);
+      const imageUrl = p.images && p.images[0] ? p.images[0].src : null;
+      const tags = (p.tags || '').split(',').map(function(t){ return t.trim(); });
+
+      // Build NET-sales daily series.
+      // - sparkline (7d, oldest → newest) feeds the existing 7-bar daily-revenue chart in the
+      //   product modal. UNCHANGED.
+      // - sparkline14d (14d, oldest → newest) feeds the r37 window toggle so "Last week" =
+      //   sum of indices 0..6, "This week" = sum of indices 7..13. Same per-day numbers,
+      //   just a longer window.
+      const daily = dailyByPid[pid] || {};
+      const sparkline = [];
+      for (let i = 7; i >= 1; i--) {
+        const d = new Date(todayStart - i * 24 * 60 * 60 * 1000);
+        const k = londonDateKey(d);
+        const dayData = daily[k];
+        sparkline.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
+      }
+      const sparkline14d = [];
+      const unitsSparkline14d = [];
+      for (let i = 14; i >= 1; i--) {
+        const d = new Date(todayStart - i * 24 * 60 * 60 * 1000);
+        const k = londonDateKey(d);
+        const dayData = daily[k];
+        sparkline14d.push(dayData ? Math.round(dayData.net * 100) / 100 : 0);
+        unitsSparkline14d.push(dayData ? (dayData.units || 0) : 0);
+      }
+
+      return {
+        id: pid,
+        title: p.title,
+        handle: p.handle,
+        url: 'https://' + store.replace('.myshopify.com', '') + '.com/products/' + p.handle,
+        shopifyUrl: 'https://' + store + '/admin/products/' + pid,
+        price: price,
+        inventory: inventory,
+        imageUrl: imageUrl,
+        tags: tags,
+        vendor: p.vendor || '',
+        productType: p.product_type || '',
+        status: p.status,
+        revenue7d: Math.round((sales7[pid] || 0) * 100) / 100,
+        unitsSold7d: units7[pid] || 0,
+        revenue30d: Math.round((sales30[pid] || 0) * 100) / 100,
+        unitsSold30d: units30[pid] || 0,
+        revenueToday: Math.round((salesToday[pid] || 0) * 100) / 100,
+        unitsSoldToday: unitsToday[pid] || 0,
+        dailySales7d: sparkline,
+        dailySales14d: sparkline14d,  // r37: powers the time-window toggle (this week / last week)
+        dailyUnits14d: unitsSparkline14d,  // r37: per-day units for prev-week Units 7d
+        variantCount: (p.variants || []).length,
+        // v10.2: store lightweight variant info (id, sku, title) so the campaign card can
+        // map Google's variant IDs to human-readable SKU/title. Without this the variant
+        // breakdown shows "(no Shopify match)" for everything.
+        variants: (p.variants || []).map(function(v){
+          return { id: String(v.id), sku: v.sku || null, title: v.title || null };
+        }),
+        createdAt: p.created_at
+      };
+    });
+
+    shopifyState.lastSync = new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'});
+    shopifyState.error = null;
+    console.log('Shopify sync complete: ' + shopifyState.products.length + ' products');
+  } catch(e) {
+    console.error('Shopify sync error: ' + e.message);
+    shopifyState.error = e.message;
+  }
+}
+
+// Match a Google Ads row to a Shopify product.
+// Priority order:
+//   1. Exact match by Shopify item ID (deterministic — preferred for Shopping)
+//   2. Match by Shopify product_type (single product in that type only)
+//   3. Fuzzy name match (legacy fallback — last resort)
+function matchShopifyProduct(googleRow) {
+  if (!shopifyState.products.length) return null;
+  if (typeof googleRow === 'string') googleRow = { name: googleRow };
+  if (!googleRow) return null;
+
+  // 1. Match by Shopify item ID — format: "shopify_gb_<productId>_<variantId>"
+  if (googleRow.shopifyItemId) {
+    const parts = String(googleRow.shopifyItemId).split('_');
+    if (parts.length >= 4) {
+      const productId = parts[2];
+      const found = shopifyState.products.find(function(p) { return String(p.id) === productId; });
+      if (found) return found;
+    }
+  }
+
+  // 2. Match by product_type when exactly one Shopify product has that type
+  if (googleRow.productType) {
+    const pt = String(googleRow.productType).toLowerCase();
+    const candidates = shopifyState.products.filter(function(p) {
+      return String(p.productType || '').toLowerCase() === pt;
+    });
+    if (candidates.length === 1) return candidates[0];
+  }
+
+  // 3. Fuzzy name match (legacy) — only if nothing else worked
+  const rawName = googleRow.name || googleRow.productName;
+  if (!rawName) return null;
+  const name = String(rawName).toLowerCase();
+  if (name.indexOf('shopify_gb_') === 0) return null;
+  if (name === 'othercase') return null;
+
+  let match = shopifyState.products.find(function(p) { return p.title.toLowerCase() === name; });
+  if (match) return match;
+  match = shopifyState.products.find(function(p) {
+    const title = p.title.toLowerCase();
+    return title.includes(name) || name.includes(title);
+  });
+  if (match) return match;
+  const words = name.split(/\s+/).filter(function(w){ return w.length > 3; });
+  match = shopifyState.products.find(function(p) {
+    const title = p.title.toLowerCase();
+    return words.some(function(w){ return title.includes(w); });
+  });
+  return match || null;
+}
+
+// Find all Google Ads rows that point at a given Shopify product (by product ID)
+function findGoogleRowsForShopifyProduct(shopifyProductId) {
+  const id = String(shopifyProductId);
+  return (googleState.products || []).filter(function(gp) {
+    if (!gp.shopifyItemId) return false;
+    const parts = String(gp.shopifyItemId).split('_');
+    return parts.length >= 4 && parts[2] === id;
+  });
+}
+
+// Aggregate Google Ads metrics across multiple rows (e.g. all variants of one Shopify product)
+function aggregateGoogleMetrics(rows) {
+  const totals = { impressions: 0, clicks: 0, spend: 0, sales: 0, conversions: 0 };
+  const campaigns = {};
+  rows.forEach(function(r) {
+    totals.impressions += r.impressions || 0;
+    totals.clicks += r.clicks || 0;
+    totals.spend += r.spend || 0;
+    totals.sales += r.sales || 0;
+    totals.conversions += r.conversions || 0;
+    if (r.campaignId && !campaigns[r.campaignId]) {
+      campaigns[r.campaignId] = { campaignId: r.campaignId, campaignName: r.campaignName, campaignType: r.campaignType };
+    }
+  });
+  return {
+    impressions: totals.impressions,
+    clicks: totals.clicks,
+    spend: Math.round(totals.spend * 100) / 100,
+    sales: Math.round(totals.sales * 100) / 100,
+    conversions: Math.round(totals.conversions * 10) / 10,
+    ctr: totals.impressions > 0 ? Math.round((totals.clicks / totals.impressions) * 100 * 100) / 100 : 0,
+    acos: totals.sales > 0 ? Math.round((totals.spend / totals.sales) * 1000) / 10 : 0,
+    // Cost per conversion — works even when revenue is lagged/zero. Useful when ACOS reads N/A.
+    costPerConv: totals.conversions > 0 ? Math.round((totals.spend / totals.conversions) * 100) / 100 : 0,
+    campaignsAdvertisedIn: Object.values(campaigns)
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// GA4 OAuth + Data API + PageSpeed Insights
+// ─────────────────────────────────────────────────────────────────────────
+// Path 2 (user OAuth) for Layer 2 funnel data.
+// Persists refresh token to Postgres so it survives Railway redeploys.
+
+const GA4_OAUTH_SCOPE = 'https://www.googleapis.com/auth/analytics.readonly';
+const GA4_OAUTH_PURPOSE = 'ga4';
+// r26: Search Console scope. Added alongside GA4 because it uses the same
+// Google OAuth client. Re-consent is required once after this deploy.
+const GSC_OAUTH_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+const COMBINED_OAUTH_SCOPES = GA4_OAUTH_SCOPE + ' ' + GSC_OAUTH_SCOPE;
+
+function getOauthRedirectUri(req) {
+  // Prefer DASHBOARD_URL env var (so prod always uses prod redirect, even when
+  // running on staging). Fall back to the request host.
+  const dash = process.env.DASHBOARD_URL || ('https://' + (req && req.get ? req.get('host') : 'app.fksports.co.uk'));
+  return dash.replace(/\/$/, '') + '/api/google/oauth/callback';
+}
+
+// State holders for runtime
+let ga4State = {
+  connected: false,
+  connectedEmail: null,
+  lastFetch: null,
+  error: null,
+  productMetrics: {} // path -> { sessions, cartAdditions, checkouts, etc. }
+};
+
+async function loadGa4StateFromDb() {
+  if (!db) return;
+  try {
+    const r = await db.query("SELECT refresh_token, access_token, access_token_expires_at, connected_email, last_used FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
+    if (r.rows.length) {
+      ga4State.connected = true;
+      ga4State.connectedEmail = r.rows[0].connected_email;
+      ga4State.refreshToken = r.rows[0].refresh_token;       // <-- this was missing; without it GA4 silently breaks on every Railway restart
+      ga4State.accessToken = r.rows[0].access_token;
+      ga4State.accessTokenExpiresAt = r.rows[0].access_token_expires_at;
+      console.log('GA4 OAuth state restored from DB (connected as ' + ga4State.connectedEmail + ')');
+    } else {
+      console.log('No GA4 OAuth token in DB — connect via /api/google/oauth/start');
+    }
+    const m = await db.query("SELECT * FROM ga4_product_metrics");
+    ga4State.productMetrics = {};
+    m.rows.forEach(function(row) {
+      ga4State.productMetrics[row.page_path] = {
+        sessions: row.sessions || 0,
+        visitors: row.visitors || 0,
+        cartAdditions: row.cart_additions || 0,
+        checkouts: row.checkouts || 0,
+        purchases: row.purchases || 0,
+        engagementRate: row.engagement_rate || 0,
+        avgEngagementTime: row.avg_engagement_time || 0,
+        bounceRate: row.bounce_rate || 0
+      };
+    });
+    if (m.rows.length) console.log('Loaded GA4 metrics for ' + m.rows.length + ' product paths');
+  } catch(e) { console.error('GA4 state load error: ' + e.message); }
+}
+
+// Step 1: send user to Google OAuth
+app.get('/api/google/oauth/start', function(req, res) {
+  const clientId = process.env.GA4_OAUTH_CLIENT_ID;
+  if (!clientId) return res.status(500).send('GA4_OAUTH_CLIENT_ID not configured');
+  const redirect = getOauthRedirectUri(req);
+  const url = 'https://accounts.google.com/o/oauth2/v2/auth?' +
+    'client_id=' + encodeURIComponent(clientId) +
+    '&redirect_uri=' + encodeURIComponent(redirect) +
+    '&response_type=code' +
+    '&scope=' + encodeURIComponent(COMBINED_OAUTH_SCOPES) +
+    '&access_type=offline' +
+    '&prompt=consent' +
+    '&include_granted_scopes=true';
+  res.redirect(url);
+});
+
+// Step 2: receive auth code, exchange for tokens, persist refresh token
+app.get('/api/google/oauth/callback', async function(req, res) {
+  const code = req.query.code;
+  const error = req.query.error;
+  if (error) return res.send('<h2>GA4 connect failed</h2><p>' + error + '</p><a href="/google.html">Back to dashboard</a>');
+  if (!code) return res.status(400).send('Missing code');
+  const clientId = process.env.GA4_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GA4_OAUTH_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return res.status(500).send('OAuth credentials not configured');
+
+  try {
+    const redirect = getOauthRedirectUri(req);
+    const tokRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      code: code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirect,
+      grant_type: 'authorization_code'
+    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+    const { refresh_token, access_token, expires_in } = tokRes.data;
+    if (!refresh_token) {
+      return res.send('<h2>GA4 connect — no refresh token</h2><p>Google did not return a refresh token. This usually means the consent was previously given. Revoke access at <a href="https://myaccount.google.com/permissions">Google Account permissions</a>, then try again.</p><a href="/google.html">Back</a>');
+    }
+
+    // Look up the user's email to display on dashboard
+    let email = null;
+    try {
+      const ui = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: 'Bearer ' + access_token }
+      });
+      email = ui.data && ui.data.email;
+    } catch(e) { /* non-fatal */ }
+
+    if (db) {
+      const expAt = new Date(Date.now() + (expires_in - 60) * 1000);
+      await db.query(`
+        INSERT INTO google_oauth_tokens (purpose, refresh_token, access_token, access_token_expires_at, connected_email, connected_at, last_used)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (purpose) DO UPDATE SET
+          refresh_token = EXCLUDED.refresh_token,
+          access_token = EXCLUDED.access_token,
+          access_token_expires_at = EXCLUDED.access_token_expires_at,
+          connected_email = EXCLUDED.connected_email,
+          connected_at = NOW(),
+          last_used = NOW()
+      `, [GA4_OAUTH_PURPOSE, refresh_token, access_token, expAt, email]);
+    }
+
+    ga4State.connected = true;
+    ga4State.connectedEmail = email;
+
+    // Trigger first GA4 fetch in background
+    fetchGa4ProductMetrics().catch(function(e){ console.error('First GA4 fetch error: ' + e.message); });
+
+    res.send('<h2>✅ GA4 connected</h2><p>Account: ' + (email || '(unknown)') + '</p><p>Pulling 7 days of funnel data now. Return to the dashboard in a minute.</p><a href="/google.html">Back to dashboard</a>');
+  } catch(e) {
+    console.error('OAuth callback error: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    res.status(500).send('<h2>GA4 connect failed</h2><pre>' + (e.response ? JSON.stringify(e.response.data, null, 2) : e.message) + '</pre>');
+  }
+});
+
+// Get a fresh GA4 access token using the stored refresh token
+// r26: Fetch Google Search Console data — top queries per page for FK Sports.
+// Uses the same Google OAuth token as GA4 (combined scopes). Pulls yesterday's
+// data (GSC has 2-3 day lag but yesterday is usually available).
+//
+// We pull at ROW level (date × page × query) because we want to see
+// rank trend per (page, query). API returns up to 25,000 rows per request.
+async function fetchGscData(daysBack) {
+  if (!db) throw new Error('No DB');
+  daysBack = daysBack || 3; // by default, refresh last 3 days (covers GSC's reporting lag)
+  const propertyUrl = process.env.GSC_PROPERTY_URL || 'https://fksports.co.uk';
+
+  let token;
+  try {
+    token = await getGa4AccessToken();
+  } catch(e) {
+    console.error('[r26 gsc] no access token: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+
+  const today = new Date();
+  const startDate = new Date(today.getTime() - daysBack * 86400000).toISOString().slice(0, 10);
+  const endDate = new Date(today.getTime() - 1 * 86400000).toISOString().slice(0, 10); // yesterday
+  let totalRows = 0, errors = 0;
+
+  try {
+    const url = 'https://searchconsole.googleapis.com/webmasters/v3/sites/' + encodeURIComponent(propertyUrl) + '/searchAnalytics/query';
+    let startRow = 0;
+    const rowLimit = 5000;
+    let keepGoing = true;
+    while (keepGoing) {
+      const reqBody = {
+        startDate: startDate,
+        endDate: endDate,
+        dimensions: ['date', 'page', 'query'],
+        rowLimit: rowLimit,
+        startRow: startRow
+      };
+      const r = await axios.post(url, reqBody, {
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        timeout: 30000
+      });
+      const rows = (r.data && r.data.rows) || [];
+      if (!rows.length) break;
+      // Upsert each row
+      for (const row of rows) {
+        try {
+          const [date, pageUrl, query] = row.keys;
+          await db.query(
+            "INSERT INTO gsc_daily (report_date, page_url, query, clicks, impressions, ctr, position, fetched_at) " +
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) " +
+            "ON CONFLICT (report_date, page_url, query) DO UPDATE SET " +
+            "clicks = EXCLUDED.clicks, impressions = EXCLUDED.impressions, ctr = EXCLUDED.ctr, position = EXCLUDED.position, fetched_at = NOW()",
+            [date, pageUrl, query, parseInt(row.clicks || 0), parseInt(row.impressions || 0), parseFloat(row.ctr || 0), parseFloat(row.position || 0)]
+          );
+          totalRows++;
+        } catch(e) { errors++; console.error('[r26 gsc] upsert error: ' + e.message); }
+      }
+      if (rows.length < rowLimit) keepGoing = false;
+      else startRow += rowLimit;
+      if (startRow >= 25000) keepGoing = false; // safety cap
+    }
+    console.log('[r26 gsc] fetched ' + totalRows + ' rows (' + startDate + ' to ' + endDate + '), ' + errors + ' errors');
+    return { ok: true, rows: totalRows, errors: errors, dateRange: { start: startDate, end: endDate } };
+  } catch(e) {
+    const status = e.response && e.response.status;
+    if (status === 403) {
+      console.error('[r26 gsc] 403 — likely missing scope. User must reconnect via /api/google/oauth/start to grant Search Console permission.');
+      return { ok: false, error: '403 — reconnect Google for Search Console scope' };
+    }
+    console.error('[r26 gsc] fetch error: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// r26: GET /api/google/gsc/product-rank?url=... — return top 10 queries for a page
+// over the last 30 days, with current vs previous-period position.
+app.get('/api/google/gsc/product-rank', async function(req, res) {
+  if (!db) return res.json({ rows: [] });
+  const url = String(req.query.url || '').trim();
+  if (!url) return res.status(400).json({ error: 'url required' });
+  try {
+    // Last 30 days, top 10 queries by clicks
+    const r = await db.query(
+      "WITH recent AS (" +
+      "  SELECT query, " +
+      "         SUM(clicks) AS clicks_30d, " +
+      "         SUM(impressions) AS impr_30d, " +
+      "         AVG(position) AS avg_pos_30d " +
+      "  FROM gsc_daily " +
+      "  WHERE page_url = $1 AND report_date >= CURRENT_DATE - INTERVAL '30 days' " +
+      "  GROUP BY query " +
+      "  HAVING SUM(impressions) >= 5 " +
+      "  ORDER BY SUM(clicks) DESC, SUM(impressions) DESC " +
+      "  LIMIT 10" +
+      "), prev AS (" +
+      "  SELECT query, AVG(position) AS avg_pos_prev " +
+      "  FROM gsc_daily " +
+      "  WHERE page_url = $1 AND report_date >= CURRENT_DATE - INTERVAL '60 days' AND report_date < CURRENT_DATE - INTERVAL '30 days' " +
+      "  GROUP BY query" +
+      ") " +
+      "SELECT r.query, r.clicks_30d, r.impr_30d, r.avg_pos_30d, p.avg_pos_prev " +
+      "FROM recent r LEFT JOIN prev p ON p.query = r.query " +
+      "ORDER BY r.clicks_30d DESC, r.impr_30d DESC",
+      [url]
+    );
+    const rows = r.rows.map(function(row) {
+      const cur = parseFloat(row.avg_pos_30d || 0);
+      const prev = row.avg_pos_prev != null ? parseFloat(row.avg_pos_prev) : null;
+      const delta = (prev != null && cur > 0) ? +((prev - cur).toFixed(1)) : null; // positive = improved (lower number = better rank)
+      return {
+        query: row.query,
+        clicks: parseInt(row.clicks_30d || 0),
+        impressions: parseInt(row.impr_30d || 0),
+        position: +cur.toFixed(1),
+        previousPosition: prev != null ? +prev.toFixed(1) : null,
+        delta: delta
+      };
+    });
+    // Total clicks/impressions across all queries (not just top 10)
+    const totalRes = await db.query(
+      "SELECT SUM(clicks) AS clicks, SUM(impressions) AS impr, AVG(ctr) AS ctr " +
+      "FROM gsc_daily WHERE page_url = $1 AND report_date >= CURRENT_DATE - INTERVAL '30 days'",
+      [url]
+    );
+    const tr = totalRes.rows[0] || {};
+    res.json({
+      url: url,
+      rows: rows,
+      totals: {
+        clicks: parseInt(tr.clicks || 0),
+        impressions: parseInt(tr.impr || 0),
+        ctr: tr.ctr != null ? +(parseFloat(tr.ctr) * 100).toFixed(1) : 0
+      }
+    });
+  } catch(e) {
+    console.error('[r26 gsc] product-rank error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r26: POST /api/google/gsc/refresh-now — manager+owner manual refresh
+app.post('/api/google/gsc/refresh-now', async function(req, res) {
+  const role = (req.user && (req.user.role || '').toLowerCase()) || '';
+  const dept = (req.user && (req.user.department || '').toLowerCase()) || '';
+  const isPrivileged = ['owner','manager'].indexOf(role) !== -1 || dept === 'manager';
+  if (!isPrivileged) return res.status(403).json({ error: 'Manager+ only' });
+  const result = await fetchGscData(7);
+  res.json(result);
+});
+
+async function getGa4AccessToken() {
+  if (!db) throw new Error('No DB — cannot read OAuth tokens');
+  const r = await db.query("SELECT * FROM google_oauth_tokens WHERE purpose=$1", [GA4_OAUTH_PURPOSE]);
+  if (!r.rows.length) throw new Error('GA4 not connected — visit /api/google/oauth/start');
+  const row = r.rows[0];
+
+  // If we have a non-expired access token, reuse it
+  if (row.access_token && row.access_token_expires_at && new Date(row.access_token_expires_at) > new Date()) {
+    return row.access_token;
+  }
+
+  // Refresh
+  const clientId = process.env.GA4_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GA4_OAUTH_CLIENT_SECRET;
+  const tokRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: row.refresh_token,
+    grant_type: 'refresh_token'
+  }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+  const { access_token, expires_in } = tokRes.data;
+  const expAt = new Date(Date.now() + (expires_in - 60) * 1000);
+  await db.query("UPDATE google_oauth_tokens SET access_token=$1, access_token_expires_at=$2, last_used=NOW() WHERE purpose=$3",
+    [access_token, expAt, GA4_OAUTH_PURPOSE]);
+  return access_token;
+}
+
+// Fetch per-product funnel metrics from GA4 Data API
+async function fetchGa4ProductMetrics() {
+  const propertyId = process.env.GA4_PROPERTY_ID;
+  if (!propertyId) { console.log('GA4_PROPERTY_ID not set — skipping GA4 fetch'); return; }
+  if (!db) { console.log('No DB — skipping GA4 fetch'); return; }
+
+  // GA4 needs Shopify titles to match itemNames. If Shopify products haven't
+  // synced yet (cold start), wait up to 60 seconds for the parallel Shopify
+  // sync to populate. Otherwise itemName matching returns 0 every time.
+  const shopifyWaitStart = Date.now();
+  while ((!shopifyState.products || shopifyState.products.length === 0) && (Date.now() - shopifyWaitStart) < 60000) {
+    console.log('GA4 fetch waiting for Shopify products to load...');
+    await new Promise(function(resolve){ setTimeout(resolve, 5000); });
+  }
+  if (!shopifyState.products || shopifyState.products.length === 0) {
+    console.log('GA4 fetch giving up — no Shopify products after 60s. Skipping; will retry next cron run.');
+    return;
+  }
+
+  let token;
+  try {
+    token = await getGa4AccessToken();
+  } catch(e) {
+    console.log('GA4 not connected: ' + e.message);
+    ga4State.connected = false;
+    return;
+  }
+
+  try {
+    console.log('Fetching GA4 product metrics (last 7 days)...');
+    const url = 'https://analyticsdata.googleapis.com/v1beta/properties/' + propertyId + ':runReport';
+
+    // Pull two reports: (a) sessions+engagement by pagePath; (b) ecommerce events by pagePath
+    const reportA = await axios.post(url, {
+      dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      dimensions: [{ name: 'pagePath' }],
+      metrics: [
+        { name: 'sessions' },
+        { name: 'totalUsers' },
+        { name: 'engagementRate' },
+        { name: 'averageSessionDuration' },
+        { name: 'bounceRate' }
+      ],
+      dimensionFilter: { filter: { fieldName: 'pagePath', stringFilter: { matchType: 'BEGINS_WITH', value: '/products/' } } },
+      limit: 250
+    }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+
+    // Ecommerce metrics. We use ITEM-SCOPED metrics keyed by itemName for all three
+    // (cart adds, checkouts, purchases). GA4 rejects pairing eventCount with itemName
+    // because they're different scopes — itemsAddedToCart/itemsCheckedOut/itemsPurchased
+    // are the correct item-scoped equivalents.
+    //
+    // We also still query add_to_cart by pagePath as a fallback, because the cart event
+    // fires on the product page so pagePath works reliably even when itemName matching
+    // has gaps (e.g. variant titles, branded prefixes).
+    let reportItemScoped, reportPathFallback;
+
+    // Primary: item-scoped query for all 3 metrics in one call, keyed by itemName
+    try {
+      reportItemScoped = await axios.post(url, {
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+        dimensions: [{ name: 'itemName' }],
+        metrics: [
+          { name: 'itemsAddedToCart' },
+          { name: 'itemsCheckedOut' },
+          { name: 'itemsPurchased' }
+        ],
+        limit: 1000
+      }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+    } catch(e) {
+      console.log('GA4 item-scoped fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    }
+
+    // Fallback: add_to_cart by pagePath. Used only when itemName matching fails.
+    try {
+      reportPathFallback = await axios.post(url, {
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+        dimensions: [{ name: 'pagePath' }, { name: 'eventName' }],
+        metrics: [{ name: 'eventCount' }],
+        dimensionFilter: {
+          andGroup: {
+            expressions: [
+              { filter: { fieldName: 'pagePath', stringFilter: { matchType: 'BEGINS_WITH', value: '/products/' } } },
+              { filter: { fieldName: 'eventName', inListFilter: { values: ['add_to_cart'] } } }
+            ]
+          }
+        },
+        limit: 1000
+      }, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+    } catch(e) {
+      console.log('GA4 pagePath fallback fetch failed: ' + (e.response ? JSON.stringify(e.response.data) : e.message));
+    }
+
+    const metrics = {};
+    (reportA.data.rows || []).forEach(function(row) {
+      const path = row.dimensionValues[0].value;
+      const v = row.metricValues || [];
+      metrics[path] = {
+        sessions: parseInt(v[0] && v[0].value) || 0,
+        visitors: parseInt(v[1] && v[1].value) || 0,
+        engagementRate: parseFloat(v[2] && v[2].value) || 0,
+        avgEngagementTime: parseFloat(v[3] && v[3].value) || 0,
+        bounceRate: parseFloat(v[4] && v[4].value) || 0,
+        cartAdditions: 0, checkouts: 0, purchases: 0
+      };
+    });
+
+    // Build a Shopify title -> pagePath lookup table for matching item-scoped data.
+    // GA4 truncates itemName at ~100 chars (confirmed from Bobby's data: titles cut
+    // mid-word with no trailing context). So we need TWO match strategies:
+    //   1. Exact match (lowercase + trim)
+    //   2. Prefix match — GA4 itemName is the START of the Shopify title
+    //      (require 30+ char agreement to avoid false positives)
+    const titleToPath = {};
+    const lowerTitleList = []; // [{lowerTitle, path}] for prefix matching
+    (shopifyState.products || []).forEach(function(p){
+      if (p.title && p.handle) {
+        const lt = p.title.toLowerCase().trim();
+        titleToPath[lt] = '/products/' + p.handle;
+        lowerTitleList.push({ lowerTitle: lt, path: '/products/' + p.handle });
+      }
+    });
+
+    function findShopifyPath(itemName) {
+      if (!itemName) return null;
+      const lower = itemName.toLowerCase().trim();
+      // Strategy 1: exact match
+      if (titleToPath[lower]) return titleToPath[lower];
+      // Strategy 2: prefix match — only meaningful if itemName is long enough.
+      // Require 30+ chars to avoid e.g. "Yoga Mat" matching the wrong product.
+      if (lower.length < 30) return null;
+      // Find the first Shopify product whose title starts with the GA4 itemName.
+      // GA4 truncates at ~100 chars so itemName <= shopifyTitle (in length).
+      const match = lowerTitleList.find(function(x){
+        return x.lowerTitle.indexOf(lower) === 0;
+      });
+      return match ? match.path : null;
+    }
+
+    // Merge item-scoped data (primary).
+    // Track which paths we successfully populated cart counts for, so the fallback
+    // only fills gaps without overwriting good data.
+    const cartFromItemScoped = new Set();
+    let matchedExactCount = 0, matchedPrefixCount = 0, unmatchedCount = 0;
+    let totalUnmatchedCart = 0, totalUnmatchedCheckout = 0, totalUnmatchedPurchase = 0;
+    const unmatchedExamples = []; // Cap at 10 for log cleanliness
+
+    if (reportItemScoped && reportItemScoped.data && reportItemScoped.data.rows) {
+      reportItemScoped.data.rows.forEach(function(row) {
+        const itemName = (row.dimensionValues[0].value || '').trim();
+        if (!itemName) return;
+        const v = row.metricValues || [];
+        const cart = parseInt(v[0] && v[0].value) || 0;
+        const chk  = parseInt(v[1] && v[1].value) || 0;
+        const pur  = parseInt(v[2] && v[2].value) || 0;
+
+        const lower = itemName.toLowerCase().trim();
+        const isExact = !!titleToPath[lower];
+        const path = findShopifyPath(itemName);
+
+        if (!path) {
+          unmatchedCount++;
+          totalUnmatchedCart += cart;
+          totalUnmatchedCheckout += chk;
+          totalUnmatchedPurchase += pur;
+          if (unmatchedExamples.length < 10 && (cart > 0 || chk > 0 || pur > 0)) {
+            unmatchedExamples.push(itemName + ' (cart:' + cart + ' chk:' + chk + ' pur:' + pur + ')');
+          }
+          return;
+        }
+
+        if (isExact) matchedExactCount++; else matchedPrefixCount++;
+        if (!metrics[path]) {
+          metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
+        }
+        metrics[path].cartAdditions = (metrics[path].cartAdditions || 0) + cart;
+        metrics[path].checkouts     = (metrics[path].checkouts     || 0) + chk;
+        metrics[path].purchases     = (metrics[path].purchases     || 0) + pur;
+        if (cart > 0) cartFromItemScoped.add(path);
+      });
+    }
+
+    // Fallback: pagePath-based add_to_cart for products where item-scoped didn't match.
+    // We only fill cartAdditions where we don't already have item-scoped data, so we
+    // don't double-count.
+    let cartFromFallback = 0;
+    if (reportPathFallback && reportPathFallback.data && reportPathFallback.data.rows) {
+      reportPathFallback.data.rows.forEach(function(row) {
+        const path = row.dimensionValues[0].value;
+        const event = row.dimensionValues[1].value;
+        const count = parseInt(row.metricValues[0].value) || 0;
+        if (event !== 'add_to_cart') return;
+        if (cartFromItemScoped.has(path)) return; // already populated from item-scoped
+        if (!metrics[path]) {
+          metrics[path] = { sessions: 0, visitors: 0, cartAdditions: 0, checkouts: 0, purchases: 0, engagementRate: 0, avgEngagementTime: 0, bounceRate: 0 };
+        }
+        metrics[path].cartAdditions = count;
+        if (count > 0) cartFromFallback++;
+      });
+    }
+
+    // Diagnostic logging — option B: log up to 10 unmatched examples
+    // so we can see at a glance how matching is performing without flooding logs.
+    console.log('GA4 itemName matching: ' + matchedExactCount + ' exact + ' + matchedPrefixCount + ' prefix-matched + ' + unmatchedCount + ' unmatched');
+    if (unmatchedCount > 0) {
+      console.log('  unattributed totals: ' + totalUnmatchedCart + ' cart adds, ' + totalUnmatchedCheckout + ' checkouts, ' + totalUnmatchedPurchase + ' purchases');
+      console.log('  examples (up to 10): ' + unmatchedExamples.join(' | '));
+    }
+    if (cartFromFallback > 0) {
+      console.log('GA4 cart fallback by pagePath filled ' + cartFromFallback + ' products');
+    }
+
+    // Persist
+    await db.query("DELETE FROM ga4_product_metrics");
+    for (const path of Object.keys(metrics)) {
+      const m = metrics[path];
+      await db.query(`
+        INSERT INTO ga4_product_metrics (page_path, sessions, visitors, cart_additions, checkouts, purchases, engagement_rate, avg_engagement_time, bounce_rate, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      `, [path, m.sessions, m.visitors, m.cartAdditions, m.checkouts, m.purchases, m.engagementRate, m.avgEngagementTime, m.bounceRate]);
+    }
+
+    ga4State.productMetrics = metrics;
+    ga4State.lastFetch = new Date().toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit'});
+    ga4State.error = null;
+    console.log('GA4 fetch complete: ' + Object.keys(metrics).length + ' product paths');
+  } catch(e) {
+    const errBody = e.response ? JSON.stringify(e.response.data) : e.message;
+    console.error('GA4 fetch error: ' + errBody);
+    ga4State.error = errBody;
+  }
+}
+
+// Look up GA4 metrics for a Shopify product (by handle → /products/<handle>)
+function getGa4ForShopifyProduct(shopifyProduct) {
+  if (!shopifyProduct || !shopifyProduct.handle) return null;
+  const path = '/products/' + shopifyProduct.handle;
+  return ga4State.productMetrics[path] || null;
+}
+
+// PageSpeed Insights — called on AI deep-dive only (rate-limited)
+async function getPageSpeedScore(url) {
+  if (!url) return null;
+  try {
+    const apiKey = process.env.PAGESPEED_API_KEY || '';
+    const endpoint = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
+      encodeURIComponent(url) +
+      '&strategy=mobile&category=performance' +
+      (apiKey ? '&key=' + encodeURIComponent(apiKey) : '');
+    const r = await axios.get(endpoint, { timeout: 25000 });
+    const lh = r.data.lighthouseResult || {};
+    const audits = lh.audits || {};
+    const score = lh.categories && lh.categories.performance ? Math.round((lh.categories.performance.score || 0) * 100) : null;
+    return {
+      mobileScore: score,
+      lcpMs: audits['largest-contentful-paint'] && audits['largest-contentful-paint'].numericValue,
+      fcpMs: audits['first-contentful-paint'] && audits['first-contentful-paint'].numericValue,
+      tbtMs: audits['total-blocking-time'] && audits['total-blocking-time'].numericValue,
+      clsRaw: audits['cumulative-layout-shift'] && audits['cumulative-layout-shift'].numericValue,
+      loadTimeMs: audits['speed-index'] && audits['speed-index'].numericValue
+    };
+  } catch(e) {
+    return { error: e.message };
+  }
+}
+
+// Status endpoint for the frontend "Connect GA4" button
+app.get('/api/google/ga4-status', async function(req, res) {
+  res.json({
+    connected: ga4State.connected,
+    connectedEmail: ga4State.connectedEmail,
+    lastFetch: ga4State.lastFetch,
+    productPathsTracked: Object.keys(ga4State.productMetrics).length,
+    error: ga4State.error
+  });
+});
+
+// Manual trigger for fetching GA4 (e.g. after first connect)
+app.post('/api/google/ga4-refresh', async function(req, res) {
+  fetchGa4ProductMetrics().catch(function(e){ console.error('Manual GA4 refresh error: ' + e.message); });
+  res.json({ success: true, message: 'GA4 refresh triggered' });
+});
+
+// r29o: account-wide funnel — sums ga4_product_metrics for current 7d, compares to a
+// snapshot from 7 days ago. Manager-only (agents look at per-product funnels).
+//
+// Returns:
+//   current: { sessions, cartAdditions, checkouts, purchases } — last 7 days
+//   previous: same shape from 7-day-ago snapshot (or null if no snapshot exists yet)
+//   percentages: { cartRate, checkoutRate, completionRate } — derived ratios
+//   trends: same shape, % change vs previous (positive = improving)
+app.get('/api/google/account-funnel', async function(req, res) {
+  if (!db) return res.json({ current: null, previous: null });
+  try {
+    const u = req.user || {};
+    const role = (u.role || '').toLowerCase();
+    const dept = (u.department || '').toLowerCase();
+    const isManager = ['manager','admin','owner'].includes(role) || dept === 'manager';
+    if (!isManager) return res.status(403).json({ error: 'Manager only' });
+
+    // Sum the current ga4_product_metrics table (always represents the most recent 7-day window
+    // — fetchGa4ProductMetrics runs daily and overwrites with last 7 days)
+    const r = await db.query(
+      "SELECT COALESCE(SUM(sessions),0)::int AS sessions, " +
+      "       COALESCE(SUM(cart_additions),0)::int AS cart_additions, " +
+      "       COALESCE(SUM(checkouts),0)::int AS checkouts, " +
+      "       COALESCE(SUM(purchases),0)::int AS purchases " +
+      "FROM ga4_product_metrics"
+    );
+    const current = r.rows[0] || { sessions: 0, cart_additions: 0, checkouts: 0, purchases: 0 };
+
+    // Look up snapshot from ~7 days ago (use the closest one between 6-8 days back)
+    const prevRes = await db.query(
+      "SELECT * FROM ga4_account_funnel_snapshot " +
+      "WHERE snapshot_date BETWEEN (CURRENT_DATE - INTERVAL '8 days') AND (CURRENT_DATE - INTERVAL '6 days') " +
+      "ORDER BY snapshot_date DESC LIMIT 1"
+    );
+    const previous = prevRes.rows[0] || null;
+
+    function rate(num, denom) { return denom > 0 ? (num / denom) * 100 : null; }
+    function pctChange(now, before) {
+      if (before == null || before === 0) return null;
+      return ((now - before) / before) * 100;
+    }
+
+    const currentPct = {
+      cartRate: rate(current.cart_additions, current.sessions),
+      checkoutRate: rate(current.checkouts, current.sessions),
+      completionRate: rate(current.purchases, current.sessions)
+    };
+    const prevPct = previous ? {
+      cartRate: rate(previous.cart_additions, previous.sessions),
+      checkoutRate: rate(previous.checkouts, previous.sessions),
+      completionRate: rate(previous.purchases, previous.sessions)
+    } : null;
+
+    const trends = previous ? {
+      sessions: pctChange(current.sessions, previous.sessions),
+      cartAdditions: pctChange(current.cart_additions, previous.cart_additions),
+      checkouts: pctChange(current.checkouts, previous.checkouts),
+      purchases: pctChange(current.purchases, previous.purchases)
+    } : null;
+
+    res.json({
+      current: {
+        sessions: current.sessions,
+        cartAdditions: current.cart_additions,
+        checkouts: current.checkouts,
+        purchases: current.purchases,
+        cartRate: currentPct.cartRate,
+        checkoutRate: currentPct.checkoutRate,
+        completionRate: currentPct.completionRate
+      },
+      previous: previous ? {
+        snapshotDate: previous.snapshot_date,
+        sessions: previous.sessions,
+        cartAdditions: previous.cart_additions,
+        checkouts: previous.checkouts,
+        purchases: previous.purchases,
+        cartRate: prevPct.cartRate,
+        checkoutRate: prevPct.checkoutRate,
+        completionRate: prevPct.completionRate
+      } : null,
+      trends: trends,
+      hasComparison: !!previous
+    });
+  } catch(e) {
+    console.error('[r29o account-funnel] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r29o: helper called by daily cron — captures today's funnel as a snapshot for
+// future comparison. Idempotent (PRIMARY KEY on snapshot_date — re-running the same
+// day overwrites the row).
+async function captureAccountFunnelSnapshot() {
+  if (!db) return;
+  try {
+    const r = await db.query(
+      "SELECT COALESCE(SUM(sessions),0)::int AS sessions, " +
+      "       COALESCE(SUM(cart_additions),0)::int AS cart_additions, " +
+      "       COALESCE(SUM(checkouts),0)::int AS checkouts, " +
+      "       COALESCE(SUM(purchases),0)::int AS purchases " +
+      "FROM ga4_product_metrics"
+    );
+    const m = r.rows[0] || { sessions: 0, cart_additions: 0, checkouts: 0, purchases: 0 };
+    // Use London-local date for the snapshot key
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' })).toISOString().split('T')[0];
+    await db.query(
+      "INSERT INTO ga4_account_funnel_snapshot (snapshot_date, sessions, cart_additions, checkouts, purchases, captured_at) " +
+      "VALUES ($1,$2,$3,$4,$5,NOW()) " +
+      "ON CONFLICT (snapshot_date) DO UPDATE SET " +
+      "  sessions=EXCLUDED.sessions, cart_additions=EXCLUDED.cart_additions, " +
+      "  checkouts=EXCLUDED.checkouts, purchases=EXCLUDED.purchases, captured_at=NOW()",
+      [today, m.sessions, m.cart_additions, m.checkouts, m.purchases]
+    );
+    console.log('[r29o] funnel snapshot saved for ' + today + ': ' + m.sessions + ' sessions, ' + m.purchases + ' purchases');
+  } catch(e) {
+    console.error('[r29o snapshot] ' + e.message);
+  }
+}
+
+// PageSpeed endpoint — called from AI analyser (and dashboard if needed)
+app.post('/api/google/pagespeed', async function(req, res) {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'No url' });
+  const result = await getPageSpeedScore(url);
+  res.json(result);
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Campaign Archive — hide old/irrelevant campaigns from main view
+// ─────────────────────────────────────────────────────────────────────────
+
+// Get current dismiss/archive set (used by frontend to filter and show pills)
+app.get('/api/google/archive', async function(req, res) {
+  if (!db) return res.json({ dismissed: [], archived: [] });
+  try {
+    const r = await db.query(
+      "SELECT campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, state FROM google_campaign_archive ORDER BY archived_at DESC"
+    );
+    const dismissed = r.rows.filter(function(x){ return (x.state || 'archived') === 'dismissed'; });
+    const archived = r.rows.filter(function(x){ return (x.state || 'archived') === 'archived'; });
+    res.json({ dismissed: dismissed, archived: archived });
+  } catch(e) {
+    // r29i: don't 500 on table/column issues — return empty so the front-end keeps working.
+    // Frequently this fires when a column was added in a later release and the live DB
+    // is missing it; the dismissed/archived tabs just show empty until manual migration.
+    console.error('[GET /api/google/archive] ' + e.message);
+    res.json({ dismissed: [], archived: [], _error: e.message });
+  }
+});
+
+// Dismiss a campaign — agent action. Stays on Active with a pill.
+app.post('/api/google/dismiss', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId, campaignName, campaignType, reason } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  if (!reason || !reason.trim()) return res.status(400).json({ error: 'A reason is required when dismissing' });
+  const dismissedBy = (req.user && req.user.name) || 'unknown';
+  try {
+    await db.query(`
+      INSERT INTO google_campaign_archive (campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, department, state)
+      VALUES ($1, $2, $3, $4, NOW(), $5, 'google', 'dismissed')
+      ON CONFLICT (campaign_id) DO UPDATE SET
+        campaign_name = EXCLUDED.campaign_name,
+        campaign_type = EXCLUDED.campaign_type,
+        archived_by = EXCLUDED.archived_by,
+        archived_at = NOW(),
+        reason = EXCLUDED.reason,
+        state = 'dismissed'
+    `, [String(campaignId), campaignName || '', campaignType || '', dismissedBy, reason.trim()]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), campaignName || '', dismissedBy, 'campaign_dismissed', reason.trim()]
+      );
+    } catch(e) { console.error('Dismiss log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Dismiss error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Archive a dismissed campaign — manager only. Removes it from Active.
+app.post('/api/google/archive', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId, campaignName, campaignType, reason } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  const archivedBy = (req.user && req.user.name) || 'unknown';
+  const role = req.user && req.user.role;
+  const isManager = ['manager', 'admin'].includes(role) || ['Bobby', 'Satyam', 'bobby', 'satyam'].includes(archivedBy);
+  if (!isManager) return res.status(403).json({ error: 'Manager only' });
+
+  try {
+    await db.query(`
+      INSERT INTO google_campaign_archive (campaign_id, campaign_name, campaign_type, archived_by, archived_at, reason, department, state)
+      VALUES ($1, $2, $3, $4, NOW(), $5, 'google', 'archived')
+      ON CONFLICT (campaign_id) DO UPDATE SET
+        campaign_name = EXCLUDED.campaign_name,
+        campaign_type = EXCLUDED.campaign_type,
+        archived_by = EXCLUDED.archived_by,
+        archived_at = NOW(),
+        reason = COALESCE(EXCLUDED.reason, google_campaign_archive.reason),
+        state = 'archived'
+    `, [String(campaignId), campaignName || '', campaignType || '', archivedBy, reason || null]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), campaignName || '', archivedBy, 'campaign_archived', reason || 'archived from dismissed']
+      );
+    } catch(e) { console.error('Archive log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Archive error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Restore a campaign from dismiss or archive — anyone for dismissed, manager-only for archived
+app.post('/api/google/archive/restore', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  const restoredBy = (req.user && req.user.name) || 'unknown';
+  const role = req.user && req.user.role;
+  const isManager = ['manager', 'admin'].includes(role) || ['Bobby', 'Satyam', 'bobby', 'satyam'].includes(restoredBy);
+  try {
+    const before = await db.query("SELECT campaign_name, state FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    if (!before.rows.length) return res.status(404).json({ error: 'Not found' });
+    const wasArchived = (before.rows[0].state || 'archived') === 'archived';
+    if (wasArchived && !isManager) return res.status(403).json({ error: 'Only manager can restore archived campaigns' });
+    await db.query("DELETE FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), before.rows[0].campaign_name, restoredBy, wasArchived ? 'campaign_restored_from_archive' : 'campaign_restored_from_dismiss', 'restored to active']
+      );
+    } catch(e) { console.error('Restore log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Permanently remove from archive (manager only)
+app.post('/api/google/archive/remove', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const { campaignId } = req.body;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+  const removedBy = (req.user && req.user.name) || 'unknown';
+  const role = req.user && req.user.role;
+  const isManager = ['manager', 'admin'].includes(role) || ['Bobby', 'Satyam', 'bobby', 'satyam'].includes(removedBy);
+  if (!isManager) return res.status(403).json({ error: 'Manager only' });
+  try {
+    const before = await db.query("SELECT campaign_name FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    await db.query("DELETE FROM google_campaign_archive WHERE campaign_id=$1", [String(campaignId)]);
+    try {
+      await db.query(
+        "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, department) VALUES ($1,$2,$3,$4,$5,'google')",
+        [String(campaignId), before.rows[0] ? before.rows[0].campaign_name : '', removedBy, 'campaign_removed', 'permanently removed by manager']
+      );
+    } catch(e) { console.error('Remove log error: ' + e.message); }
+    archivedCampaignsCache = { ids: new Set(), at: 0 };
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Daily Sales — store-wide last 7 days (Mon-Sun aligned to today)
+// ─────────────────────────────────────────────────────────────────────────
+app.get('/api/google/daily-sales', async function(req, res) {
+  const products = shopifyState.products || [];
+  const dailyAll = shopifyState.dailyBreakdown || {}; // 'YYYY-MM-DD' -> { gross, discount, refund, shipping, net, byPid }
+
+  // 7-day labels = today−7 to today−1 (excludes today, oldest first), London time
+  const labels = [];
+  const startOfTodayMs = londonMidnightToday();
+  for (let i = 7; i >= 1; i--) {
+    const d = new Date(startOfTodayMs - i * 24 * 60 * 60 * 1000);
+    labels.push({
+      iso: londonDateKey(d),
+      day: d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' }),
+      shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'Europe/London' })
+    });
+  }
+  const todayIso = londonDateKey(new Date(startOfTodayMs));
+
+  const productById = {};
+  products.forEach(function(p){ productById[String(p.id)] = p; });
+
+  function buildDay(l){
+    const dayData = dailyAll[l.iso] || { gross: 0, discount: 0, refund: 0, shipping: 0, net: 0, byPid: {} };
+    // Top 5 contributors by NET sales for the day
+    const top = Object.keys(dayData.byPid)
+      .map(function(pid){
+        const p = productById[pid];
+        return {
+          shopifyId: pid,
+          title: p ? p.title : '(unknown product)',
+          imageUrl: p ? p.imageUrl : null,
+          revenue: Math.round(dayData.byPid[pid] * 100) / 100
+        };
+      })
+      .filter(function(x){ return x.revenue !== 0; })
+      .sort(function(a,b){ return b.revenue - a.revenue; })
+      .slice(0, 5);
+    return {
+      ...l,
+      gross: Math.round((dayData.gross || 0) * 100) / 100,
+      discount: Math.round((dayData.discount || 0) * 100) / 100,
+      refund: Math.round((dayData.refund || 0) * 100) / 100,
+      shipping: Math.round((dayData.shipping || 0) * 100) / 100,
+      net: Math.round((dayData.net || 0) * 100) / 100,
+      total: Math.round((dayData.net || 0) * 100) / 100, // backward compat
+      top: top
+    };
+  }
+
+  const result = labels.map(buildDay);
+
+  // Today as a separate object
+  const todayData = dailyAll[todayIso];
+  const today = todayData
+    ? buildDay({
+        iso: todayIso,
+        day: 'Today',
+        shortDate: new Date(startOfTodayMs).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'Europe/London' })
+      })
+    : null;
+
+  // 7-day totals (excluding today)
+  const totalGross = result.reduce(function(s, d){ return s + d.gross; }, 0);
+  const totalDiscount = result.reduce(function(s, d){ return s + d.discount; }, 0);
+  const totalRefund = result.reduce(function(s, d){ return s + d.refund; }, 0);
+  const totalShipping = result.reduce(function(s, d){ return s + d.shipping; }, 0);
+  const totalNet = result.reduce(function(s, d){ return s + d.net; }, 0);
+
+  res.json({
+    days: result,
+    today: today,                 // separate "today so far" snapshot (incomplete day)
+    windowLabel: 'Last 7 complete days (excludes today)',
+    totalGross7d: Math.round(totalGross * 100) / 100,
+    totalDiscount7d: Math.round(totalDiscount * 100) / 100,
+    totalRefund7d: Math.round(totalRefund * 100) / 100,
+    totalShipping7d: Math.round(totalShipping * 100) / 100,
+    totalNet7d: Math.round(totalNet * 100) / 100,
+    totalRevenue7d: Math.round(totalNet * 100) / 100, // backward compat
+    lastShopifySync: shopifyState.lastSync
+  });
+});
+
+// The unified diagnosis decision tree.
+// priority: 1 = urgent (red), 2 = needs attention (amber), 3 = scale (green), 4 = healthy/info (grey)
+//
+// r35.13b: market-anchored CVR thresholds for Google/Shopify side.
+// Shopify ecom benchmark (paid-search traffic, considered purchases like ours):
+//   <1% critical, 1-2% below market floor, 2-3% market average, 3-5% strong, >5% excellent
+// Same philosophy as Amazon side — we push slightly past market norms so the team
+// is calibrated to compete with category, not to current baseline.
+const GOOGLE_CVR_CRITICAL = 1;       // <1% well below paid-search Shopify floor
+const GOOGLE_CVR_BELOW_MARKET = 2;   // 1-2% below market floor
+const GOOGLE_CVR_AT_FLOOR = 3;       // 2-3% at Shopify ecom average
+const GOOGLE_CVR_STRONG = 5;         // 3-5% top 20% of Shopify stores
+                                      // >5% excellent / top 10%
+
+function diagnoseProduct(ctx) {
+  const s = ctx.shopify;
+  const g = ctx.google;
+  const f = ctx.funnel; // GA4 funnel data — { sessions, cartAdditions, checkouts, purchases, bounceRate, ... } or null
+
+  // Catch-all rows (Google's "everything else" bucket)
+  if (ctx.itemType === 'catchall') {
+    return { diagnosisType: 'catchall_bucket', diagnosis: 'Catch-all bucket — products in this ad group not individually targeted', action: 'Review whether these products should be individually bid', priority: 4 };
+  }
+
+  // 1. Shopify product is draft/archived — diagnose this BEFORE any ad-related rules
+  if (s && s.status && s.status !== 'active') {
+    if (g.impressions > 0) {
+      return { diagnosisType: 'shopify_inactive', diagnosis: 'Customers cannot buy this — product is ' + s.status.toUpperCase() + ' in Shopify', action: 'Activate the product in Shopify or remove from Google feed', priority: 1 };
+    }
+    return { diagnosisType: 'shopify_' + s.status, diagnosis: 'Product is ' + s.status.toUpperCase() + ' in Shopify — not sellable', action: s.status === 'draft' ? 'Publish the product or remove from inventory' : 'Restore from archive or de-list', priority: 4 };
+  }
+
+  // 2. Out of stock + ads running
+  if (s && s.inventory === 0 && g.impressions > 0) {
+    return { diagnosisType: 'out_of_stock', diagnosis: 'Out of stock — ads running but nothing to sell', action: 'Pause ads immediately and restock', priority: 1 };
+  }
+
+  // 3. Active product with NO ads at all
+  if (s && s.status === 'active' && !ctx.hasGoogleData) {
+    if (s.revenue7d > 100 || s.revenue30d > 500) {
+      return { diagnosisType: 'organic_winner', diagnosis: 'Strong organic seller (£' + (s.revenue30d || 0).toFixed(0) + ' in 30d) but no Google ads', action: 'Add to a Shopping campaign — likely big revenue uplift', priority: 3 };
+    }
+    if ((s.revenue30d || 0) === 0) {
+      return { diagnosisType: 'no_ads_no_sales', diagnosis: 'No ads and no organic sales in 30d', action: 'Investigate listing quality, then either fix listing or de-prioritise', priority: 4 };
+    }
+    return { diagnosisType: 'no_ads', diagnosis: 'No Google ads running for this product', action: 'Consider adding to a Shopping campaign', priority: 4 };
+  }
+
+  // 4. Active product with sales but zero advertising spend (organic only)
+  if (s && (s.revenue7d || 0) > 0 && g.spend === 0) {
+    return { diagnosisType: 'organic_only', diagnosis: 'Selling organically (£' + (s.revenue7d || 0).toFixed(0) + ' in 7d), no ad spend', action: 'Could scale faster with Google ads', priority: 3 };
+  }
+
+  // 5. Google: no impressions despite enabled
+  if (g.impressions === 0 && g.spend === 0) {
+    return { diagnosisType: 'no_impressions', diagnosis: 'Ads not showing — bidding/budget issue', action: 'Check bid strategy and daily budget', priority: 2 };
+  }
+
+  // 6. Impressions but no clicks — weak ad
+  if (g.clicks === 0 && g.impressions > 50) {
+    return { diagnosisType: 'low_ctr', diagnosis: 'Ad showing but nobody clicking — weak listing image/title', action: 'Improve main image and product title', priority: 2 };
+  }
+
+  // 7. Clicks but no conversions — use GA4 funnel data when present to pinpoint where
+  // r35.13b: rule rewritten — overall CVR verdict (Shopify ecom benchmark
+  // 2-3% paid-search), with funnel-stage cause appended to action.
+  if (g.clicks > 20 && g.conversions === 0) {
+    if (f && f.sessions > 20) {
+      const cartRate = f.sessions > 0 ? (f.cartAdditions / f.sessions) * 100 : 0;
+      const checkoutRate = f.cartAdditions > 0 ? (f.checkouts / f.cartAdditions) * 100 : 0;
+      // Funnel-stage cause (used in action text)
+      let causeText;
+      if (cartRate < 2) {
+        causeText = 'Cause: cart rate ' + cartRate.toFixed(1) + '% (only ' + f.cartAdditions + ' adds from ' + f.sessions + ' sessions) — page or product image is the bottleneck.';
+      } else if (cartRate >= 2 && checkoutRate < 30) {
+        causeText = 'Cause: cart rate ok (' + cartRate.toFixed(1) + '%) but checkout drop-off ' + (100 - checkoutRate).toFixed(0) + '% — checkout friction.';
+      } else {
+        causeText = 'Cause: cart rate ok and checkout ok, but conversions dropping at final step — payment or trust issue.';
+      }
+      return {
+        diagnosisType: 'critical_cvr',
+        diagnosis: 'CVR 0% on ' + f.sessions + ' sessions vs Shopify paid-search average 2-3%. Listing not converting at all.',
+        action: causeText + ' Fix the bottleneck before adding more spend.',
+        priority: 1
+      };
+    }
+    return { diagnosisType: 'landing_page', diagnosis: 'People clicking but not buying — landing page, price, or reviews issue', action: 'Review product page, pricing, images, and reviews', priority: 1 };
+  }
+
+  // 7c. r35.13b — market-anchored CVR verdict for products WITH conversions
+  // Compares CVR to Shopify ecom paid-search benchmark (2-3%). Layered AFTER
+  // rule 7 (no conversions) so we only enter this branch with real CVR data.
+  if (f && f.sessions >= 50 && f.purchases > 0) {
+    const cvr = (f.purchases / f.sessions) * 100;
+    const cartRate = f.sessions > 0 ? (f.cartAdditions / f.sessions) * 100 : 0;
+    const checkoutRate = f.cartAdditions > 0 ? (f.checkouts / f.cartAdditions) * 100 : 0;
+    // Build cause text — which funnel stage is weakest
+    let stageHint = '';
+    if (cartRate < 3) stageHint = ' Weak point: cart rate ' + cartRate.toFixed(1) + '% — product page not converting.';
+    else if (checkoutRate < 50) stageHint = ' Weak point: checkout drop-off ' + (100 - checkoutRate).toFixed(0) + '% — checkout friction.';
+
+    if (cvr < GOOGLE_CVR_CRITICAL) {
+      return {
+        diagnosisType: 'cvr_critical',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% vs Shopify paid-search benchmark 2-3%. Far below market floor.' + stageHint,
+        action: 'Audit competitor product pages, fix main image / price / trust badges. Pause ads until CVR clears 1%.',
+        priority: 1
+      };
+    }
+    if (cvr < GOOGLE_CVR_BELOW_MARKET) {
+      return {
+        diagnosisType: 'cvr_below_market',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% vs Shopify paid-search benchmark 2-3%. Below market floor — real lift available.' + stageHint,
+        action: 'Compare top 3 competitor pages for same keywords. Test improvements to weakest funnel stage.',
+        priority: 2
+      };
+    }
+    if (cvr < GOOGLE_CVR_AT_FLOOR) {
+      return {
+        diagnosisType: 'cvr_at_floor',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% — at Shopify market floor (2-3%). Push for 3-5% target.' + stageHint,
+        action: 'Small page improvements compound at this level — review acquisition, page speed, trust signals.',
+        priority: 2
+      };
+    }
+    if (cvr > GOOGLE_CVR_STRONG) {
+      return {
+        diagnosisType: 'cvr_excellent',
+        diagnosis: 'CVR ' + cvr.toFixed(1) + '% — top-decile performer vs Shopify benchmark.',
+        action: 'Scale budget on this product. Apply learnings to similar listings.',
+        priority: 3
+      };
+    }
+    // 3-5% = strong, falls through to healthy below
+  }
+
+  // 7b. High bounce rate signal (GA4) on a product getting decent ad clicks
+  if (f && f.sessions > 50 && f.bounceRate > 0.7 && g.clicks > 30) {
+    return { diagnosisType: 'high_bounce', diagnosis: 'Bounce rate ' + (f.bounceRate * 100).toFixed(0) + '% — visitors leave immediately. Likely page speed, weak hero image, or wrong intent match', action: 'Check mobile page speed and hero image; verify ad targeting matches product', priority: 2 };
+  }
+
+  // 8. Conversions recorded but Google attributes no value — tracking issue
+  if (g.conversions > 0 && g.sales === 0) {
+    return { diagnosisType: 'conv_tracking', diagnosis: 'Google records ' + g.conversions + ' conversions but no value — tracking is broken', action: 'Check conversion tracking pixel sends purchase value', priority: 2 };
+  }
+
+  // 9. Spending with no revenue
+  if (g.spend > 5 && g.sales === 0) {
+    return { diagnosisType: 'spend_no_revenue', diagnosis: 'Spending money with zero revenue', action: 'Pause and investigate listing quality', priority: 1 };
+  }
+
+  // 10. High ACOS
+  if (g.acos > 50 && g.spend > 1) {
+    return { diagnosisType: 'high_acos', diagnosis: 'Very high ACOS (' + g.acos + '%) — burning money to make sales', action: 'Reduce bids or tighten targeting', priority: 2 };
+  }
+
+  // 11. Healthy — scale
+  if (g.conversions > 0 && g.acos > 0 && g.acos < 15) {
+    return { diagnosisType: 'scale', diagnosis: 'Strong performance — ACOS ' + g.acos + '%, scale this', action: 'Increase daily budget by 50%', priority: 3 };
+  }
+
+  // 12. OK but unremarkable
+  if (g.conversions > 0) {
+    return { diagnosisType: 'healthy', diagnosis: 'Performing OK — ACOS ' + g.acos + '%', action: 'Monitor', priority: 4 };
+  }
+
+  return { diagnosisType: 'unknown', diagnosis: 'Insufficient data to diagnose', action: 'Wait for more data', priority: 4 };
+}
+
+// ── Shopify API endpoints ─────────────────────────────────────────────────
+app.get('/api/shopify/products', async function(req, res) {
+  res.json({ products: shopifyState.products, lastSync: shopifyState.lastSync, error: shopifyState.error });
+});
+
+app.post('/api/shopify/sync', async function(req, res) {
+  syncShopifyProducts().catch(function(e){ console.error('Manual Shopify sync error: ' + e.message); });
+  res.json({ success: true, message: 'Shopify sync triggered' });
+});
+
+// ── Google Advertised View — grouped by campaign ──────────────────────────
+// Helper — load currently ARCHIVED campaign IDs (dismissed stay visible on Active with pill).
+// Cached briefly to avoid DB hits per request.
+let archivedCampaignsCache = { ids: new Set(), dismissed: new Map(), at: 0 };
+async function getArchivedCampaignIds() {
+  if (Date.now() - archivedCampaignsCache.at < 30000) return archivedCampaignsCache.ids;
+  if (!db) return new Set();
+  try {
+    const r = await db.query("SELECT campaign_id, state, archived_by, archived_at, reason FROM google_campaign_archive");
+    const archived = new Set();
+    const dismissed = new Map();
+    r.rows.forEach(function(x){
+      const state = x.state || 'archived';
+      if (state === 'archived') archived.add(String(x.campaign_id));
+      else if (state === 'dismissed') dismissed.set(String(x.campaign_id), x);
+    });
+    archivedCampaignsCache = { ids: archived, dismissed: dismissed, at: Date.now() };
+    return archived;
+  } catch(e) { return new Set(); }
+}
+
+// Helper — get dismiss info for a campaign (returns row with archived_by, reason, archived_at — or null)
+async function getDismissedInfoMap() {
+  await getArchivedCampaignIds(); // populates cache
+  return archivedCampaignsCache.dismissed || new Map();
+}
+
+app.get('/api/google/products-diagnostic', async function(req, res) {
+  const archivedIds = await getArchivedCampaignIds();
+  const dismissedMap = await getDismissedInfoMap();
+  const googleProducts = (googleState.products || []).filter(function(gp){
+    return !archivedIds.has(String(gp.campaignId));
+  });
+
+  const rows = googleProducts.map(function(gp) {
+    const shopifyProduct = matchShopifyProduct(gp);
+    const rawName = gp.name || gp.productName;
+    const displayName = (shopifyProduct && shopifyProduct.title)
+      || rawName
+      || gp.productType
+      || gp.adGroupName
+      || gp.campaignName
+      || '(unknown)';
+
+    const funnel = shopifyProduct ? getGa4ForShopifyProduct(shopifyProduct) : null;
+    const dx = diagnoseProduct({
+      shopify: shopifyProduct ? {
+        status: shopifyProduct.status,
+        inventory: shopifyProduct.inventory,
+        revenue7d: shopifyProduct.revenue7d || 0,
+        revenue30d: shopifyProduct.revenue30d || 0
+      } : null,
+      google: {
+        impressions: gp.impressions || 0,
+        clicks: gp.clicks || 0,
+        spend: gp.spend || 0,
+        sales: gp.sales || 0,
+        conversions: gp.conversions || 0,
+        ctr: gp.ctr || 0,
+        acos: gp.acos || 0
+      },
+      funnel: funnel,
+      hasGoogleData: true,
+      itemType: gp.itemType
+    });
+
+    return {
+      productId: gp.productId || gp.shopifyItemId || (gp.campaignId + ':' + (rawName || gp.adGroupName || '')),
+      productName: displayName,
+      displayName: displayName,
+      campaignId: gp.campaignId,
+      campaignName: gp.campaignName,
+      campaignType: gp.campaignType || null,
+      itemType: gp.itemType || null,
+      adGroupName: gp.adGroupName || null,
+      shopifyItemId: gp.shopifyItemId || null,
+      productType: gp.productType || null,
+      productGroupPath: gp.productGroupPath || null,
+      partitionType: gp.partitionType || null,
+      spend: gp.spend, sales: gp.sales, impressions: gp.impressions,
+      clicks: gp.clicks, conversions: gp.conversions, ctr: gp.ctr, acos: gp.acos,
+      costPerConv: (gp.conversions > 0) ? Math.round((gp.spend / gp.conversions) * 100) / 100 : 0,
+      agentName: gp.agentName,
+      shopifyMatched: !!shopifyProduct,
+      shopifyTitle: shopifyProduct ? shopifyProduct.title : null,
+      shopifyId: shopifyProduct ? shopifyProduct.id : null,
+      shopifyStatus: shopifyProduct ? shopifyProduct.status : null,
+      shopifyPrice: shopifyProduct ? shopifyProduct.price : null,
+      shopifyInventory: shopifyProduct ? shopifyProduct.inventory : null,
+      shopifyRevenue7d: shopifyProduct ? (shopifyProduct.revenue7d || 0) : null,
+      shopifyUnitsSold7d: shopifyProduct ? (shopifyProduct.unitsSold7d || 0) : null,
+      shopifyRevenue30d: shopifyProduct ? shopifyProduct.revenue30d : null,
+      shopifyUnitsSold30d: shopifyProduct ? shopifyProduct.unitsSold30d : null,
+      shopifyUrl: shopifyProduct ? shopifyProduct.shopifyUrl : null,
+      shopifyImageUrl: shopifyProduct ? shopifyProduct.imageUrl : null,
+      ga4Sessions: funnel ? funnel.sessions : null,
+      ga4CartAdditions: funnel ? funnel.cartAdditions : null,
+      ga4Checkouts: funnel ? funnel.checkouts : null,
+      ga4Purchases: funnel ? funnel.purchases : null,
+      ga4BounceRate: funnel ? funnel.bounceRate : null,
+      ga4EngagementRate: funnel ? funnel.engagementRate : null,
+      ga4AvgEngagementTime: funnel ? funnel.avgEngagementTime : null,
+      ga4CartRate: funnel && funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : null,
+      ga4CheckoutRate: funnel && funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : null,
+      // r35.13: CVR computed from GA4 funnel — purchases / sessions × 100.
+      ga4Cvr: funnel && funnel.sessions > 0 ? Math.round((funnel.purchases / funnel.sessions) * 1000) / 10 : null,
+      // r35.13b: lift potential — £/wk this listing leaves on the table if it
+      // hit Shopify paid-search benchmark (2% CVR). Used to sub-rank urgent
+      // and below-market buckets so agents see highest-£ gaps first.
+      // Formula: sessions × (target - current)/100 × aov × margin
+      //   target = 2% (Shopify ecom paid-search floor)
+      //   margin = 16% (net profit threshold)
+      lift_potential_gbp_wk: (function(){
+        if (!funnel || !funnel.sessions) return 0;
+        const currentCvr = funnel.sessions > 0 ? (funnel.purchases / funnel.sessions) * 100 : 0;
+        const gap = 2 - currentCvr;
+        if (gap <= 0) return 0;
+        // r35.13b hotfix: this code path uses 'shopifyProduct' (not 'sp')
+        if (!shopifyProduct) return 0;
+        const aov = shopifyProduct.unitsSold7d > 0 ? shopifyProduct.revenue7d / shopifyProduct.unitsSold7d : (shopifyProduct.price || 0);
+        if (aov === 0) return 0;
+        return Math.round(funnel.sessions * (gap / 100) * aov * 0.16 * 100) / 100;
+      })(),
+      diagnosisType: dx.diagnosisType,
+      diagnosis: dx.diagnosis,
+      action: dx.action,
+      priority: dx.priority
+    };
+  });
+
+  // Group by campaign
+  const byCampaign = {};
+  rows.forEach(function(r) {
+    const key = r.campaignId || 'unknown';
+    if (!byCampaign[key]) {
+      byCampaign[key] = {
+        campaignId: r.campaignId,
+        campaignName: r.campaignName,
+        campaignType: r.campaignType,
+        totalSpend: 0, totalSales: 0, totalImpressions: 0, totalClicks: 0, totalConversions: 0,
+        wastedSpend: 0,           // spend on rows that produced £0 sales (clear money loss)
+        urgentCount: 0, productCount: 0,
+        products: []
+      };
+    }
+    const c = byCampaign[key];
+    c.totalSpend += r.spend || 0;
+    c.totalSales += r.sales || 0;
+    c.totalImpressions += r.impressions || 0;
+    c.totalClicks += r.clicks || 0;
+    c.totalConversions += r.conversions || 0;
+    // Wasted spend = money spent on a product/keyword that returned £0 sales
+    // (with a real spend > £0.50 — ignore noise at < 50p but capture long-tail
+    // waste so the campaign-level total reflects every penny lost. HTML side
+    // uses a higher £5 threshold for individual-row red highlights to avoid
+    // visual noise on small wastes.)
+    if ((r.spend || 0) > 0.5 && (!r.sales || r.sales === 0)) {
+      c.wastedSpend += r.spend || 0;
+    }
+    c.productCount += 1;
+    if (r.priority === 1) c.urgentCount += 1;
+    c.products.push(r);
+  });
+
+  Object.values(byCampaign).forEach(function(c) {
+    c.totalSpend = Math.round(c.totalSpend * 100) / 100;
+    c.totalSales = Math.round(c.totalSales * 100) / 100;
+    c.wastedSpend = Math.round(c.wastedSpend * 100) / 100;
+    c.acos = c.totalSales > 0 ? Math.round((c.totalSpend / c.totalSales) * 1000) / 10 : 0;
+    c.costPerConv = c.totalConversions > 0 ? Math.round((c.totalSpend / c.totalConversions) * 100) / 100 : 0;
+    c.products.sort(function(a, b) {
+      if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
+      return (b.spend || 0) - (a.spend || 0);
+    });
+    // Attach dismiss info if present
+    const dismInfo = dismissedMap.get(String(c.campaignId));
+    if (dismInfo) {
+      c.dismissed = true;
+      c.dismissedBy = dismInfo.archived_by;
+      c.dismissedAt = dismInfo.archived_at;
+      c.dismissReason = dismInfo.reason;
+    }
+  });
+
+  const campaignList = Object.values(byCampaign).sort(function(a, b) {
+    if (a.urgentCount !== b.urgentCount) return b.urgentCount - a.urgentCount;
+    return b.totalSpend - a.totalSpend;
+  });
+
+  res.json({
+    campaigns: campaignList,
+    totalCampaigns: campaignList.length,
+    totalProducts: rows.length,
+    shopifyMatched: rows.filter(function(r){ return r.shopifyMatched; }).length,
+    lastGoogleSync: googleState.lastSync,
+    lastShopifySync: shopifyState.lastSync
+  });
+});
+
+// ── Product WoW (week-over-week) — lazy endpoint called when product modal opens ─────
+// Returns prior-7d Google Ads metrics for one product (matched by Shopify ID),
+// summed across all its campaigns. The modal computes deltas client-side.
+app.get('/api/google/product-wow/:shopifyId', async function(req, res) {
+  const shopifyId = String(req.params.shopifyId || '');
+  if (!shopifyId) return res.status(400).json({ error: 'shopifyId required' });
+  if (!db) return res.json({ prior: null });
+
+  try {
+    const r = await db.query(
+      "SELECT products FROM google_state_snapshots " +
+      "WHERE received_at <= NOW() - INTERVAL '7 days' " +
+      "ORDER BY received_at DESC LIMIT 1"
+    );
+    if (!r.rows.length) return res.json({ prior: null });
+
+    // Match snapshot rows whose shopifyItemId embeds this shopifyId
+    const matches = (r.rows[0].products || []).filter(function(gp){
+      if (!gp.shopifyItemId) return false;
+      const parts = String(gp.shopifyItemId).split('_');
+      const embeddedId = parts.length >= 3 ? parts[2] : null;
+      return embeddedId === shopifyId;
+    });
+
+    if (!matches.length) return res.json({ prior: null });
+
+    let pSpend = 0, pSales = 0, pClicks = 0, pImpressions = 0, pConversions = 0;
+    matches.forEach(function(p){
+      pSpend += Number(p.spend) || 0;
+      pSales += Number(p.sales) || 0;
+      pClicks += Number(p.clicks) || 0;
+      pImpressions += Number(p.impressions) || 0;
+      pConversions += Number(p.conversions) || 0;
+    });
+    res.json({
+      prior: {
+        spend: Math.round(pSpend * 100) / 100,
+        sales: Math.round(pSales * 100) / 100,
+        clicks: pClicks,
+        impressions: pImpressions,
+        conversions: Math.round(pConversions * 10) / 10,  // r37: needed for prev-week on Conversions stat
+        acos: pSales > 0 ? Math.round((pSpend / pSales) * 1000) / 10 : 0
+      }
+    });
+  } catch(e) {
+    console.error('[product-wow] ' + e.message);
+    res.json({ prior: null });
+  }
+});
+
+// ── Campaign × Product Scoped Detail — single product within a single campaign ──────
+// Used when the user clicks a campaign link from inside the product modal.
+// Returns just this product's metrics within this specific campaign, aggregated
+// across all variants. Different from /campaign-detail/:id which is campaign-wide.
+//
+// Matching: a row belongs to (campaignId, shopifyId) when:
+//   row.campaignId === campaignId
+//   AND row.shopifyItemId.split('_')[2] === shopifyId  (variant ID in [3])
+//
+// Same WoW snapshot + 14-day trend approach as the campaign-wide endpoint,
+// but every aggregation is filtered to this product only.
+app.get('/api/google/campaign-product-detail/:campaignId/:shopifyId', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  const shopifyId = String(req.params.shopifyId || '');
+  if (!campaignId || !shopifyId) return res.status(400).json({ error: 'campaignId and shopifyId both required' });
+
+  // Helper: filter rows to this (campaign, product) pair across variants
+  function scopedRows(rows) {
+    return (rows || []).filter(function(gp){
+      if (String(gp.campaignId) !== campaignId) return false;
+      if (!gp.shopifyItemId) return false;
+      const parts = String(gp.shopifyItemId).split('_');
+      return parts.length >= 4 && parts[2] === shopifyId;
+    });
+  }
+
+  // Helper: aggregate spend/sales/clicks/impressions across rows
+  function aggregate(rows) {
+    let spend = 0, sales = 0, impressions = 0, clicks = 0, conversions = 0;
+    rows.forEach(function(p){
+      spend += Number(p.spend) || 0;
+      sales += Number(p.sales) || 0;
+      impressions += Number(p.impressions) || 0;
+      clicks += Number(p.clicks) || 0;
+      conversions += Number(p.conversions) || 0;
+    });
+    return {
+      spend: Math.round(spend * 100) / 100,
+      sales: Math.round(sales * 100) / 100,
+      impressions: impressions,
+      clicks: clicks,
+      conversions: Math.round(conversions),
+      acos: sales > 0 ? Math.round((spend / sales) * 1000) / 10 : 0,
+      ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0,
+      costPerConv: conversions > 0 ? Math.round((spend / conversions) * 100) / 100 : 0
+    };
+  }
+
+  // 1. Current scoped rows
+  const currentRows = scopedRows(googleState.products);
+  if (!currentRows.length) {
+    return res.status(404).json({ error: 'No data — this product is not currently in this campaign, or the matching failed. May have been removed in the last sync.' });
+  }
+  const current = aggregate(currentRows);
+
+  // Resolve campaign and product names from the matched rows
+  const campaignName = currentRows[0].campaignName || '(unnamed)';
+  const campaignType = currentRows[0].campaignType || null;
+  const productName = currentRows[0].name || currentRows[0].productName || '(unnamed product)';
+  const variantCount = currentRows.length;
+
+  // 2. WoW comparison — same snapshot picking rule as campaign-detail endpoint
+  let prior = null;
+  if (db) {
+    try {
+      const r = await db.query(
+        "SELECT products FROM google_state_snapshots " +
+        "WHERE received_at <= NOW() - INTERVAL '7 days' " +
+        "ORDER BY received_at DESC LIMIT 1"
+      );
+      if (r.rows.length) {
+        const priorRows = scopedRows(r.rows[0].products);
+        if (priorRows.length) {
+          prior = aggregate(priorRows);
+          prior.variantCount = priorRows.length;
+        }
+      }
+    } catch(e) {
+      console.error('[campaign-product-detail WoW] ' + e.message);
+    }
+  }
+
+  // 3. 14-day rolling trend — one bar per day, this (campaign, product) only
+  let trend = [];
+  if (db) {
+    try {
+      const r = await db.query(
+        "WITH per_day AS ( " +
+        "  SELECT DATE(received_at AT TIME ZONE 'Europe/London') AS d, " +
+        "         products, " +
+        "         ROW_NUMBER() OVER (PARTITION BY DATE(received_at AT TIME ZONE 'Europe/London') ORDER BY received_at DESC) AS rn " +
+        "  FROM google_state_snapshots " +
+        "  WHERE received_at >= NOW() - INTERVAL '15 days' " +
+        ") SELECT d, products FROM per_day WHERE rn = 1 ORDER BY d ASC"
+      );
+      trend = r.rows.map(function(row){
+        const dayRows = scopedRows(row.products);
+        const agg = aggregate(dayRows);
+        return {
+          date: row.d,
+          spend7d: agg.spend,
+          sales7d: agg.sales,
+          variantCount: dayRows.length
+        };
+      });
+    } catch(e) {
+      console.error('[campaign-product-detail trend] ' + e.message);
+    }
+  }
+
+  // 4. Variant breakdown — return the raw rows so the modal can show "this product
+  //    appears as N variants in this campaign" with per-variant numbers.
+  // r38 / v10.2: build TWO Shopify lookup maps:
+  //   variantSkuMap[variantId]   = SKU code (may be empty/missing)
+  //   variantTitleMap[variantId] = "Product Title — Variant Title" (always available — what humans read)
+  // Variant title is the fallback when SKU is missing. Together they answer "which variant is this".
+  const variantSkuMap = {};
+  const variantTitleMap = {};
+  try {
+    (shopifyState.products || []).forEach(function(sp){
+      const productTitle = sp.title || '';
+      if (Array.isArray(sp.variants)) {
+        sp.variants.forEach(function(v){
+          if (!v || !v.id) return;
+          const vid = String(v.id);
+          if (v.sku) variantSkuMap[vid] = String(v.sku);
+          // Build human label: "Product Title — Variant Title" or just product title if variant has no title
+          const variantTitle = v.title && v.title !== 'Default Title' ? v.title : '';
+          variantTitleMap[vid] = variantTitle
+            ? (productTitle + ' — ' + variantTitle)
+            : productTitle;
+        });
+      }
+    });
+  } catch(_) {}
+
+  // Group rows by distinct variant ID, summing metrics. Google can split one variant
+  // across multiple ad groups / partition rows, which previously showed the same variant
+  // ID several times and labelled the row count as "N variants". We collapse to one row
+  // per real variant. (The `current` totals above still use ALL rows — that sum is correct
+  // and unchanged; only this per-variant TABLE is deduped.)
+  const variantAgg = {};
+  currentRows.forEach(function(p){
+    const parts = String(p.shopifyItemId || '').split('_');
+    const vid = parts.length >= 4 ? parts[3] : (p.shopifyItemId || 'unknown');
+    if (!variantAgg[vid]) {
+      variantAgg[vid] = {
+        shopifyItemId: p.shopifyItemId,
+        variantId: parts.length >= 4 ? parts[3] : null,
+        variantSku: null,
+        variantTitle: null,
+        adGroupNames: {},   // collect distinct ad groups this variant spans
+        spend: 0, sales: 0, impressions: 0, clicks: 0, conversions: 0
+      };
+    }
+    const a = variantAgg[vid];
+    a.spend += Number(p.spend) || 0;
+    a.sales += Number(p.sales) || 0;
+    a.impressions += Number(p.impressions) || 0;
+    a.clicks += Number(p.clicks) || 0;
+    a.conversions += Number(p.conversions) || 0;
+    if (p.adGroupName) a.adGroupNames[p.adGroupName] = true;
+  });
+
+  const variants = Object.keys(variantAgg).map(function(vid){
+    const a = variantAgg[vid];
+    const realVid = a.variantId;
+    const adGroups = Object.keys(a.adGroupNames);
+    return {
+      shopifyItemId: a.shopifyItemId,
+      variantId: realVid,
+      variantSku: realVid && variantSkuMap[realVid] ? variantSkuMap[realVid] : null,
+      variantTitle: realVid && variantTitleMap[realVid] ? variantTitleMap[realVid] : null,
+      // If a variant spans multiple ad groups, show "Shopping (2 ad groups)" rather than one name
+      adGroupName: adGroups.length > 1 ? (adGroups[0] + ' (+' + (adGroups.length - 1) + ' more)') : (adGroups[0] || null),
+      spend: Math.round(a.spend * 100) / 100,
+      sales: Math.round(a.sales * 100) / 100,
+      impressions: a.impressions,
+      clicks: a.clicks,
+      conversions: Math.round(a.conversions),
+      acos: a.sales > 0 ? Math.round((a.spend / a.sales) * 1000) / 10 : 0
+    };
+  }).sort(function(a, b){ return b.spend - a.spend; });
+
+  // r38 audit fix: variantCount is now the number of DISTINCT variants, not raw row count.
+  const distinctVariantCount = variants.length;
+
+  res.json({
+    campaignId: campaignId,
+    campaignName: campaignName,
+    campaignType: campaignType,
+    shopifyId: shopifyId,
+    productName: productName,
+    variantCount: distinctVariantCount,
+    rowCount: variantCount,  // raw Google row count, kept for debugging
+    current: current,
+    prior: prior,         // null if no snapshot from 7+ days ago
+    trend: trend,         // array of { date, spend7d, sales7d, variantCount }
+    variants: variants,   // per-variant breakdown
+    lastGoogleSync: googleState.lastSync
+  });
+});
+
+// ── Campaign Detail — single campaign with WoW deltas and 14-day rolling trend ──────
+// Used by the campaign detail modal in google.html. Pulls current state from
+// googleState, then for WoW deltas looks up the snapshot from ~7 days ago.
+// For the rolling trend, picks one snapshot per day for the last 14 days.
+//
+// IMPORTANT: every value in googleState.products[].spend (etc.) is a 7-day
+// CUMULATIVE total (the script pushes 7d totals). So:
+// ─── Batch 2 endpoints (r37) — fed by v10 script data ───────────────────────────────
+
+// Top search terms for one campaign, sorted by waste-first (zero-sale spenders) then by spend.
+// Returns empty array if v10 hasn't been installed yet.
+// r38: Word lists for the search-term classifier. Hardcoded for now — extend via admin UI later.
+// OFF_TOPIC_WORDS = clear signals that the search is for something we don't sell
+//   (used/refurbished/parts/repair) or for a different retailer (amazon/argos/ebay).
+// COMPETITOR_BRANDS = brands of products we don't carry. If the term contains a competitor
+//   brand name, the user wanted a different product — safe negative.
+// These are MATCHED CASE-INSENSITIVE AS WHOLE WORDS via regex word-boundary checks.
+const OFF_TOPIC_WORDS = [
+  'used', 'second hand', 'secondhand', '2nd hand', 'refurbished', 'refurb',
+  'parts', 'spare', 'spares', 'repair', 'repairs', 'replacement part',
+  'free', 'wanted', 'wtb', 'donation',
+  'amazon', 'argos', 'ebay', 'b&q', 'b and q', 'currys', 'aldi', 'lidl', 'tesco', 'costco', 'wickes', 'homebase'
+];
+const COMPETITOR_BRANDS = [
+  // Trampolines
+  'rebo', 'vuly', 'plum', 'jumpking', 'springfree', 'jumpflex',
+  // Gym / fitness
+  'gymrax', 'mirafit', 'jordan fitness', 'bodymax', 'jll', 'powertrain', 'reebok',
+  // Baby
+  'mamas papas', 'mamas and papas', 'joie', 'cybex', 'maxi cosi', 'silvercross', 'silver cross', 'icandy', 'bugaboo', 'graco'
+];
+
+// Returns the kind for one search-term row given context.
+// campaignName is used so terms matching the campaign theme can't be flagged as wasting.
+function classifySearchTerm(row, campaignName) {
+  const cost = Number(row.cost) || 0;
+  const sales = Number(row.conversions_value) || 0;
+  const conversions = Number(row.conversions) || 0;
+  const term = String(row.search_term || '').toLowerCase();
+  const campLower = String(campaignName || '').toLowerCase();
+
+  // Converting always wins.
+  if (sales > 0 && cost > 0 && (sales / cost) >= 3) return 'converting';
+  if (sales > 0) return 'healthy';
+
+  // No sales below this point.
+  // Step 1 — does the term contain an off-topic word or competitor brand?
+  // If yes, this is a genuine negative candidate regardless of spend size.
+  const hasOffTopic = OFF_TOPIC_WORDS.some(function(w){
+    const re = new RegExp('(?:^|\\s)' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '(?:\\s|$)', 'i');
+    return re.test(term);
+  });
+  const hasCompetitor = COMPETITOR_BRANDS.some(function(b){
+    const re = new RegExp('(?:^|\\s)' + b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '(?:\\s|$)', 'i');
+    return re.test(term);
+  });
+  if (hasOffTopic || hasCompetitor) return 'off-topic';
+
+  // Step 2 — if the term shares meaningful words with the campaign name, it's NOT a negative
+  // candidate (the campaign is supposed to advertise that). Classify as page-issue instead —
+  // the page or pricing is the problem, not the keyword.
+  // "meaningful" = 4+ char alphanumeric tokens, excluding obvious filler words.
+  const FILLER = new Set(['shopping', 'with', 'and', 'for', 'the', 'all', 'product', 'campaign', 'may']);
+  const campTokens = campLower.match(/[a-z]{4,}/g) || [];
+  const meaningfulCampTokens = campTokens.filter(function(t){ return !FILLER.has(t); });
+  const termMatchesCampaign = meaningfulCampTokens.some(function(t){ return term.indexOf(t) !== -1; });
+  if (termMatchesCampaign) return 'page-issue';
+
+  // Step 3 — for terms that don't match campaign theme and aren't off-topic, only flag as
+  // genuine "wasting" if spend is high enough we can be confident the term itself is wrong
+  // (£20+ with zero conversions, OR 50+ clicks with zero conversions). Otherwise page-issue.
+  if (cost >= 20 || (Number(row.clicks) || 0) >= 50) return 'page-issue';
+
+  // Below threshold — too little data to be sure. Treat as page-issue.
+  return 'page-issue';
+}
+
+// r38 / v10.2: cluster search terms by theme using nouns from the campaign's product titles.
+// Replaces v10.1's broken product_item_id filtering (Google's API forbids that segment on
+// search_term_view). Clusters give the visual grouping without claiming per-product attribution.
+//
+// Approach:
+//   1. Collect 4+ char nouns from product titles in this campaign, drop fillers
+//   2. Score each noun: how many product titles in this campaign contain it (= "centrality")
+//   3. Pick top N nouns as cluster anchors (N = up to 10 by centrality)
+//   4. For each search term: pick the cluster whose anchor noun appears in the term (longest match wins)
+//   5. Terms matching no anchor noun → cluster "Other"
+function buildClusterAnchors(productTitles) {
+  // FILLER words that don't make good cluster anchors. Includes generic descriptors,
+  // colours, sizes, units — things that span product categories.
+  const FILLER = new Set([
+    'with', 'and', 'for', 'the', 'soft', 'pack', 'each', 'shop', 'free',
+    'pcs', 'piece', 'pieces', 'tile', 'tiles', 'item', 'items',
+    'set', 'sets', 'kit', 'kits', 'pack', 'packs', 'unit', 'units',
+    'small', 'medium', 'large', 'mini', 'maxi', 'extra', 'super',
+    'red', 'blue', 'black', 'white', 'green', 'grey', 'gray', 'pink', 'yellow', 'purple', 'orange', 'brown',
+    'leaf', 'cross', 'pattern',
+    'sports', 'sport', 'shopping', 'product', 'products', 'brand', 'campaign'
+  ]);
+  const counts = {};
+  productTitles.forEach(function(title){
+    const seen = new Set();
+    const toks = String(title || '').toLowerCase().match(/[a-z]{4,}/g) || [];
+    toks.forEach(function(t){
+      if (FILLER.has(t)) return;
+      if (seen.has(t)) return;  // count once per title
+      seen.add(t);
+      counts[t] = (counts[t] || 0) + 1;
+    });
+  });
+  // Sort by centrality (count desc), keep top 10
+  const entries = Object.keys(counts).map(function(k){ return { noun: k, count: counts[k] }; });
+  entries.sort(function(a, b){ return b.count - a.count; });
+  return entries.slice(0, 10).map(function(e){ return e.noun; });
+}
+
+function clusterForTerm(termLower, anchors) {
+  // Pick the anchor with the longest match in the term. Returns null if no match.
+  let best = null, bestLen = 0;
+  for (let i = 0; i < anchors.length; i++) {
+    const a = anchors[i];
+    if (termLower.indexOf(a) !== -1 && a.length > bestLen) {
+      best = a;
+      bestLen = a.length;
+    }
+  }
+  return best;  // null = unclustered
+}
+
+app.get('/api/google/campaign/:campaignId/search-terms', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  // r38: shopifyId is used to HIGHLIGHT (not filter) the relevant cluster when arriving from a product.
+  const shopifyIdContext = String(req.query.shopifyId || '').trim();
+  if (!db) return res.json({ terms: [], hasData: false });
+
+  try {
+    // Look up campaign name so the classifier knows the theme.
+    let campaignName = '';
+    try {
+      const cr = await db.query("SELECT campaign_name FROM google_campaign_daily WHERE campaign_id=$1 ORDER BY day DESC LIMIT 1", [campaignId]);
+      if (cr.rows.length) campaignName = cr.rows[0].campaign_name || '';
+    } catch(_) {}
+
+    // Pull product titles for this campaign so we can build cluster anchors.
+    // Source: current googleState.products filtered by campaignId.
+    const campaignProducts = (googleState.products || []).filter(function(gp){
+      return String(gp.campaignId) === campaignId;
+    });
+    if (campaignProducts.length && !campaignName) {
+      campaignName = campaignProducts[0].campaignName || '';
+    }
+    const productTitles = campaignProducts.map(function(p){
+      return p.productName || p.adGroupName || '';
+    }).filter(Boolean);
+    const anchors = buildClusterAnchors(productTitles);
+
+    // If shopifyId provided (came from a product), find the cluster that product belongs to —
+    // that's the cluster we'll auto-expand on the frontend.
+    let highlightCluster = null;
+    let highlightProductName = null;
+    if (shopifyIdContext) {
+      const sourceProduct = campaignProducts.find(function(gp){
+        return gp.shopifyItemId && String(gp.shopifyItemId).split('_')[2] === shopifyIdContext;
+      });
+      if (sourceProduct) {
+        highlightProductName = sourceProduct.productName || sourceProduct.adGroupName || null;
+        const titleLower = String(highlightProductName || '').toLowerCase();
+        highlightCluster = clusterForTerm(titleLower, anchors);
+      }
+    }
+
+    // v10.2: pull search terms — no product_item_id, no aggregation needed (v10.2 doesn't multiply rows).
+    // The GROUP BY is defensive in case the table still has v10.1 leftover rows with product_item_id.
+    const r = await db.query(
+      "SELECT search_term, MAX(match_type) AS match_type, " +
+      "  SUM(cost) AS cost, SUM(clicks)::int AS clicks, SUM(impressions)::int AS impressions, " +
+      "  SUM(conversions) AS conversions, SUM(conversions_value) AS conversions_value, " +
+      "  MAX(status) AS status, MAX(updated_at) AS updated_at " +
+      "FROM google_search_terms WHERE campaign_id=$1 " +
+      "GROUP BY search_term " +
+      "ORDER BY SUM(cost) DESC LIMIT 200",
+      [campaignId]
+    );
+    const rows = r.rows;
+
+    const terms = rows.slice(0, 50).map(function(row){
+      const cost = Number(row.cost) || 0;
+      const sales = Number(row.conversions_value) || 0;
+      const kind = classifySearchTerm(row, campaignName);
+      const cluster = clusterForTerm(String(row.search_term || '').toLowerCase(), anchors);
+      return {
+        searchTerm: row.search_term,
+        matchType: row.match_type,
+        cost: Math.round(cost * 100) / 100,
+        clicks: Number(row.clicks) || 0,
+        impressions: Number(row.impressions) || 0,
+        conversions: Math.round(Number(row.conversions) * 10) / 10,
+        sales: Math.round(sales * 100) / 100,
+        status: row.status,
+        kind: kind,
+        cluster: cluster || 'other',  // 'other' bucket for unmatched
+        updatedAt: row.updated_at
+      };
+    });
+
+    // Sort: off-topic first, page-issue second, converting third, healthy last. Within each, by spend desc.
+    const order = { 'off-topic': 0, 'page-issue': 1, 'converting': 2, 'healthy': 3 };
+    terms.sort(function(a, b){
+      const oa = order[a.kind] !== undefined ? order[a.kind] : 3;
+      const ob = order[b.kind] !== undefined ? order[b.kind] : 3;
+      if (oa !== ob) return oa - ob;
+      return (b.cost || 0) - (a.cost || 0);
+    });
+
+    // Build cluster summary: name → { count, totalSpend, kinds }
+    const clusterSummary = {};
+    terms.forEach(function(t){
+      const c = t.cluster;
+      if (!clusterSummary[c]) clusterSummary[c] = { name: c, count: 0, totalSpend: 0, totalSales: 0, hasOffTopic: false, hasPageIssue: false, hasConverting: false };
+      clusterSummary[c].count++;
+      clusterSummary[c].totalSpend += t.cost;
+      clusterSummary[c].totalSales += t.sales;
+      if (t.kind === 'off-topic') clusterSummary[c].hasOffTopic = true;
+      if (t.kind === 'page-issue') clusterSummary[c].hasPageIssue = true;
+      if (t.kind === 'converting') clusterSummary[c].hasConverting = true;
+    });
+    const clusters = Object.values(clusterSummary).map(function(c){
+      return {
+        name: c.name,
+        count: c.count,
+        totalSpend: Math.round(c.totalSpend * 100) / 100,
+        totalSales: Math.round(c.totalSales * 100) / 100,
+        hasOffTopic: c.hasOffTopic,
+        hasPageIssue: c.hasPageIssue,
+        hasConverting: c.hasConverting
+      };
+    });
+    // Sort clusters: highlighted first (if any), then by total spend desc, "other" always last
+    clusters.sort(function(a, b){
+      if (highlightCluster) {
+        if (a.name === highlightCluster && b.name !== highlightCluster) return -1;
+        if (b.name === highlightCluster && a.name !== highlightCluster) return 1;
+      }
+      if (a.name === 'other' && b.name !== 'other') return 1;
+      if (b.name === 'other' && a.name !== 'other') return -1;
+      return b.totalSpend - a.totalSpend;
+    });
+
+    res.json({
+      terms: terms,
+      clusters: clusters,
+      anchors: anchors,
+      hasData: terms.length > 0,
+      total: terms.length,
+      highlightCluster: highlightCluster,        // null if no product context, else cluster name to auto-expand
+      highlightProductName: highlightProductName, // e.g. "EVA Interlocking Floor Mats..."
+      cameFromProduct: !!shopifyIdContext,
+      perProductNotAvailable: !!shopifyIdContext  // honest flag — per-product search terms don't exist in Google's API
+    });
+  } catch(e) {
+    console.error('[campaign/search-terms] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Device + day-of-week splits for one campaign.
+app.get('/api/google/campaign/:campaignId/segments', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!db) return res.json({ device: [], dayOfWeek: [], hasData: false });
+
+  try {
+    const r = await db.query(
+      "SELECT segment_kind, segment_value, cost, sales, clicks, impressions, conversions " +
+      "FROM google_campaign_segments WHERE campaign_id=$1",
+      [campaignId]
+    );
+    const device = [], dayOfWeek = [];
+    r.rows.forEach(function(row){
+      const item = {
+        value: row.segment_value,
+        cost: Math.round(Number(row.cost) * 100) / 100,
+        sales: Math.round(Number(row.sales) * 100) / 100,
+        clicks: Number(row.clicks) || 0,
+        impressions: Number(row.impressions) || 0,
+        conversions: Math.round(Number(row.conversions) * 10) / 10,
+        acos: Number(row.sales) > 0 ? Math.round((Number(row.cost) / Number(row.sales)) * 1000) / 10 : 0
+      };
+      if (row.segment_kind === 'device') device.push(item);
+      else if (row.segment_kind === 'day_of_week') dayOfWeek.push(item);
+    });
+    res.json({ device: device, dayOfWeek: dayOfWeek, hasData: (device.length + dayOfWeek.length) > 0 });
+  } catch(e) {
+    console.error('[campaign/segments] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Daily metrics for one campaign over the last N days. Used by the window toggle and trend chart.
+// query params: days (default 30, max 60)
+app.get('/api/google/campaign/:campaignId/daily', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  if (!db) return res.json({ days: [], hasData: false });
+  const requestedDays = Math.min(60, Math.max(1, parseInt(req.query.days || '30')));
+
+  try {
+    const r = await db.query(
+      "SELECT snapshot_date, spend, sales, clicks, impressions, conversions " +
+      "FROM google_campaign_daily WHERE campaign_id=$1 " +
+      "AND snapshot_date >= CURRENT_DATE - ($2 || ' days')::INTERVAL " +
+      "ORDER BY snapshot_date ASC",
+      [campaignId, String(requestedDays)]
+    );
+    const days = r.rows.map(function(row){
+      return {
+        date: row.snapshot_date,
+        spend: Math.round(Number(row.spend) * 100) / 100,
+        sales: Math.round(Number(row.sales) * 100) / 100,
+        clicks: Number(row.clicks) || 0,
+        impressions: Number(row.impressions) || 0,
+        conversions: Math.round(Number(row.conversions) * 10) / 10
+      };
+    });
+    res.json({ days: days, hasData: days.length > 0, requestedDays: requestedDays });
+  } catch(e) {
+    console.error('[campaign/daily] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Record agent's decision on a search term — "add as negative" or "add as exact match".
+// Record-only — does NOT push to Google Ads API. Agent has to add it in Google Ads UI manually.
+// Returns the decision id and a reminder message.
+app.post('/api/google/campaign/:campaignId/keyword-decision', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+
+  const { searchTerm, decisionKind, reason, campaignName } = req.body;
+  if (!searchTerm) return res.status(400).json({ error: 'searchTerm required' });
+  if (!['add_negative', 'add_exact'].includes(decisionKind)) {
+    return res.status(400).json({ error: 'decisionKind must be add_negative or add_exact' });
+  }
+
+  const u = req.user || {};
+  const decidedBy = u.name || u.username || 'unknown';
+
+  try {
+    // Check if a pending decision already exists on the same (campaign, term, kind)
+    const dup = await db.query(
+      "SELECT id FROM google_keyword_decisions " +
+      "WHERE campaign_id=$1 AND search_term=$2 AND decision_kind=$3 AND status='pending' " +
+      "LIMIT 1",
+      [campaignId, String(searchTerm), decisionKind]
+    );
+    if (dup.rows.length) {
+      return res.status(409).json({
+        error: 'Already pending — someone already flagged this term for the same action. Check Google Ads.',
+        existingId: dup.rows[0].id
+      });
+    }
+
+    const result = await db.query(
+      "INSERT INTO google_keyword_decisions " +
+      "(campaign_id, campaign_name, search_term, decision_kind, decided_by, reason, status) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,'pending') RETURNING id",
+      [campaignId, campaignName || null, String(searchTerm), decisionKind, decidedBy, reason || null]
+    );
+    const newId = result.rows[0].id;
+    const reminder = decisionKind === 'add_negative'
+      ? 'Recorded. Now add "' + searchTerm + '" as a negative keyword in Google Ads → Campaign → Keywords → Negative keywords.'
+      : 'Recorded. Now add "' + searchTerm + '" as an exact-match keyword in Google Ads → Campaign → Keywords.';
+    res.json({ success: true, id: newId, reminder: reminder });
+  } catch(e) {
+    console.error('[keyword-decision] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List pending keyword decisions (for an admin/manager view — not built into UI yet,
+// but useful for tracking what's been flagged but not applied).
+app.get('/api/google/keyword-decisions', async function(req, res) {
+  if (!db) return res.json({ decisions: [] });
+  try {
+    const r = await db.query(
+      "SELECT id, campaign_id, campaign_name, search_term, decision_kind, decided_by, decided_at, reason, status, applied_at, applied_by " +
+      "FROM google_keyword_decisions ORDER BY decided_at DESC LIMIT 200"
+    );
+    res.json({ decisions: r.rows });
+  } catch(e) {
+    console.error('[keyword-decisions list] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Mark a decision as applied (someone added it in Google Ads UI). Manager-only.
+app.post('/api/google/keyword-decisions/:id/applied', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const u = req.user || {};
+  const role = (u.role || '').toLowerCase();
+  if (!['owner','manager'].includes(role)) {
+    return res.status(403).json({ error: 'Manager only' });
+  }
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'id required' });
+  try {
+    await db.query(
+      "UPDATE google_keyword_decisions SET status='applied', applied_at=NOW(), applied_by=$1 WHERE id=$2",
+      [u.name || u.username || 'manager', id]
+    );
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[keyword-decisions applied] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+//   - prior_7d  = snapshot from ~7d ago (its spend = the prior week's 7d total)
+//   - current_7d = snapshot from now (matches what live UI shows)
+//   - WoW delta = (current_7d - prior_7d) / prior_7d
+// The 14-day trend is a series of 7d-rolling totals, NOT per-day totals.
+// We label it "7-day rolling" in the UI so it's not misread as daily spend.
+app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
+  const campaignId = String(req.params.campaignId || '');
+  if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  const shopifyIdFilter = String(req.query.shopifyId || '').trim();  // r38: optional product scope
+
+  // 1. Current campaign data — same shape as products-diagnostic builds, scoped to one campaign.
+  let currentProducts = (googleState.products || []).filter(function(gp){
+    return String(gp.campaignId) === campaignId;
+  });
+  if (!currentProducts.length) {
+    return res.status(404).json({ error: 'Campaign not found in current Google state. May have been paused or removed.' });
+  }
+  const campaignName = currentProducts[0].campaignName || '(unnamed)';
+  const campaignType = currentProducts[0].campaignType || null;
+  const fullProductCount = currentProducts.length;  // unfiltered count for the banner
+
+  // r38: if shopifyId provided, scope to variants of that product within this campaign.
+  let scopedProductName = null;
+  if (shopifyIdFilter) {
+    currentProducts = currentProducts.filter(function(gp){
+      if (!gp.shopifyItemId) return false;
+      return String(gp.shopifyItemId).split('_')[2] === shopifyIdFilter;
+    });
+    if (!currentProducts.length) {
+      return res.status(404).json({ error: 'Product not in this campaign.' });
+    }
+    scopedProductName = currentProducts[0].productName || currentProducts[0].adGroupName || null;
+  }
+
+  // Aggregate current 7d totals
+  let curSpend = 0, curSales = 0, curImpressions = 0, curClicks = 0, curConversions = 0, curWasted = 0;
+  currentProducts.forEach(function(p){
+    curSpend += Number(p.spend) || 0;
+    curSales += Number(p.sales) || 0;
+    curImpressions += Number(p.impressions) || 0;
+    curClicks += Number(p.clicks) || 0;
+    curConversions += Number(p.conversions) || 0;
+    if ((Number(p.spend) || 0) > 0.5 && (!p.sales || Number(p.sales) === 0)) {
+      curWasted += Number(p.spend) || 0;
+    }
+  });
+  const curAcos = curSales > 0 ? (curSpend / curSales) * 100 : 0;
+  const curCtr = curImpressions > 0 ? (curClicks / curImpressions) * 100 : 0;
+  const curCostPerConv = curConversions > 0 ? curSpend / curConversions : 0;
+
+  // 2. WoW comparison — find latest snapshot received ≥7 days ago.
+  let prior = null;
+  if (db) {
+    try {
+      const r = await db.query(
+        "SELECT products FROM google_state_snapshots " +
+        "WHERE received_at <= NOW() - INTERVAL '7 days' " +
+        "ORDER BY received_at DESC LIMIT 1"
+      );
+      if (r.rows.length) {
+        let priorProducts = (r.rows[0].products || []).filter(function(gp){
+          return String(gp.campaignId) === campaignId;
+        });
+        // r38: also scope prior data so WoW deltas are on the same scope
+        if (shopifyIdFilter) {
+          priorProducts = priorProducts.filter(function(gp){
+            if (!gp.shopifyItemId) return false;
+            return String(gp.shopifyItemId).split('_')[2] === shopifyIdFilter;
+          });
+        }
+        let pSpend = 0, pSales = 0, pImpressions = 0, pClicks = 0, pConversions = 0;
+        priorProducts.forEach(function(p){
+          pSpend += Number(p.spend) || 0;
+          pSales += Number(p.sales) || 0;
+          pImpressions += Number(p.impressions) || 0;
+          pClicks += Number(p.clicks) || 0;
+          pConversions += Number(p.conversions) || 0;
+        });
+        const pAcos = pSales > 0 ? (pSpend / pSales) * 100 : 0;
+        prior = {
+          spend: Math.round(pSpend * 100) / 100,
+          sales: Math.round(pSales * 100) / 100,
+          impressions: pImpressions,
+          clicks: pClicks,
+          conversions: Math.round(pConversions),
+          acos: Math.round(pAcos * 10) / 10
+        };
+      }
+    } catch(e) {
+      console.error('[campaign-detail WoW] ' + e.message);
+    }
+  }
+
+  // 3. 14-day rolling trend — for each of the last 14 calendar days, pick the
+  //    LAST snapshot of that day and extract this campaign's 7d cumulative total.
+  let trend = [];
+  if (db) {
+    try {
+      const r = await db.query(
+        "WITH per_day AS ( " +
+        "  SELECT DATE(received_at AT TIME ZONE 'Europe/London') AS d, " +
+        "         products, " +
+        "         ROW_NUMBER() OVER (PARTITION BY DATE(received_at AT TIME ZONE 'Europe/London') ORDER BY received_at DESC) AS rn " +
+        "  FROM google_state_snapshots " +
+        "  WHERE received_at >= NOW() - INTERVAL '15 days' " +
+        ") SELECT d, products FROM per_day WHERE rn = 1 ORDER BY d ASC"
+      );
+      trend = r.rows.map(function(row){
+        let ps = (row.products || []).filter(function(gp){ return String(gp.campaignId) === campaignId; });
+        // r38: also scope trend
+        if (shopifyIdFilter) {
+          ps = ps.filter(function(gp){
+            if (!gp.shopifyItemId) return false;
+            return String(gp.shopifyItemId).split('_')[2] === shopifyIdFilter;
+          });
+        }
+        let s = 0, sa = 0;
+        ps.forEach(function(p){
+          s += Number(p.spend) || 0;
+          sa += Number(p.sales) || 0;
+        });
+        return {
+          date: row.d,
+          spend7d: Math.round(s * 100) / 100,
+          sales7d: Math.round(sa * 100) / 100
+        };
+      });
+    } catch(e) {
+      console.error('[campaign-detail trend] ' + e.message);
+    }
+  }
+
+  // 4. Products list. Re-shape and ENRICH each row with the Shopify-side fields that
+  //    productSubrow expects (shopifyTitle, shopifyImageUrl, displayName, shopifyId).
+  //    Without this enrichment, the campaign-card's product list shows blank titles
+  //    and a `—` placeholder for images.
+  const shopifyByPid = {};
+  try {
+    (shopifyState.products || []).forEach(function(sp){
+      if (sp && sp.id) shopifyByPid[String(sp.id)] = sp;
+    });
+  } catch(_) {}
+
+  const rows = currentProducts.slice().map(function(gp){
+    // Pull the matched Shopify product (if any) for this Google row
+    const sid = gp.shopifyItemId ? String(gp.shopifyItemId).split('_')[2] : null;
+    const sp = sid ? shopifyByPid[sid] : null;
+    // Display name: prefer Shopify title, fall back to the Google ad-group product name
+    const displayName = (sp && sp.title) || gp.productName || gp.adGroupName || '(unknown)';
+    return Object.assign({}, gp, {
+      productName: displayName,
+      displayName: displayName,
+      shopifyTitle: sp ? sp.title : null,
+      shopifyId: sp ? sp.id : sid,
+      shopifyImageUrl: sp ? sp.imageUrl : null,
+      shopifyUrl: sp ? sp.shopifyUrl : null,
+      shopifyPrice: sp ? sp.price : null,
+      shopifyStatus: sp ? sp.status : null,
+      shopifyInventory: sp ? sp.inventory : null,
+      costPerConv: (Number(gp.conversions) > 0) ? Math.round((Number(gp.spend) / Number(gp.conversions)) * 100) / 100 : 0
+    });
+  }).sort(function(a, b){
+    if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
+    return (Number(b.spend) || 0) - (Number(a.spend) || 0);
+  });
+
+  // r38: SKU + variant title enrichment for the variants list rendered next to product rows.
+  // shopifyItemId format: shopify_gb_<productId>_<variantId>
+  const variantSkuMap = {};
+  const variantTitleMap = {};
+  try {
+    (shopifyState.products || []).forEach(function(sp){
+      const productTitle = sp.title || '';
+      if (Array.isArray(sp.variants)) {
+        sp.variants.forEach(function(v){
+          if (!v || !v.id) return;
+          const vid = String(v.id);
+          if (v.sku) variantSkuMap[vid] = String(v.sku);
+          const variantTitle = v.title && v.title !== 'Default Title' ? v.title : '';
+          variantTitleMap[vid] = variantTitle
+            ? (productTitle + ' — ' + variantTitle)
+            : productTitle;
+        });
+      }
+    });
+  } catch(_) {}
+  rows.forEach(function(r){
+    if (r.shopifyItemId) {
+      const parts = String(r.shopifyItemId).split('_');
+      const vid = parts.length >= 4 ? parts[3] : null;
+      if (vid) {
+        if (variantSkuMap[vid]) r.variantSku = variantSkuMap[vid];
+        if (variantTitleMap[vid]) r.variantTitle = variantTitleMap[vid];
+      }
+    }
+  });
+
+  res.json({
+    campaignId: campaignId,
+    campaignName: campaignName,
+    campaignType: campaignType,
+    productCount: currentProducts.length,
+    fullProductCount: fullProductCount,  // r38: total products in campaign before filter
+    scopedToProduct: !!shopifyIdFilter,
+    scopedShopifyId: shopifyIdFilter || null,
+    scopedProductName: scopedProductName,
+    current: {
+      spend: Math.round(curSpend * 100) / 100,
+      sales: Math.round(curSales * 100) / 100,
+      wastedSpend: Math.round(curWasted * 100) / 100,
+      impressions: curImpressions,
+      clicks: curClicks,
+      conversions: Math.round(curConversions),
+      acos: Math.round(curAcos * 10) / 10,
+      ctr: Math.round(curCtr * 100) / 100,
+      costPerConv: Math.round(curCostPerConv * 100) / 100
+    },
+    prior: prior,
+    trend: trend,
+    products: rows,
+    lastGoogleSync: googleState.lastSync
+  });
+});
+
+// ── All Products View — Shopify-led ───────────────────────────────────────
+app.get('/api/google/all-products', async function(req, res) {
+  const shopifyProducts = shopifyState.products || [];
+  const archivedIds = await getArchivedCampaignIds();
+
+  const rows = shopifyProducts.map(function(sp) {
+    // Filter google rows for this product, excluding archived campaigns
+    const googleRowsAll = findGoogleRowsForShopifyProduct(sp.id);
+    const googleRows = googleRowsAll.filter(function(r){ return !archivedIds.has(String(r.campaignId)); });
+    const agg = aggregateGoogleMetrics(googleRows);
+    const hasGoogleData = googleRows.length > 0;
+    const hasGoogleActivity = hasGoogleData && (agg.spend > 0 || agg.impressions > 0);
+    const funnel = getGa4ForShopifyProduct(sp);
+
+    // Three-bucket categorisation:
+    //   driving_traffic — has ≥100 impressions OR ≥1 click in 7 days
+    //   listed_quiet   — in feed (has rows) but below threshold
+    //   not_promoted   — no Google rows at all
+    let adStatus;
+    if (!hasGoogleData) {
+      adStatus = 'not_promoted';
+    } else if (agg.impressions >= 100 || agg.clicks >= 1) {
+      adStatus = 'driving_traffic';
+    } else {
+      adStatus = 'listed_quiet';
+    }
+
+    const dx = diagnoseProduct({
+      shopify: {
+        status: sp.status,
+        inventory: sp.inventory,
+        revenue7d: sp.revenue7d || 0,
+        revenue30d: sp.revenue30d || 0
+      },
+      google: agg,
+      funnel: funnel,
+      hasGoogleData: hasGoogleData,
+      itemType: 'product_group'
+    });
+
+    return {
+      shopifyId: sp.id,
+      title: sp.title,
+      handle: sp.handle,
+      imageUrl: sp.imageUrl,
+      shopifyUrl: sp.shopifyUrl,
+      url: sp.url,
+      status: sp.status,
+      productType: sp.productType,
+      price: sp.price,
+      inventory: sp.inventory,
+      revenue7d: sp.revenue7d || 0,
+      unitsSold7d: sp.unitsSold7d || 0,
+      revenue30d: sp.revenue30d || 0,
+      unitsSold30d: sp.unitsSold30d || 0,
+      dailySales7d: sp.dailySales7d || [],
+      dailySales14d: sp.dailySales14d || [],  // r37: window toggle
+      dailyUnits14d: sp.dailyUnits14d || [],  // r37: prev-week units
+      googleImpressions: agg.impressions,
+      googleClicks: agg.clicks,
+      googleSpend: agg.spend,
+      googleSales: agg.sales,
+      googleConversions: agg.conversions,
+      googleCtr: agg.ctr,
+      googleAcos: agg.acos,
+      googleCostPerConv: agg.costPerConv,
+      campaignsAdvertisedIn: agg.campaignsAdvertisedIn,
+      hasGoogleData: hasGoogleData,
+      hasGoogleActivity: hasGoogleActivity,
+      adStatus: adStatus,
+      ga4Sessions: funnel ? funnel.sessions : null,
+      ga4CartAdditions: funnel ? funnel.cartAdditions : null,
+      ga4Checkouts: funnel ? funnel.checkouts : null,
+      ga4Purchases: funnel ? funnel.purchases : null,
+      ga4BounceRate: funnel ? funnel.bounceRate : null,
+      ga4EngagementRate: funnel ? funnel.engagementRate : null,
+      ga4AvgEngagementTime: funnel ? funnel.avgEngagementTime : null,
+      ga4CartRate: funnel && funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : null,
+      ga4CheckoutRate: funnel && funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : null,
+      // r35.13: CVR computed from GA4 funnel — purchases / sessions × 100.
+      ga4Cvr: funnel && funnel.sessions > 0 ? Math.round((funnel.purchases / funnel.sessions) * 1000) / 10 : null,
+      // r35.13b: lift potential — £/wk this listing leaves on the table if it
+      // hit Shopify paid-search benchmark (2% CVR). Used to sub-rank urgent
+      // and below-market buckets so agents see highest-£ gaps first.
+      // Formula: sessions × (target - current)/100 × aov × margin
+      //   target = 2% (Shopify ecom paid-search floor)
+      //   margin = 16% (net profit threshold)
+      lift_potential_gbp_wk: (function(){
+        if (!funnel || !funnel.sessions) return 0;
+        const currentCvr = funnel.sessions > 0 ? (funnel.purchases / funnel.sessions) * 100 : 0;
+        const gap = 2 - currentCvr;
+        if (gap <= 0) return 0;
+        const aov = sp.unitsSold7d > 0 ? sp.revenue7d / sp.unitsSold7d : (sp.price || 0);
+        if (aov === 0) return 0;
+        return Math.round(funnel.sessions * (gap / 100) * aov * 0.16 * 100) / 100;
+      })(),
+      diagnosisType: dx.diagnosisType,
+      diagnosis: dx.diagnosis,
+      action: dx.action,
+      priority: dx.priority
+    };
+  });
+
+  rows.sort(function(a, b) {
+    if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
+    return (b.revenue30d || 0) - (a.revenue30d || 0);
+  });
+
+  const summary = {
+    totalProducts: rows.length,
+    activeProducts: rows.filter(function(r){ return r.status === 'active'; }).length,
+    draftProducts: rows.filter(function(r){ return r.status === 'draft'; }).length,
+    archivedProducts: rows.filter(function(r){ return r.status === 'archived'; }).length,
+    advertisedProducts: rows.filter(function(r){ return r.hasGoogleData; }).length,
+    drivingTrafficCount: rows.filter(function(r){ return r.adStatus === 'driving_traffic'; }).length,
+    listedQuietCount: rows.filter(function(r){ return r.adStatus === 'listed_quiet'; }).length,
+    notPromotedCount: rows.filter(function(r){ return r.adStatus === 'not_promoted'; }).length,
+    urgentCount: rows.filter(function(r){ return r.priority === 1; }).length,
+    scaleCount: rows.filter(function(r){ return r.priority === 3; }).length,
+    totalGoogleSpend: Math.round(rows.reduce(function(s, r){ return s + (r.googleSpend || 0); }, 0) * 100) / 100,
+    totalGoogleSales: Math.round(rows.reduce(function(s, r){ return s + (r.googleSales || 0); }, 0) * 100) / 100,
+    totalShopifyRevenue7d: Math.round(rows.reduce(function(s, r){ return s + (r.revenue7d || 0); }, 0) * 100) / 100,
+    totalShopifyRevenue30d: Math.round(rows.reduce(function(s, r){ return s + (r.revenue30d || 0); }, 0) * 100) / 100
+  };
+
+  res.json({
+    products: rows,
+    summary: summary,
+    lastGoogleSync: googleState.lastSync,
+    lastShopifySync: shopifyState.lastSync
+  });
+});
+
+// ── Cron Jobs ─────────────────────────────────────────────────────────────
+
+// r33d: REMOVED the 8/13/18 keyword cron. Search-term reports + AI analysis are
+// now fully manual — fired only when an agent clicks the "🔄 Run keyword analysis"
+// button on the Keyword Intelligence tab. This stops the 3x-per-day Opus calls
+// (~£0.30/day) when often no one reads the result. The /api/keywords/refresh
+// endpoint still kicks off both windows + analysis on demand. Server-side
+// 2-hour cache on the AI result prevents accidental double-clicks costing twice.
+
+cron.schedule('0 8 * * *', function() {
+  console.log('Running scheduled daily tasks at 8am UK time');
+  runDailyTaskScheduler().catch(function(e){ console.error('Scheduled task error: ' + e.message); });
+  // Google task auto-creation runs alongside Amazon's at 8am — independent code path,
+  // separate department, won't interfere with each other
+  runGoogleTaskScheduler().catch(function(e){ console.error('[GTASK] scheduled run error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+cron.schedule('0 0 * * *', function() {
+  autoArchiveTasks().catch(function(e){ console.error('Auto-archive error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r7b: advance task stages once a day at 00:01 London time.
+// Reads created_date for every non-archived/non-complete task and recomputes
+// task_stage based on working-day count. Writes audit log entries when a stage
+// actually changes (so we don't spam the log with no-op rows).
+cron.schedule('1 0 * * *', function() {
+  advanceTaskStages().catch(function(e){ console.error('Stage-advance cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// ── SP-API sync crons (r8) ──────────────────────────────────────────────────
+// Catalogue sync: once a day at 02:30 London. Quiet hours, full refresh.
+cron.schedule('30 2 * * *', function() {
+  if (!spApiConfigured()) return;
+  syncAmazonCatalogue().catch(function(e){ console.error('SP-API catalogue cron: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// Orders sync: twice a day — 06:00 (covers overnight) and 14:00 (covers morning).
+// r25c: now uses LastUpdatedAfter to fetch only changed orders since the last run.
+// First run after deploy falls back to a 7-day window (when no HWM is stored).
+// Combined with the line-items skip optimisation, typical run is ~30 calls vs ~155 before.
+cron.schedule('0 6,14 * * *', async function() {
+  if (!spApiConfigured()) return;
+  let lastUpdatedAfter = null;
+  try {
+    if (db) {
+      const r = await db.query("SELECT settings->>'last_orders_sync_at' AS hwm FROM app_settings WHERE id = 1");
+      if (r.rows.length && r.rows[0].hwm) lastUpdatedAfter = r.rows[0].hwm;
+    }
+  } catch(e) { /* fall back to full mode */ }
+  // Safety: if HWM is older than 24h (server downtime), do a full 7d sync anyway
+  if (lastUpdatedAfter) {
+    const hwmAge = Date.now() - new Date(lastUpdatedAfter).getTime();
+    if (hwmAge > 24 * 3600 * 1000) {
+      console.log('[r25c orders cron] HWM is ' + Math.round(hwmAge/3600000) + 'h old — falling back to full 7d sync');
+      lastUpdatedAfter = null;
+    }
+  }
+  syncAmazonOrders(7, lastUpdatedAfter ? { lastUpdatedAfter: lastUpdatedAfter } : null)
+    .catch(function(e){ console.error('SP-API orders cron: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r20: Pricing signals refresh — 03:30 London. Runs after catalogue sync (02:30)
+// so we have all current ASINs to iterate, before orders sync (06:00).
+cron.schedule('30 3 * * *', function() {
+  if (!spApiConfigured()) return;
+  refreshAmazonPricingSignals({}).catch(function(e){ console.error('[r20-cron] pricing signals: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r20: Sales & Traffic Report — 04:00 London. Pulls yesterday's data
+// (Amazon's report has ~24h lag). Used for Buy Box win % rolling 7-day avg.
+cron.schedule('0 4 * * *', function() {
+  if (!spApiConfigured()) return;
+  // Yesterday in London time
+  const now = new Date();
+  const ldn = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+  ldn.setDate(ldn.getDate() - 1);
+  const dateStr = ldn.toISOString().slice(0, 10);
+  fetchSalesAndTrafficReport(dateStr).catch(function(e){ console.error('[r20-cron] traffic: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r33b: REMOVED the 04:30 r22 advertisedProduct cron. After r33a all 4 read sites
+// switched to amazon_asin_ad_perf_7d (fresh every 2h), so the daily writes to
+// amazon_asin_ad_performance fed nothing. The fetchAdvertisedProductReport()
+// function is preserved for the admin backfill endpoint /api/admin/backfill-ad-performance
+// in case historical per-day rows are ever needed. The table is also left in place;
+// drop manually with `DROP TABLE amazon_asin_ad_performance;` whenever desired.
+
+// r33b: End-of-day snapshot capture at 23:45 London. saveDailySnapshot stores
+// the current day's actuals (c.todaySpend/Sales/etc from the live todayOnly
+// Amazon Ads stream). Around midnight Amazon's "today" rolls over and those
+// fields reset to zero — running at 23:45 freezes the day's final figures in
+// daily_snapshots before that happens. ON CONFLICT (snapshot_date) DO UPDATE
+// in saveDailySnapshot means this idempotently overwrites whatever the last
+// sync-time snapshot was with the most-complete end-of-day version.
+cron.schedule('45 23 * * *', function() {
+  console.log('[r33b] End-of-day snapshot capture starting');
+  saveDailySnapshot().catch(function(e){ console.error('[r33b] EOD snapshot: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r34: Nightly task outcome scoring at 23:50 London (5 min after EOD snapshot).
+// Scores tasks completed 7+ days ago that don't yet have an outcome row.
+// Skips disqualify-check (r33e scheduler doesn't fire bogus tasks).
+cron.schedule('50 23 * * *', function() {
+  console.log('[r34] Nightly outcome scoring starting');
+  r34_runNightlyScoring().catch(function(e){ console.error('[r34] nightly: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+async function advanceTaskStages() {
+  if (!db) return;
+  try {
+    // Pick up every task that isn't already finished
+    const result = await db.query(
+      "SELECT id, campaign_id, campaign_name, agent_name, department, created_date, task_stage FROM campaign_tasks WHERE status NOT IN ('complete','archived','dismissed','cancelled') AND archived_at IS NULL"
+    );
+    const today = new Date();
+    const counters = { open: 0, discuss: 0, decide: 0, overdue: 0 };
+    let advanced = 0;
+    for (const t of result.rows) {
+      const wdo = workingDaysBetween(t.created_date, today);
+      const newStage = stageForWorkingDay(wdo);
+      counters[newStage] = (counters[newStage] || 0) + 1;
+      const oldStage = (t.task_stage || 'open');
+      if (newStage !== oldStage) {
+        try {
+          await db.query(
+            'UPDATE campaign_tasks SET task_stage=$1, stage_advanced_at=NOW() WHERE id=$2',
+            [newStage, t.id]
+          );
+          // Write an audit-log entry so managers can see when a task auto-flipped.
+          // Only log on stage upgrades (open→discuss→decide→overdue). Backfills on the same
+          // day produce a single entry per task, not per cron tick.
+          await db.query(
+            "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, status_before, status_after, department) VALUES ($1,$2,$3,'system','task_stage_advanced',$4,$5,$6,$7)",
+            [String(t.campaign_id || ''), t.campaign_name || '', t.agent_name || '', 'Auto-advanced after ' + wdo + ' working day(s)', oldStage, newStage, t.department || 'amazon']
+          );
+          advanced++;
+        } catch(e) { console.error('Stage-advance error on task ' + t.id + ': ' + e.message); }
+      }
+    }
+    console.log('[STAGE-ADVANCE] Reviewed ' + result.rows.length + ' tasks, advanced ' + advanced + '. Distribution: ' + JSON.stringify(counters));
+  } catch(e) { console.error('Stage-advance overall error: ' + e.message); }
+}
+
+async function autoArchiveTasks() {
+  if (!db) return;
+  try {
+    const expiredScaling = await db.query("SELECT id, campaign_name, agent_name FROM campaign_tasks WHERE status='scaling' AND scaling_deadline IS NOT NULL AND scaling_deadline < NOW()");
+    for (const row of expiredScaling.rows) {
+      await db.query("UPDATE campaign_tasks SET status='open', updated_at=NOW() WHERE id=$1", [row.id]);
+      await db.query('INSERT INTO activity_log (campaign_id, campaign_name, agent_name, action, notes, status_before, status_after, task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', ['', row.campaign_name, row.agent_name, 'scaling_expired', '7-day scaling window expired. Task returned to open for immediate action.', 'scaling', 'open', row.id]);
+      console.log('Scaling expired for: ' + row.campaign_name);
+      if (row.agent_name) {
+        const dashUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : 'https://campaignpulse-setup-production.up.railway.app';
+        await sendToAgent(row.agent_name, '🚨 SCALING WINDOW EXPIRED\nCampaign: ' + row.campaign_name + '\n7-day scaling period has ended. Immediate decision required: resolve or pause.\n' + dashUrl + '/tasks');
+      }
+    }
+    const result = await db.query("SELECT id, resolved_at FROM campaign_tasks WHERE status IN ('complete','dismissed','paused') AND archived_at IS NULL AND resolved_at IS NOT NULL");
+    let archived = 0;
+    const now = new Date();
+    for (const row of result.rows) {
+      const resolved = new Date(row.resolved_at);
+      let workingDays = 0;
+      const check = new Date(resolved);
+      check.setDate(check.getDate() + 1);
+      while (check <= now) { const day = check.getDay(); if (day !== 0 && day !== 6) workingDays++; if (workingDays >= 3) break; check.setDate(check.getDate() + 1); }
+      if (workingDays >= 3) { await db.query('UPDATE campaign_tasks SET status=$1, archived_at=NOW() WHERE id=$2', ['archived', row.id]); archived++; }
+    }
+    if (archived > 0) console.log('Auto-archived ' + archived + ' tasks');
+  } catch(e) { console.error('Auto-archive error: ' + e.message); }
+}
+
+const interval = process.env.POLL_INTERVAL_MINUTES || 15;
+cron.schedule('*/' + interval + ' * * * *', function() {
+  syncCampaigns();
+  // r31b: also tick the 7d advertised-product report cycle. Cheap — only POSTs once per 2h.
+  runAdvertisedProduct7dCycle().catch(function(e){ console.error('[r31b] 7d ad-perf cycle: ' + e.message); });
+});
+cron.schedule('0 */2 * * *', function() { syncShopifyProducts().catch(function(e){ console.error('Shopify cron error: ' + e.message); }); }, { timezone: 'Europe/London' });
+// GA4 funnel data — refresh once a day at 7am UK time (after midnight UTC data settles)
+cron.schedule('0 7 * * *', function() {
+  fetchGa4ProductMetrics()
+    .then(function(){ return captureAccountFunnelSnapshot(); })  // r29o: snapshot for trend comparison
+    .catch(function(e){ console.error('GA4 cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+// r26: GSC daily fetch — 06:30 London. Pulls last 3 days (covers GSC's 2-day reporting lag).
+cron.schedule('30 6 * * *', function() {
+  fetchGscData(3).catch(function(e){ console.error('GSC cron error: ' + e.message); });
+}, { timezone: 'Europe/London' });
+
+const PORT = process.env.PORT || 3000;
+// ─────────────────────────────────────────────────────────────────────────
+// Rule-based friction (free, instant, always-on)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Runs immediately when a product card is opened. No AI call. No cost.
+// Identifies obvious problems by simple thresholds against page content +
+// funnel data + ad data. Caches page summary 12h to avoid re-fetching.
+//
+// Output shape mirrors the AI critique's friction format so the front-end
+// can render both in the same component.
+
+const RULE_PAGE_CACHE_HOURS = 12;
+const FUNNEL_BENCHMARKS = {
+  cartRateGood: 3,        // %; under this is flagged
+  cartRateBad: 1,         // %; under this is P1
+  checkoutFromCartGood: 45,   // %; under this is flagged
+  checkoutFromCartBad: 25,    // %; under this is P1
+  bounceBad: 70           // %; over this is flagged
+};
+
+function extractRuleFriction(pageSummary, dossier) {
+  const friction = [];
+  const sig = (pageSummary && pageSummary.signals) || {};
+  const text = (pageSummary && pageSummary.text) || '';
+  const lower = text.toLowerCase();
+
+  // ─── Trust signals ────────────────────────────────────────────────────
+  // Review count — pull a number near "review"
+  const reviewMatch = lower.match(/(\d{1,5})\s*reviews?/);
+  const reviewCount = reviewMatch ? parseInt(reviewMatch[1], 10) : 0;
+  if (reviewCount === 0 && !sig.hasReviewWidget) {
+    friction.push({ priority: 'P1', issue: 'No customer reviews shown', evidence: 'Page has no visible review count or rating widget. With a paid product, social proof is critical.', category: 'trust' });
+  } else if (reviewCount > 0 && reviewCount < 3) {
+    friction.push({ priority: 'P2', issue: 'Very few reviews (' + reviewCount + ')', evidence: 'Page shows only ' + reviewCount + ' review' + (reviewCount === 1 ? '' : 's') + '. Aim for 5+ to build confidence.', category: 'trust' });
+  }
+
+  if (!sig.hasShippingMention) {
+    friction.push({ priority: 'P2', issue: 'Shipping info not visible', evidence: 'No mention of "free delivery" / "next day shipping" detected on page. Shipping clarity is a top conversion lever.', category: 'trust' });
+  }
+  if (!sig.hasReturnsMention) {
+    friction.push({ priority: 'P3', issue: 'Returns / refund policy not visible', evidence: 'No mention of returns or money-back guarantee found. UK shoppers expect this.', category: 'trust' });
+  }
+
+  // ─── Stock / availability ─────────────────────────────────────────────
+  if (lower.indexOf('backordered') >= 0 || lower.indexOf('back order') >= 0) {
+    friction.push({ priority: 'P1', issue: 'Backordered notice on page', evidence: 'Page mentions "backordered" — likely a default variant is out of stock, killing trust at point of sale.', category: 'stock' });
+  }
+  if (lower.indexOf('sold out') >= 0 && !lower.match(/sold\s*out\s*:\s*0/)) {
+    friction.push({ priority: 'P1', issue: 'Sold-out indicator visible', evidence: 'Page contains "sold out" copy — verify default variant is in stock.', category: 'stock' });
+  }
+  if (dossier && dossier.product && dossier.product.inventory === 0) {
+    friction.push({ priority: 'P1', issue: 'Product inventory is zero', evidence: 'Shopify reports 0 in stock. Ads driving traffic to an unpurchasable page.', category: 'stock' });
+  }
+
+  // ─── Page basics ──────────────────────────────────────────────────────
+  if (!sig.hasPrice) {
+    friction.push({ priority: 'P1', issue: 'No price detected on page', evidence: 'Could not find a £ symbol or price marker in page content. Price visibility is the #1 conversion driver.', category: 'price' });
+  }
+  if (!sig.hasViewportMeta) {
+    friction.push({ priority: 'P2', issue: 'No mobile viewport meta tag', evidence: 'Page is missing the viewport meta tag — likely renders poorly on mobile.', category: 'mobile' });
+  }
+  if (sig.h1Count === 0) {
+    friction.push({ priority: 'P3', issue: 'No H1 heading on page', evidence: 'Hurts SEO and screen-reader users. Add a clear product-name H1.', category: 'copy' });
+  } else if (sig.h1Count > 2) {
+    friction.push({ priority: 'P3', issue: 'Multiple H1 headings (' + sig.h1Count + ')', evidence: 'Multiple H1s confuse search engines and users on screen-readers.', category: 'copy' });
+  }
+
+  // ─── Performance / weight ─────────────────────────────────────────────
+  if (sig.imageCount > 30) {
+    friction.push({ priority: 'P2', issue: 'Page has ' + sig.imageCount + ' images', evidence: 'Excessive image count slows mobile load and overwhelms users. Aim for 6–12 hero/gallery images.', category: 'mobile' });
+  }
+  if (sig.pageBytes > 1500000) {
+    friction.push({ priority: 'P3', issue: 'Page is heavy (' + Math.round(sig.pageBytes / 1024) + 'KB)', evidence: 'Large page weight delays interactivity, especially on mobile.', category: 'mobile' });
+  }
+
+  // ─── CTA ──────────────────────────────────────────────────────────────
+  if (sig.addToCartCount === 0) {
+    friction.push({ priority: 'P1', issue: 'No "Add to cart" button text detected', evidence: 'Could not find Add to cart / Add to bag wording. Purchase CTA may be missing or hidden.', category: 'cta' });
+  }
+
+  return friction;
+}
+
+function extractFunnelFriction(funnel) {
+  const friction = [];
+  if (!funnel) return friction;
+
+  const cartRate = funnel.sessions > 0 ? (funnel.cartAdditions / funnel.sessions) * 100 : null;
+  const checkoutFromCart = funnel.cartAdditions > 0 ? (funnel.checkouts / funnel.cartAdditions) * 100 : null;
+  const purchaseFromCheckout = funnel.checkouts > 0 ? (funnel.purchases / funnel.checkouts) * 100 : null;
+  const bounce = funnel.bounceRate != null ? funnel.bounceRate * 100 : null;
+
+  if (cartRate != null && funnel.sessions >= 30) {
+    if (cartRate < FUNNEL_BENCHMARKS.cartRateBad) {
+      friction.push({ priority: 'P1', issue: 'Very low cart-add rate (' + cartRate.toFixed(1) + '%)', evidence: 'Of ' + funnel.sessions + ' sessions, only ' + funnel.cartAdditions + ' added to cart. Benchmark is 3%+. Problem is upstream of cart — landing page, price, or ad relevance.', category: 'funnel' });
+    } else if (cartRate < FUNNEL_BENCHMARKS.cartRateGood) {
+      friction.push({ priority: 'P2', issue: 'Below-benchmark cart-add rate (' + cartRate.toFixed(1) + '%)', evidence: 'Of ' + funnel.sessions + ' sessions, ' + funnel.cartAdditions + ' added to cart. Aim for 3%+.', category: 'funnel' });
+    }
+  }
+
+  if (checkoutFromCart != null && funnel.cartAdditions >= 5) {
+    if (checkoutFromCart < FUNNEL_BENCHMARKS.checkoutFromCartBad) {
+      friction.push({ priority: 'P1', issue: 'Big drop cart→checkout (only ' + checkoutFromCart.toFixed(0) + '%)', evidence: 'Of ' + funnel.cartAdditions + ' carts, only ' + funnel.checkouts + ' reached checkout. Benchmark is 45–60%. Issue is at the cart page (shipping cost, currency, login wall).', category: 'funnel' });
+    } else if (checkoutFromCart < FUNNEL_BENCHMARKS.checkoutFromCartGood) {
+      friction.push({ priority: 'P2', issue: 'Below-benchmark cart→checkout (' + checkoutFromCart.toFixed(0) + '%)', evidence: 'Of ' + funnel.cartAdditions + ' carts, ' + funnel.checkouts + ' reached checkout. Benchmark is 45–60%.', category: 'funnel' });
+    }
+  }
+
+  if (purchaseFromCheckout != null && funnel.checkouts >= 3 && purchaseFromCheckout < 50) {
+    friction.push({ priority: 'P1', issue: 'Checkout abandonment (' + purchaseFromCheckout.toFixed(0) + '% completed)', evidence: 'Of ' + funnel.checkouts + ' checkouts, only ' + funnel.purchases + ' completed. Likely shipping cost, payment, or trust friction at final step.', category: 'funnel' });
+  }
+
+  if (bounce != null && bounce > FUNNEL_BENCHMARKS.bounceBad && funnel.sessions >= 30) {
+    friction.push({ priority: 'P2', issue: 'High bounce rate (' + bounce.toFixed(0) + '%)', evidence: 'Most landings leave without engaging. Page may load slowly, look untrustworthy, or mismatch the ad.', category: 'mobile' });
+  }
+
+  return friction;
+}
+
+function extractAdFriction(dossier) {
+  const friction = [];
+  if (!dossier || !dossier.ads || !dossier.searchKeywords) return friction;
+
+  // If there are search keywords with spend but the ad spend overall is highly inefficient,
+  // surface the top wasted-spend keyword as friction.
+  const totalSpend = dossier.ads.spend || 0;
+  const totalSales = dossier.ads.sales || 0;
+  if (totalSpend < 5) return friction;
+
+  const acos = totalSales > 0 ? (totalSpend / totalSales) * 100 : Infinity;
+  if (acos === Infinity || acos > 100) {
+    friction.push({ priority: 'P1', issue: 'Ad spend not generating sales', evidence: 'Spent £' + totalSpend.toFixed(2) + ' for £' + totalSales.toFixed(2) + ' sales (ACOS ' + (acos === Infinity ? '∞' : acos.toFixed(0) + '%') + '). Either targeting is wrong or landing page isn\'t closing.', category: 'ad-coherence' });
+  } else if (acos > 50) {
+    friction.push({ priority: 'P2', issue: 'High ACOS (' + acos.toFixed(0) + '%)', evidence: 'Spent £' + totalSpend.toFixed(2) + ' for £' + totalSales.toFixed(2) + ' sales. Healthy ACOS is under 30%.', category: 'ad-coherence' });
+  }
+
+  // If using product title keywords and they appear in dossier, check for category mismatch.
+  // Simple heuristic: title's primary noun should appear in at least one converting keyword.
+  if (dossier.product && dossier.product.title && dossier.searchKeywords.length > 0) {
+    const titleWords = dossier.product.title.toLowerCase()
+      .replace(/[^a-z0-9 ]/g, ' ')
+      .split(/\s+/)
+      .filter(function(w){ return w.length > 3; });
+    const wastedKeywords = dossier.searchKeywords.filter(function(k){
+      if (!k.spend || k.spend < 1) return false;
+      if (k.sales > 0) return false;
+      const kwLower = (k.keyword || '').toLowerCase();
+      // Mismatch if NO title word appears in keyword
+      return !titleWords.some(function(w){ return kwLower.indexOf(w) >= 0; });
+    });
+    if (wastedKeywords.length > 0) {
+      const wastedSpend = wastedKeywords.reduce(function(s, k){ return s + (k.spend || 0); }, 0);
+      if (wastedSpend > 2) {
+        friction.push({
+          priority: 'P2',
+          issue: '£' + wastedSpend.toFixed(2) + ' on keywords unrelated to this product',
+          evidence: 'Keywords like "' + wastedKeywords.slice(0, 3).map(function(k){return k.keyword;}).join('", "') + '" cost £' + wastedSpend.toFixed(2) + ' with zero conversions. Add as negatives or move to better-matching ad groups.',
+          category: 'ad-coherence'
+        });
+      }
+    }
+  }
+
+  return friction;
+}
+
+// Main rule-based endpoint. Returns ALL rule-based findings for one product. No AI.
+// Cached at the page-summary level for 12h (the rule evaluation itself runs every call,
+// since dossier data — funnel, ads — refreshes more frequently).
+async function getRuleFrictionForProduct(shopifyProduct) {
+  const productId = String(shopifyProduct.id);
+  const dossier = buildLandingPageDossier(shopifyProduct);
+  if (!dossier) return { friction: [], dossier: null, pageError: 'Could not build dossier' };
+
+  // Check page-summary cache (12h)
+  let pageSummary = null;
+  let pageFetchedAt = null;
+  let cacheUsed = false;
+  if (db) {
+    try {
+      const r = await db.query("SELECT page_summary, fetched_at FROM product_page_cache WHERE product_id=$1", [productId]);
+      if (r.rows.length) {
+        const ageHours = (Date.now() - new Date(r.rows[0].fetched_at).getTime()) / 36e5;
+        if (ageHours < RULE_PAGE_CACHE_HOURS) {
+          pageSummary = r.rows[0].page_summary;
+          pageFetchedAt = r.rows[0].fetched_at;
+          cacheUsed = true;
+        }
+      }
+    } catch(e) { /* fall through to fresh fetch */ }
+  }
+
+  // Fresh fetch if not cached
+  let pageError = null;
+  if (!pageSummary) {
+    if (!dossier.product.url) {
+      pageError = 'Product has no handle / URL';
+    } else {
+      const fetchResult = await fetchProductPageHtml(dossier.product.url);
+      if (!fetchResult.html) {
+        pageError = fetchResult.error || 'Could not fetch page';
+      } else {
+        pageSummary = summariseProductPage(fetchResult.html);
+        pageFetchedAt = new Date();
+        // Persist
+        if (db) {
+          try {
+            await db.query(
+              "INSERT INTO product_page_cache (product_id, product_url, fetched_at, page_summary) VALUES ($1, $2, NOW(), $3) " +
+              "ON CONFLICT (product_id) DO UPDATE SET product_url=EXCLUDED.product_url, fetched_at=NOW(), page_summary=EXCLUDED.page_summary",
+              [productId, dossier.product.url, JSON.stringify(pageSummary)]
+            );
+          } catch(e) { console.error('Page cache persist error: ' + e.message); }
+        }
+      }
+    }
+  }
+
+  // Run rule extractors (always live, even with cached page — funnel & ad data is fresher)
+  const ruleFriction = pageSummary ? extractRuleFriction(pageSummary, dossier) : [];
+  const funnelFriction = extractFunnelFriction(dossier.funnel);
+  const adFriction = extractAdFriction(dossier);
+  const allFriction = [].concat(ruleFriction, funnelFriction, adFriction);
+
+  // Sort by priority (P1 > P2 > P3)
+  allFriction.sort(function(a, b) {
+    const order = { P1: 1, P2: 2, P3: 3 };
+    return (order[a.priority] || 9) - (order[b.priority] || 9);
+  });
+
+  return {
+    friction: allFriction,
+    dossier: dossier,
+    pageSummary: pageSummary,
+    pageError: pageError,
+    pageCacheUsed: cacheUsed,
+    pageFetchedAt: pageFetchedAt,
+    counts: {
+      total: allFriction.length,
+      p1: allFriction.filter(function(f){ return f.priority === 'P1'; }).length,
+      p2: allFriction.filter(function(f){ return f.priority === 'P2'; }).length,
+      p3: allFriction.filter(function(f){ return f.priority === 'P3'; }).length
+    }
+  };
+}
+
+app.post('/api/google/rule-friction', async function(req, res) {
+  try {
+    const productId = String(req.body.productId || '');
+    if (!productId) return res.status(400).json({ error: 'productId required' });
+    const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
+    if (!sp) return res.status(404).json({ error: 'Product not found in Shopify state' });
+    const result = await getRuleFrictionForProduct(sp);
+    res.json(result);
+  } catch(e) {
+    console.error('Rule friction error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Batch endpoint: rule-friction for ALL Shopify-matched products at once.
+// Used by the All Products grid to show per-card friction summary.
+// No AI, just rule scans, but still costs ~50 page fetches first time.
+// Subsequent calls hit the 12h page cache.
+app.get('/api/google/rule-friction/list', async function(req, res) {
+  if (!db) return res.json({ items: [] });
+  try {
+    // Read every product whose page_summary is cached. If the table doesn't exist yet
+    // (first deploy of the new feature), return empty list rather than 500.
+    let r;
+    try {
+      r = await db.query("SELECT product_id, product_url, fetched_at, page_summary FROM product_page_cache");
+    } catch (tableErr) {
+      console.log('product_page_cache not ready yet: ' + tableErr.message);
+      return res.json({ items: [] });
+    }
+
+    const items = [];
+    const byId = {};
+    r.rows.forEach(function(row) { byId[row.product_id] = row; });
+
+    (shopifyState.products || []).forEach(function(sp) {
+      try {
+        const id = String(sp.id);
+        const cached = byId[id];
+        if (!cached || !cached.page_summary) return;
+
+        const dossier = buildLandingPageDossier(sp);
+        if (!dossier) return;
+
+        const ruleFriction = extractRuleFriction(cached.page_summary, dossier);
+        const funnelFriction = extractFunnelFriction(dossier.funnel);
+        const adFriction = extractAdFriction(dossier);
+        const all = [].concat(ruleFriction, funnelFriction, adFriction);
+        all.sort(function(a, b) {
+          const order = { P1: 1, P2: 2, P3: 3 };
+          return (order[a.priority] || 9) - (order[b.priority] || 9);
+        });
+        const counts = { p1: all.filter(function(f){return f.priority==='P1';}).length, p2: all.filter(function(f){return f.priority==='P2';}).length, p3: all.filter(function(f){return f.priority==='P3';}).length };
+        if (all.length === 0) return;
+        items.push({ productId: id, productTitle: sp.title, counts: counts, top: all.slice(0, 3) });
+      } catch (perProductErr) {
+        // Skip a single bad product rather than 500 the whole list
+        console.error('rule-friction list per-product error: ' + perProductErr.message);
+      }
+    });
+
+    res.json({ items: items });
+  } catch(e) {
+    console.error('rule-friction list error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Layer 4: Landing page critique
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Stitches Shopify + Google Ads + GA4 data per product, fetches the live
+// product page, summarises both, and asks Claude to produce a structured
+// critique: where in the funnel are people dropping, what's wrong with the
+// landing page, and what specific actions to take.
+//
+// Endpoints:
+//   POST /api/google/landing-page-critique          { productId, forceRefresh }
+//   GET  /api/google/landing-page-critique/list     → cached top-10
+//   POST /api/google/landing-page-critique-batch    (manager-only) → run top-10 now
+//
+// Cache: 24h, in landing_page_critiques. forceRefresh=true bypasses cache.
+// Daily cron: 03:30 London time, runs the batch automatically.
+
+const LPC_CACHE_HOURS = 24;
+const LPC_MODEL = 'claude-opus-4-7';
+
+// Strip <script>, <style>, comments and tags, collapse whitespace.
+// Returns the visible-text content of the page plus a few structural signals.
+function summariseProductPage(html) {
+  if (!html || typeof html !== 'string') return { text: '', signals: {} };
+  const signals = {
+    hasViewportMeta: /<meta[^>]+name=["']viewport["']/i.test(html),
+    pageBytes: html.length,
+    imageCount: (html.match(/<img\b/gi) || []).length,
+    h1Count: (html.match(/<h1\b/gi) || []).length,
+    hasReviewWidget: /reviews?|rating|stars?/i.test(html) && /<svg|class="[^"]*star/i.test(html),
+    hasShippingMention: /free (uk )?(delivery|shipping)|next.day|24.hour/i.test(html),
+    hasReturnsMention: /returns?|refund|money.back|guarantee/i.test(html),
+    hasUrgencyBadges: /(only \d+ left|selling fast|in stock|low stock|hurry|limited)/i.test(html),
+    hasPrice: /£\d|currency/i.test(html),
+    addToCartCount: (html.match(/add to cart|add to bag|add to basket/gi) || []).length
+  };
+
+  // Try to extract the page title and meta description first
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+  const metaDescMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
+  const ogDescMatch = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+  const productJsonLdMatch = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+  let jsonLd = null;
+  if (productJsonLdMatch) {
+    try { jsonLd = JSON.parse(productJsonLdMatch[1].trim()); } catch(e) {}
+  }
+
+  // Strip noise to get the visible text
+  let body = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Trim to ~6000 chars (~1500 tokens) — enough for AI to assess content quality
+  if (body.length > 6000) body = body.substring(0, 6000) + '... [truncated]';
+
+  return {
+    pageTitle: titleMatch ? titleMatch[1].trim() : null,
+    metaDescription: (metaDescMatch || ogDescMatch) ? (metaDescMatch || ogDescMatch)[1].trim() : null,
+    jsonLdPresent: !!jsonLd,
+    jsonLdType: jsonLd && (jsonLd['@type'] || (Array.isArray(jsonLd) && jsonLd[0] && jsonLd[0]['@type'])) || null,
+    text: body,
+    signals: signals
+  };
+}
+
+async function fetchProductPageHtml(url) {
+  if (!url) return { html: null, error: 'No URL provided' };
+  try {
+    const resp = await axios.get(url, {
+      timeout: 20000,
+      maxRedirects: 5,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        // Force UK locale so Shopify/Cloudflare serve the GBP-priced page (matches what UK shoppers see).
+        // Without these, Shopify auto-detects server IP location and shows USD/etc, causing false-positive
+        // 'currency mismatch' findings in the AI critique.
+        'Accept-Language': 'en-GB,en;q=0.9',
+        'CF-IPCountry': 'GB',
+        'X-Forwarded-For': '81.2.69.142',  // a UK-based residential IP range (BT)
+        'Accept-Encoding': 'gzip, deflate, br'
+      },
+      validateStatus: function(s){ return s >= 200 && s < 400; }
+    });
+    if (!resp.data || typeof resp.data !== 'string') {
+      return { html: null, error: 'Response not HTML (got ' + typeof resp.data + ')', url: url, status: resp.status };
+    }
+    return { html: resp.data, error: null, url: url, status: resp.status, bytes: resp.data.length };
+  } catch (e) {
+    const detail = {
+      message: e.message,
+      code: e.code || null,
+      status: e.response ? e.response.status : null,
+      url: url
+    };
+    console.error('Landing page fetch failed: ' + JSON.stringify(detail));
+    return { html: null, error: e.message, code: e.code, status: detail.status, url: url };
+  }
+}
+
+// Build the dossier we feed to Claude. Pure data — no AI prompt yet.
+function buildLandingPageDossier(shopifyProduct) {
+  if (!shopifyProduct) return null;
+  const productId = String(shopifyProduct.id);
+
+  // The PUBLIC storefront URL — what customers actually see when they click an ad.
+  // shopifyProduct.shopifyUrl points at the admin page (myshopify.com/admin/...) which
+  // requires auth, so we always build the storefront URL from the handle.
+  // Append ?country=GB&currency=GBP so Shopify renders the UK market view regardless
+  // of server IP — without this, the page comes back in USD because Shopify auto-detects
+  // the request origin location.
+  const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
+  const storefrontUrl = shopifyProduct.handle
+    ? ('https://' + storefrontDomain + '/products/' + shopifyProduct.handle + '?country=GB&currency=GBP')
+    : null;
+
+  // Google Ads rows for this product (across all campaigns)
+  const adRows = (googleState.products || []).filter(function(gp) {
+    if (!gp.shopifyItemId) return false;
+    const parts = String(gp.shopifyItemId).split('_');
+    return parts.length >= 4 && parts[2] === productId;
+  });
+  const adAgg = aggregateGoogleMetrics(adRows);
+
+  // r29: BUGFIX — search keywords must be SCOPED to this product. Previously this
+  // pulled keywords from every campaign across the account, leading the AI to
+  // suggest negating keywords (e.g. "weight plates") that have no relation to the
+  // trampoline page being analysed. Fix: only include keywords from ad groups
+  // that this product is actually in, OR campaigns this product runs in.
+  const myAdGroups = {};
+  const myCampaigns = {};
+  adRows.forEach(function(r) {
+    if (r.adGroupId) myAdGroups[String(r.adGroupId)] = true;
+    if (r.adGroupName) myAdGroups[r.adGroupName] = true;
+    if (r.campaignId) myCampaigns[String(r.campaignId)] = true;
+  });
+  const searchKeywords = (googleState.products || [])
+    .filter(function(gp){
+      if (gp.itemType !== 'keyword') return false;
+      if (!(gp.spend > 0 || gp.impressions > 0)) return false;
+      // Match by ad group ID, ad group name, or fall back to campaign ID
+      const inMyAdGroup = (gp.adGroupId && myAdGroups[String(gp.adGroupId)]) ||
+                         (gp.adGroupName && myAdGroups[gp.adGroupName]);
+      const inMyCampaign = gp.campaignId && myCampaigns[String(gp.campaignId)];
+      return inMyAdGroup || inMyCampaign;
+    })
+    .slice(0, 20)
+    .map(function(gp){ return { keyword: gp.name, spend: gp.spend, sales: gp.sales, clicks: gp.clicks, conversions: gp.conversions }; });
+
+  // GA4 funnel for this product's URL path
+  let funnel = null;
+  if (shopifyProduct.handle) {
+    const path = '/products/' + shopifyProduct.handle;
+    funnel = (ga4State.productMetrics || {})[path] || null;
+  }
+
+  return {
+    product: {
+      id: productId,
+      title: shopifyProduct.title,
+      handle: shopifyProduct.handle,
+      url: storefrontUrl,
+      adminUrl: shopifyProduct.shopifyUrl || null,
+      price: shopifyProduct.price,
+      status: shopifyProduct.status,
+      inventory: shopifyProduct.inventory,
+      revenue7d: shopifyProduct.revenue7d || 0,
+      revenue30d: shopifyProduct.revenue30d || 0,
+      unitsSold7d: shopifyProduct.unitsSold7d || 0,
+      unitsSold30d: shopifyProduct.unitsSold30d || 0
+    },
+    ads: {
+      spend: adAgg.spend,
+      sales: adAgg.sales,
+      impressions: adAgg.impressions,
+      clicks: adAgg.clicks,
+      conversions: adAgg.conversions,
+      ctr: adAgg.ctr,
+      acos: adAgg.acos,
+      costPerConv: adAgg.costPerConv,
+      campaignsCount: adAgg.campaignsAdvertisedIn.length,
+      campaignNames: adAgg.campaignsAdvertisedIn.map(function(c){ return c.campaignName; })
+    },
+    searchKeywords: searchKeywords,
+    funnel: funnel ? {
+      sessions: funnel.sessions,
+      cartAdditions: funnel.cartAdditions,
+      checkouts: funnel.checkouts,
+      purchases: funnel.purchases,
+      cartRate: funnel.sessions > 0 ? Math.round((funnel.cartAdditions / funnel.sessions) * 1000) / 10 : 0,
+      checkoutFromCart: funnel.cartAdditions > 0 ? Math.round((funnel.checkouts / funnel.cartAdditions) * 1000) / 10 : 0,
+      purchaseFromCheckout: funnel.checkouts > 0 ? Math.round((funnel.purchases / funnel.checkouts) * 1000) / 10 : 0,
+      bounceRate: funnel.bounceRate,
+      engagementRate: funnel.engagementRate,
+      avgEngagementTime: funnel.avgEngagementTime
+    } : null
+  };
+}
+
+function buildCritiquePrompt(dossier, pageSummary) {
+  // r28: rewritten to be specifically about the LANDING PAGE itself + how it
+  // converts. Forces the AI to call out title, images, keywords-on-page, copy,
+  // trust signals, mobile, CTA — not the generic "diagnosis" output it used to
+  // give. Different focus from campaign-AI prompt.
+  return [
+    "You are an e-commerce conversion expert reviewing ONE Shopify product page for FK Sports UK (UK fitness + baby equipment seller).",
+    "Your job: explain in plain English what is wrong with THIS PRODUCT PAGE specifically — title, images, copy, keywords, trust signals, mobile experience — and what to fix this week.",
+    "",
+    "═══ AUDIENCE ═══",
+    "The agent reading this is NOT technical. They speak plain English. NO jargon: no CRO, CTA, funnel, conversion rate optimisation, friction, value proposition, USP, social proof, A/B test, bounce rate.",
+    "If you must use a term, explain in brackets the first time. Example: 'Add to Cart button (the buy button)'.",
+    "Use British English, £ for money. Sentences should be short.",
+    "",
+    "═══ FOCUS — YOU MUST DIAGNOSE EACH OF THESE ═══",
+    "1. PAGE TITLE — does it match what people search for? Is it descriptive enough? Word too long, too short, missing brand or model number?",
+    "2. PRODUCT IMAGES — count, quality, lifestyle vs product-only, missing scale shots, missing dimension shots, image-to-text ratio.",
+    "3. KEYWORDS ON PAGE — does the visible page text actually contain the keywords this product is being advertised for? (Cross-reference the search keywords from the ad data with what's in the page text.)",
+    "4. PRODUCT DESCRIPTION / COPY — long enough? clear benefits? specs visible? warranty/returns mentioned?",
+    "5. TRUST SIGNALS — review count, recency, badges, returns policy, warranty, payment options.",
+    "6. PRICE & PROMOTION — visible? competitive-looking? promo missing?",
+    "7. ADD TO CART — visible without scrolling on mobile? clear text?",
+    "8. AD-vs-PAGE COHERENCE — does the page deliver what the search ad promised?",
+    "",
+    "═══ DO NOT DO THESE ═══",
+    "- Do NOT use generic phrases like 'optimise the listing', 'improve conversion', 'monitor performance', 'consider A/B testing', 'review keywords'.",
+    "- Do NOT recommend things outside the product page (no 'change campaign budget' — that is the campaign-level analyst's job).",
+    "- Do NOT flag a 'currency mismatch' or 'USD shown to UK shoppers' unless you have direct evidence in the page TEXT that the actual product price next to Add to Cart is shown in USD. The dossier price is the source of truth for the GBP price.",
+    "- Do NOT pad. If a section has nothing wrong, skip it.",
+    "",
+    "═══ PRODUCT DOSSIER ═══",
+    "```json",
+    JSON.stringify(dossier, null, 2),
+    "```",
+    "",
+    "═══ LANDING PAGE — STRUCTURAL SIGNALS ═══",
+    JSON.stringify(pageSummary.signals, null, 2),
+    "",
+    "═══ LANDING PAGE — META ═══",
+    "Page title: " + (pageSummary.pageTitle || '(none)'),
+    "Meta description: " + (pageSummary.metaDescription || '(none)'),
+    "JSON-LD product schema present: " + pageSummary.jsonLdPresent,
+    "",
+    "═══ LANDING PAGE — VISIBLE TEXT (truncated to 6000 chars) ═══",
+    pageSummary.text,
+    "",
+    "═══ OUTPUT FORMAT — STRICT JSON ═══",
+    "Return ONLY this JSON shape, no markdown fences, no commentary outside the JSON:",
+    "{",
+    '  "diagnosis": "ONE plain-English sentence with the SPECIFIC biggest issue with THIS page. Cite a number or visible-text fact. No jargon.",',
+    '  "frictionPoints": [',
+    '    { "priority": "P1|P2|P3", "issue": "Short title naming a specific page element (Title / Images / Description / Reviews / Add to Cart / Page Speed / etc.)", "evidence": "Why this is a problem in everyday language. Quote actual page text or specific numbers.", "category": "title|images|keywords|copy|reviews|trust|price|cta|mobile|ad-coherence|other" }',
+    '  ],',
+    '  "actions": [',
+    '    { "rank": 1, "action": "MUST be a verifiable, specific action. NAME the element to change. NAMING the campaign / keyword / image-position / heading. BAD: \\"Improve the title\\". GOOD: \\"Change page title from \'PRO 8FT TRAMPOLINE\' to \'PRO 8FT INDOOR-OUTDOOR TRAMPOLINE WITH SAFETY NET\' to capture more search variants\\". Or: \\"Add 3 lifestyle images: 1) child jumping in garden, 2) close-up of safety pad stitching, 3) instruction sheet on a kitchen table.\\"", "expectedImpact": "Plain words, e.g. \\"More phone-shoppers likely to add to cart.\\"", "effort": "low|medium|high" }',
+    '  ],',
+    '  "adVsPageCoherence": "Plain English: does what the ad promised match what the visitor sees? Be specific. Quote the search keyword and what is actually on the page.",',
+    '  "trustSignals": "What customer trust signals are present (reviews count, free returns, badges) and what is missing.",',
+    '  "summary": "2-3 sentences. The single most important thing the agent should do this week, named as a specific action."',
+    "}",
+    "",
+    "═══ HARD RULES ═══",
+    "- Quote real numbers and real page text. Do not invent.",
+    "- Rank 3-6 friction points P1 (highest impact) to P3 (low priority). Be honest — if there are only 2 real issues, return 2.",
+    "- Provide 3-6 actions, ranked by expected revenue impact.",
+    "- Total response under 1500 words.",
+    "- If a section has no information (e.g. no review count visible on the page), say so explicitly: \"Reviews not visible on the page text scraped\" — do not invent a number."
+  ].join('\n');
+}
+
+// Pick the top 10 products to analyse, by combined "wasted spend" score.
+// Includes both burning-money (high spend, no sales) and inefficient (high ACOS) cases.
+function pickTopUnderperformers(limit) {
+  limit = limit || 10;
+  const candidates = [];
+  (shopifyState.products || []).forEach(function(sp) {
+    const id = String(sp.id);
+    const adRows = (googleState.products || []).filter(function(gp) {
+      if (!gp.shopifyItemId) return false;
+      const parts = String(gp.shopifyItemId).split('_');
+      return parts.length >= 4 && parts[2] === id;
+    });
+    if (!adRows.length) return;
+    const agg = aggregateGoogleMetrics(adRows);
+    if (agg.spend < 20) return;     // ignore tiny spend
+    const sales = agg.sales || 0;
+    const acos = sales > 0 ? (agg.spend / sales) * 100 : Infinity;
+    // Score: weighted combination
+    //  - if sales=0: full spend counts as wasted (high score)
+    //  - if acos > 30: count the over-spend as wasted, weighted by spend
+    let score = 0;
+    if (sales === 0) {
+      score = agg.spend * 2;        // burning money — double weight
+    } else if (acos > 30) {
+      const targetSpend = sales * 0.30;
+      score = agg.spend - targetSpend;
+    } else {
+      return;                        // healthy product, skip
+    }
+    candidates.push({ shopifyProduct: sp, agg: agg, score: score });
+  });
+  candidates.sort(function(a,b){ return b.score - a.score; });
+  return candidates.slice(0, limit);
+}
+
+async function getCachedCritique(productId) {
+  if (!db) return null;
+  try {
+    const r = await db.query("SELECT * FROM landing_page_critiques WHERE product_id=$1", [String(productId)]);
+    console.log('[LPC] cache lookup productId=' + productId + ' → ' + (r.rows.length ? 'HIT, generated_at=' + r.rows[0].generated_at : 'MISS'));
+    if (!r.rows.length) return null;
+    const row = r.rows[0];
+    const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
+    const isStale = ageHours > LPC_CACHE_HOURS;
+    if (isStale) {
+      console.log('[LPC] cache STALE productId=' + productId + ' (' + ageHours.toFixed(1) + 'h old, max=' + LPC_CACHE_HOURS + 'h) — returning anyway, caller decides');
+    }
+    // r29q: return the row regardless of age. Caller decides whether to use it
+    // (display: yes — show what was last analysed even if old; rerun-gate: no — let
+    // them re-run if stale). Previously returned null when stale, which caused the
+    // analysis to "vanish" from the modal on close+reopen after 24h.
+    // Detect partial saves (truncated AI response): friction empty + diagnosis hints partial,
+    // OR diagnosis says "(AI returned non-JSON" / "(Partial".
+    const diagText = row.diagnosis || '';
+    const partialFlag = (diagText.indexOf('(Partial') >= 0)
+      || (diagText.indexOf('non-JSON') >= 0)
+      || (!row.friction_json || (Array.isArray(row.friction_json) && row.friction_json.length === 0));
+    return {
+      productId: row.product_id,
+      productTitle: row.product_title,
+      productUrl: row.product_url,
+      generatedAt: row.generated_at,
+      diagnosis: row.diagnosis,
+      friction: row.friction_json,
+      actions: row.actions_json,
+      funnelSummary: row.funnel_summary,
+      adSummary: row.ad_summary,
+      pageSummary: row.page_summary,
+      rawText: row.raw_ai_text || '',
+      score: parseFloat(row.score) || 0,
+      cached: true,
+      ageHours: ageHours,
+      stale: isStale,           // r29q: caller checks this
+      partial: partialFlag,
+      modelUsed: row.model_used || null  // r28
+    };
+  } catch (e) {
+    console.error('[LPC] cache read error productId=' + productId + ': ' + e.message);
+    return null;
+  }
+}
+
+// When max_tokens truncates Claude's response mid-JSON, JSON.parse fails. This helper
+// attempts to extract individual fields with regex so we can salvage what's there
+// rather than showing the agent nothing useful. Marks the result as partial so the
+// front-end can prompt for re-run with more tokens.
+// r29r: Amazon-shaped partial JSON recovery. Mirrors recoverPartialCritiqueJson
+// but for the Amazon critique shape: { summary, issues: [{title, severity, ...}] }.
+// Returns null if nothing recoverable, otherwise an object with whatever fields
+// the regex managed to extract.
+function _recoverPartialAmzCritique(rawText) {
+  const result = { summary: '', issues: [] };
+
+  const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sumMatch) result.summary = sumMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  // issues — array of {title, severity, evidence, fix} objects. Find each one even if
+  // the array isn't closed. Match objects that have a "title" field at minimum.
+  const issueMatches = rawText.match(/\{\s*"title"[^{}]*?\}/g);
+  if (issueMatches) {
+    issueMatches.forEach(function(s){
+      try {
+        // Attempt parse. If it fails (e.g. unclosed quote at truncation), skip it.
+        const obj = JSON.parse(s);
+        if (obj && obj.title) result.issues.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+  // If we have neither summary nor any issues, we've got nothing — caller treats as failure
+  if (!result.summary && (!result.issues || result.issues.length === 0)) return null;
+  return result;
+}
+
+function recoverPartialCritiqueJson(rawText) {
+  const result = {
+    diagnosis: '',
+    funnelDiagnosis: '',
+    frictionPoints: [],
+    actions: [],
+    adVsPageCoherence: '',
+    trustSignals: '',
+    summary: ''
+  };
+
+  // diagnosis — single-line string field
+  const diagMatch = rawText.match(/"diagnosis"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (diagMatch) result.diagnosis = diagMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const funnelMatch = rawText.match(/"funnelDiagnosis"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (funnelMatch) result.funnelDiagnosis = funnelMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const adCoMatch = rawText.match(/"adVsPageCoherence"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (adCoMatch) result.adVsPageCoherence = adCoMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const trustMatch = rawText.match(/"trustSignals"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (trustMatch) result.trustSignals = trustMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sumMatch) result.summary = sumMatch[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+
+  // frictionPoints — array of {priority, issue, evidence, category} objects.
+  // Try to find each complete object even if the whole array isn't complete.
+  const friMatches = rawText.match(/\{\s*"priority"\s*:\s*"P[1-3]"[^{}]*?\}/g);
+  if (friMatches) {
+    friMatches.forEach(function(s){
+      try {
+        const obj = JSON.parse(s);
+        if (obj.priority && obj.issue) result.frictionPoints.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+
+  // actions — array of {rank, action, expectedImpact, effort}
+  const actMatches = rawText.match(/\{\s*"rank"\s*:\s*\d+[^{}]*?\}/g);
+  if (actMatches) {
+    actMatches.forEach(function(s){
+      try {
+        const obj = JSON.parse(s);
+        if (obj.rank && obj.action) result.actions.push(obj);
+      } catch(_) { /* skip malformed */ }
+    });
+  }
+
+  return result;
+}
+
+async function runCritiqueForProduct(shopifyProduct, score, options) {
+  options = options || {};
+  const dossier = buildLandingPageDossier(shopifyProduct);
+  if (!dossier) throw new Error('Could not build dossier');
+  const fetchResult = await fetchProductPageHtml(dossier.product.url);
+  if (!fetchResult.html) {
+    throw new Error('Could not fetch product page (' + dossier.product.url + '): ' + (fetchResult.error || 'unknown') + (fetchResult.code ? ' [' + fetchResult.code + ']' : '') + (fetchResult.status ? ' status=' + fetchResult.status : ''));
+  }
+  const pageSummary = summariseProductPage(fetchResult.html);
+  let prompt = buildCritiquePrompt(dossier, pageSummary);
+
+  // r28: append agent feedback so re-runs after feedback produce different answers.
+  try {
+    const fb = await buildFeedbackPromptSection('google_product', String(shopifyProduct.id));
+    if (fb) prompt = prompt + fb;
+  } catch(e) { /* non-fatal */ }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+
+  // r28: Haiku/Opus split — agents default to Haiku (fast, ~£0.01). Manager can
+  // request Opus via options.model='opus' for deeper analysis.
+  const HAIKU = 'claude-haiku-4-5-20251001';
+  const OPUS  = 'claude-opus-4-5-20251101';
+  const useOpus = options.model === 'opus';
+  const modelToUse = useOpus ? OPUS : HAIKU;
+
+  const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: modelToUse,
+    max_tokens: 4500,
+    messages: [{ role: 'user', content: prompt }]
+  }, {
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    timeout: 90000
+  });
+
+  const rawText = aiResp.data.content[0].text;
+  // Strip any accidental markdown fences
+  const cleaned = rawText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+  let parsed;
+  let partial = false;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    // JSON parse failed — likely truncated mid-response. Try to recover what we can
+    // by manually extracting individual top-level fields with regex. Mark `partial:true`
+    // so the front-end can show a "complete this" hint.
+    console.warn('[LPC] JSON parse failed, attempting partial recovery: ' + e.message);
+    partial = true;
+    parsed = recoverPartialCritiqueJson(cleaned);
+  }
+
+  const result = {
+    productId: String(shopifyProduct.id),
+    productTitle: shopifyProduct.title,
+    productUrl: dossier.product.url,
+    generatedAt: new Date(),
+    diagnosis: parsed.diagnosis || (partial ? '(Partial — see full text below)' : ''),
+    friction: parsed.frictionPoints || [],
+    actions: parsed.actions || [],
+    funnelSummary: { funnel: dossier.funnel, funnelDiagnosis: parsed.funnelDiagnosis || '' },
+    adSummary: { ads: dossier.ads, searchKeywords: dossier.searchKeywords, adVsPageCoherence: parsed.adVsPageCoherence || '' },
+    pageSummary: { signals: pageSummary.signals, pageTitle: pageSummary.pageTitle, metaDescription: pageSummary.metaDescription, trustSignals: parsed.trustSignals || '', summary: parsed.summary || '' },
+    rawText: rawText,
+    partial: partial,
+    score: score || 0,
+    cached: false,
+    modelUsed: modelToUse  // r28: front-end shows which model ran
+  };
+
+  // Persist
+  if (db) {
+    try {
+      await db.query(
+        "INSERT INTO landing_page_critiques (product_id, product_title, product_url, generated_at, diagnosis, friction_json, actions_json, funnel_summary, ad_summary, page_summary, raw_ai_text, score, model_used) " +
+        "VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7,$8,$9,$10,$11,$12) " +
+        "ON CONFLICT (product_id) DO UPDATE SET " +
+        "  product_title=EXCLUDED.product_title, product_url=EXCLUDED.product_url, generated_at=NOW(), " +
+        "  diagnosis=EXCLUDED.diagnosis, friction_json=EXCLUDED.friction_json, actions_json=EXCLUDED.actions_json, " +
+        "  funnel_summary=EXCLUDED.funnel_summary, ad_summary=EXCLUDED.ad_summary, page_summary=EXCLUDED.page_summary, " +
+        "  raw_ai_text=EXCLUDED.raw_ai_text, score=EXCLUDED.score, model_used=EXCLUDED.model_used",
+        [result.productId, result.productTitle, result.productUrl, result.diagnosis,
+          JSON.stringify(result.friction), JSON.stringify(result.actions),
+          JSON.stringify(result.funnelSummary), JSON.stringify(result.adSummary), JSON.stringify(result.pageSummary),
+          rawText, result.score, result.modelUsed || null]
+      );
+      console.log('[LPC] persisted productId=' + result.productId + ' title="' + (result.productTitle || '').slice(0, 40) + '"');
+    } catch (e) {
+      console.error('[LPC] persist error productId=' + result.productId + ': ' + e.message);
+    }
+  } else {
+    console.warn('[LPC] no db — analysis not persisted, will be lost when you close the modal');
+  }
+  return result;
+}
+
+// ── Endpoints ────────────────────────────────────────────────────────────
+
+// Debug: probe the page-fetch in isolation. Helps diagnose DNS/firewall/Cloudflare issues
+// without burning AI tokens. Usage: POST /api/google/landing-page-critique-debug { productId } or { url }
+app.post('/api/google/landing-page-critique-debug', async function(req, res) {
+  // r35.5: owner-only — this burns AI tokens (fetches a page + runs critique).
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (role !== 'owner') return res.status(403).json({ error: 'owner only' });
+  try {
+    let url = req.body.url;
+    let productInfo = null;
+    if (!url && req.body.productId) {
+      const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === String(req.body.productId); });
+      if (!sp) return res.status(404).json({ error: 'Product not found in shopifyState' });
+      productInfo = { id: sp.id, title: sp.title, handle: sp.handle, shopifyAdminUrl: sp.shopifyUrl };
+      const storefrontDomain = process.env.SHOPIFY_STOREFRONT_DOMAIN || 'www.fksports.co.uk';
+      url = sp.handle ? ('https://' + storefrontDomain + '/products/' + sp.handle + '?country=GB&currency=GBP') : null;
+      if (!url) return res.status(400).json({ error: 'Product has no handle, cannot build URL' });
+    }
+    if (!url) return res.status(400).json({ error: 'productId or url required' });
+    const fetchResult = await fetchProductPageHtml(url);
+    res.json({
+      productInfo: productInfo,
+      attemptedUrl: url,
+      success: !!fetchResult.html,
+      error: fetchResult.error,
+      errorCode: fetchResult.code,
+      httpStatus: fetchResult.status,
+      bytes: fetchResult.bytes || 0,
+      htmlSnippet: fetchResult.html ? fetchResult.html.substring(0, 500) : null
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/google/landing-page-critique', async function(req, res) {
+  try {
+    const productId = String(req.body.productId || '');
+    const requestedRefresh = !!req.body.forceRefresh;
+    const cachedOnly = !!req.body.cachedOnly;   // if true, never auto-run AI, return 404 when no cache
+    if (!productId) return res.status(400).json({ error: 'productId required' });
+
+    // r29g: cachedOnly bypass — if caller only wants the cached row, look up directly
+    // by productId. Don't require the Shopify product to still be in current state
+    // (sync state evicts old products; cache row remains valid for display).
+    // Without this, reopening a product modal after sync churn returns 404 even when
+    // a perfectly good critique row exists in landing_page_critiques.
+    if (cachedOnly) {
+      console.log('[LPC cachedOnly] lookup productId="' + productId + '"');
+      const cached = await getCachedCritique(productId);
+      if (cached) {
+        const u0 = req.user || {};
+        const isManager0 = ['manager','admin'].includes(u0.role) || ['Bobby','Satyam','bobby','satyam'].includes(u0.name || u0.username || '');
+        cached.lockedForAgent = !isManager0;
+        return res.json(cached);
+      }
+      // r29i: log nearby product_ids in cache so we can see if there's a near-match
+      // (e.g. format difference like leading "gid://" or "_" vs ":")
+      try {
+        const nearby = await db.query("SELECT product_id, generated_at FROM landing_page_critiques ORDER BY generated_at DESC LIMIT 5");
+        console.log('[LPC cachedOnly] MISS for "' + productId + '". Recent cache rows:');
+        nearby.rows.forEach(function(row){ console.log('  · "' + row.product_id + '" (' + row.generated_at + ')'); });
+      } catch(_) {}
+      return res.status(404).json({ error: 'No cached analysis', cached: false });
+    }
+
+    const sp = (shopifyState.products || []).find(function(p){ return String(p.id) === productId; });
+    if (!sp) return res.status(404).json({ error: 'Product not found in Shopify state' });
+
+    // 24h lock: if a critique was generated in the last 24h, return it. Only managers
+    // can override (forceRefresh=true requires manager role).
+    // r29d: EXCEPTION — if agent is requesting Opus AND has submitted ≥1 feedback row,
+    // they've earned a fresh Opus run. Skip the cache lock for that case.
+    const u = req.user || {};
+    const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
+    const wantsOpus = req.body && req.body.model === 'opus';
+    let agentEarnedOpusBypass = false;
+    if (wantsOpus && !isManager) {
+      try {
+        const fbProbe = await db.query("SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope='google_product' AND target_id=$1", [productId]);
+        if (fbProbe.rows[0] && fbProbe.rows[0].c >= 1) agentEarnedOpusBypass = true;
+      } catch(_) {}
+    }
+    let forceRefresh = false;
+    if (requestedRefresh && !cachedOnly) {
+      if (isManager) {
+        forceRefresh = true;
+      } else if (agentEarnedOpusBypass) {
+        // Agent earned Opus by submitting feedback — let them through the 24h lock
+        forceRefresh = true;
+      } else {
+        // Agent requested refresh — only allowed if no fresh cache exists (or stale)
+        // r29q: stale cache (>24h) lets the agent re-run; fresh cache blocks.
+        const existing = await getCachedCritique(productId);
+        if (existing && !existing.stale) {
+          // Fresh cache exists; agent cannot force-refresh, return cached with a notice
+          existing.lockedForAgent = true;
+          existing.lockMessage = 'Already analysed in the last 24h. Manager can re-analyse.';
+          return res.json(existing);
+        }
+        // No cache OR stale cache — agent's request triggers a fresh run
+        forceRefresh = true;
+      }
+    }
+
+    if (!forceRefresh) {
+      const cached = await getCachedCritique(productId);
+      if (cached) {
+        cached.lockedForAgent = !isManager;
+        return res.json(cached);
+      }
+      // No cache. If caller asked for cachedOnly, do NOT auto-run AI — return 404.
+      if (cachedOnly) {
+        return res.status(404).json({ error: 'No cached analysis', cached: false });
+      }
+    }
+    // r29: model selection — agents start with Haiku. Opus is "earned" — agent must
+    // have submitted ≥1 feedback row on this target first. Manager unrestricted.
+    let modelChoice = 'haiku';
+    if (req.body && req.body.model === 'opus') {
+      if (!isManager) {
+        // Check feedback count
+        let fbCount = 0;
+        try {
+          const fr = await db.query("SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope='google_product' AND target_id=$1", [productId]);
+          fbCount = fr.rows[0] ? fr.rows[0].c : 0;
+        } catch(_) {}
+        if (fbCount < 1) {
+          return res.status(403).json({ error: 'Opus (deep analysis) is unlocked after you submit feedback on the Haiku output. Run Haiku first, write what you think is wrong with the analysis, then Opus becomes available.' });
+        }
+      }
+      modelChoice = 'opus';
+    }
+    const result = await runCritiqueForProduct(sp, 0, { model: modelChoice });
+    result.lockedForAgent = !isManager;
+    res.json(result);
+  } catch (e) {
+    console.error('LPC single error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/google/landing-page-critique/list', async function(req, res) {
+  if (!db) return res.json({ items: [] });
+  try {
+    const r = await db.query("SELECT product_id, product_title, product_url, generated_at, diagnosis, friction_json, actions_json, score FROM landing_page_critiques ORDER BY score DESC, generated_at DESC LIMIT 20");
+    const items = r.rows.map(function(row) {
+      const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
+      return {
+        productId: row.product_id,
+        productTitle: row.product_title,
+        productUrl: row.product_url,
+        generatedAt: row.generated_at,
+        diagnosis: row.diagnosis,
+        topFriction: (row.friction_json || []).slice(0, 3),
+        topActions: (row.actions_json || []).slice(0, 3),
+        score: parseFloat(row.score) || 0,
+        ageHours: Math.round(ageHours * 10) / 10,
+        stale: ageHours > LPC_CACHE_HOURS
+      };
+    });
+    res.json({ items: items });
+  } catch (e) {
+    console.error('LPC list error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// MANUAL INIT: force-creates the new AI/cache tables. Use this if the boot-time
+// init didn't run (e.g. earlier migration failed). Safe to call multiple times —
+// CREATE TABLE IF NOT EXISTS is idempotent.
+app.post('/api/google/init-tables', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'no db connection' });
+  const results = {};
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS landing_page_critiques (
+        product_id TEXT PRIMARY KEY,
+        product_title TEXT,
+        product_url TEXT,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        diagnosis TEXT,
+        friction_json JSONB,
+        actions_json JSONB,
+        funnel_summary JSONB,
+        ad_summary JSONB,
+        page_summary JSONB,
+        raw_ai_text TEXT,
+        score NUMERIC DEFAULT 0
+      )
+    `);
+    await db.query("CREATE INDEX IF NOT EXISTS idx_lpc_generated_at ON landing_page_critiques(generated_at DESC)");
+    results.landing_page_critiques = 'ready';
+  } catch(e) { results.landing_page_critiques = 'error: ' + e.message; }
+
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS campaign_ai_cache (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT,
+        generated_at TIMESTAMP DEFAULT NOW(),
+        analysis TEXT,
+        model_used TEXT
+      )
+    `);
+    results.campaign_ai_cache = 'ready';
+  } catch(e) { results.campaign_ai_cache = 'error: ' + e.message; }
+
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS product_page_cache (
+        product_id TEXT PRIMARY KEY,
+        product_url TEXT,
+        fetched_at TIMESTAMP DEFAULT NOW(),
+        page_summary JSONB,
+        rule_friction JSONB,
+        funnel_friction JSONB,
+        ad_friction JSONB
+      )
+    `);
+    results.product_page_cache = 'ready';
+  } catch(e) { results.product_page_cache = 'error: ' + e.message; }
+
+  // Verify tables exist now
+  try {
+    const r = await db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('landing_page_critiques','campaign_ai_cache','product_page_cache')");
+    results.verifiedTables = r.rows.map(function(row){ return row.table_name; });
+  } catch(e) { results.verifyError = e.message; }
+
+  res.json({ ok: true, results: results });
+});
+
+// DEBUG: lists every row in the critique table — used to verify saves actually happen.
+// Hit this in browser to see what's in the DB. Returns minimal info so it's safe to call.
+app.get('/api/google/landing-page-critique-debug-list', async function(req, res) {
+  // r35.5: owner/manager guard
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
+  if (!db) return res.json({ rows: [], note: 'no db connection' });
+  try {
+    const r = await db.query(
+      "SELECT product_id, product_title, generated_at, " +
+      "LENGTH(diagnosis) AS diag_len, " +
+      "(friction_json IS NOT NULL) AS has_friction, " +
+      "(actions_json IS NOT NULL) AS has_actions " +
+      "FROM landing_page_critiques ORDER BY generated_at DESC LIMIT 100"
+    );
+    res.json({
+      count: r.rows.length,
+      cacheHours: LPC_CACHE_HOURS,
+      rows: r.rows.map(function(row) {
+        const ageHours = (Date.now() - new Date(row.generated_at).getTime()) / 36e5;
+        return {
+          productId: row.product_id,
+          productTitle: (row.product_title || '').slice(0, 60),
+          generatedAt: row.generated_at,
+          ageHours: Math.round(ageHours * 10) / 10,
+          stale: ageHours > LPC_CACHE_HOURS,
+          diagLen: row.diag_len || 0,
+          hasFriction: row.has_friction,
+          hasActions: row.has_actions
+        };
+      })
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/google/landing-page-critique-batch', async function(req, res) {
+  // Manager-only
+  const u = req.user || {};
+  const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name);
+  if (!isManager) return res.status(403).json({ error: 'Manager access required' });
+
+  try {
+    const top = pickTopUnderperformers(10);
+    const results = [];
+    const errors = [];
+    // Sequential to avoid hammering Anthropic. ~5-10s per product → up to ~2 min for 10 products.
+    for (const c of top) {
+      try {
+        const r = await runCritiqueForProduct(c.shopifyProduct, c.score);
+        results.push({ productId: r.productId, productTitle: r.productTitle, score: c.score });
+      } catch (e) {
+        errors.push({ productId: String(c.shopifyProduct.id), title: c.shopifyProduct.title, error: e.message });
+      }
+    }
+    res.json({ analysed: results.length, errors: errors.length, results: results, errorDetail: errors });
+  } catch (e) {
+    console.error('LPC batch error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Daily cron: 03:30 London time
+// r29: skip products that already have a fresh cached critique (within LPC_CACHE_HOURS).
+// Saves ~£0.50/day on speculative AI runs that nobody opened. Agents force-refresh manually.
+cron.schedule('30 3 * * *', async function() {
+  console.log('LPC nightly batch starting');
+  try {
+    const top = pickTopUnderperformers(10);
+    let ok = 0, err = 0, skipped = 0;
+    for (const c of top) {
+      try {
+        // r29: cache-check first. If a fresh critique already exists, skip the AI call.
+        // r29q: with the new stale flag, "fresh" means !cached.stale (i.e. <24h old).
+        // Stale cache lets the cron re-analyse to keep data current.
+        const cached = await getCachedCritique(String(c.shopifyProduct.id));
+        if (cached && !cached.stale) {
+          skipped++;
+          continue;
+        }
+        await runCritiqueForProduct(c.shopifyProduct, c.score);
+        ok++;
+      }
+      catch (e) { err++; console.error('LPC cron item error: ' + e.message); }
+    }
+    console.log('LPC nightly batch done — ' + ok + ' analysed, ' + skipped + ' skipped (cached), ' + err + ' errors');
+  } catch(e) {
+    console.error('LPC nightly batch top-level error: ' + e.message);
+  }
+}, { timezone: 'Europe/London' });
+
+// ═══════════════════════════════════════════════════════════════════════
+// r34: Agent Performance — read endpoints + admin trigger
+// ═══════════════════════════════════════════════════════════════════════
+
+// Authorisation helper: only the agent themselves OR manager/owner can read
+// any agent's data. Returns true if allowed.
+function r34_canAccess(req, requestedAgent) {
+  if (!req.user) return false;
+  const myName = (req.user.name || req.user.username || '').trim();
+  const myRole = (req.user.role || '').toLowerCase();
+  const myDept = (req.user.department || '').toLowerCase();
+  const isManagerOrOwner = ['manager','owner','admin'].indexOf(myRole) !== -1 || myDept === 'manager';
+  if (isManagerOrOwner) return true;
+  // canonicalAgent equates "Aryan Tomar" with "Aryan" etc.
+  const canonMe = (typeof canonicalAgent === 'function' ? canonicalAgent(myName) : myName) || myName;
+  const canonReq = (typeof canonicalAgent === 'function' ? canonicalAgent(requestedAgent) : requestedAgent) || requestedAgent;
+  return canonMe.toLowerCase() === canonReq.toLowerCase();
+}
+
+function r34_periodToDays(p) {
+  if (p === '7d') return 7;
+  if (p === '90d') return 90;
+  return 30;
+}
+
+// r35: Tier calculation. Pure function — given a success rate and the number
+// of scored tasks, returns { tier, label, color, calibrating, needed }.
+// Thresholds: ≥80% Excellent, 60-79% Good, 50-59% Average, <50% Poor.
+// Below 10 scored tasks the tier is suppressed and "calibrating" is set.
+const R35_TIER_MIN_TASKS = 10;
+function r35_computeTier(successRate, scoredCount) {
+  if (scoredCount < R35_TIER_MIN_TASKS) {
+    return { tier: 'calibrating', label: 'Calibrating', color: 'grey', calibrating: true, needed: R35_TIER_MIN_TASKS - scoredCount };
+  }
+  if (successRate == null) {
+    return { tier: 'calibrating', label: 'Calibrating', color: 'grey', calibrating: true, needed: R35_TIER_MIN_TASKS };
+  }
+  const pct = successRate * 100;
+  if (pct >= 80) return { tier: 'excellent', label: 'Excellent', color: 'green', calibrating: false };
+  if (pct >= 60) return { tier: 'good',      label: 'Good',      color: 'blue',  calibrating: false };
+  if (pct >= 50) return { tier: 'average',   label: 'Average',   color: 'amber', calibrating: false };
+  return { tier: 'poor', label: 'Poor', color: 'red', calibrating: false };
+}
+
+// r35: Tier endpoint — the headline number for the new simplified page.
+// Returns current tier + prior-period tier so we can show the up/down arrow.
+// Pure SQL aggregation; reuses task_outcomes table.
+app.get('/api/performance/:agent/tier', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  try {
+    // Current period: rolling 30 days
+    const cur = await db.query(
+      "SELECT outcome, COUNT(*)::int AS n, " +
+      "       COALESCE(SUM(efficiency_gain_gbp), 0) AS efficiency_total, " +
+      "       COALESCE(SUM(worsened_waste_gbp), 0) AS worsened_total, " +
+      "       COALESCE(SUM(repeat_gap_waste_gbp), 0) AS repeat_gap_total " +
+      "FROM task_outcomes " +
+      "WHERE agent_name = $1 AND scored_at > NOW() - INTERVAL '30 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+    // Prior period: 30-60 days ago (the month before)
+    const prior = await db.query(
+      "SELECT outcome, COUNT(*)::int AS n " +
+      "FROM task_outcomes " +
+      "WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - INTERVAL '60 days' " +
+      "  AND scored_at <= NOW() - INTERVAL '30 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+
+    const summarise = function(rows) {
+      let scored = 0, wins = 0, efficiency = 0, worsened = 0, repeatGap = 0;
+      rows.forEach(function(r){
+        const o = r.outcome;
+        const n = parseInt(r.n) || 0;
+        if (['breakthrough','improved','flat','worsened'].includes(o)) {
+          scored += n;
+          if (o === 'breakthrough' || o === 'improved') wins += n;
+        }
+        if (o !== 'disqualified') {
+          efficiency += parseFloat(r.efficiency_total) || 0;
+          worsened += parseFloat(r.worsened_total) || 0;
+          repeatGap += parseFloat(r.repeat_gap_total) || 0;
+        }
+      });
+      const successRate = scored > 0 ? wins / scored : null;
+      const netImpact = efficiency - worsened - repeatGap;
+      return { scored: scored, successRate: successRate, netImpact: netImpact };
+    };
+
+    const curStats = summarise(cur.rows);
+    const priorStats = summarise(prior.rows);
+    const curTier = r35_computeTier(curStats.successRate, curStats.scored);
+    const priorTier = r35_computeTier(priorStats.successRate, priorStats.scored);
+
+    // Movement direction: only meaningful if both periods have a real tier
+    let movement = 'flat';
+    if (!curTier.calibrating && !priorTier.calibrating) {
+      const order = { poor: 0, average: 1, good: 2, excellent: 3 };
+      const diff = order[curTier.tier] - order[priorTier.tier];
+      if (diff > 0) movement = 'up';
+      else if (diff < 0) movement = 'down';
+    }
+
+    res.json({
+      agent: agent,
+      tier: curTier,
+      priorTier: priorTier,
+      movement: movement,
+      successRate: curStats.successRate,
+      netImpactGbp: Math.round(curStats.netImpact * 100) / 100,
+      scoredCount: curStats.scored
+    });
+  } catch(e) {
+    console.error('[r35 /tier] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// GET /api/performance/:agent/scorecard?period=7d|30d|90d
+// Returns the headline numbers: counts by outcome, success rate, £ impact summary.
+app.get('/api/performance/:agent/scorecard', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const days = r34_periodToDays(req.query.period);
+  try {
+    const r = await db.query(
+      "SELECT outcome, task_source, COUNT(*) AS n, " +
+      "       COALESCE(SUM(efficiency_gain_gbp), 0) AS efficiency_total, " +
+      "       COALESCE(SUM(worsened_waste_gbp), 0) AS worsened_total, " +
+      "       COALESCE(SUM(repeat_gap_waste_gbp), 0) AS repeat_gap_total " +
+      "FROM task_outcomes " +
+      "WHERE agent_name = $1 AND scored_at > NOW() - ($2 || ' days')::interval " +
+      "GROUP BY outcome, task_source",
+      [agent, String(days)]
+    );
+
+    const buckets = { breakthrough: 0, improved: 0, flat: 0, worsened: 0, unscoreable: 0, disqualified: 0 };
+    const sources = { daily: 0, manual: 0 };
+    let efficiencyTotal = 0, worsenedTotal = 0, repeatGapTotal = 0;
+    r.rows.forEach(function(row) {
+      const o = row.outcome || 'flat';
+      const n = parseInt(row.n) || 0;
+      if (buckets[o] != null) buckets[o] += n; else buckets.flat += n;
+      const src = row.task_source === 'manual' ? 'manual' : 'daily';
+      sources[src] += n;
+      // £ totals: exclude disqualified from impact maths
+      if (o !== 'disqualified') {
+        efficiencyTotal += parseFloat(row.efficiency_total) || 0;
+        worsenedTotal += parseFloat(row.worsened_total) || 0;
+        repeatGapTotal += parseFloat(row.repeat_gap_total) || 0;
+      }
+    });
+    const scoredTotal = buckets.breakthrough + buckets.improved + buckets.flat + buckets.worsened;
+    const wins = buckets.breakthrough + buckets.improved;
+    const successRate = scoredTotal >= 5 ? (wins / scoredTotal) : null;   // need ≥5 for a meaningful %
+    const wastedTotal = worsenedTotal + repeatGapTotal;
+    const netImpact = efficiencyTotal - wastedTotal;
+
+    res.json({
+      agent: agent,
+      period: req.query.period || '30d',
+      totalCompleted: scoredTotal + buckets.unscoreable + buckets.disqualified,
+      scored: scoredTotal,
+      outcomes: buckets,
+      sources: sources,
+      successRate: successRate,
+      needsMoreTasks: scoredTotal < 5,
+      efficiencyGainGbp: Math.round(efficiencyTotal * 100) / 100,
+      worsenedWasteGbp: Math.round(worsenedTotal * 100) / 100,
+      repeatGapWasteGbp: Math.round(repeatGapTotal * 100) / 100,
+      totalWastedGbp: Math.round(wastedTotal * 100) / 100,
+      netImpactGbp: Math.round(netImpact * 100) / 100
+    });
+  } catch(e) {
+    console.error('[r34 /scorecard] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/scored-tasks?outcome=&period=
+// Drill-down — task-by-task list for one outcome category.
+app.get('/api/performance/:agent/scored-tasks', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const days = r34_periodToDays(req.query.period);
+  const outcome = String(req.query.outcome || '');
+  const validOutcomes = ['breakthrough','improved','flat','worsened','unscoreable','disqualified'];
+  if (!validOutcomes.includes(outcome)) return res.status(400).json({ error: 'invalid outcome' });
+  try {
+    const r = await db.query(
+      "SELECT o.task_id, o.campaign_id, o.campaign_name, o.problem_type, o.task_source, o.department, " +
+      "       o.before_spend, o.before_sales, o.before_acos, " +
+      "       o.after_spend, o.after_sales, o.after_acos, " +
+      "       o.acos_delta, o.efficiency_gain_gbp, o.worsened_waste_gbp, o.repeat_gap_waste_gbp, " +
+      "       o.scored_at, o.disqualified_reason, " +
+      "       t.agent_notes, t.problem_detail, t.resolved_at AS completed_at, t.created_date " +
+      "FROM task_outcomes o LEFT JOIN campaign_tasks t ON t.id = o.task_id " +
+      "WHERE o.agent_name = $1 AND o.outcome = $2 " +
+      "  AND o.scored_at > NOW() - ($3 || ' days')::interval " +
+      "ORDER BY o.scored_at DESC LIMIT 50",
+      [agent, outcome, String(days)]
+    );
+    res.json({ agent: agent, outcome: outcome, period: req.query.period || '30d', tasks: r.rows });
+  } catch(e) {
+    console.error('[r34 /scored-tasks] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/mistakes-mirror?limit=10
+app.get('/api/performance/:agent/mistakes-mirror', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const limit = Math.min(50, parseInt(req.query.limit, 10) || 10);
+  try {
+    const r = await db.query(
+      "SELECT o.task_id, o.campaign_name, o.problem_type, o.repeat_gap_waste_gbp, o.mistake_mirror_note, " +
+      "       o.scored_at, o.department, " +
+      "       t.agent_notes, t.problem_detail " +
+      "FROM task_outcomes o LEFT JOIN campaign_tasks t ON t.id = o.task_id " +
+      "WHERE o.agent_name = $1 " +
+      "  AND o.mistake_mirror_note IS NOT NULL " +
+      "  AND o.outcome != 'disqualified' " +
+      "ORDER BY o.scored_at DESC LIMIT $2",
+      [agent, limit]
+    );
+    res.json({ agent: agent, repeats: r.rows });
+  } catch(e) {
+    console.error('[r34 /mistakes-mirror] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r35: Wins — meaningful breakthroughs and improvements. Mirror of mistakes-mirror
+// but on the positive side. Filtered to £200+ £ impact OR breakthrough outcome.
+// Max 3 by default. Sorted by impact descending. For the new simple page.
+app.get('/api/performance/:agent/wins', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const limit = Math.min(10, parseInt(req.query.limit, 10) || 3);
+  const days = r34_periodToDays(req.query.period);
+  try {
+    const r = await db.query(
+      "SELECT o.task_id, o.campaign_name, o.problem_type, o.outcome, " +
+      "       o.efficiency_gain_gbp, o.before_acos, o.after_acos, o.scored_at, o.department, " +
+      "       t.agent_notes, t.problem_detail " +
+      "FROM task_outcomes o LEFT JOIN campaign_tasks t ON t.id = o.task_id " +
+      "WHERE o.agent_name = $1 " +
+      "  AND o.outcome IN ('breakthrough','improved') " +
+      "  AND (o.outcome = 'breakthrough' OR COALESCE(o.efficiency_gain_gbp, 0) >= 200) " +
+      "  AND o.scored_at > NOW() - ($2 || ' days')::interval " +
+      "ORDER BY (CASE WHEN o.outcome = 'breakthrough' THEN 1 ELSE 0 END) DESC, " +
+      "         COALESCE(o.efficiency_gain_gbp, 0) DESC " +
+      "LIMIT $3",
+      [agent, String(days), limit]
+    );
+    res.json({ agent: agent, wins: r.rows });
+  } catch(e) {
+    console.error('[r35 /wins] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/daily-brief
+app.get('/api/performance/:agent/daily-brief', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  try {
+    // Yesterday's wins — tasks completed within last 48h that were scored
+    // breakthrough or improved.
+    const wins = await db.query(
+      "SELECT campaign_name, outcome, efficiency_gain_gbp, before_acos, after_acos " +
+      "FROM task_outcomes WHERE agent_name = $1 AND outcome IN ('breakthrough','improved') " +
+      "  AND scored_at > NOW() - INTERVAL '2 days' " +
+      "ORDER BY efficiency_gain_gbp DESC NULLS LAST LIMIT 5",
+      [agent]
+    );
+
+    // Needs attention today — open tasks owned by agent that are flagged repeat
+    // OR have been around for 6+ days. working_days_open is a COMPUTED field
+    // (not a DB column) — we use a simple created_date age in DB and let frontend
+    // refine if it cares about exact working days. The 6-day threshold here uses
+    // calendar days (6 calendar days roughly = 5 working days).
+    const needsAttention = await db.query(
+      "SELECT id, campaign_name, problem_detail, is_repeat_offender, failure_count, " +
+      "       EXTRACT(EPOCH FROM (NOW() - created_date)) / 86400 AS days_open_calendar, " +
+      "       task_stage " +
+      "FROM campaign_tasks " +
+      "WHERE agent_name = $1 AND status IN ('open','in_progress') " +
+      "  AND (is_repeat_offender = TRUE OR created_date < NOW() - INTERVAL '6 days') " +
+      "ORDER BY created_date ASC LIMIT 5",
+      [agent]
+    );
+
+    // 7-day trend: this week vs prior week — success rate, avg ACOS, repeat-failure rate
+    const trendsThisWeek = await db.query(
+      "SELECT outcome, COUNT(*) AS n, AVG(after_acos) AS avg_after_acos, " +
+      "       SUM(CASE WHEN repeat_gap_waste_gbp > 0 THEN 1 ELSE 0 END) AS repeats " +
+      "FROM task_outcomes WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - INTERVAL '7 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+    const trendsPrior = await db.query(
+      "SELECT outcome, COUNT(*) AS n, AVG(after_acos) AS avg_after_acos, " +
+      "       SUM(CASE WHEN repeat_gap_waste_gbp > 0 THEN 1 ELSE 0 END) AS repeats " +
+      "FROM task_outcomes WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - INTERVAL '14 days' AND scored_at <= NOW() - INTERVAL '7 days' " +
+      "GROUP BY outcome",
+      [agent]
+    );
+
+    const summarise = function(rows) {
+      let scored = 0, wins = 0, repeats = 0, acosSum = 0, acosN = 0;
+      rows.forEach(function(r){
+        const o = r.outcome;
+        const n = parseInt(r.n) || 0;
+        if (['breakthrough','improved','flat','worsened'].includes(o)) {
+          scored += n;
+          if (o === 'breakthrough' || o === 'improved') wins += n;
+          if (r.avg_after_acos != null) { acosSum += parseFloat(r.avg_after_acos) * n; acosN += n; }
+        }
+        repeats += parseInt(r.repeats) || 0;
+      });
+      return {
+        scored: scored,
+        successRate: scored > 0 ? wins / scored : null,
+        avgAcos: acosN > 0 ? acosSum / acosN : null,
+        repeatRate: scored > 0 ? repeats / scored : null
+      };
+    };
+    res.json({
+      agent: agent,
+      yesterdayWins: wins.rows,
+      needsAttention: needsAttention.rows,
+      trendThisWeek: summarise(trendsThisWeek.rows),
+      trendPrior: summarise(trendsPrior.rows)
+    });
+  } catch(e) {
+    console.error('[r34 /daily-brief] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/performance/:agent/trajectory?weeks=12
+app.get('/api/performance/:agent/trajectory', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const agent = decodeURIComponent(req.params.agent);
+  if (!r34_canAccess(req, agent)) return res.status(403).json({ error: 'Not authorised' });
+  const weeks = Math.min(26, Math.max(2, parseInt(req.query.weeks, 10) || 12));
+  try {
+    const r = await db.query(
+      "SELECT date_trunc('week', scored_at) AS week_start, outcome, COUNT(*) AS n, " +
+      "       AVG(after_acos) AS avg_after_acos, " +
+      "       SUM(CASE WHEN outcome = 'breakthrough' THEN 1 ELSE 0 END) AS bt, " +
+      "       COALESCE(SUM(efficiency_gain_gbp), 0) AS gain, " +
+      "       COALESCE(SUM(worsened_waste_gbp), 0) AS worsened, " +
+      "       COALESCE(SUM(repeat_gap_waste_gbp), 0) AS repeat_gap " +
+      "FROM task_outcomes WHERE agent_name = $1 " +
+      "  AND scored_at > NOW() - ($2 || ' weeks')::interval " +
+      "GROUP BY week_start, outcome ORDER BY week_start ASC",
+      [agent, String(weeks)]
+    );
+    // Bucket per week
+    const byWeek = {};
+    r.rows.forEach(function(row){
+      const k = row.week_start.toISOString().slice(0,10);
+      if (!byWeek[k]) byWeek[k] = { week_start: k, scored: 0, wins: 0, breakthroughs: 0, sumAcos: 0, nAcos: 0, gain: 0, worsened: 0, repeat_gap: 0 };
+      const bk = byWeek[k];
+      const n = parseInt(row.n) || 0;
+      if (['breakthrough','improved','flat','worsened'].includes(row.outcome)) {
+        bk.scored += n;
+        if (row.outcome === 'breakthrough' || row.outcome === 'improved') bk.wins += n;
+        if (row.outcome === 'breakthrough') bk.breakthroughs += parseInt(row.bt) || 0;
+        if (row.avg_after_acos != null) { bk.sumAcos += parseFloat(row.avg_after_acos) * n; bk.nAcos += n; }
+      }
+      bk.gain += parseFloat(row.gain) || 0;
+      bk.worsened += parseFloat(row.worsened) || 0;
+      bk.repeat_gap += parseFloat(row.repeat_gap) || 0;
+    });
+    const weeksOut = Object.values(byWeek).map(function(w){
+      return {
+        week_start: w.week_start,
+        scored: w.scored,
+        successRate: w.scored > 0 ? Math.round((w.wins / w.scored) * 1000) / 1000 : null,
+        avgAcos: w.nAcos > 0 ? Math.round((w.sumAcos / w.nAcos) * 1000) / 1000 : null,
+        breakthroughs: w.breakthroughs,
+        netImpactGbp: Math.round((w.gain - w.worsened - w.repeat_gap) * 100) / 100
+      };
+    });
+    res.json({ agent: agent, weeks: weeksOut });
+  } catch(e) {
+    console.error('[r34 /trajectory] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin: list agents eligible for PPC performance scoring. Pulls from
+// task_outcomes (agents who actually have scored rows) OR from the users
+// table filtered to Amazon/Google departments only — agents in other
+// departments (logistics, accounts, supply_chain) don't run PPC campaigns
+// and shouldn't appear here. Their work has different KPIs.
+app.get('/api/performance/_agents', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  const myDept = req.user ? (req.user.department||'').toLowerCase() : '';
+  const isManagerOrOwner = ['manager','owner','admin'].indexOf(myRole) !== -1 || myDept === 'manager';
+  if (!isManagerOrOwner) return res.status(403).json({ error: 'Not authorised' });
+  try {
+    // Union of:
+    //   - agents who have task_outcomes rows (regardless of current dept — for
+    //     audit if an agent moved teams; their historical scores still show)
+    //   - active users whose CURRENT department is amazon or google (so the
+    //     dropdown is populated pre-backfill, and so newly-added PPC agents
+    //     appear immediately even before they've completed any task)
+    // Plus owner role (Bobby), since you own tasks for verification purposes.
+    const r = await db.query(
+      "WITH outcome_agents AS ( " +
+      "  SELECT agent_name, COUNT(*)::int AS n FROM task_outcomes " +
+      "  WHERE agent_name IS NOT NULL AND agent_name != '' " +
+      "  GROUP BY agent_name " +
+      "), user_agents AS ( " +
+      "  SELECT DISTINCT name AS agent_name, 0::int AS n FROM users " +
+      "  WHERE name IS NOT NULL AND name != '' " +
+      "    AND COALESCE(is_active, TRUE) = TRUE " +
+      "    AND ( " +
+      "      LOWER(COALESCE(department, '')) IN ('amazon', 'google') " +
+      "      OR LOWER(COALESCE(role, '')) = 'owner' " +
+      "    ) " +
+      ") " +
+      "SELECT agent_name, MAX(n) AS n FROM ( " +
+      "  SELECT * FROM outcome_agents UNION ALL SELECT * FROM user_agents " +
+      ") combined " +
+      "GROUP BY agent_name ORDER BY MAX(n) DESC, agent_name ASC"
+    );
+    res.json({ agents: r.rows });
+  } catch(e) {
+    // Fallback: if users table query fails for any reason, return just outcome agents
+    try {
+      const r2 = await db.query("SELECT agent_name, COUNT(*)::int AS n FROM task_outcomes WHERE agent_name IS NOT NULL AND agent_name != '' GROUP BY agent_name ORDER BY n DESC");
+      res.json({ agents: r2.rows });
+    } catch(e2) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+});
+
+// r34 diagnostic — owner only. Returns the counts needed to understand why
+// the performance page shows zeros. No data leak risk since it's aggregate.
+app.get('/api/admin/r34/diagnose', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  if (myRole !== 'owner') return res.status(403).json({ error: 'Owner only' });
+  try {
+    const out = {};
+    const q = async function(label, sql) {
+      try {
+        const r = await db.query(sql);
+        out[label] = r.rows;
+      } catch(e) {
+        out[label] = { error: e.message };
+      }
+    };
+    await q('completed_with_resolved_at', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NOT NULL");
+    await q('completed_without_resolved_at', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NULL");
+    await q('completed_in_backfill_window_7_to_30d', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NOT NULL AND resolved_at < NOW() - INTERVAL '7 days' AND resolved_at > NOW() - INTERVAL '30 days'");
+    await q('completed_in_nightly_window_7_to_14d', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND resolved_at IS NOT NULL AND resolved_at < NOW() - INTERVAL '7 days' AND resolved_at > NOW() - INTERVAL '14 days'");
+    await q('completed_last_30d_any', "SELECT COUNT(*)::int AS n FROM campaign_tasks WHERE status='complete' AND COALESCE(resolved_at, last_resolved_date, updated_at) > NOW() - INTERVAL '30 days'");
+    await q('task_outcomes_total', "SELECT COUNT(*)::int AS n FROM task_outcomes");
+    await q('task_outcomes_by_outcome', "SELECT outcome, COUNT(*)::int AS n FROM task_outcomes GROUP BY outcome ORDER BY n DESC");
+    await q('task_outcomes_by_agent', "SELECT agent_name, COUNT(*)::int AS n FROM task_outcomes GROUP BY agent_name ORDER BY n DESC LIMIT 20");
+    await q('sample_recent_completed', "SELECT id, agent_name, campaign_name, status, resolved_at, last_resolved_date, updated_at FROM campaign_tasks WHERE status='complete' ORDER BY COALESCE(resolved_at, last_resolved_date, updated_at) DESC LIMIT 5");
+    await q('daily_snapshots_count', "SELECT COUNT(*)::int AS n, MIN(snapshot_date) AS earliest, MAX(snapshot_date) AS latest FROM daily_snapshots");
+    res.json(out);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// r35.1 Fix B — one-time cleanup tool. Finds groups of open tasks where
+// (campaign_id, agent_name) has 2+ open tasks, and merges them: keep oldest
+// as canonical, close the rest with a "merged into #X" note. Owner only.
+// Dry-run by default — must POST with { confirm: true } to actually merge.
+// Use this once to clean up the backlog from before r35.1 Fix A was deployed.
+app.post('/api/admin/merge-duplicate-tasks', async function(req, res) {
+  if (!db) return res.status(500).json({ error: 'No DB' });
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  if (myRole !== 'owner') return res.status(403).json({ error: 'Owner only' });
+  const confirm = req.body && req.body.confirm === true;
+  try {
+    // Find duplicate groups: same (campaign_id, agent_name, department) with
+    // 2+ open tasks. We DON'T group by problem_type because the duplicates
+    // we're cleaning up are about the same campaign — even if one was flagged
+    // as "no_revenue" and another as "high_acos" it's still the same campaign
+    // having problems and should be one task.
+    const groups = await db.query(
+      "SELECT campaign_id, campaign_name, agent_name, department, " +
+      "       COUNT(*) AS n, " +
+      "       MIN(id) AS canonical_id, " +
+      "       MIN(created_date) AS oldest_date, " +
+      "       MAX(created_date) AS newest_date, " +
+      "       array_agg(id ORDER BY created_date ASC) AS task_ids " +
+      "FROM campaign_tasks " +
+      "WHERE status NOT IN ('complete','archived','dismissed','cancelled') " +
+      "  AND task_source='daily' " +
+      "  AND campaign_id IS NOT NULL AND campaign_id != '' " +
+      "GROUP BY campaign_id, campaign_name, agent_name, department " +
+      "HAVING COUNT(*) >= 2 " +
+      "ORDER BY COUNT(*) DESC"
+    );
+    if (!groups.rows.length) {
+      return res.json({ found: 0, message: 'No duplicate task groups found — nothing to merge.' });
+    }
+
+    const summary = groups.rows.map(function(g){
+      return {
+        campaign: g.campaign_name,
+        agent: g.agent_name,
+        department: g.department,
+        open_tasks: parseInt(g.n),
+        canonical_id_to_keep: parseInt(g.canonical_id),
+        all_task_ids: g.task_ids.map(function(i){ return parseInt(i); }),
+        oldest: g.oldest_date,
+        newest: g.newest_date
+      };
+    });
+
+    if (!confirm) {
+      // Dry run — just report what would happen
+      const totalToClose = summary.reduce(function(s,g){ return s + g.open_tasks - 1; }, 0);
+      return res.json({
+        dry_run: true,
+        found_groups: summary.length,
+        tasks_that_would_be_closed: totalToClose,
+        groups: summary,
+        next_step: 'POST again with body {"confirm": true} to actually perform the merge.'
+      });
+    }
+
+    // CONFIRM=TRUE — actually merge
+    let mergedGroups = 0, closedTasks = 0;
+    const errors = [];
+    for (const g of groups.rows) {
+      try {
+        const canonicalId = parseInt(g.canonical_id);
+        const allIds = g.task_ids.map(function(i){ return parseInt(i); });
+        const toClose = allIds.filter(function(i){ return i !== canonicalId; });
+        const totalFailureCount = allIds.length;
+        // Close the duplicates
+        for (const id of toClose) {
+          await db.query(
+            "UPDATE campaign_tasks SET status='complete', " +
+            "  agent_notes = COALESCE(agent_notes,'') || E'\\n🔀 Merged into task #' || $2 || ' (auto-cleanup of duplicate task on same campaign). Closed by system on ' || NOW()::date, " +
+            "  resolved_at = NOW(), last_resolved_date = NOW(), updated_at = NOW() " +
+            "WHERE id = $1",
+            [id, canonicalId]
+          );
+          closedTasks++;
+        }
+        // Bump the canonical task's failure_count + mark repeat offender
+        await db.query(
+          "UPDATE campaign_tasks SET " +
+          "  failure_count = $2, " +
+          "  is_repeat_offender = ($2 >= 2), " +
+          "  problem_detail = COALESCE(problem_detail,'') || E'\\n\\n— 🔀 Auto-merged ' || $3 || ' duplicate task(s) on same campaign (IDs: ' || $4 || '). This task is now the canonical record.', " +
+          "  updated_at = NOW() " +
+          "WHERE id = $1",
+          [canonicalId, totalFailureCount, toClose.length, toClose.join(',')]
+        );
+        // Activity log
+        try {
+          await db.query(
+            "INSERT INTO activity_log (campaign_id, campaign_name, agent_name, actor_name, action, notes, task_id, department) " +
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            [String(g.campaign_id), g.campaign_name, g.agent_name, (req.user && req.user.name) || 'System',
+             'duplicates_merged',
+             'Merged ' + toClose.length + ' duplicate(s) into canonical task #' + canonicalId + '. Closed IDs: ' + toClose.join(','),
+             canonicalId, g.department || 'amazon']
+          );
+        } catch(_e) { /* non-fatal */ }
+        mergedGroups++;
+      } catch(e) {
+        errors.push({ campaign: g.campaign_name, agent: g.agent_name, error: e.message });
+      }
+    }
+
+    res.json({
+      confirmed: true,
+      merged_groups: mergedGroups,
+      tasks_closed: closedTasks,
+      errors: errors
+    });
+  } catch(e) {
+    console.error('[r35.1 merge-duplicates] ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin trigger — manually run backfill or nightly. Owner only.
+app.post('/api/admin/r34/run', async function(req, res) {
+  const myRole = req.user ? (req.user.role||'').toLowerCase() : '';
+  if (myRole !== 'owner') return res.status(403).json({ error: 'Owner only' });
+  const which = String(req.body && req.body.which || 'nightly');
+  try {
+    if (which === 'backfill') {
+      // Wipe the flag so backfill re-runs
+      if (db) await db.query("DELETE FROM system_meta WHERE key = 'r34_backfill_completed_at'");
+      r34_runBackfillIfNeeded().catch(function(){});   // async, don't await
+      return res.json({ started: 'backfill', note: 'running in background — watch logs' });
+    } else {
+      r34_runNightlyScoring().catch(function(){});
+      return res.json({ started: 'nightly', note: 'running in background — watch logs' });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// End r34 endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
+
+app.listen(PORT, '0.0.0.0', async function() {
+  console.log('App running on port ' + PORT);
+  await initDB();
+  // r30a — boot the logistics module's schema/seed now that db is ready
+  try { if (logisticsRouter && logisticsRouter._boot) await logisticsRouter._boot(); }
+  catch(e) { console.error('[logistics _boot] ' + e.message); }
+  if (db) {
+    // r17: belt-and-braces migrations — ensure tables exist before any hydrate.
+    // The initDB() code above already attempts these inside try/catch, but we've seen
+    // failures on production where the table didn't get created (silent init error).
+    // Run explicit CREATE TABLE IF NOT EXISTS here as a safety net.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS google_state_snapshots (
+          id SERIAL PRIMARY KEY,
+          received_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          campaigns JSONB,
+          products JSONB,
+          campaigns_count INTEGER DEFAULT 0,
+          products_count INTEGER DEFAULT 0,
+          last_sync_label TEXT
+        )
+      `);
+      await db.query("CREATE INDEX IF NOT EXISTS idx_gss_received_at ON google_state_snapshots(received_at DESC)");
+      console.log('[r17-migrate] google_state_snapshots ensured');
+    } catch(e) {
+      console.error('[r17-migrate] google_state_snapshots failed: ' + e.message);
+    }
+    try {
+      const result = await db.query('SELECT settings FROM app_settings WHERE id = 1');
+      const settings = result.rows[0]?.settings || {};
+      if (settings.acosCritical) process.env.ACOS_CRITICAL_THRESHOLD = String(settings.acosCritical);
+      if (settings.acosWarning) process.env.ACOS_WARNING_THRESHOLD = String(settings.acosWarning);
+      if (settings.budgetLowPct) process.env.BUDGET_LOW_PERCENT = String(settings.budgetLowPct);
+      if (Object.keys(settings).length) console.log('Settings loaded from DB: ' + JSON.stringify(settings));
+    } catch(e) { console.error('Settings load error: ' + e.message); }
+
+    // r33b: warm the agent alias cache on boot so first request doesn't pay
+    // the DB round-trip. If this fails, canonicalAgent falls back to the
+    // hardcoded {aryan, aryan tomar, satyam} dict — no functional break.
+    refreshAgentAliasCache().catch(function(){});
+
+    // r34: kick off one-time backfill of historical task outcomes.
+    // Delayed 60s so DB, hydration, and any catch-up syncs have settled.
+    // The function itself is gated by system_meta — won't re-run on later
+    // deploys. Safe to call on every boot.
+    setTimeout(function() {
+      r34_runBackfillIfNeeded().catch(function(e){ console.error('[r34 backfill outer] ' + e.message); });
+    }, 60000);
+
+    // r35.6: one-time product visibility recovery. The catalogue sync flagged
+    // 274 products as REMOVED on 2026-05-20 because Amazon's SP-API didn't
+    // return them in that night's pagination (well-known eventual consistency
+    // behaviour). The sweep rule has been changed to 3 days (from 2 hours)
+    // to prevent recurrence, but the rows already flagged need un-flagging
+    // for the team to see them again. Gated by system_meta so it only runs
+    // once across all deploys.
+    try {
+      const r356Flag = await db.query("SELECT value FROM system_meta WHERE key = 'r35_6_product_recovery_done'");
+      if (r356Flag.rows.length === 0) {
+        const recovery = await db.query(
+          "UPDATE amazon_products SET status = NULL " +
+          "WHERE status = 'REMOVED' AND last_synced_at >= NOW() - INTERVAL '7 days' " +
+          "RETURNING sku"
+        );
+        console.log('[r35.6 recovery] un-flagged ' + recovery.rows.length + ' products that were swept by the old 2-hour REMOVED rule');
+        await db.query(
+          "INSERT INTO system_meta (key, value) VALUES ('r35_6_product_recovery_done', NOW()::text) " +
+          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+        );
+      } else {
+        console.log('[r35.6 recovery] already ran at ' + r356Flag.rows[0].value + ' — skipping');
+      }
+    } catch(e) { console.error('[r35.6 recovery] error: ' + e.message); }
+
+    // r35.7: hotfix for r35.6's recovery. r35.6 set status=NULL to un-flag
+    // products, but NULL status fails the buyable_count check at the
+    // products-endpoint level (line ~6819 — isBuyable looks for 'BUYABLE' in
+    // g.statuses, which is empty for NULL). Result: recovered products had
+    // sales and showed the right UNDERPERFORMING badge, but landed in the
+    // Dormant tab because they weren't counted as buyable. Card badge said
+    // one thing, tab routing said another. Fix: flip the NULL-status rows
+    // to 'BUYABLE'. Next overnight catalogue sync (02:30) will overwrite
+    // with the real Amazon-returned status, so this is self-healing. Gated
+    // by system_meta with a new key so it runs exactly once.
+    try {
+      const r357Flag = await db.query("SELECT value FROM system_meta WHERE key = 'r35_7_buyable_recovery_done'");
+      if (r357Flag.rows.length === 0) {
+        const fix = await db.query(
+          "UPDATE amazon_products SET status = 'BUYABLE' " +
+          "WHERE status IS NULL AND last_synced_at >= NOW() - INTERVAL '7 days' " +
+          "RETURNING sku"
+        );
+        const sampleSkus = fix.rows.slice(0, 5).map(function(r){ return r.sku; }).join(', ');
+        console.log('[r35.7 recovery] flipped ' + fix.rows.length + ' NULL-status rows to BUYABLE so they land in correct tabs. Sample: ' + sampleSkus);
+        await db.query(
+          "INSERT INTO system_meta (key, value) VALUES ('r35_7_buyable_recovery_done', NOW()::text) " +
+          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+        );
+      } else {
+        console.log('[r35.7 recovery] already ran at ' + r357Flag.rows[0].value + ' — skipping');
+      }
+    } catch(e) { console.error('[r35.7 recovery] error: ' + e.message); }
+
+    // Hydrate googleState from the most recent snapshot in DB.
+    // Prevents the "dashboard goes blank after every deploy" problem — agents see
+    // last-known data immediately on boot, regardless of whether the script has
+    // run since the redeploy.
+    try {
+      const snap = await db.query("SELECT received_at, campaigns, products, last_sync_label, campaigns_count, products_count FROM google_state_snapshots ORDER BY received_at DESC LIMIT 1");
+      if (snap.rows.length) {
+        const r = snap.rows[0];
+        googleState.campaigns = r.campaigns || [];
+        googleState.products = r.products || [];
+        googleState.lastSync = r.last_sync_label;
+        googleState.lastReceivedAt = r.received_at ? new Date(r.received_at).toISOString() : null;
+        const ageHours = ((Date.now() - new Date(r.received_at).getTime()) / 36e5).toFixed(1);
+        console.log('[GOOGLE-STATE] hydrated from DB: ' + (r.campaigns_count || 0) + ' campaigns, ' + (r.products_count || 0) + ' products, ' + ageHours + 'h old');
+      } else {
+        console.log('[GOOGLE-STATE] no snapshots in DB yet — waiting for first ingest');
+      }
+    } catch(e) {
+      console.error('[GOOGLE-STATE] hydrate error: ' + e.message);
+    }
+
+    // r25a: hydrate state.exhaustionLog from today's daily_snapshots row.
+    // Without this, server restarts wipe in-memory Pending entries — so when an
+    // agent later approves budget, the find() in /api/budget/:id can't match and
+    // the row stays "Pending" forever in the report. Hydrating today's log fixes
+    // that. We only load TODAY's row (older Pending entries are already lost).
+    try {
+      const todayStr = new Date().toLocaleString('en-CA', { timeZone: 'Europe/London' }).slice(0, 10);
+      const r = await db.query("SELECT exhaustion_log FROM daily_snapshots WHERE snapshot_date = $1", [todayStr]);
+      if (r.rows.length && Array.isArray(r.rows[0].exhaustion_log)) {
+        state.exhaustionLog = r.rows[0].exhaustion_log;
+        const pendingCount = state.exhaustionLog.filter(function(e){ return e.action === 'Pending'; }).length;
+        console.log('[r25a] hydrated exhaustionLog: ' + state.exhaustionLog.length + ' entries (' + pendingCount + ' pending)');
+      } else {
+        console.log('[r25a] no exhaustionLog in today\u2019s snapshot — starting empty');
+      }
+    } catch(e) {
+      console.error('[r25a] exhaustionLog hydrate error: ' + e.message);
+    }
+  }
+  setTimeout(function() {
+    syncCampaigns().catch(function(err) { console.error('Initial sync failed:', err.message); });
+    syncShopifyProducts().catch(function(err) { console.error('Initial Shopify sync failed:', err.message); });
+    loadGa4StateFromDb().then(function() {
+      // Only refresh GA4 if we have a connection and last fetch was > 12h ago (avoid hammering on every restart)
+      fetchGa4ProductMetrics().catch(function(err) { console.error('Initial GA4 fetch failed:', err.message); });
+    });
+    // r31b: kick off the 7-day advertised-product report cycle at boot so the modal has data fast
+    setTimeout(function(){
+      runAdvertisedProduct7dCycle().catch(function(err) { console.error('Initial 7d ad-perf failed:', err.message); });
+    }, 5000);
+  }, 30000);
+});
+
+// ── Google Product AI Analysis ────────────────────────────────────────────
+// Accepts a product (Shopify-led row OR campaign-grouped row) and returns a
+// concise actionable analysis. Optionally fetches the product page to give
+// listing-quality feedback (image, title length, description, price).
+app.post('/api/google/ai-analyse', async function(req, res) {
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'No API key' });
+  const { product, includePageContent } = req.body;
+  if (!product) return res.status(400).json({ error: 'No product data' });
+  try {
+    // Normalise: works for both shapes (Shopify-led `all-products` rows
+    // and Google-led `products-diagnostic` rows)
+    const name = product.title || product.displayName || product.productName || product.shopifyTitle || '(unknown)';
+    const price = product.price != null ? product.price : product.shopifyPrice;
+    const inventory = product.inventory != null ? product.inventory : product.shopifyInventory;
+    const status = product.status || product.shopifyStatus;
+    const rev7d = product.revenue7d != null ? product.revenue7d : product.shopifyRevenue7d;
+    const units7d = product.unitsSold7d != null ? product.unitsSold7d : product.shopifyUnitsSold7d;
+    const rev30d = product.revenue30d != null ? product.revenue30d : product.shopifyRevenue30d;
+    const units30d = product.unitsSold30d != null ? product.unitsSold30d : product.shopifyUnitsSold30d;
+    const productUrl = product.url || null;
+
+    // Google metrics may live on either `googleX` (all-products view) or top-level (advertised view)
+    const gImp = product.googleImpressions != null ? product.googleImpressions : (product.impressions || 0);
+    const gClk = product.googleClicks != null ? product.googleClicks : (product.clicks || 0);
+    const gCtr = product.googleCtr != null ? product.googleCtr : (product.ctr || 0);
+    const gConv = product.googleConversions != null ? product.googleConversions : (product.conversions || 0);
+    const gSpend = product.googleSpend != null ? product.googleSpend : (product.spend || 0);
+    const gSales = product.googleSales != null ? product.googleSales : (product.sales || 0);
+    const gAcos = product.googleAcos != null ? product.googleAcos : (product.acos || 0);
+
+    // Optionally fetch the product page so the AI can give listing-quality feedback
+    let pageSnippet = '';
+    if (includePageContent && productUrl) {
+      try {
+        const pageRes = await axios.get(productUrl, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0 CampaignPulse' } });
+        const html = String(pageRes.data || '');
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
+        const h1Match = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+        const ogImageMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+        pageSnippet = '\nLIVE PAGE CONTENT:\n'
+          + '- Page title: ' + (titleMatch ? titleMatch[1].trim().slice(0, 200) : '(missing)') + ' (' + (titleMatch ? titleMatch[1].length : 0) + ' chars)\n'
+          + '- Meta description: ' + (descMatch ? descMatch[1].slice(0, 200) : '(missing)') + '\n'
+          + '- H1: ' + (h1Match ? h1Match[1].trim().slice(0, 200) : '(missing)') + '\n'
+          + '- OG image: ' + (ogImageMatch ? 'present' : 'MISSING (hurts social/SEO sharing)');
+      } catch(e) {
+        pageSnippet = '\nLIVE PAGE CONTENT: could not fetch (' + e.message + ')';
+      }
+    }
+
+    // GA4 funnel snippet
+    const f = product.ga4Sessions != null ? {
+      sessions: product.ga4Sessions, cartAdditions: product.ga4CartAdditions, checkouts: product.ga4Checkouts,
+      purchases: product.ga4Purchases, bounceRate: product.ga4BounceRate, engagementRate: product.ga4EngagementRate,
+      avgEngagementTime: product.ga4AvgEngagementTime, cartRate: product.ga4CartRate, checkoutRate: product.ga4CheckoutRate
+    } : null;
+    let funnelSnippet = '';
+    if (f) {
+      funnelSnippet = '\nWEBSITE FUNNEL (GA4, last 7 days):\n'
+        + '- Sessions: ' + f.sessions + '\n'
+        + '- Add-to-carts: ' + f.cartAdditions + (f.cartRate != null ? ' (' + f.cartRate + '% of sessions)' : '') + '\n'
+        + '- Checkouts started: ' + f.checkouts + (f.checkoutRate != null ? ' (' + f.checkoutRate + '% of cart-adds)' : '') + '\n'
+        + '- Purchases: ' + f.purchases + '\n'
+        + '- Bounce rate: ' + (f.bounceRate != null ? (f.bounceRate * 100).toFixed(0) + '%' : '—') + '\n'
+        + '- Engagement rate: ' + (f.engagementRate != null ? (f.engagementRate * 100).toFixed(0) + '%' : '—') + '\n'
+        + '- Avg session duration: ' + (f.avgEngagementTime != null ? f.avgEngagementTime.toFixed(0) + 's' : '—');
+    }
+
+    // PageSpeed snippet — fetched on demand only when asked for deep analysis
+    let speedSnippet = '';
+    if (includePageContent && productUrl) {
+      const ps = await getPageSpeedScore(productUrl);
+      if (ps && !ps.error) {
+        speedSnippet = '\nPAGE SPEED (PageSpeed Insights, mobile):\n'
+          + '- Lighthouse score: ' + (ps.mobileScore != null ? ps.mobileScore + '/100' : '—') + (ps.mobileScore != null && ps.mobileScore < 50 ? ' (POOR)' : ps.mobileScore < 80 ? ' (NEEDS WORK)' : ' (good)') + '\n'
+          + '- Largest Contentful Paint: ' + (ps.lcpMs != null ? (ps.lcpMs / 1000).toFixed(1) + 's' : '—') + (ps.lcpMs > 4000 ? ' (POOR — should be < 2.5s)' : '') + '\n'
+          + '- Speed Index: ' + (ps.loadTimeMs != null ? (ps.loadTimeMs / 1000).toFixed(1) + 's' : '—') + '\n'
+          + '- Total Blocking Time: ' + (ps.tbtMs != null ? ps.tbtMs.toFixed(0) + 'ms' : '—');
+      }
+    }
+
+    // Build daily Shopify sales line for this product so AI can see the trend rather than just totals
+    const dailySales7d = product.dailySales7d || [];
+    const dailyLine = dailySales7d.length
+      ? dailySales7d.map(function(v, i){
+          const d = new Date(Date.now() - (6 - i) * 24 * 60 * 60 * 1000);
+          const day = d.toLocaleDateString('en-GB', { weekday: 'short' });
+          return day + ' £' + Math.round(v || 0);
+        }).join(', ')
+      : '(no daily breakdown available)';
+
+    // Derived signals — let AI see the relationship rather than infer it
+    const adSpendVsShopifySales = (gSpend > 0 && rev7d != null) ? (rev7d / gSpend).toFixed(1) : null;
+    const sellingWithoutAds = (rev7d != null && rev7d > 50 && gSpend < 5);
+    const spendingWithoutSales = (gSpend > 5 && rev7d != null && rev7d < 20);
+
+    const signalsLine = [
+      sellingWithoutAds ? 'SIGNAL: This product is selling on Shopify (' + fmt(rev7d) + ') with little/no Google ad spend (' + fmt(gSpend) + '). It either does not need ads, or there is an opportunity to scale through ads.' : '',
+      spendingWithoutSales ? 'SIGNAL: Google ad spend (' + fmt(gSpend) + ') is high vs Shopify sales (' + fmt(rev7d) + ') in the same window. Either ads are not converting (creative/landing/competitive issue) or attribution is delayed.' : '',
+      adSpendVsShopifySales ? 'Shopify-sales-to-ad-spend ratio: ' + adSpendVsShopifySales + 'x' : ''
+    ].filter(function(x){ return x; }).join('\n');
+
+    function fmt(n){ return n == null ? '—' : '£' + Math.round(n * 100) / 100; }
+
+    const prompt = `You are advising FK Sports UK on a single product.
+
+CONTEXT YOU NEED TO KNOW:
+- FK Sports UK is a Shopify store (fksports.co.uk) selling home fitness equipment AND baby products. ~150+ orders/day.
+- One Google Ads account covers everything today (fitness + baby will split into separate accounts later).
+- Shopify is the source of truth for actual sales. Google "Revenue" lags 24-48 hours and may show £0 even when Google has driven real sales.
+- Known data caveat: GA4 begin_checkout/purchase events are not always attributing back to product names cleanly. If the funnel section below shows "0 checkouts" for a product that clearly has Shopify orders, treat the funnel as untrustworthy on those two metrics — but cart_additions on the funnel is reliable.
+
+PRODUCT: ${name}${product.campaignName ? '\nCAMPAIGN: ' + product.campaignName : ''}${product.campaignType ? ' (' + product.campaignType + ')' : ''}
+
+SHOPIFY (TRUTH):
+${(price != null) ? `- Price: ${fmt(price)}` : ''}
+${(inventory != null) ? `- Inventory: ${inventory === 0 ? 'OUT OF STOCK' : inventory + ' units'}` : ''}
+${status ? '- Status: ' + status.toUpperCase() : ''}
+${rev7d != null ? `- Net sales last 7 COMPLETE days (excludes today): ${fmt(rev7d)} / ${units7d || 0} units` : ''}
+${(product.revenueToday != null || product.shopifyRevenueToday != null) ? `- Net sales TODAY so far (incomplete): ${fmt(product.revenueToday != null ? product.revenueToday : product.shopifyRevenueToday)}` : ''}
+${rev30d != null ? `- Net sales last 30 days: ${fmt(rev30d)} / ${units30d || 0} units` : ''}
+- Daily net sales (last 7 complete days, oldest → newest): ${dailyLine}
+
+GOOGLE ADS (LAST 7 DAYS):
+- Impressions: ${gImp}
+- Clicks: ${gClk} (CTR ${gCtr}%)
+- Conversions recorded: ${gConv}
+- Ad spend: ${fmt(gSpend)}
+- Google-attributed revenue (lagged 24-48h): ${fmt(gSales)}
+- ACOS: ${gAcos}% (only meaningful when Google revenue > 0; reads N/A or 0 otherwise)
+- Cost/conv (cost per conversion): ${gConv > 0 ? '£' + (gSpend / gConv).toFixed(2) : 'N/A (no conversions)'} — useful when ACOS is N/A; tells you what one conversion costs regardless of revenue lag
+
+${signalsLine ? 'DERIVED SIGNALS:\n' + signalsLine + '\n' : ''}
+${funnelSnippet ? funnelSnippet + '\n' : ''}${speedSnippet}${pageSnippet}
+
+THE QUESTION:
+Why isn't this product selling better, and what should the team do?
+
+WRITE IN PLAIN ENGLISH. The agent reading this is NOT a marketing expert.
+- No jargon. Avoid: CRO, CTA, funnel, conversion rate optimisation, value proposition, USP, social proof, attribution.
+- If you must use a technical term, explain it in brackets the first time. Example: "CTR (the % of people who click the ad)".
+- Talk about "shoppers" or "people", not "users" or "sessions".
+- Use £ for money.
+- Every recommendation should be something a normal person could do this week.
+
+Specifically address:
+1. What's actually going wrong, in plain words. Look at Shopify trends vs Google Ads numbers — don't blame Google for a Shopify problem or vice versa.
+2. The single biggest thing the team should do this week.
+3. What might happen if they do it (be realistic, not promotional).
+${includePageContent && productUrl ? '4. What you can see about the product page (image quality, title clarity, description, etc.) in everyday language.' : ''}
+
+Be direct. Be specific. Quote the real numbers above. If the data is unclear, say so. No generic advice.`;
+
+    // r25b: append agent feedback for this product to the prompt
+    const gpTargetId = String(product.shopifyId || product.shopifyItemId || product.productId || '');
+    let promptWithFeedback = prompt;
+    if (gpTargetId) {
+      try {
+        const fb = await buildFeedbackPromptSection('google_product', gpTargetId);
+        if (fb) promptWithFeedback = prompt + fb;
+      } catch(e) { /* non-fatal */ }
+    }
+
+    // r25b: For routine (non-deep-dive) analysis, use Haiku-then-Opus to save cost.
+    // Deep dives (with page content + image) still go straight to Opus because they
+    // need vision + harder reasoning, and we use multimodal content blocks.
+    if (!includePageContent) {
+      try {
+        const ai = await aiHaikuThenOpus(promptWithFeedback, { max_tokens: 700 });
+        return res.json({
+          analysis: ai.text,
+          modelUsed: ai.modelUsed,
+          visionUsed: false,
+          pageFetched: false
+        });
+      } catch(e) {
+        console.error('Google AI analyse (light) error: ' + e.message);
+        return res.status(500).json({ error: e.message });
+      }
+    }
+
+    // Deep dive path (page content fetched) — stays on Opus, may include vision
+    const model = 'claude-opus-4-5-20251101';
+
+    // For deep dive: also fetch the hero image and let Claude actually see it.
+    const imageUrl = product.imageUrl || product.shopifyImageUrl;
+    let messageContent = [{ type: 'text', text: promptWithFeedback }];
+    let visionUsed = false;
+    if (includePageContent && imageUrl) {
+      try {
+        // Resize hint: ask Shopify CDN for a reasonable size to keep payload small.
+        // Shopify image URLs accept _<size> in the filename (e.g. image_512x.jpg)
+        const sizedUrl = imageUrl.replace(/(\.[a-z]+)(\?.*)?$/i, '_512x$1$2');
+        const imgRes = await axios.get(sizedUrl, {
+          responseType: 'arraybuffer',
+          timeout: 8000,
+          headers: { 'User-Agent': 'Mozilla/5.0 CampaignPulse' }
+        });
+        const contentType = imgRes.headers['content-type'] || 'image/jpeg';
+        // Only proceed if it's a real image
+        if (contentType.startsWith('image/')) {
+          const base64 = Buffer.from(imgRes.data).toString('base64');
+          // Cap at ~1MB to be safe
+          if (base64.length < 1500000) {
+            messageContent = [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: contentType.split(';')[0],
+                  data: base64
+                }
+              },
+              { type: 'text', text: promptWithFeedback + '\n\nThe attached image is the product\'s main photo as it appears on the Shopify page and in Google ads. In plain English, comment on the image quality: is it bright and clear, is the product easy to see, does it look professional, are there any obvious issues that might put off shoppers? Avoid jargon.' }
+            ];
+            visionUsed = true;
+          }
+        }
+      } catch(e) {
+        console.log('Image fetch for vision skipped: ' + e.message);
+      }
+    }
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: model,
+      max_tokens: 700,
+      messages: [{ role: 'user', content: messageContent }]
+    }, {
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+    });
+
+    res.json({
+      analysis: response.data.content[0].text,
+      modelUsed: model,
+      visionUsed: visionUsed,
+      pageFetched: !!pageSnippet && !pageSnippet.includes('could not fetch')
+    });
+  } catch(e) {
+    console.error('Google AI analyse error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Campaign-level AI analysis — looks at the whole campaign (all products + campaign metrics)
+// and gives campaign-focused advice (which products are dragging it down, are bids right,
+// is the campaign type appropriate, etc.)
+app.post('/api/google/ai-analyse-campaign', async function(req, res) {
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'No API key' });
+  const { campaignId } = req.body;
+  const requestedRefresh = !!req.body.forceRefresh;
+  if (!campaignId) return res.status(400).json({ error: 'No campaignId' });
+
+  // 24h lock — manager-only override
+  const u = req.user || {};
+  const isManager = ['manager','admin'].includes(u.role) || ['Bobby','Satyam','bobby','satyam'].includes(u.name || u.username || '');
+
+  // r29: model selection — Haiku default. Opus is "earned" — agents need ≥1 feedback row first.
+  let modelChoice = 'haiku';
+  if (req.body && req.body.model === 'opus') {
+    if (!isManager) {
+      let fbCount = 0;
+      try {
+        const fr = await db.query("SELECT COUNT(*)::int AS c FROM ai_feedback WHERE scope='google_campaign' AND target_id=$1", [String(campaignId)]);
+        fbCount = fr.rows[0] ? fr.rows[0].c : 0;
+      } catch(_) {}
+      if (fbCount < 1) {
+        return res.status(403).json({ error: 'Opus is unlocked after you submit feedback on the Haiku output. Run Haiku first, leave feedback, then Opus becomes available.' });
+      }
+    }
+    modelChoice = 'opus';
+  }
+
+  // Cache lookup (24h)
+  // r29d: agents who've earned Opus (submitted ≥1 feedback) bypass the cache lock for this run.
+  let agentEarnedOpusBypass = false;
+  if (modelChoice === 'opus' && !isManager) {
+    // We already verified above; just trust modelChoice — if it survived to here, agent has feedback.
+    agentEarnedOpusBypass = true;
+  }
+  if (db) {
+    try {
+      const cacheRes = await db.query("SELECT * FROM campaign_ai_cache WHERE campaign_id=$1", [String(campaignId)]);
+      if (cacheRes.rows.length) {
+        const ageHours = (Date.now() - new Date(cacheRes.rows[0].generated_at).getTime()) / 36e5;
+        if (ageHours < 24) {
+          // Inside lock window
+          const canBypass = isManager || agentEarnedOpusBypass;
+          if (!requestedRefresh || !canBypass) {
+            return res.json({
+              analysis: cacheRes.rows[0].analysis,
+              campaignName: cacheRes.rows[0].campaign_name,
+              modelUsed: cacheRes.rows[0].model_used,
+              cached: true,
+              ageHours: Math.round(ageHours * 10) / 10,
+              lockedForAgent: !isManager,
+              lockMessage: !isManager ? 'Already analysed in the last 24h. Manager can re-analyse.' : null
+            });
+          }
+          // Bypass — fall through to fresh run
+        }
+      }
+    } catch(e) { /* fall through to fresh */ }
+  }
+
+  try {
+    // Find all products in this campaign from current Google state
+    const allProducts = (googleState.products || []).filter(function(gp){
+      return String(gp.campaignId) === String(campaignId);
+    });
+    if (!allProducts.length) return res.status(404).json({ error: 'No data for this campaign' });
+
+    const campaignName = allProducts[0].campaignName || 'Unknown campaign';
+    const campaignType = allProducts[0].campaignType || 'Unknown type';
+    const totalSpend = allProducts.reduce(function(s, p){ return s + (p.spend || 0); }, 0);
+    const totalSales = allProducts.reduce(function(s, p){ return s + (p.sales || 0); }, 0);
+    const totalImpressions = allProducts.reduce(function(s, p){ return s + (p.impressions || 0); }, 0);
+    const totalClicks = allProducts.reduce(function(s, p){ return s + (p.clicks || 0); }, 0);
+    const totalConv = allProducts.reduce(function(s, p){ return s + (p.conversions || 0); }, 0);
+    const overallCtr = totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : '0';
+    const overallAcos = totalSales > 0 ? (totalSpend / totalSales * 100).toFixed(1) : 'N/A';
+    const overallCostPerConv = totalConv > 0 ? (totalSpend / totalConv).toFixed(2) : 'N/A';
+
+    // r28: TACOS = ad spend / TOTAL site sales (not just ad-attributed). Pull
+    // from shopifyState totals to give the AI a different, broader signal than ACOS.
+    let tacos = 'N/A';
+    try {
+      const totalShopify7d = (shopifyState.products || []).reduce(function(s, sp){ return s + (sp.revenue7d || 0); }, 0);
+      if (totalShopify7d > 0) tacos = (totalSpend / totalShopify7d * 100).toFixed(1);
+    } catch(_) {}
+
+    // Sort products by spend descending so AI sees biggest spenders first
+    const sorted = allProducts.slice().sort(function(a, b){ return (b.spend || 0) - (a.spend || 0); });
+    const top = sorted.slice(0, 15); // limit to 15 to keep prompt manageable
+
+    // Per-product Shopify net sales (7d) lookup so AI can compare each product's ad performance vs its Shopify performance
+    const shopifyByPid = {};
+    (shopifyState.products || []).forEach(function(sp){ shopifyByPid[String(sp.id)] = sp; });
+    function getShopifyNet7d(googleRow) {
+      if (!googleRow.shopifyItemId) return null;
+      const parts = String(googleRow.shopifyItemId).split('_');
+      if (parts.length < 4) return null;
+      const sp = shopifyByPid[parts[2]];
+      return sp ? (sp.revenue7d || 0) : null;
+    }
+
+    const productLines = top.map(function(p, i){
+      const name = p.name || p.productName || p.adGroupName || '(unknown)';
+      const spend = (p.spend || 0).toFixed(2);
+      const sales = (p.sales || 0).toFixed(2);
+      const acos = (p.acos != null && p.acos > 0) ? p.acos.toFixed(1) + '%' : 'N/A';
+      const costPerConv = (p.conversions > 0) ? '£' + (p.spend / p.conversions).toFixed(2) : 'N/A';
+      const shopifyNet = getShopifyNet7d(p);
+      const shopifyPart = shopifyNet != null ? ', Shopify net 7d £' + shopifyNet.toFixed(0) : '';
+      return (i+1) + '. ' + name.slice(0, 60)
+        + ' — Spend £' + spend + ', Google rev (lagged) £' + sales
+        + shopifyPart
+        + ', ' + (p.conversions || 0) + ' conv'
+        + ', Cost/conv ' + costPerConv
+        + ', ACOS ' + acos
+        + ' (' + (p.impressions || 0) + ' impr, ' + (p.clicks || 0) + ' clk)';
+    }).join('\n');
+
+    const remaining = sorted.length - top.length;
+    const remainingNote = remaining > 0
+      ? '\n... and ' + remaining + ' more product rows in this campaign.'
+      : '';
+
+    // r38: pull search-term data and feed it to the AI with the proper classification.
+    // Only off-topic / competitor terms are flagged as negative candidates. Page-issue terms
+    // are listed separately so the AI knows the page is the problem, not the keyword.
+    let searchTermsContext = '';
+    try {
+      if (db) {
+        // v10.1: aggregate by search_term in case the v10.1 script has row-multiplied
+        // terms across products (SUM over (campaign_id, search_term, product_item_id) → per-term).
+        const stRes = await db.query(
+          "SELECT search_term, MAX(match_type) AS match_type, " +
+          "  SUM(cost) AS cost, SUM(clicks)::int AS clicks, " +
+          "  SUM(conversions) AS conversions, SUM(conversions_value) AS conversions_value " +
+          "FROM google_search_terms WHERE campaign_id=$1 " +
+          "GROUP BY search_term " +
+          "ORDER BY SUM(cost) DESC LIMIT 50",
+          [String(campaignId)]
+        );
+        if (stRes.rows.length) {
+          const offTopic = [];
+          const pageIssue = [];
+          const converters = [];
+          stRes.rows.forEach(function(r){
+            const kind = classifySearchTerm(r, campaignName);
+            if (kind === 'off-topic') offTopic.push(r);
+            else if (kind === 'page-issue') pageIssue.push(r);
+            else if (kind === 'converting' || kind === 'healthy') {
+              if (Number(r.conversions_value) > 0) converters.push(r);
+            }
+          });
+
+          let block = '\n\n═══ SEARCH TERMS (last 7 days) ═══\n';
+          if (offTopic.length) {
+            block += 'OFF-TOPIC / COMPETITOR TERMS — these are genuine negative-keyword candidates because they contain words like "used/refurbished/parts/repair/ebay/amazon/argos" or competitor brand names:\n';
+            offTopic.slice(0, 10).forEach(function(r){
+              block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
+                + ', ' + r.clicks + ' clicks, 0 sales'
+                + (r.match_type ? ' (' + r.match_type.toLowerCase() + ')' : '') + '\n';
+            });
+          } else {
+            block += 'OFF-TOPIC / COMPETITOR TERMS: NONE FOUND. Do NOT recommend any negatives unless they appear in this section.\n';
+          }
+          if (pageIssue.length) {
+            block += '\nPAGE-ISSUE TERMS (clicks but no sales, BUT the term matches what this campaign sells) — these are NOT negative candidates. The product page, price, or attribution is the problem, not the keyword. DO NOT recommend adding these as negatives:\n';
+            pageIssue.slice(0, 8).forEach(function(r){
+              block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
+                + ', ' + r.clicks + ' clicks, 0 sales\n';
+            });
+          }
+          if (converters.length) {
+            block += '\nCONVERTING TERMS — already producing sales. Leave as-is unless ACOS is high. DO NOT recommend brand terms (e.g. "fk sports") as exact-match in Shopping campaigns — they already match via the product feed:\n';
+            converters.slice(0, 8).forEach(function(r){
+              block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
+                + ' spend, £' + Number(r.conversions_value).toFixed(2) + ' sales, '
+                + r.clicks + ' clicks'
+                + (r.match_type ? ' (' + r.match_type.toLowerCase() + ')' : '') + '\n';
+            });
+          }
+          searchTermsContext = block;
+        }
+      }
+    } catch(e) { console.error('[r38 campaign-ai search terms] ' + e.message); }
+
+    // r28: Sharper, campaign-specific prompt. Different from product-level critique.
+    // Focus areas: budget, bid strategy, ACOS/TACOS, keywords, negatives, conversion
+    // tracking, ad-vs-page coherence. Word-cap 150.
+    const prompt = 'You are a senior Google Ads analyst advising FK Sports UK on ONE campaign.\n\n'
+      + '═══ CONTEXT ═══\n'
+      + 'FK Sports UK is a Shopify store (fksports.co.uk) selling home fitness equipment AND baby products. ~150+ orders/day. Single Google Ads account covers all today.\n'
+      + 'Shopify is the source of truth for actual sales. Google "Revenue" lags 24-48h — when Google shows conversions but £0 revenue, that is normally attribution lag, not broken tracking.\n'
+      + 'ACOS = ad spend / Google-attributed revenue. TACOS = ad spend / TOTAL site revenue (broader picture — captures the halo effect on direct/organic traffic).\n\n'
+      + '═══ THIS CAMPAIGN ═══\n'
+      + 'Name: ' + campaignName + '\n'
+      + 'Type: ' + campaignType + '\n'
+      + 'Period: Last 7 days\n\n'
+      + 'TOTALS:\n'
+      + '- Spend: £' + totalSpend.toFixed(2) + '\n'
+      + '- Google-attributed sales (lagged): £' + totalSales.toFixed(2) + '\n'
+      + '- Impressions: ' + totalImpressions + '\n'
+      + '- Clicks: ' + totalClicks + ' (CTR ' + overallCtr + '%)\n'
+      + '- Conversions: ' + totalConv + '\n'
+      + '- ACOS: ' + overallAcos + (overallAcos === 'N/A' ? '' : '%') + '\n'
+      + '- TACOS (vs total store revenue 7d): ' + tacos + (tacos === 'N/A' ? '' : '%') + '\n'
+      + '- Cost per conversion: £' + overallCostPerConv + ' (use this when ACOS is N/A — tells you what one sale costs regardless of revenue lag)\n'
+      + '- Product rows in campaign: ' + allProducts.length + '\n\n'
+      + 'TOP PRODUCTS BY SPEND (with Shopify-side truth):\n' + productLines + remainingNote
+      + searchTermsContext + '\n\n'
+      + '═══ YOUR JOB — DIAGNOSE EACH OF THESE ═══\n'
+      + '1. BUDGET — too high? too low? being exhausted daily? sitting unspent?\n'
+      + '2. BID STRATEGY — given the campaign type, is it appropriate? Should it switch (e.g. Manual CPC → Max Conversions)?\n'
+      + '3. ACOS / TACOS — are they sustainable? trend?\n'
+      + '4. KEYWORDS — for Search campaigns: wasted spend on broad terms? are converting terms set as exact match? (If SEARCH TERMS section is provided above, NAME specific terms.)\n'
+      + '5. NEGATIVES — should specific negative keywords be added? (If SEARCH TERMS section lists wasted terms, recommend those AS NEGATIVES BY NAME.)\n'
+      + '6. CONVERSION TRACKING — does the conversion count look plausible vs clicks? if 1000 clicks → 0 conv, suspect tracking.\n'
+      + '7. AD-vs-PAGE COHERENCE — do the products being advertised match what the campaign is supposed to be about?\n\n'
+      + '═══ OUTPUT FORMAT ═══\n'
+      + 'STRICT 150 word cap. Format:\n\n'
+      + '**Verdict:** [healthy / waste / underspent / mistargeted / structural-fix-needed]\n\n'
+      + '**The problem:** [1-2 sentences naming THE specific issue with numbers]\n\n'
+      + '**1 thing to do this week:** [exact action — be concrete: "Pause product X", "Add negative keyword Y", "Lower daily budget from £A to £B", "Move product Z into its own campaign"]\n\n'
+      + '═══ HARD RULES ═══\n'
+      + '- DO NOT use these phrases: "monitor closely", "review performance", "optimise targeting", "consider A/B testing", "ongoing optimisation needed".\n'
+      + '- DO NOT recommend things at the product page level (titles, images, descriptions) — that is the product analyst\'s job.\n'
+      + '- DO quote real numbers and named products.\n'
+      + '- ONLY recommend negative keywords from the OFF-TOPIC / COMPETITOR TERMS list above. NEVER recommend a term from PAGE-ISSUE as a negative — the term is fine, the page or price is the problem.\n'
+      + '- A term with zero 7-day sales is NOT automatically a negative. For high-ticket items (£200+) the buyer journey is often 14-30 days, and the term may convert later. Only flag truly off-topic terms.\n'
+      + '- If a search term matches the campaign theme or any product name in this campaign, NEVER recommend it as a negative regardless of conversions.\n'
+      + '- DO NOT recommend brand terms (e.g. "fk sports", "fitness karma") as exact-match keywords in Shopping campaigns — Shopping campaigns already match brand searches via the product feed.\n'
+      + '- If the campaign is genuinely fine, say so in one line: "Verdict: healthy. ACOS X%, TACOS Y%, on track. No action needed this week."';
+
+    // r25b/r28: append agent feedback — handled via stronger buildFeedbackPromptSection.
+    let promptWithFeedback = prompt;
+    try {
+      const fb = await buildFeedbackPromptSection('google_campaign', String(campaignId));
+      if (fb) promptWithFeedback = prompt + fb;
+    } catch(e) { /* non-fatal */ }
+
+    // r28: model selection
+    const HAIKU = 'claude-haiku-4-5-20251001';
+    const OPUS  = 'claude-opus-4-5-20251101';
+    const modelToUse = modelChoice === 'opus' ? OPUS : HAIKU;
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const aiResp = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: modelToUse,
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: promptWithFeedback }]
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      timeout: 90000
+    });
+    const analysisText = aiResp.data.content[0].text;
+    const modelUsedActual = modelToUse;
+
+    // Persist to 24h cache
+    if (db) {
+      try {
+        await db.query(
+          "INSERT INTO campaign_ai_cache (campaign_id, campaign_name, generated_at, analysis, model_used) " +
+          "VALUES ($1, $2, NOW(), $3, $4) " +
+          "ON CONFLICT (campaign_id) DO UPDATE SET campaign_name=EXCLUDED.campaign_name, generated_at=NOW(), analysis=EXCLUDED.analysis, model_used=EXCLUDED.model_used",
+          [String(campaignId), campaignName, analysisText, modelUsedActual]
+        );
+      } catch(e) { console.error('Campaign AI cache persist error: ' + e.message); }
+    }
+
+    res.json({
+      analysis: analysisText,
+      campaignName: campaignName,
+      campaignType: campaignType,
+      productCount: allProducts.length,
+      modelUsed: modelUsedActual,
+      cached: false,
+      lockedForAgent: !isManager
+    });
+  } catch(e) {
+    console.error('Campaign AI analyse error: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Diagnostic endpoints (temporary — for Round N+5 fixes) ────────────────
+// These help us see real data structures without guessing. Remove after use.
+
+// Sample one refunded order — return its full structure so we can see the actual
+// fields Shopify returns for refunds (we may be reading the wrong field).
+app.get('/api/google/debug/refund-sample', async function(req, res) {
+  // r35.5: owner/manager guard added. Was reachable without auth (PUBLIC_PATHS
+  // included /google/debug/ until r35.5). Now requires login + privileged role.
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
+  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  const store = process.env.SHOPIFY_STORE;
+  if (!token || !store) return res.status(500).json({ error: 'No Shopify credentials' });
+  try {
+    // Search recent orders for one with refunds
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const orderRes = await axios.get('https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&financial_status=refunded,partially_refunded&created_at_min=' + since, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const orders = orderRes.data.orders || [];
+    const refundedOrder = orders.find(function(o){ return (o.refunds || []).length > 0; });
+    if (!refundedOrder) return res.json({ message: 'No refunded orders found in last 30 days' });
+
+    // Return just the relevant fields plus the raw refunds array so we can see structure
+    res.json({
+      orderName: refundedOrder.name,
+      orderId: refundedOrder.id,
+      createdAt: refundedOrder.created_at,
+      financialStatus: refundedOrder.financial_status,
+      currentTotalPrice: refundedOrder.current_total_price,
+      currentSubtotalPrice: refundedOrder.current_subtotal_price,
+      totalPrice: refundedOrder.total_price,
+      subtotalPrice: refundedOrder.subtotal_price,
+      totalDiscounts: refundedOrder.total_discounts,
+      totalRefunded: refundedOrder.total_refunded || refundedOrder.refund_amount || null,
+      totalShippingPriceSet: refundedOrder.total_shipping_price_set,
+      lineItems: (refundedOrder.line_items || []).map(function(li){
+        return {
+          productId: li.product_id,
+          title: li.title,
+          quantity: li.quantity,
+          price: li.price,
+          discountAllocations: li.discount_allocations
+        };
+      }),
+      refundsRaw: refundedOrder.refunds, // FULL refund objects so we can see all fields
+      refundsSummary: (refundedOrder.refunds || []).map(function(ref){
+        return {
+          createdAt: ref.created_at,
+          processedAt: ref.processed_at,
+          note: ref.note,
+          orderAdjustments: ref.order_adjustments,
+          transactions: (ref.transactions || []).map(function(t){
+            return { kind: t.kind, status: t.status, amount: t.amount };
+          }),
+          refundLineItems: (ref.refund_line_items || []).map(function(rli){
+            return {
+              quantity: rli.quantity,
+              subtotal: rli.subtotal,
+              subtotalSet: rli.subtotal_set,
+              totalTax: rli.total_tax,
+              productId: rli.line_item ? rli.line_item.product_id : null,
+              lineItemPrice: rli.line_item ? rli.line_item.price : null
+            };
+          })
+        };
+      })
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Comprehensive refund audit — fetches all refunds issued in the last N days and
+// dumps every field we might possibly need to read. This is the source-of-truth
+// view: if Shopify Analytics shows £6.46 in Returns for Sunday and we don't,
+// the answer is in here somewhere. Defaults to last 14 days.
+app.get('/api/google/debug/refund-audit', async function(req, res) {
+  // r35.5: owner/manager guard
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
+  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  const store = process.env.SHOPIFY_STORE;
+  if (!token || !store) return res.status(500).json({ error: 'No Shopify credentials' });
+
+  const days = parseInt(req.query.days || '14', 10);
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    // Use updated_at_min to catch refunds on old orders
+    const orderRes = await axios.get('https://' + store + '/admin/api/2021-07/orders.json?limit=250&status=any&updated_at_min=' + since, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const orders = orderRes.data.orders || [];
+
+    // Walk every refund and capture EVERY possible source of refund value
+    const refundsFlat = [];
+    let totalLineItemSubtotals = 0;
+    let totalAdjustmentRefundDiscrepancies = 0;
+    let totalAdjustmentShippingRefunds = 0;
+    let totalAdjustmentOther = 0;
+    let totalTransactionRefunds = 0;
+    const adjustmentKindsSeen = {};
+
+    orders.forEach(function(order) {
+      if (!(order.refunds || []).length) return;
+
+      (order.refunds || []).forEach(function(ref) {
+        // Sum all four possible refund-value sources for cross-check
+        const lineSubtotalSum = (ref.refund_line_items || []).reduce(function(s, rli){
+          return s + parseFloat(rli.subtotal || 0);
+        }, 0);
+
+        // order_adjustments by kind — refund_discrepancy, shipping_refund, other
+        const adjBuckets = { refund_discrepancy: 0, shipping_refund: 0, other: 0 };
+        (ref.order_adjustments || []).forEach(function(adj){
+          const kind = adj.kind || 'unknown';
+          adjustmentKindsSeen[kind] = (adjustmentKindsSeen[kind] || 0) + 1;
+          const amt = parseFloat(adj.amount || 0);
+          if (kind === 'refund_discrepancy') adjBuckets.refund_discrepancy += amt;
+          else if (kind === 'shipping_refund') adjBuckets.shipping_refund += amt;
+          else adjBuckets.other += amt;
+        });
+
+        // transactions of kind=refund (the actual money that left)
+        const txnRefundSum = (ref.transactions || []).filter(function(t){
+          return t.kind === 'refund' && t.status === 'success';
+        }).reduce(function(s, t){
+          return s + parseFloat(t.amount || 0);
+        }, 0);
+
+        totalLineItemSubtotals += lineSubtotalSum;
+        totalAdjustmentRefundDiscrepancies += adjBuckets.refund_discrepancy;
+        totalAdjustmentShippingRefunds += adjBuckets.shipping_refund;
+        totalAdjustmentOther += adjBuckets.other;
+        totalTransactionRefunds += txnRefundSum;
+
+        refundsFlat.push({
+          orderName: order.name,
+          orderId: order.id,
+          orderCreatedAt: order.created_at,
+          orderCancelledAt: order.cancelled_at,
+          orderFinancialStatus: order.financial_status,
+          refundCreatedAt: ref.created_at,
+          refundDateLondon: londonDateKey(new Date(ref.created_at)),
+          refundNote: ref.note,
+          // What we currently read (refund_line_items[].subtotal)
+          mySubtotalSum: Math.round(lineSubtotalSum * 100) / 100,
+          // Shipping refunds we currently miss
+          adjShippingRefundSum: Math.round(adjBuckets.shipping_refund * 100) / 100,
+          // Other adjustments
+          adjOtherSum: Math.round(adjBuckets.other * 100) / 100,
+          // Refund discrepancy (these cancel out so usually zero)
+          adjRefundDiscrepancySum: Math.round(adjBuckets.refund_discrepancy * 100) / 100,
+          // The actual money refunded via payment processor — true source of truth
+          txnRefundSum: Math.round(txnRefundSum * 100) / 100,
+          // Item count
+          refundedLineCount: (ref.refund_line_items || []).length,
+          adjustmentCount: (ref.order_adjustments || []).length
+        });
+      });
+    });
+
+    // Sort by refund date descending so most recent is first
+    refundsFlat.sort(function(a, b){ return new Date(b.refundCreatedAt) - new Date(a.refundCreatedAt); });
+
+    // Group by London date to compare against Shopify Analytics' "Returns" line
+    const byDate = {};
+    refundsFlat.forEach(function(r){
+      if (!byDate[r.refundDateLondon]) {
+        byDate[r.refundDateLondon] = { mySubtotalSum: 0, txnRefundSum: 0, adjShippingRefundSum: 0, adjOtherSum: 0, count: 0 };
+      }
+      byDate[r.refundDateLondon].mySubtotalSum += r.mySubtotalSum;
+      byDate[r.refundDateLondon].txnRefundSum += r.txnRefundSum;
+      byDate[r.refundDateLondon].adjShippingRefundSum += r.adjShippingRefundSum;
+      byDate[r.refundDateLondon].adjOtherSum += r.adjOtherSum;
+      byDate[r.refundDateLondon].count += 1;
+    });
+    Object.keys(byDate).forEach(function(k){
+      byDate[k].mySubtotalSum = Math.round(byDate[k].mySubtotalSum * 100) / 100;
+      byDate[k].txnRefundSum = Math.round(byDate[k].txnRefundSum * 100) / 100;
+      byDate[k].adjShippingRefundSum = Math.round(byDate[k].adjShippingRefundSum * 100) / 100;
+      byDate[k].adjOtherSum = Math.round(byDate[k].adjOtherSum * 100) / 100;
+    });
+
+    res.json({
+      windowDays: days,
+      ordersScanned: orders.length,
+      refundsFound: refundsFlat.length,
+      // Totals across the whole window
+      totals: {
+        myCurrentCalcSum: Math.round(totalLineItemSubtotals * 100) / 100,
+        // The truth: sum of refund transactions
+        actualRefundedToCustomerSum: Math.round(totalTransactionRefunds * 100) / 100,
+        // Things I currently miss
+        missedShippingRefunds: Math.round(totalAdjustmentShippingRefunds * 100) / 100,
+        missedOtherAdjustments: Math.round(totalAdjustmentOther * 100) / 100,
+        // Things to ignore (these net to zero typically)
+        refundDiscrepancyAdjustments: Math.round(totalAdjustmentRefundDiscrepancies * 100) / 100,
+      },
+      gapAnalysis: {
+        myCalcVsTransactionTruth: Math.round((totalLineItemSubtotals - totalTransactionRefunds) * 100) / 100,
+        explanation: 'If this is a positive number, my calc is OVER-counting (e.g. counting refunds before they were actually processed). If negative, I am UNDER-counting (e.g. missing shipping refunds). The closer to zero the better.'
+      },
+      adjustmentKindsSeen: adjustmentKindsSeen,
+      byDate: byDate,
+      // Show top 20 individual refunds
+      sampleRefunds: refundsFlat.slice(0, 20)
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Sample of GA4 itemNames vs Shopify titles so we can see why matching fails
+app.get('/api/google/debug/ga4-sample', async function(req, res) {
+  // r35.5: owner/manager guard
+  const role = String((req.user || {}).role || '').toLowerCase();
+  if (['owner','manager','admin'].indexOf(role) === -1) {
+    return res.status(403).json({ error: 'owner/manager only' });
+  }
+  if (!ga4State.refreshToken) return res.status(500).json({ error: 'GA4 not connected' });
+  if (!process.env.GA4_OAUTH_CLIENT_ID || !process.env.GA4_OAUTH_CLIENT_SECRET) return res.status(500).json({ error: 'No OAuth creds' });
+  try {
+    // Refresh the token to make a live call
+    const tokenRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      client_id: process.env.GA4_OAUTH_CLIENT_ID,
+      client_secret: process.env.GA4_OAUTH_CLIENT_SECRET,
+      refresh_token: ga4State.refreshToken,
+      grant_type: 'refresh_token'
+    }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const accessToken = tokenRes.data.access_token;
+    const url = 'https://analyticsdata.googleapis.com/v1beta/properties/' + process.env.GA4_PROPERTY_ID + ':runReport';
+
+    // Fetch raw itemName + eventName + count for begin_checkout, purchase, add_to_cart
+    const r = await axios.post(url, {
+      dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      dimensions: [{ name: 'itemName' }, { name: 'eventName' }],
+      metrics: [{ name: 'eventCount' }],
+      dimensionFilter: {
+        filter: { fieldName: 'eventName', inListFilter: { values: ['begin_checkout', 'purchase', 'add_to_cart'] } }
+      },
+      limit: 200
+    }, { headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' } });
+
+    const itemRows = (r.data.rows || []).map(function(row){
+      return {
+        itemName: row.dimensionValues[0].value,
+        event: row.dimensionValues[1].value,
+        count: parseInt(row.metricValues[0].value) || 0
+      };
+    });
+
+    // Build the same titleToPath map we use during sync
+    const titleToPath = {};
+    (shopifyState.products || []).forEach(function(p){
+      if (p.title && p.handle) titleToPath[p.title.toLowerCase().trim()] = '/products/' + p.handle;
+    });
+
+    // Compare
+    const matched = [];
+    const unmatched = [];
+    const seenItems = {};
+    itemRows.forEach(function(r){
+      const key = r.itemName.toLowerCase().trim();
+      if (seenItems[key]) return;
+      seenItems[key] = true;
+      if (titleToPath[key]) matched.push({ itemName: r.itemName, path: titleToPath[key] });
+      else unmatched.push({ itemName: r.itemName });
+    });
+
+    // For the unmatched, find the closest Shopify title (substring match) to help diagnose
+    const closestMatches = unmatched.slice(0, 30).map(function(u){
+      const lo = u.itemName.toLowerCase();
+      const closest = (shopifyState.products || []).find(function(p){
+        const t = (p.title || '').toLowerCase();
+        return lo.indexOf(t.slice(0, 20)) >= 0 || t.indexOf(lo.slice(0, 20)) >= 0;
+      });
+      return {
+        ga4ItemName: u.itemName,
+        closestShopifyTitle: closest ? closest.title : '(no obvious match)'
+      };
+    });
+
+    res.json({
+      totalGa4Rows: itemRows.length,
+      uniqueItemNamesInGa4: Object.keys(seenItems).length,
+      shopifyProductCount: (shopifyState.products || []).length,
+      matchedCount: matched.length,
+      unmatchedCount: unmatched.length,
+      sampleMatched: matched.slice(0, 10),
+      sampleUnmatched: closestMatches,
+      eventCounts: itemRows.reduce(function(acc, r){
+        acc[r.event] = (acc[r.event] || 0) + r.count;
+        return acc;
+      }, {}),
+      shopifySampleTitles: (shopifyState.products || []).slice(0, 10).map(function(p){ return p.title; })
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
