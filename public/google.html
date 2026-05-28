@@ -2615,20 +2615,33 @@ function closeAi() { /* no-op: AI is now inline inside the big modal */ }
 // If v10 script data isn't flowing yet, search-terms and segments sections
 // show "no data" placeholders. The card still works with just AI + stats.
 
-async function openCampaignDetailFromId(campaignId, campaignName) {
+// r38: openCampaignDetailFromId now supports an optional filter to a specific product.
+// When opened from a product, pass shopifyId + productName — the card opens in
+// filtered mode (blue banner, scoped stats, scoped AI verdict, scoped search terms,
+// only this product's variants). When opened directly from the campaigns list,
+// the third/fourth args are empty and the card shows the full unfiltered campaign.
+async function openCampaignDetailFromId(campaignId, campaignName, shopifyIdFilter, productNameFilter) {
   if (!campaignId) return;
-  const title = campaignName ? ('Campaign · ' + campaignName) : 'Campaign detail';
+  const isFiltered = !!shopifyIdFilter;
+  const title = campaignName ? ('Campaign · ' + campaignName + (isFiltered ? ' · scoped' : '')) : 'Campaign detail';
   showBigModal(title, '<div class="empty-state">Loading campaign detail…</div>');
 
   try {
-    const detailRes = await authedFetch('/api/google/campaign-detail/' + encodeURIComponent(campaignId));
+    const url = '/api/google/campaign-detail/' + encodeURIComponent(campaignId)
+      + (isFiltered ? '?shopifyId=' + encodeURIComponent(shopifyIdFilter) : '');
+    const detailRes = await authedFetch(url);
     const detail = await detailRes.json();
     if (!detailRes.ok || detail.error) throw new Error(detail.error || 'Failed to load campaign');
+
+    // r38: stash filter context so AI section + search terms can scope themselves
+    window.CP_CAMPAIGN_FILTER = isFiltered
+      ? { campaignId: campaignId, shopifyId: shopifyIdFilter, productName: productNameFilter || detail.scopedProductName || '' }
+      : null;
 
     // Render the shell — sections will be populated as the parallel fetches return
     renderRealCampaignCardShell(detail, campaignId);
 
-    // Fire the three v10 fetches in parallel + the AI fetch
+    // Fire AI + search terms + segments in parallel
     setTimeout(function(){ runCampaignAi(campaignId, detail.campaignName || campaignName || '', false); }, 20);
     loadCampaignSearchTerms(campaignId, detail.campaignName || campaignName || '');
     loadCampaignSegments(campaignId);
@@ -2640,55 +2653,91 @@ async function openCampaignDetailFromId(campaignId, campaignName) {
 
 // Build the shell of the real campaign card. Sections are populated lazily by the
 // load helpers below — they replace placeholder divs as their data arrives.
+// r38: now shows big stat cards (matching product modal Google Ads style), a blue
+// filter banner when scoped to a product, and an inline product list + search.
 function renderRealCampaignCardShell(j, campaignId) {
   const cur = j.current || {};
   const prior = j.prior; // may be null
   const campNameSafe = String(j.campaignName || '').replace(/'/g, "&#39;");
+  const isFiltered = !!j.scopedToProduct;
+  const scopedProductName = j.scopedProductName || (window.CP_CAMPAIGN_FILTER && window.CP_CAMPAIGN_FILTER.productName) || '';
 
-  // Helper for inline pill — value + WoW delta
-  function pill(label, curVal, priorVal, formatter, opts) {
+  // r38: big stat card (same style as product modal Google Ads cards)
+  function bigStat(label, curVal, priorVal, formatter, opts) {
     opts = opts || {};
     const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
     const tone = opts.tone || '';
     let bg = 'var(--bg2)';
-    let textColour = 'var(--text)';
-    if (tone === 'bad') { bg = '#fee2e2'; textColour = '#991b1b'; }
-    let deltaHtml = '';
+    let borderColour = 'var(--border)';
+    let labelColour = 'var(--text2)';
+    let valueColour = 'var(--text)';
+    if (tone === 'bad') {
+      bg = '#fef2f2';
+      borderColour = 'rgba(192,57,43,0.25)';
+      labelColour = '#991b1b';
+      valueColour = '#dc2626';
+    }
+    let extras = '';
     if (priorVal != null && priorVal !== 0) {
       const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
       const lowerIsBetter = !!opts.lowerIsBetter;
       const isUp = change > 0;
       const isGood = lowerIsBetter ? !isUp : isUp;
-      if (Math.abs(change) >= 1) {
+      if (Math.abs(change) < 1) {
+        extras = '<div style="font-size:10px;color:var(--text3);margin-top:4px">flat vs prev wk</div>';
+      } else {
         const arrow = isUp ? '↑' : '↓';
         const colour = isGood ? '#16a34a' : '#dc2626';
-        deltaHtml = ' <span style="color:' + colour + ';font-weight:600">' + arrow + Math.abs(change).toFixed(0) + '%</span>';
+        extras = '<div style="margin-top:4px;font-size:11px;color:' + colour + ';font-weight:600">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev wk</div>';
       }
+    } else if (opts.subtitle) {
+      extras = '<div style="font-size:10px;color:' + (tone === 'bad' ? '#991b1b' : 'var(--text3)') + ';margin-top:4px">' + opts.subtitle + '</div>';
     }
-    return '<div style="background:' + bg + ';padding:4px 12px;border-radius:14px;font-size:12px;color:' + textColour + '">'
-      + '<span style="color:var(--text3)">' + label + '</span> <strong>' + valDisplay + '</strong>' + deltaHtml
+    return '<div style="background:' + bg + ';padding:14px 16px;border-radius:10px;border:1px solid ' + borderColour + '">'
+      + '<div style="font-size:12px;color:' + labelColour + ';text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:700;color:' + valueColour + ';font-family:var(--mono);line-height:1.1">' + valDisplay + '</div>'
+      + extras
       + '</div>';
+  }
+
+  // r38: filtered-mode banner
+  let filterBanner = '';
+  if (isFiltered) {
+    filterBanner = '<div style="background:#e6f1fb;border-left:3px solid #185fa5;padding:10px 14px;border-radius:0 6px 6px 0;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+      + '<div style="font-size:13px;color:#0c447c"><strong>Filtered to:</strong> ' + escapeHtml(scopedProductName || 'this product') + ' · ' + j.productCount + ' variants of this product in this campaign</div>'
+      + '<div style="display:flex;gap:14px;font-size:12px">'
+      + (LAST_PRODUCT_FOR_BACK
+          ? '<button onclick="backToProductFromScoped()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font-family:inherit;font-size:12px">← Back to product</button>'
+          : '')
+      + '<button onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font-family:inherit;font-size:12px">Clear filter — see whole campaign</button>'
+      + '</div></div>';
   }
 
   const aiSection = '<div id="rcc-ai-shell" style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:18px">'
     + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;flex-wrap:wrap">'
-    + '<div style="font-size:13px;font-weight:700;color:var(--text)">🪄 Verdict <span id="ai-lock-badge-campaign" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>'
+    + '<div style="font-size:13px;font-weight:700;color:var(--text)">🪄 Verdict' + (isFiltered ? ' — ' + escapeHtml(scopedProductName || 'this product') + ' in this campaign' : '') + ' <span id="ai-lock-badge-campaign" style="font-size:11px;color:var(--text3);font-weight:500;margin-left:6px"></span></div>'
     + '<div id="ai-buttons-campaign" style="display:flex;gap:8px;flex-wrap:wrap"></div>'
     + '</div>'
     + '<div id="ai-content-campaign" style="font-size:14px;line-height:1.65;color:var(--text);white-space:pre-wrap">Loading…</div>'
     + '<div id="ai-meta-campaign" style="margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--mono)"></div>'
     + '</div>';
 
-  const pillRow = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;font-size:12px">'
-    + pill('Spend', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
-    + pill('Sales', cur.sales, prior && prior.sales, fmtCurrency)
-    + pill('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
-    + pill('Wasted', cur.wastedSpend, null, fmtCurrency, { tone: cur.wastedSpend > 5 ? 'bad' : '' })
-    + pill('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
-    + pill('Conv', cur.conversions, prior && prior.conversions, fmtNum)
+  // r38: stat cards replace the old pill row. Same big-card style used everywhere.
+  const statsHeader = '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:10px">'
+    + (isFiltered ? escapeHtml(scopedProductName || 'this product') + ' in this campaign — 7 days' : 'Campaign totals — 7 days')
+    + '</div>';
+  const statsGrid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px">'
+    + bigStat('Spend', cur.spend, prior && prior.spend, fmtCurrency, { lowerIsBetter: true })
+    + bigStat('Sales', cur.sales, prior && prior.sales, fmtCurrency)
+    + bigStat('ACOS', cur.acos, prior && prior.acos, function(v){ return fmtPct(v); }, { lowerIsBetter: true, tone: cur.acos > 30 ? 'bad' : '' })
+    + bigStat('Wasted', cur.wastedSpend, null, fmtCurrency, { tone: cur.wastedSpend > 5 ? 'bad' : '', subtitle: cur.wastedSpend > 0 ? 'spend with £0 sales' : '' })
+    + bigStat('Clicks', cur.clicks, prior && prior.clicks, fmtNum)
+    + bigStat('Conv', cur.conversions, prior && prior.conversions, fmtNum)
+    + bigStat('CTR', cur.ctr, null, function(v){ return v ? v.toFixed(2) + '%' : '—'; })
+    + bigStat('Cost/conv', cur.costPerConv, null, function(v){ return v ? fmtCurrency(v) : '—'; })
     + '</div>';
 
-  // Search terms placeholder — replaced by loadCampaignSearchTerms
+  // Search terms placeholder — replaced by loadCampaignSearchTerms (r38: 3-category)
   const searchTermsPlaceholder = '<div id="rcc-search-terms" style="margin-bottom:18px">'
     + '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Search terms</div>'
     + '<div style="font-size:12px;color:var(--text3);padding:14px;background:var(--bg2);border-radius:6px;text-align:center">Loading search-term data…</div>'
@@ -2697,76 +2746,130 @@ function renderRealCampaignCardShell(j, campaignId) {
   // Segments placeholder — replaced by loadCampaignSegments
   const segmentsPlaceholder = '<div id="rcc-segments" style="margin-bottom:18px"></div>';
 
-  // Footer link to products list (the existing campaign block expand-products view in the list)
-  const productsLink = '<div style="margin-top:18px;padding:10px 14px;background:var(--bg2);border-radius:6px;font-size:12px;color:var(--text3);display:flex;gap:10px;align-items:center;justify-content:space-between">'
-    + '<span>Want to see products in this campaign?</span>'
-    + '<button class="btn btn-ghost" onclick="renderCampaignProductsInModal(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="font-size:12px">Show product list (' + (j.productCount || 0) + ') →</button>'
-    + '</div>';
+  // r38: inline product list with search bar (always visible now — no secondary view).
+  // Renders directly from j.products (already returned by campaign-detail endpoint).
+  const products = j.products || [];
+  window.CP_CAMPAIGN_PRODUCTS = products;
+  const productListSection = '<div style="margin-top:18px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;flex-wrap:wrap;gap:8px">'
+    + '<div style="font-size:13px;font-weight:600">Products in this campaign · <span id="cp-campaign-product-count">' + products.length + '</span></div>'
+    + '<input id="cp-campaign-product-search" type="text" placeholder="Search products…" '
+    + 'style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:inherit;font-size:12px;min-width:200px" '
+    + 'oninput="filterCampaignProductsInModal(this.value)">'
+    + '</div>'
+    + '<div id="cp-campaign-products-list" class="campaign-products" style="display:block;max-height:600px;overflow-y:auto">'
+    + (products.length ? products.map(productSubrow).join('') : '<div class="empty-state" style="padding:20px;text-align:center;color:var(--text3)">No products in this campaign.</div>')
+    + '</div></div>';
 
-  const header = '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">' + j.productCount + ' products' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>';
+  const header = '<div style="font-size:13px;color:var(--text2);margin-bottom:14px">'
+    + (isFiltered ? (j.productCount + ' of ' + j.fullProductCount + ' products shown') : (j.productCount + ' products'))
+    + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>';
 
   document.getElementById('big-modal-body').innerHTML =
-    header + aiSection + pillRow + searchTermsPlaceholder + segmentsPlaceholder + productsLink;
+    header + filterBanner + aiSection + statsHeader + statsGrid + searchTermsPlaceholder + segmentsPlaceholder + productListSection;
+  setTimeout(populateFrictionBadges, 50);
 }
 
 // Fetch and render the search-terms table.
+// r38: now classifies into 4 buckets (converting / page-issue / off-topic / healthy)
+// instead of 2 (converting / wasting). Filtered mode scopes terms to a product.
 // Empty state if v10 script hasn't started pushing data yet.
 async function loadCampaignSearchTerms(campaignId, campaignName) {
   const container = document.getElementById('rcc-search-terms');
   if (!container) return;
   try {
-    const r = await authedFetch('/api/google/campaign/' + encodeURIComponent(campaignId) + '/search-terms');
+    const filter = window.CP_CAMPAIGN_FILTER;
+    const url = '/api/google/campaign/' + encodeURIComponent(campaignId) + '/search-terms'
+      + (filter && filter.shopifyId ? '?shopifyId=' + encodeURIComponent(filter.shopifyId) : '');
+    const r = await authedFetch(url);
     const j = await r.json();
     if (!j.hasData || !j.terms || !j.terms.length) {
-      container.innerHTML = '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Search terms</div>'
+      const emptyMsg = filter
+        ? 'No search terms matched ' + escapeHtml(filter.productName || 'this product') + ' in this campaign. Either the term-to-product mapping is too strict, or no terms have triggered this product in 7 days.'
+        : 'No search-term data yet. This populates once the v10 Google Ads Script has run (typically within 30 min of installation).';
+      container.innerHTML = '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Search terms' + (filter ? ' — for ' + escapeHtml(filter.productName || 'this product') + ' only' : '') + '</div>'
         + '<div style="font-size:12px;color:var(--text3);padding:14px;background:var(--bg2);border-radius:6px;text-align:center">'
-        + 'No search-term data yet. This populates once the v10 Google Ads Script has run (typically within 30 min of installation).'
+        + emptyMsg
         + (j.error ? '<br><span style="color:#dc2626">Error: ' + escapeHtml(j.error) + '</span>' : '')
         + '</div>';
       return;
     }
     const terms = j.terms;
-    const showCap = 12;
+    const showCap = 15;
     const visible = terms.slice(0, showCap);
-    const wasterCount = terms.filter(function(t){ return t.kind === 'wasting'; }).length;
+    const offTopicCount = terms.filter(function(t){ return t.kind === 'off-topic'; }).length;
+    const pageIssueCount = terms.filter(function(t){ return t.kind === 'page-issue'; }).length;
     const converterCount = terms.filter(function(t){ return t.kind === 'converting'; }).length;
 
     const campNameSafe = String(campaignName || '').replace(/'/g, "&#39;");
     const rows = visible.map(function(t){
       const termSafe = String(t.searchTerm || '').replace(/'/g, "&#39;");
-      const rowBg = t.kind === 'wasting' ? '#fee2e2' : (t.kind === 'converting' ? '#dcfce7' : 'transparent');
-      const spendColour = t.kind === 'wasting' ? '#dc2626' : 'var(--text)';
-      const salesColour = t.kind === 'wasting' ? '#dc2626' : (t.kind === 'converting' ? '#16a34a' : 'var(--text)');
-      const fontWeightSpend = t.kind === 'wasting' ? '600' : '400';
-      const fontWeightSales = t.kind === 'converting' ? '600' : '400';
-
+      let rowBg = 'transparent';
+      let spendColour = 'var(--text)';
       let actionCell = '<span style="font-size:11px;color:var(--text3)">healthy</span>';
-      if (t.kind === 'wasting') {
-        actionCell = '<button class="rcc-action-btn" data-action="add_negative" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" style="font-size:10px;padding:3px 8px;background:#dc2626;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit">Add negative</button>';
+
+      if (t.kind === 'off-topic') {
+        // True negative candidate — contains off-topic words or competitor brands
+        rowBg = '#fee2e2';
+        spendColour = '#dc2626';
+        actionCell = '<button class="rcc-action-btn" data-action="add_negative" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" '
+          + 'style="font-size:10px;padding:3px 8px;background:#dc2626;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit" '
+          + 'title="This term contains off-topic words (used/refurbished/competitor brand) — likely a true negative">Add negative</button>';
+      } else if (t.kind === 'page-issue') {
+        // Term matches what we sell but isn't converting — page or price is the problem
+        rowBg = '#fef3c7';
+        actionCell = '<span style="font-size:10px;color:#92400e;background:#fef3c7;padding:3px 8px;border-radius:4px;border:1px solid #fde68a" '
+          + 'title="The term matches what this campaign sells. The page or price is the problem, not the keyword. Investigate the product page before flagging this as negative.">page issue — not term</span>'
+          + ' <button class="rcc-action-btn" data-action="add_negative" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" '
+          + 'style="font-size:10px;padding:3px 6px;background:transparent;color:var(--text3);border:1px dashed var(--border);border-radius:4px;cursor:pointer;font-family:inherit;margin-left:4px" '
+          + 'title="If you really want to add as negative anyway (e.g. you do not actually sell this), click here.">···</button>';
       } else if (t.kind === 'converting') {
-        actionCell = '<button class="rcc-action-btn" data-action="add_exact" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" style="font-size:10px;padding:3px 8px;background:#16a34a;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit">Add exact</button>';
+        // Already producing sales — green
+        rowBg = '#dcfce7';
+        actionCell = '<button class="rcc-action-btn" data-action="add_exact" data-term="' + termSafe + '" data-campaign-id="' + campaignId + '" data-campaign-name="' + campNameSafe + '" '
+          + 'style="font-size:10px;padding:3px 8px;background:#16a34a;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit" '
+          + 'title="Promote to exact match in a Search campaign (does not apply to Shopping campaigns — brand and keyword matching there is automatic)">Add exact</button>';
       }
+
+      const salesColour = t.kind === 'converting' ? '#16a34a' : 'var(--text)';
+      const fontWeightSales = t.kind === 'converting' ? '600' : '400';
 
       return '<tr style="border-bottom:0.5px solid var(--border);background:' + rowBg + '">'
         + '<td style="padding:8px 6px">' + escapeHtml(t.searchTerm) + '</td>'
         + '<td style="padding:8px 6px;text-align:right;font-size:10px;color:var(--text3)">' + (t.matchType ? String(t.matchType).toLowerCase() : '—') + '</td>'
-        + '<td style="padding:8px 6px;text-align:right;color:' + spendColour + ';font-weight:' + fontWeightSpend + '">' + fmtCurrency(t.cost) + '</td>'
+        + '<td style="padding:8px 6px;text-align:right;color:' + spendColour + ';font-weight:' + (t.kind === 'off-topic' ? '600' : '400') + '">' + fmtCurrency(t.cost) + '</td>'
         + '<td style="padding:8px 6px;text-align:right">' + fmtNum(t.clicks) + '</td>'
         + '<td style="padding:8px 6px;text-align:right;color:' + salesColour + ';font-weight:' + fontWeightSales + '">' + fmtCurrency(t.sales) + '</td>'
         + '<td style="padding:8px 6px;text-align:right">' + actionCell + '</td>'
         + '</tr>';
     }).join('');
 
+    // r38: warning banner — many flagged terms are actually inventory terms with bad page CVR
+    const warningBanner = pageIssueCount > 0
+      ? '<div style="background:#fef3c7;border-left:3px solid #f59e0b;padding:8px 12px;border-radius:0 4px 4px 0;margin-bottom:10px;font-size:11px;color:#92400e;line-height:1.5">'
+        + '<strong>Read before adding negatives:</strong> ' + pageIssueCount + ' term(s) below are flagged "page issue — not term". '
+        + 'These match what the campaign sells but aren\'t converting in 7 days. For high-ticket items the buyer journey can be 14-30 days. '
+        + 'Investigate the product page or pricing before adding as negative.'
+        + '</div>'
+      : '';
+
     const summary = '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">'
       + 'Showing ' + visible.length + ' of ' + terms.length + ' terms · '
-      + wasterCount + ' wasting · ' + converterCount + ' converting · sorted by waste first, then by spend'
+      + offTopicCount + ' off-topic · ' + pageIssueCount + ' page-issue · ' + converterCount + ' converting'
+      + ' · sorted: off-topic first, then by spend'
+      + (j.scopedToProduct ? ' · <strong style="color:#0c447c">scoped to product (text-match)</strong>' : '')
       + '</div>';
 
-    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
-      + '<div style="font-size:13px;font-weight:600">Search terms — top by spend</div>'
+    const titleText = j.scopedToProduct
+      ? 'Search terms — for ' + escapeHtml((filter && filter.productName) || 'this product') + ' only'
+      : 'Search terms — top by spend';
+
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:8px">'
+      + '<div style="font-size:13px;font-weight:600">' + titleText + '</div>'
       + '<div style="font-size:11px;color:var(--text3)">click action to record decision</div>'
       + '</div>'
       + summary
+      + warningBanner
       + '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">'
       + '<thead><tr style="border-bottom:0.5px solid var(--border)">'
       + '<th style="text-align:left;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500">Search term</th>'
@@ -2774,7 +2877,7 @@ async function loadCampaignSearchTerms(campaignId, campaignName) {
       + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:70px">Spend</th>'
       + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:60px">Clicks</th>'
       + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:70px">Sales</th>'
-      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:100px">Action</th>'
+      + '<th style="text-align:right;padding:8px 6px;font-size:11px;color:var(--text3);font-weight:500;width:160px">Status / Action</th>'
       + '</tr></thead><tbody>' + rows + '</tbody></table>';
 
     // Wire the action buttons
@@ -2886,43 +2989,6 @@ async function loadCampaignSegments(campaignId) {
   }
 }
 
-// Render the products inside a campaign as a secondary view inside the modal.
-// User opts into this by clicking "Show product list →" — kept secondary because
-// the campaign card's purpose is traffic/keyword analysis, not product analysis.
-async function renderCampaignProductsInModal(campaignId, campaignName) {
-  const body = document.getElementById('big-modal-body');
-  if (!body) return;
-  body.innerHTML = '<div class="empty-state">Loading products in campaign…</div>';
-  try {
-    const r = await authedFetch('/api/google/campaign-detail/' + encodeURIComponent(campaignId));
-    const j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error || 'Failed');
-    const products = j.products || [];
-    const campNameSafe = String(campaignName || '').replace(/'/g, "&#39;");
-    const back = '<button class="btn btn-ghost" onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="font-size:13px;margin-bottom:14px">← Back to campaign</button>';
-
-    // r37: stash products on window so the search filter can re-render without re-fetching
-    window.CP_CAMPAIGN_PRODUCTS = products;
-
-    // Search input — filters by title / displayName / productName / productGroupPath in memory
-    const searchBar = '<div style="margin-bottom:12px">'
-      + '<input id="cp-campaign-product-search" type="text" placeholder="Search products in this campaign…" '
-      + 'style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:inherit;font-size:13px" '
-      + 'oninput="filterCampaignProductsInModal(this.value)">'
-      + '</div>';
-
-    const productsHtml = products.length
-      ? products.map(productSubrow).join('')
-      : '<div class="empty-state">No products in this campaign.</div>';
-    body.innerHTML = back
-      + '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Products in this campaign · <span id="cp-campaign-product-count">' + products.length + '</span> total</div>'
-      + searchBar
-      + '<div id="cp-campaign-products-list" class="campaign-products" style="display:block">' + productsHtml + '</div>';
-    setTimeout(populateFrictionBadges, 50);
-  } catch(e) {
-    body.innerHTML = '<div style="padding:20px;color:var(--red);font-size:13px">Could not load products: ' + escapeHtml(e.message) + '</div>';
-  }
-}
 
 // r37: in-memory filter for the campaign product list. Matches title / displayName /
 // productName / productGroupPath case-insensitive.
@@ -2984,16 +3050,18 @@ function renderCampaignProductScopedBody(j, campaignId) {
   const prior = j.prior;
   const variants = j.variants || [];
   const campNameSafe = String(j.campaignName || '').replace(/'/g, "&#39;");
+  const shopifyIdSafe = j.shopifyId || (j.scopedShopifyId || '');
+  const productNameSafe = String(j.productName || '').replace(/'/g, "&#39;");
 
   // Inline prev-week stat tile (no separate strip — pattern matches product modal).
   function prevWkLine(curVal, priorVal, formatter, opts) {
     opts = opts || {};
     if (priorVal == null || priorVal === 0) {
-      return '<div style="font-size:10px;color:var(--text3);margin-top:2px">no prior data</div>';
+      return '<div style="font-size:10px;color:var(--text3);margin-top:4px">no prior data</div>';
     }
     const change = ((curVal - priorVal) / Math.abs(priorVal)) * 100;
     if (Math.abs(change) < 1) {
-      return '<div style="font-size:10px;color:var(--text3);margin-top:2px">flat vs prev wk · prev: ' + formatter(priorVal) + '</div>';
+      return '<div style="font-size:10px;color:var(--text3);margin-top:4px">flat vs prev wk · prev: ' + formatter(priorVal) + '</div>';
     }
     const lowerIsBetter = !!opts.lowerIsBetter;
     const isUp = change > 0;
@@ -3007,7 +3075,13 @@ function renderCampaignProductScopedBody(j, campaignId) {
   function statTile(label, curVal, priorVal, formatter, opts) {
     opts = opts || {};
     const valDisplay = formatter ? formatter(curVal) : (curVal == null ? '—' : curVal);
-    return '<div class="stat-item"><div class="stat-label">' + label + '</div><div class="stat-value">' + valDisplay + '</div>'
+    // r38: big-card style — same look as Google Ads stats on the product modal.
+    const isAcosBad = (label === 'ACOS' && Number(curVal) >= 50);
+    const borderColour = isAcosBad ? 'rgba(192,57,43,0.25)' : 'var(--border)';
+    const valueColour = isAcosBad ? 'var(--red)' : 'var(--text)';
+    return '<div style="background:var(--bg2);padding:14px 16px;border-radius:10px;border:1px solid ' + borderColour + '">'
+      + '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:700;color:' + valueColour + ';font-family:var(--mono);line-height:1.1">' + valDisplay + '</div>'
       + (priorVal !== undefined ? prevWkLine(curVal, priorVal, formatter, opts) : '')
       + '</div>';
   }
@@ -3016,7 +3090,8 @@ function renderCampaignProductScopedBody(j, campaignId) {
   const backLink = LAST_PRODUCT_FOR_BACK
     ? '<button onclick="backToProductFromScoped()" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit">← Back to product</button>'
     : '';
-  const wholeCampaignLink = '<button onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\')" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit;margin-left:14px">Open whole campaign card →</button>';
+  // r38: open whole campaign in FILTERED MODE so it scopes to this product
+  const wholeCampaignLink = '<button onclick="openCampaignDetailFromId(\'' + campaignId + '\',\'' + campNameSafe + '\',\'' + shopifyIdSafe + '\',\'' + productNameSafe + '\')" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;font-family:inherit;margin-left:14px">Open whole campaign card →</button>';
 
   const header = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' + backLink + wholeCampaignLink + '</div>'
     + '<div style="font-size:13px;color:var(--text2);margin-bottom:6px">In campaign: <strong style="color:var(--text)">' + escapeHtml(j.campaignName) + '</strong>' + (j.campaignType ? ' · ' + typeBadge(j.campaignType) : '') + '</div>'
@@ -3039,22 +3114,28 @@ function renderCampaignProductScopedBody(j, campaignId) {
     + '</div>';
 
   // Variant breakdown — informational table, no click handlers
+  // r38: SKU is the primary identifier; long variant ID demoted to small mono subtext
   let variantsHtml = '';
   if (variants.length > 1) {
     const variantRows = variants.map(function(v){
+      const skuCell = v.variantSku
+        ? '<strong style="font-size:12px">' + escapeHtml(v.variantSku) + '</strong>'
+          + '<span style="display:block;font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:1px">' + escapeHtml(String(v.variantId || '—')) + '</span>'
+        : '<span style="font-family:var(--mono);font-size:11px;color:var(--text2)">' + escapeHtml(String(v.variantId || '—')) + '</span>'
+          + '<span style="display:block;font-size:10px;color:var(--text3);margin-top:1px;font-style:italic">no SKU in Shopify</span>';
       return '<tr style="border-bottom:0.5px solid var(--border)">'
-        + '<td style="padding:6px 8px;font-family:var(--mono);font-size:11px;color:var(--text2)">' + escapeHtml(String(v.variantId || '—')) + '</td>'
-        + '<td style="padding:6px 8px;font-size:12px">' + escapeHtml(v.adGroupName || '—') + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.spend) + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtCurrency(v.sales) + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + fmtNum(v.clicks) + '</td>'
-        + '<td style="padding:6px 8px;text-align:right;font-size:12px">' + (v.acos ? fmtPct(v.acos) : '—') + '</td>'
+        + '<td style="padding:8px">' + skuCell + '</td>'
+        + '<td style="padding:8px;font-size:12px">' + escapeHtml(v.adGroupName || '—') + '</td>'
+        + '<td style="padding:8px;text-align:right;font-size:12px">' + fmtCurrency(v.spend) + '</td>'
+        + '<td style="padding:8px;text-align:right;font-size:12px">' + fmtCurrency(v.sales) + '</td>'
+        + '<td style="padding:8px;text-align:right;font-size:12px">' + fmtNum(v.clicks) + '</td>'
+        + '<td style="padding:8px;text-align:right;font-size:12px">' + (v.acos ? fmtPct(v.acos) : '—') + '</td>'
         + '</tr>';
     }).join('');
     variantsHtml = '<div style="margin-top:8px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Variant breakdown · ' + variants.length + ' variants</div>'
       + '<table style="width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden">'
       + '<thead><tr style="background:var(--bg);border-bottom:1px solid var(--border)">'
-      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Variant ID</th>'
+      + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">SKU / Variant</th>'
       + '<th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Ad group</th>'
       + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Spend</th>'
       + '<th style="text-align:right;padding:6px 8px;font-size:11px;color:var(--text3);font-weight:600">Sales</th>'
@@ -3199,55 +3280,61 @@ function openProductDetailFromObj(p) {
     // data — sum of indices 0..6 = previous week, sum of 7..13 = this week).
     // Other stats (Revenue 30d, Units 30d, Price) stay plain — we don't have
     // 30d prev data, and price doesn't have a "vs prev" concept.
+    // r38: Sales section now uses the big-card stat() helper (same style as Google Ads section).
+    // Revenue 7d and Units 7d show a prev-week line built into the card.
+    // Prev-week values are computed inline from dailySales14d / dailyUnits14d.
     '<div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:24px 0 4px">Sales (Shopify, estimate)</div>' +
     '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Net of refunds. May differ from Shopify Analytics by ~5% due to refund attribution timing.</div>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">' +
     (function(){
-      // Inline prev-week helper for Sales section. Reads dailySales14d / dailyUnits14d.
       const sales14 = Array.isArray(p.dailySales14d) ? p.dailySales14d : null;
       const units14 = Array.isArray(p.dailyUnits14d) ? p.dailyUnits14d : null;
       const has14Sales = sales14 && sales14.length >= 14;
       const has14Units = units14 && units14.length >= 14;
 
-      function prevWkLine(curVal, prevVal, formatter) {
-        if (prevVal == null || prevVal === 0) {
-          return '<div style="font-size:10px;color:var(--text3);margin-top:2px">no prior data</div>';
-        }
+      // Build a prev-week extras string for the stat() helper — same format as
+      // renderProductWoWStrip uses on the Google Ads cards. The stat() helper takes
+      // a prevSlotKey arg; we'll fill those slots synchronously here.
+      // Approach: render the cards, then immediately fill the slot divs via inline script.
+      // Simpler: build cards with a 4th arg containing the inline prev-week HTML directly.
+      // I'll inline the HTML into the stat() call by post-processing the returned cards.
+
+      function fmtPrevLine(curVal, prevVal, formatter, lowerIsBetter) {
+        if (prevVal == null || prevVal === 0) return '<div style="font-size:10px;color:var(--text3);margin-top:4px">no prior data</div>';
         const change = ((curVal - prevVal) / Math.abs(prevVal)) * 100;
-        if (Math.abs(change) < 1) {
-          return '<div style="font-size:10px;color:var(--text3);margin-top:2px">flat vs prev wk · prev: ' + formatter(prevVal) + '</div>';
-        }
-        const arrow = change > 0 ? '↑' : '↓';
-        const colour = change > 0 ? '#16a34a' : '#dc2626';
-        return '<div style="font-size:11px;color:' + colour + ';margin-top:2px;font-weight:600">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev wk</div>'
+        if (Math.abs(change) < 1) return '<div style="font-size:10px;color:var(--text3);margin-top:4px">flat vs prev wk · prev: ' + formatter(prevVal) + '</div>';
+        const isUp = change > 0;
+        const isGood = lowerIsBetter ? !isUp : isUp;
+        const arrow = isUp ? '↑' : '↓';
+        const colour = isGood ? '#16a34a' : '#dc2626';
+        return '<div style="margin-top:4px;font-size:11px;color:' + colour + ';font-weight:600">' + arrow + ' ' + Math.abs(change).toFixed(0) + '% vs prev wk</div>'
           + '<div style="font-size:10px;color:var(--text3)">prev: ' + formatter(prevVal) + '</div>';
       }
 
-      // Revenue 7d with prev-week line
-      let revBlock;
+      // Use a local "big-card" function that mirrors stat() but with inline extras.
+      function bigCard(label, value, extras) {
+        return '<div style="background:var(--bg2);padding:14px 16px;border-radius:10px;border:1px solid var(--border)">'
+          + '<div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;margin-bottom:6px">' + label + '</div>'
+          + '<div style="font-size:22px;font-weight:700;color:var(--text);font-family:var(--mono);line-height:1.1">' + value + '</div>'
+          + (extras || '')
+          + '</div>';
+      }
+
+      let rev7Extras = '', units7Extras = '';
       if (has14Sales) {
         const prevRev = Math.round(sales14.slice(0, 7).reduce(function(s, v){ return s + (Number(v) || 0); }, 0) * 100) / 100;
-        revBlock = '<div class="stat-item"><div class="stat-label">Revenue 7d</div><div class="stat-value">' + fmtCurrency(p.revenue7d) + '</div>'
-          + prevWkLine(Number(p.revenue7d) || 0, prevRev, fmtCurrency) + '</div>';
-      } else {
-        revBlock = '<div class="stat-item"><div class="stat-label">Revenue 7d</div><div class="stat-value">' + fmtCurrency(p.revenue7d) + '</div></div>';
+        rev7Extras = fmtPrevLine(Number(p.revenue7d) || 0, prevRev, fmtCurrency, false);
       }
-
-      // Units 7d with prev-week line
-      let unitsBlock;
       if (has14Units) {
         const prevUnits = units14.slice(0, 7).reduce(function(s, v){ return s + (Number(v) || 0); }, 0);
-        unitsBlock = '<div class="stat-item"><div class="stat-label">Units 7d</div><div class="stat-value">' + fmtNum(p.unitsSold7d) + '</div>'
-          + prevWkLine(Number(p.unitsSold7d) || 0, prevUnits, fmtNum) + '</div>';
-      } else {
-        unitsBlock = '<div class="stat-item"><div class="stat-label">Units 7d</div><div class="stat-value">' + fmtNum(p.unitsSold7d) + '</div></div>';
+        units7Extras = fmtPrevLine(Number(p.unitsSold7d) || 0, prevUnits, fmtNum, false);
       }
 
-      return revBlock
-        + '<div class="stat-item"><div class="stat-label">Revenue 30d</div><div class="stat-value">' + fmtCurrency(p.revenue30d) + '</div></div>'
-        + unitsBlock
-        + '<div class="stat-item"><div class="stat-label">Units 30d</div><div class="stat-value">' + fmtNum(p.unitsSold30d) + '</div></div>'
-        + '<div class="stat-item"><div class="stat-label">Price</div><div class="stat-value">' + (p.price != null ? fmtCurrency(p.price) : '—') + '</div></div>';
+      return bigCard('Revenue 7d', fmtCurrency(p.revenue7d), rev7Extras)
+        + bigCard('Revenue 30d', fmtCurrency(p.revenue30d), '')
+        + bigCard('Units 7d', fmtNum(p.unitsSold7d), units7Extras)
+        + bigCard('Units 30d', fmtNum(p.unitsSold30d), '')
+        + bigCard('Price', p.price != null ? fmtCurrency(p.price) : '—', '');
     })() +
     '</div>' +
 

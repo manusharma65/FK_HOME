@@ -14097,11 +14097,26 @@ app.get('/api/google/campaign-product-detail/:campaignId/:shopifyId', async func
 
   // 4. Variant breakdown — return the raw rows so the modal can show "this product
   //    appears as N variants in this campaign" with per-variant numbers.
+  // r38: SKU enrichment for the variants list. Look up each variant's SKU
+  // from shopifyState.products[].variants[].sku.
+  const variantSkuMap = {};
+  try {
+    (shopifyState.products || []).forEach(function(sp){
+      if (Array.isArray(sp.variants)) {
+        sp.variants.forEach(function(v){
+          if (v && v.id && v.sku) variantSkuMap[String(v.id)] = String(v.sku);
+        });
+      }
+    });
+  } catch(_) {}
+
   const variants = currentRows.map(function(p){
     const parts = String(p.shopifyItemId || '').split('_');
+    const vid = parts.length >= 4 ? parts[3] : null;
     return {
       shopifyItemId: p.shopifyItemId,
-      variantId: parts.length >= 4 ? parts[3] : null,
+      variantId: vid,
+      variantSku: vid && variantSkuMap[vid] ? variantSkuMap[vid] : null,  // r38: SKU code
       adGroupName: p.adGroupName || null,
       itemType: p.itemType || null,
       spend: Math.round((Number(p.spend) || 0) * 100) / 100,
@@ -14139,27 +14154,136 @@ app.get('/api/google/campaign-product-detail/:campaignId/:shopifyId', async func
 
 // Top search terms for one campaign, sorted by waste-first (zero-sale spenders) then by spend.
 // Returns empty array if v10 hasn't been installed yet.
+// r38: Word lists for the search-term classifier. Hardcoded for now — extend via admin UI later.
+// OFF_TOPIC_WORDS = clear signals that the search is for something we don't sell
+//   (used/refurbished/parts/repair) or for a different retailer (amazon/argos/ebay).
+// COMPETITOR_BRANDS = brands of products we don't carry. If the term contains a competitor
+//   brand name, the user wanted a different product — safe negative.
+// These are MATCHED CASE-INSENSITIVE AS WHOLE WORDS via regex word-boundary checks.
+const OFF_TOPIC_WORDS = [
+  'used', 'second hand', 'secondhand', '2nd hand', 'refurbished', 'refurb',
+  'parts', 'spare', 'spares', 'repair', 'repairs', 'replacement part',
+  'free', 'wanted', 'wtb', 'donation',
+  'amazon', 'argos', 'ebay', 'b&q', 'b and q', 'currys', 'aldi', 'lidl', 'tesco', 'costco', 'wickes', 'homebase'
+];
+const COMPETITOR_BRANDS = [
+  // Trampolines
+  'rebo', 'vuly', 'plum', 'jumpking', 'springfree', 'jumpflex',
+  // Gym / fitness
+  'gymrax', 'mirafit', 'jordan fitness', 'bodymax', 'jll', 'powertrain', 'reebok',
+  // Baby
+  'mamas papas', 'mamas and papas', 'joie', 'cybex', 'maxi cosi', 'silvercross', 'silver cross', 'icandy', 'bugaboo', 'graco'
+];
+
+// Returns the kind for one search-term row given context.
+// campaignName is used so terms matching the campaign theme can't be flagged as wasting.
+function classifySearchTerm(row, campaignName) {
+  const cost = Number(row.cost) || 0;
+  const sales = Number(row.conversions_value) || 0;
+  const conversions = Number(row.conversions) || 0;
+  const term = String(row.search_term || '').toLowerCase();
+  const campLower = String(campaignName || '').toLowerCase();
+
+  // Converting always wins.
+  if (sales > 0 && cost > 0 && (sales / cost) >= 3) return 'converting';
+  if (sales > 0) return 'healthy';
+
+  // No sales below this point.
+  // Step 1 — does the term contain an off-topic word or competitor brand?
+  // If yes, this is a genuine negative candidate regardless of spend size.
+  const hasOffTopic = OFF_TOPIC_WORDS.some(function(w){
+    const re = new RegExp('(?:^|\\s)' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '(?:\\s|$)', 'i');
+    return re.test(term);
+  });
+  const hasCompetitor = COMPETITOR_BRANDS.some(function(b){
+    const re = new RegExp('(?:^|\\s)' + b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '(?:\\s|$)', 'i');
+    return re.test(term);
+  });
+  if (hasOffTopic || hasCompetitor) return 'off-topic';
+
+  // Step 2 — if the term shares meaningful words with the campaign name, it's NOT a negative
+  // candidate (the campaign is supposed to advertise that). Classify as page-issue instead —
+  // the page or pricing is the problem, not the keyword.
+  // "meaningful" = 4+ char alphanumeric tokens, excluding obvious filler words.
+  const FILLER = new Set(['shopping', 'with', 'and', 'for', 'the', 'all', 'product', 'campaign', 'may']);
+  const campTokens = campLower.match(/[a-z]{4,}/g) || [];
+  const meaningfulCampTokens = campTokens.filter(function(t){ return !FILLER.has(t); });
+  const termMatchesCampaign = meaningfulCampTokens.some(function(t){ return term.indexOf(t) !== -1; });
+  if (termMatchesCampaign) return 'page-issue';
+
+  // Step 3 — for terms that don't match campaign theme and aren't off-topic, only flag as
+  // genuine "wasting" if spend is high enough we can be confident the term itself is wrong
+  // (£20+ with zero conversions, OR 50+ clicks with zero conversions). Otherwise page-issue.
+  if (cost >= 20 || (Number(row.clicks) || 0) >= 50) return 'page-issue';
+
+  // Below threshold — too little data to be sure. Treat as page-issue.
+  return 'page-issue';
+}
+
 app.get('/api/google/campaign/:campaignId/search-terms', async function(req, res) {
   const campaignId = String(req.params.campaignId || '');
   if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  const shopifyIdFilter = String(req.query.shopifyId || '').trim();  // r38: optional product scope
   if (!db) return res.json({ terms: [], hasData: false });
 
   try {
+    // Look up campaign name so the classifier knows the theme.
+    let campaignName = '';
+    try {
+      const cr = await db.query("SELECT campaign_name FROM google_campaign_daily WHERE campaign_id=$1 ORDER BY day DESC LIMIT 1", [campaignId]);
+      if (cr.rows.length) campaignName = cr.rows[0].campaign_name || '';
+    } catch(_) {}
+    if (!campaignName) {
+      try {
+        const sr = await db.query("SELECT products FROM google_state_snapshots ORDER BY received_at DESC LIMIT 1");
+        if (sr.rows.length) {
+          const m = (sr.rows[0].products || []).find(function(p){ return String(p.campaignId) === campaignId; });
+          if (m) campaignName = m.campaignName || '';
+        }
+      } catch(_) {}
+    }
+
+    // r38: if shopifyIdFilter present, look up product title for text-match scoping.
+    let productTitleTokens = [];
+    if (shopifyIdFilter) {
+      try {
+        const sr = await db.query("SELECT products FROM google_state_snapshots ORDER BY received_at DESC LIMIT 1");
+        if (sr.rows.length) {
+          const match = (sr.rows[0].products || []).find(function(p){
+            return p.shopifyItemId && String(p.shopifyItemId).split('_')[2] === shopifyIdFilter;
+          });
+          if (match && match.productName) {
+            // Pull meaningful tokens from product title (4+ chars, excluding filler).
+            const FILLER = new Set(['with', 'and', 'for', 'the', 'soft', 'pack', 'each', 'kids', 'shop']);
+            const toks = String(match.productName).toLowerCase().match(/[a-z]{4,}/g) || [];
+            productTitleTokens = toks.filter(function(t){ return !FILLER.has(t); });
+          }
+        }
+      } catch(_) {}
+    }
+
     const r = await db.query(
       "SELECT search_term, match_type, cost, clicks, impressions, conversions, conversions_value, status, updated_at " +
       "FROM google_search_terms WHERE campaign_id=$1 " +
-      "ORDER BY " +
-      "  CASE WHEN (cost > 0.5 AND conversions_value = 0) THEN 0 ELSE 1 END, " +
-      "  cost DESC LIMIT 50",
+      "ORDER BY cost DESC LIMIT 200",  // Pull more so we have headroom after filtering
       [campaignId]
     );
-    // Tag each row with kind: 'wasting' | 'converting' | 'healthy'
-    const terms = r.rows.map(function(row){
+
+    let rows = r.rows;
+    // r38: scope search terms to the product via text-match (term contains any meaningful
+    // word from the product title). Imperfect but it's the only approach until v10.1
+    // adds segments.product_item_id to the script's GAQL query.
+    if (shopifyIdFilter && productTitleTokens.length > 0) {
+      rows = rows.filter(function(row){
+        const t = String(row.search_term || '').toLowerCase();
+        return productTitleTokens.some(function(tok){ return t.indexOf(tok) !== -1; });
+      });
+    }
+
+    const terms = rows.slice(0, 50).map(function(row){
       const cost = Number(row.cost) || 0;
       const sales = Number(row.conversions_value) || 0;
-      let kind = 'healthy';
-      if (cost > 0.5 && sales === 0) kind = 'wasting';
-      else if (sales > 0 && cost > 0 && (sales / cost) >= 3) kind = 'converting';
+      const kind = classifySearchTerm(row, campaignName);
       return {
         searchTerm: row.search_term,
         matchType: row.match_type,
@@ -14173,7 +14297,21 @@ app.get('/api/google/campaign/:campaignId/search-terms', async function(req, res
         updatedAt: row.updated_at
       };
     });
-    res.json({ terms: terms, hasData: terms.length > 0, total: terms.length });
+    // Sort: off-topic (true negatives) first, then page-issue, then converting, then healthy. Within each, by spend desc.
+    const order = { 'off-topic': 0, 'page-issue': 1, 'converting': 2, 'healthy': 3 };
+    terms.sort(function(a, b){
+      const oa = order[a.kind] !== undefined ? order[a.kind] : 3;
+      const ob = order[b.kind] !== undefined ? order[b.kind] : 3;
+      if (oa !== ob) return oa - ob;
+      return (b.cost || 0) - (a.cost || 0);
+    });
+    res.json({
+      terms: terms,
+      hasData: terms.length > 0,
+      total: terms.length,
+      scopedToProduct: !!shopifyIdFilter,
+      productTokens: productTitleTokens  // for debug / display
+    });
   } catch(e) {
     console.error('[campaign/search-terms] ' + e.message);
     res.status(500).json({ error: e.message });
@@ -14341,9 +14479,10 @@ app.post('/api/google/keyword-decisions/:id/applied', async function(req, res) {
 app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
   const campaignId = String(req.params.campaignId || '');
   if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+  const shopifyIdFilter = String(req.query.shopifyId || '').trim();  // r38: optional product scope
 
   // 1. Current campaign data — same shape as products-diagnostic builds, scoped to one campaign.
-  const currentProducts = (googleState.products || []).filter(function(gp){
+  let currentProducts = (googleState.products || []).filter(function(gp){
     return String(gp.campaignId) === campaignId;
   });
   if (!currentProducts.length) {
@@ -14351,6 +14490,20 @@ app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
   }
   const campaignName = currentProducts[0].campaignName || '(unnamed)';
   const campaignType = currentProducts[0].campaignType || null;
+  const fullProductCount = currentProducts.length;  // unfiltered count for the banner
+
+  // r38: if shopifyId provided, scope to variants of that product within this campaign.
+  let scopedProductName = null;
+  if (shopifyIdFilter) {
+    currentProducts = currentProducts.filter(function(gp){
+      if (!gp.shopifyItemId) return false;
+      return String(gp.shopifyItemId).split('_')[2] === shopifyIdFilter;
+    });
+    if (!currentProducts.length) {
+      return res.status(404).json({ error: 'Product not in this campaign.' });
+    }
+    scopedProductName = currentProducts[0].productName || currentProducts[0].adGroupName || null;
+  }
 
   // Aggregate current 7d totals
   let curSpend = 0, curSales = 0, curImpressions = 0, curClicks = 0, curConversions = 0, curWasted = 0;
@@ -14378,9 +14531,16 @@ app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
         "ORDER BY received_at DESC LIMIT 1"
       );
       if (r.rows.length) {
-        const priorProducts = (r.rows[0].products || []).filter(function(gp){
+        let priorProducts = (r.rows[0].products || []).filter(function(gp){
           return String(gp.campaignId) === campaignId;
         });
+        // r38: also scope prior data so WoW deltas are on the same scope
+        if (shopifyIdFilter) {
+          priorProducts = priorProducts.filter(function(gp){
+            if (!gp.shopifyItemId) return false;
+            return String(gp.shopifyItemId).split('_')[2] === shopifyIdFilter;
+          });
+        }
         let pSpend = 0, pSales = 0, pImpressions = 0, pClicks = 0, pConversions = 0;
         priorProducts.forEach(function(p){
           pSpend += Number(p.spend) || 0;
@@ -14419,7 +14579,14 @@ app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
         ") SELECT d, products FROM per_day WHERE rn = 1 ORDER BY d ASC"
       );
       trend = r.rows.map(function(row){
-        const ps = (row.products || []).filter(function(gp){ return String(gp.campaignId) === campaignId; });
+        let ps = (row.products || []).filter(function(gp){ return String(gp.campaignId) === campaignId; });
+        // r38: also scope trend
+        if (shopifyIdFilter) {
+          ps = ps.filter(function(gp){
+            if (!gp.shopifyItemId) return false;
+            return String(gp.shopifyItemId).split('_')[2] === shopifyIdFilter;
+          });
+        }
         let s = 0, sa = 0;
         ps.forEach(function(p){
           s += Number(p.spend) || 0;
@@ -14440,13 +14607,30 @@ app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
   //    products-diagnostic endpoint returns for each row, since the modal's
   //    "products in this campaign" section reuses the existing productSubrow
   //    renderer.
-  // Reuse same logic as products-diagnostic — but only for THIS campaign.
-  // To avoid duplicating the diagnose+enrich code, we just hand back the raw
-  // googleState.products entries; the frontend already knows how to render them
-  // (it's how the current campaign-block expands inline).
   const rows = currentProducts.slice().sort(function(a, b){
     if ((a.priority || 9) !== (b.priority || 9)) return (a.priority || 9) - (b.priority || 9);
     return (Number(b.spend) || 0) - (Number(a.spend) || 0);
+  });
+
+  // r38: SKU enrichment. For each row, look up the Shopify variant's SKU via shopifyState.
+  // Build a lookup map: shopifyItemId variant component → variant SKU.
+  // shopifyItemId format: shopify_gb_<productId>_<variantId>
+  const variantSkuMap = {};
+  try {
+    (shopifyState.products || []).forEach(function(sp){
+      if (Array.isArray(sp.variants)) {
+        sp.variants.forEach(function(v){
+          if (v && v.id && v.sku) variantSkuMap[String(v.id)] = String(v.sku);
+        });
+      }
+    });
+  } catch(_) {}
+  rows.forEach(function(r){
+    if (r.shopifyItemId) {
+      const parts = String(r.shopifyItemId).split('_');
+      const vid = parts.length >= 4 ? parts[3] : null;
+      if (vid && variantSkuMap[vid]) r.variantSku = variantSkuMap[vid];
+    }
   });
 
   res.json({
@@ -14454,6 +14638,10 @@ app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
     campaignName: campaignName,
     campaignType: campaignType,
     productCount: currentProducts.length,
+    fullProductCount: fullProductCount,  // r38: total products in campaign before filter
+    scopedToProduct: !!shopifyIdFilter,
+    scopedShopifyId: shopifyIdFilter || null,
+    scopedProductName: scopedProductName,
     current: {
       spend: Math.round(curSpend * 100) / 100,
       sales: Math.round(curSales * 100) / 100,
@@ -14465,8 +14653,8 @@ app.get('/api/google/campaign-detail/:campaignId', async function(req, res) {
       ctr: Math.round(curCtr * 100) / 100,
       costPerConv: Math.round(curCostPerConv * 100) / 100
     },
-    prior: prior,         // null if no snapshot from 7+ days ago
-    trend: trend,         // array of { date, spend7d, sales7d }, up to 14 points
+    prior: prior,
+    trend: trend,
     products: rows,
     lastGoogleSync: googleState.lastSync
   });
@@ -17139,33 +17327,52 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       ? '\n... and ' + remaining + ' more product rows in this campaign.'
       : '';
 
-    // r37 (Batch 2): pull search-term data for this campaign if v10 script has been
-    // populating it. No-op if google_search_terms is empty. Adds a new SEARCH TERMS section
-    // to the prompt so the AI can name specific terms instead of generic advice.
+    // r38: pull search-term data and feed it to the AI with the proper classification.
+    // Only off-topic / competitor terms are flagged as negative candidates. Page-issue terms
+    // are listed separately so the AI knows the page is the problem, not the keyword.
     let searchTermsContext = '';
     try {
       if (db) {
         const stRes = await db.query(
           "SELECT search_term, match_type, cost, clicks, conversions, conversions_value " +
           "FROM google_search_terms WHERE campaign_id=$1 " +
-          "ORDER BY cost DESC LIMIT 25",
+          "ORDER BY cost DESC LIMIT 50",
           [String(campaignId)]
         );
         if (stRes.rows.length) {
-          const wasters = stRes.rows.filter(function(r){ return Number(r.cost) > 0.5 && Number(r.conversions_value) === 0; });
-          const converters = stRes.rows.filter(function(r){ return Number(r.conversions_value) > 0; });
+          const offTopic = [];
+          const pageIssue = [];
+          const converters = [];
+          stRes.rows.forEach(function(r){
+            const kind = classifySearchTerm(r, campaignName);
+            if (kind === 'off-topic') offTopic.push(r);
+            else if (kind === 'page-issue') pageIssue.push(r);
+            else if (kind === 'converting' || kind === 'healthy') {
+              if (Number(r.conversions_value) > 0) converters.push(r);
+            }
+          });
+
           let block = '\n\n═══ SEARCH TERMS (last 7 days) ═══\n';
-          if (wasters.length) {
-            block += 'WASTED SPEND (£0 sales) — candidates for negative keywords:\n';
-            wasters.slice(0, 10).forEach(function(r){
+          if (offTopic.length) {
+            block += 'OFF-TOPIC / COMPETITOR TERMS — these are genuine negative-keyword candidates because they contain words like "used/refurbished/parts/repair/ebay/amazon/argos" or competitor brand names:\n';
+            offTopic.slice(0, 10).forEach(function(r){
               block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
                 + ', ' + r.clicks + ' clicks, 0 sales'
                 + (r.match_type ? ' (' + r.match_type.toLowerCase() + ')' : '') + '\n';
             });
+          } else {
+            block += 'OFF-TOPIC / COMPETITOR TERMS: NONE FOUND. Do NOT recommend any negatives unless they appear in this section.\n';
+          }
+          if (pageIssue.length) {
+            block += '\nPAGE-ISSUE TERMS (clicks but no sales, BUT the term matches what this campaign sells) — these are NOT negative candidates. The product page, price, or attribution is the problem, not the keyword. DO NOT recommend adding these as negatives:\n';
+            pageIssue.slice(0, 8).forEach(function(r){
+              block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
+                + ', ' + r.clicks + ' clicks, 0 sales\n';
+            });
           }
           if (converters.length) {
-            block += 'CONVERTING — candidates for exact-match keywords:\n';
-            converters.slice(0, 10).forEach(function(r){
+            block += '\nCONVERTING TERMS — already producing sales. Leave as-is unless ACOS is high. DO NOT recommend brand terms (e.g. "fk sports") as exact-match in Shopping campaigns — they already match via the product feed:\n';
+            converters.slice(0, 8).forEach(function(r){
               block += '  • "' + r.search_term + '" → £' + Number(r.cost).toFixed(2)
                 + ' spend, £' + Number(r.conversions_value).toFixed(2) + ' sales, '
                 + r.clicks + ' clicks'
@@ -17175,7 +17382,7 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
           searchTermsContext = block;
         }
       }
-    } catch(e) { console.error('[r37 campaign-ai search terms] ' + e.message); }
+    } catch(e) { console.error('[r38 campaign-ai search terms] ' + e.message); }
 
     // r28: Sharper, campaign-specific prompt. Different from product-level critique.
     // Focus areas: budget, bid strategy, ACOS/TACOS, keywords, negatives, conversion
@@ -17218,7 +17425,10 @@ app.post('/api/google/ai-analyse-campaign', async function(req, res) {
       + '- DO NOT use these phrases: "monitor closely", "review performance", "optimise targeting", "consider A/B testing", "ongoing optimisation needed".\n'
       + '- DO NOT recommend things at the product page level (titles, images, descriptions) — that is the product analyst\'s job.\n'
       + '- DO quote real numbers and named products.\n'
-      + '- If SEARCH TERMS section is provided, DO name specific search terms when recommending negatives or new exact-match keywords.\n'
+      + '- ONLY recommend negative keywords from the OFF-TOPIC / COMPETITOR TERMS list above. NEVER recommend a term from PAGE-ISSUE as a negative — the term is fine, the page or price is the problem.\n'
+      + '- A term with zero 7-day sales is NOT automatically a negative. For high-ticket items (£200+) the buyer journey is often 14-30 days, and the term may convert later. Only flag truly off-topic terms.\n'
+      + '- If a search term matches the campaign theme or any product name in this campaign, NEVER recommend it as a negative regardless of conversions.\n'
+      + '- DO NOT recommend brand terms (e.g. "fk sports", "fitness karma") as exact-match keywords in Shopping campaigns — Shopping campaigns already match brand searches via the product feed.\n'
       + '- If the campaign is genuinely fine, say so in one line: "Verdict: healthy. ACOS X%, TACOS Y%, on track. No action needed this week."';
 
     // r25b/r28: append agent feedback — handled via stronger buildFeedbackPromptSection.
