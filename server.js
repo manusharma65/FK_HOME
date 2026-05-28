@@ -1,14 +1,16 @@
 // FK Home — bootstrap
-// Build marker: r0.14 (2026-05-28) — Ship 2: module loading infrastructure
-//                                    (loadModule + #moduleView), Home as a
-//                                    module, HR Insights migrated to a module
-//                                    (#hr/insights). Plus: salary edit for HR,
-//                                    onboarding+review backfill, birthday
-//                                    pre-notify (HR) + birthday banner, status
-//                                    set rework (In meeting / WFH + geo),
-//                                    status nudges (1h self / 1.5h manager),
-//                                    Company Today simplification.
-// Previous: r0.13 (2026-05-27) — Ship 1: shell foundation.
+// Build marker: r0.15 (2026-05-28) — HR-1.5: leave accrual + weekend
+//                                    conditional pay. Engine fixes:
+//                                    anniversary-based leave year (reset on
+//                                    hire-date anniversary, no carryover),
+//                                    owner excluded from accrual, boot-time
+//                                    backfill (active non-owner users get
+//                                    correct entitled_days), retroactive
+//                                    weekend recompute when leave approved.
+//                                    New Payroll module at #hr/payroll
+//                                    (Owner + HR only) with monthly rollup,
+//                                    day drill-through, and CSV export.
+// Previous: r0.14 (2026-05-28) — Ship 2: module loading infrastructure
 //                                    Sidebar regrouped into WORKSPACE/HR/DAY/
 //                                    SYSTEM/YOU with permission-based item
 //                                    hiding. Mobile hamburger + overlay
@@ -35,6 +37,7 @@ const chatRoutes = require('./server/modules/chat');
 const notificationsRoutes = require('./server/modules/notifications');
 const attendanceRoutes = require('./server/modules/attendance');
 const filesRoutes = require('./server/modules/files');
+const payrollRoutes = require('./server/modules/payroll');
 const profileRoutes = require('./server/modules/profile');
 const tasksRoutes = require('./server/modules/tasks');
 const leaveEngine = require('./server/modules/leave-engine');
@@ -49,7 +52,7 @@ app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 
 // Health check
-app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.14' }));
+app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.15' }));
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -63,6 +66,7 @@ app.use('/api/me', meRoutes);
 app.use('/api/team', teamRoutes);
 app.use('/api/leaves', leavesRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/payroll', payrollRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/attendance', attendanceRoutes);
@@ -257,8 +261,10 @@ async function start() {
     console.log('[boot] migrations applied');
     await seedInitialData();
     console.log('[boot] seed verified');
+    // r0.15 (HR-1.5) — one-time leave-balance backfill. Self-guards via system_state.
+    await leaveEngine.runBackfillIfNeeded();
     app.listen(PORT, () => {
-      console.log(`[boot] FK Home r0.14 listening on port ${PORT}`);
+      console.log(`[boot] FK Home r0.15 listening on port ${PORT}`);
       startCronJobs();
       // Run one immediate 5-min tick on boot, in case the server was down for a while.
       attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron boot tick]', e.message));

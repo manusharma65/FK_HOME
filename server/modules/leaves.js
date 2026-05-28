@@ -290,6 +290,16 @@ router.post('/:id/decide', async (req, res) => {
          -Number(lr.total_days), `Leave request #${id} approved by ${req.user.full_name}`,
          req.user.id]
       );
+      // r0.15 (HR-1.5) — recompute weekend pay for every Mon–Sun week
+      // overlapping this leave, in case it pushes the week below 5 days.
+      try {
+        const fromStr = String(lr.start_date).slice(0, 10);
+        const toStr = String(lr.end_date).slice(0, 10);
+        const r = await leaveEngine.recomputeWeekendPayForRange(lr.user_id, fromStr, toStr);
+        console.log(`[leaves/decide] weekend pay recomputed for user ${lr.user_id} weeks=${r.weeks || 0}`);
+      } catch (e) {
+        console.error('[leaves/decide] weekend recompute failed:', e.message);
+      }
     }
 
     await logAudit({

@@ -382,7 +382,7 @@ async function seedBobby() {
     `INSERT INTO leave_balances (user_id, year, entitled_days, carryover_days, taken_days, pending_days)
      VALUES ($1,$2,$3,0,0,0)
      ON CONFLICT (user_id, year) DO NOTHING`,
-    [bobbyId, CURRENT_YEAR, STANDARD_ANNUAL_DAYS]
+    [bobbyId, CURRENT_YEAR, 0]
   );
 
   // Ensure user_status row

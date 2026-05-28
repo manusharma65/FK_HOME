@@ -68,6 +68,19 @@ function isAnniversaryToday(joinedDate, today) {
 
 // --- Accrual rate ----------------------------------------------------------
 
+// r0.15 (HR-1.5) — Returns the user's most recent hire-anniversary on or before today.
+// E.g. hire 15 Apr 2024, today 28 May 2026 → returns 2026-04-15.
+function lastAnniversary(hireDate, today) {
+  const h = new Date(hireDate + 'T00:00:00Z');
+  const t = new Date(today + 'T00:00:00Z');
+  let year = t.getUTCFullYear();
+  let anniv = new Date(Date.UTC(year, h.getUTCMonth(), h.getUTCDate()));
+  if (anniv > t) {
+    anniv = new Date(Date.UTC(year - 1, h.getUTCMonth(), h.getUTCDate()));
+  }
+  return anniv.toISOString().slice(0, 10);
+}
+
 function accrualRateForTenure(tenureMonths) {
   // tenureMonths = how many months they'll have completed AFTER this accrual.
   if (tenureMonths <= 6) return 1.0;
@@ -223,11 +236,17 @@ async function getBalance(userId) {
 async function tickMonthlyAccrual() {
   try {
     const today = nowLondonDate();
+    // r0.15 (HR-1.5): exclude owners — they don't accrue leave
     const users = await db.query(
-      `SELECT id, hire_date FROM users
-        WHERE deleted_at IS NULL
-          AND employment_status = 'active'
-          AND hire_date IS NOT NULL`
+      `SELECT u.id, u.hire_date FROM users u
+        WHERE u.deleted_at IS NULL
+          AND u.employment_status = 'active'
+          AND u.hire_date IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM user_groups ug
+            JOIN groups g ON g.id = ug.group_id
+            WHERE ug.user_id = u.id AND g.slug = 'owner'
+          )`
     );
     let accrued = 0;
     for (const u of users.rows) {
@@ -235,30 +254,61 @@ async function tickMonthlyAccrual() {
       if (!isAnniversaryToday(joined, today)) continue;
 
       const tenure = monthsBetween(joined, today);
-      // tenure here = months including this anniversary
       const rate = accrualRateForTenure(tenure);
-      const year = new Date().getFullYear();
+      // r0.15 (HR-1.5) — anniversary-based leave year. On the exact anniversary
+      // we reset entitled_days to 0 then apply this month's accrual on top.
+      // A different leave_year_start row is created for each new employment year.
+      const newYearStart = today; // we're firing on the anniversary day
+      const year = new Date().getUTCFullYear();
 
-      await db.query(
-        `INSERT INTO leave_balances (user_id, year, entitled_days)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (user_id, year) DO UPDATE
-           SET entitled_days = leave_balances.entitled_days + $3,
-               updated_at = NOW()`,
-        [u.id, year, rate]
+      // Check if this is a fresh anniversary (year-start) vs a regular monthly tick.
+      // If a row already exists with this leave_year_start, just add the accrual;
+      // otherwise create the new year-row at 0 + accrual.
+      const existing = await db.query(
+        `SELECT id FROM leave_balances WHERE user_id = $1 AND leave_year_start = $2`,
+        [u.id, newYearStart]
       );
-      await db.query(
-        `INSERT INTO leave_accrual_log
-           (user_id, year, event_date, event_type, days_delta, tenure_months, note)
-         VALUES ($1, $2, $3, 'monthly_accrual', $4, $5, $6)`,
-        [u.id, year, today, rate, tenure,
-         `Monthly accrual at tenure ${tenure}mo (rate ${rate}/mo)`]
-      );
+      if (existing.rows.length === 0) {
+        // New employment year — reset and start fresh
+        await db.query(
+          `INSERT INTO leave_balances
+             (user_id, year, leave_year_start, entitled_days, carryover_days, taken_days, pending_days)
+           VALUES ($1, $2, $3, $4, 0, 0, 0)`,
+          [u.id, year, newYearStart, rate]
+        );
+        await db.query(
+          `INSERT INTO leave_accrual_log
+             (user_id, year, event_date, event_type, days_delta, tenure_months, note)
+           VALUES ($1, $2, $3, 'anniversary_reset', 0, $4, $5)`,
+          [u.id, year, today, tenure,
+           `Anniversary reset; new leave year starts ${newYearStart}`]
+        );
+        await db.query(
+          `INSERT INTO leave_accrual_log
+             (user_id, year, event_date, event_type, days_delta, tenure_months, note)
+           VALUES ($1, $2, $3, 'monthly_accrual', $4, $5, $6)`,
+          [u.id, year, today, rate, tenure,
+           `Monthly accrual at tenure ${tenure}mo (rate ${rate}/mo)`]
+        );
+      } else {
+        // Same employment year — accrue on top
+        await db.query(
+          `UPDATE leave_balances SET entitled_days = entitled_days + $1, updated_at = NOW()
+            WHERE user_id = $2 AND leave_year_start = $3`,
+          [rate, u.id, newYearStart]
+        );
+        await db.query(
+          `INSERT INTO leave_accrual_log
+             (user_id, year, event_date, event_type, days_delta, tenure_months, note)
+           VALUES ($1, $2, $3, 'monthly_accrual', $4, $5, $6)`,
+          [u.id, year, today, rate, tenure,
+           `Monthly accrual at tenure ${tenure}mo (rate ${rate}/mo)`]
+        );
+      }
       accrued++;
     }
-    if (accrued > 0) {
-      console.log(`[leave-engine] accrued for ${accrued} user(s) on ${today}`);
-    }
+    // r0.15 — heartbeat even on zero accruals
+    console.log(`[leave-engine] tickMonthlyAccrual ${today}: accrued=${accrued} candidates=${users.rows.length}`);
   } catch (err) {
     console.error('[leave-engine.tickMonthlyAccrual] failed:', err.message);
   }
@@ -339,6 +389,149 @@ async function tickWeeklyWeekendPay() {
   }
 }
 
+// --- r0.15 (HR-1.5) — Boot-time backfill ----------------------------------
+// One-time per database: for every active non-owner user, fill in the leave
+// balance from their most recent hire-anniversary to today using the 1/mo →
+// 1.5/mo accrual. Marks itself complete in system_state so it never re-runs.
+// Safe to call on every boot — it self-guards.
+async function runBackfillIfNeeded() {
+  try {
+    const flag = await db.query(
+      `SELECT value FROM system_state WHERE key = 'hr15_backfill_done'`
+    );
+    if (flag.rows.length > 0 && flag.rows[0].value === 'true') {
+      console.log('[leave-engine] backfill already complete, skipping');
+      return { skipped: true };
+    }
+    const today = nowLondonDate();
+    const users = await db.query(
+      `SELECT u.id, u.hire_date FROM users u
+        WHERE u.deleted_at IS NULL AND u.employment_status = 'active'
+          AND u.hire_date IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM user_groups ug
+            JOIN groups g ON g.id = ug.group_id
+            WHERE ug.user_id = u.id AND g.slug = 'owner'
+          )`
+    );
+    let processed = 0;
+    for (const u of users.rows) {
+      const joined = String(u.hire_date).slice(0, 10);
+      const anniv = lastAnniversary(joined, today);
+      // Months elapsed from current anniversary up to today (inclusive of months
+      // whose anniversary-day has passed).
+      const monthsSinceAnniv = monthsBetween(anniv, today);
+      // Tenure at each accrual moment governs the rate. Sum:
+      let totalDays = 0;
+      const tenureAtAnniv = monthsBetween(joined, anniv);
+      for (let m = 1; m <= monthsSinceAnniv; m++) {
+        const tenureAtThisAccrual = tenureAtAnniv + m;
+        totalDays += accrualRateForTenure(tenureAtThisAccrual);
+      }
+      const year = new Date().getUTCFullYear();
+      // Upsert the leave_balances row for this employment year.
+      await db.query(
+        `INSERT INTO leave_balances
+           (user_id, year, leave_year_start, entitled_days, carryover_days, taken_days, pending_days)
+         VALUES ($1, $2, $3, $4, 0, COALESCE((SELECT taken_days FROM leave_balances WHERE user_id = $1 AND leave_year_start = $3), 0), COALESCE((SELECT pending_days FROM leave_balances WHERE user_id = $1 AND leave_year_start = $3), 0))
+         ON CONFLICT (user_id, leave_year_start) DO UPDATE
+           SET entitled_days = EXCLUDED.entitled_days, updated_at = NOW()`,
+        [u.id, year, anniv, totalDays]
+      );
+      await db.query(
+        `INSERT INTO leave_accrual_log
+           (user_id, year, event_date, event_type, days_delta, tenure_months, note)
+         VALUES ($1, $2, $3, 'backfill', $4, $5, $6)`,
+        [u.id, year, today, totalDays, tenureAtAnniv + monthsSinceAnniv,
+         `r0.15 backfill: anniversary ${anniv}, ${monthsSinceAnniv} months accrued = ${totalDays} days`]
+      );
+      processed++;
+    }
+    await db.query(
+      `INSERT INTO system_state (key, value) VALUES ('hr15_backfill_done', 'true')
+       ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+    );
+    console.log(`[leave-engine] backfill complete — processed ${processed} user(s)`);
+    return { processed };
+  } catch (err) {
+    console.error('[leave-engine.runBackfillIfNeeded] failed:', err.message);
+    return { error: err.message };
+  }
+}
+
+// --- r0.15 (HR-1.5) — Retroactive weekend recompute -----------------------
+// Re-evaluates weekend pay status for every Mon–Sun week that overlaps the
+// given date range, for one user. Called whenever a leave is approved /
+// cancelled / modified so past weekends correctly reflect the change.
+async function recomputeWeekendPayForRange(userId, fromDateStr, toDateStr) {
+  try {
+    const from = new Date(fromDateStr + 'T00:00:00Z');
+    const to = new Date(toDateStr + 'T00:00:00Z');
+    if (isNaN(from) || isNaN(to)) return { error: 'bad dates' };
+    // Walk the Mondays from the week containing `from` to the week containing `to`.
+    const firstMonday = new Date(from);
+    const fromDow = firstMonday.getUTCDay(); // 0=Sun
+    const fromBack = fromDow === 0 ? 6 : (fromDow - 1);
+    firstMonday.setUTCDate(firstMonday.getUTCDate() - fromBack);
+
+    let weeks = 0;
+    let cursor = new Date(firstMonday);
+    while (cursor <= to) {
+      const monday = cursor.toISOString().slice(0, 10);
+      const sundayDate = new Date(cursor);
+      sundayDate.setUTCDate(sundayDate.getUTCDate() + 6);
+      const sunday = sundayDate.toISOString().slice(0, 10);
+      const saturdayDate = new Date(cursor);
+      saturdayDate.setUTCDate(saturdayDate.getUTCDate() + 5);
+      const saturday = saturdayDate.toISOString().slice(0, 10);
+
+      // Count qualifying days for the week (same rule as tickWeeklyWeekendPay)
+      const attCount = await db.query(
+        `SELECT COUNT(*)::int AS c
+           FROM attendance_day
+          WHERE user_id = $1
+            AND for_date BETWEEN $2 AND $3
+            AND (
+              status IN ('on_time','late','very_late','worked_voluntary','off_holiday')
+              OR (status = 'on_leave')
+              OR (status = 'off_sick' AND sick_notified_hours >= 4)
+            )`,
+        [userId, monday, sunday]
+      );
+      const qualifying = Number(attCount.rows[0].c);
+      const newStatus = qualifying >= 5 ? 'paid' : 'unpaid';
+
+      for (const day of [saturday, sunday]) {
+        const existing = await db.query(
+          `SELECT id FROM attendance_day WHERE user_id = $1 AND for_date = $2`,
+          [userId, day]
+        );
+        if (existing.rows.length === 0) {
+          await db.query(
+            `INSERT INTO attendance_day (user_id, for_date, status, weekend_pay_status, is_paid)
+             VALUES ($1, $2, 'off_pattern', $3, $4)
+             ON CONFLICT (user_id, for_date) DO NOTHING`,
+            [userId, day, newStatus, newStatus === 'paid']
+          );
+        } else {
+          await db.query(
+            `UPDATE attendance_day
+                SET weekend_pay_status = $1, is_paid = $2, updated_at = NOW()
+              WHERE id = $3`,
+            [newStatus, newStatus === 'paid', existing.rows[0].id]
+          );
+        }
+      }
+      weeks++;
+      cursor.setUTCDate(cursor.getUTCDate() + 7);
+    }
+    return { weeks };
+  } catch (err) {
+    console.error('[leave-engine.recomputeWeekendPayForRange] failed:', err.message);
+    return { error: err.message };
+  }
+}
+
 // --- Module exports -------------------------------------------------------
 
 module.exports = {
@@ -347,4 +540,9 @@ module.exports = {
   getBalance,
   tickMonthlyAccrual,
   tickWeeklyWeekendPay,
+  runBackfillIfNeeded,
+  recomputeWeekendPayForRange,
+  lastAnniversary,
+  accrualRateForTenure,
+  monthsBetween,
 };
