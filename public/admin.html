@@ -1,0 +1,2323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FK Home · Admin</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
+<style>
+  :root {
+    --bg: #FAF7F2; --surface: #FFFFFF; --nav: #14161B; --nav-elev: #1F232B;
+    --ink: #14161B; --muted: #6B6760; --soft: #888780;
+    --line: rgba(20,22,27,0.12); --line-strong: rgba(20,22,27,0.20);
+    --amber: #EF9F27; --amber-warm: #FAC775; --amber-soft: #FAEEDA; --amber-deep: #854F0B;
+    --green: #3B6D11; --green-soft: #EAF3DE;
+    --red: #A32D2D; --red-soft: #FCEBEB;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+  }
+  button, input, select, textarea { font-family: inherit; }
+  a { color: inherit; text-decoration: none; }
+
+  .topbar {
+    background: var(--surface); border-bottom: 0.5px solid var(--line);
+    padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 28px; height: 28px; background: var(--nav); border-radius: 7px;
+    color: var(--amber); font-weight: 600; font-size: 15px;
+    display: flex; align-items: center; justify-content: center; letter-spacing: -0.5px;
+  }
+  .brand-name { font-size: 16px; font-weight: 500; }
+  .brand .sep { color: var(--soft); margin: 0 4px; }
+  .topbar-right { display: flex; gap: 14px; align-items: center; }
+  .home-link { font-size: 15px; color: var(--muted); padding: 5px 11px; border: 0.5px solid var(--line); border-radius: 99px; cursor: pointer; background: var(--surface); display: flex; align-items: center; gap: 6px; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 26px; font-weight: 500; margin: 0 0 6px; letter-spacing: -0.3px; }
+  .sub { font-size: 15px; color: var(--muted); margin: 0 0 22px; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 0.5px solid var(--line); }
+  .tab {
+    padding: 9px 16px; font-size: 15px; color: var(--muted); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -0.5px;
+  }
+  .tab.on { color: var(--ink); border-bottom-color: var(--amber); font-weight: 500; }
+  .tab:hover { color: var(--ink); }
+
+  .card { background: var(--surface); border: 0.5px solid var(--line); border-radius: 14px; padding: 0; margin-bottom: 18px; overflow: hidden; }
+  .card-head {
+    padding: 14px 18px; border-bottom: 0.5px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .card-head h2 { font-size: 16px; font-weight: 500; margin: 0; }
+  .card-head .meta { font-size: 14px; color: var(--muted); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 11px 18px; font-size: 15px; border-bottom: 0.5px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 14px; text-transform: uppercase; letter-spacing: 0.4px; background: #FBFAF7; }
+  tr:last-child td { border-bottom: none; }
+  td.action-col { text-align: right; width: 1%; white-space: nowrap; }
+
+  .avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 500; font-size: 14px; color: var(--ink); margin-right: 9px; vertical-align: middle;
+  }
+  .name-cell { display: flex; align-items: center; gap: 9px; }
+  .name-cell .nm { font-weight: 500; }
+  .name-cell .em { font-size: 14px; color: var(--muted); }
+
+  .chip {
+    display: inline-block; font-size: 13px; padding: 2px 8px; border-radius: 99px;
+    background: #F1EFE8; color: #5F5E5A; font-weight: 500; margin-right: 4px; margin-bottom: 2px;
+  }
+  .chip.amber { background: var(--amber-soft); color: var(--amber-deep); }
+  .chip.green { background: var(--green-soft); color: var(--green); }
+  .chip.red   { background: var(--red-soft); color: var(--red); }
+  .chip.muted { background: #F1EFE8; color: var(--muted); }
+
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 14px;
+    padding: 3px 9px; border-radius: 99px; font-weight: 500;
+  }
+  .status-pill.active { background: var(--green-soft); color: var(--green); }
+  .status-pill.on_leave { background: var(--amber-soft); color: var(--amber-deep); }
+  .status-pill.left { background: var(--red-soft); color: var(--red); }
+
+  /* Buttons */
+  .btn {
+    padding: 7px 13px; font-size: 15px; font-weight: 500;
+    border: 0.5px solid var(--line); border-radius: 8px; cursor: pointer;
+    background: var(--surface); color: var(--ink);
+  }
+  .btn:hover { background: #F1EFE8; }
+  .btn-primary { background: var(--ink); color: #FFFFFF; border-color: var(--ink); }
+  .btn-primary:hover { background: #000; }
+  .btn-danger { color: var(--red); border-color: var(--red-soft); }
+  .btn-danger:hover { background: var(--red-soft); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Modal */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(20,22,27,0.5); z-index: 100;
+    display: none; align-items: center; justify-content: center; padding: 24px;
+  }
+  .modal-bg.on { display: flex; }
+  .modal { width: 100%; max-width: 480px; background: var(--surface); border-radius: 16px; padding: 24px 22px; max-height: 90vh; overflow-y: auto; }
+  .modal h2 { font-size: 19px; font-weight: 500; margin: 0 0 4px; }
+  .modal .modal-sub { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  .modal label { display: block; font-size: 15px; color: var(--muted); margin: 0 0 6px; }
+  .modal input, .modal select, .modal textarea {
+    width: 100%; padding: 10px 12px; font-size: 16px;
+    border: 0.5px solid var(--line); border-radius: 9px; outline: none;
+    background: var(--surface); margin-bottom: 12px;
+  }
+  .modal textarea { resize: vertical; min-height: 60px; }
+  .modal input:focus, .modal select:focus, .modal textarea:focus { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+  .modal-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .modal-actions .btn { flex: 1; padding: 11px 14px; font-size: 15px; }
+  .modal-err {
+    background: var(--red-soft); color: var(--red); font-size: 15px;
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; display: none;
+  }
+  .modal-err.on { display: block; }
+  .modal-ok {
+    background: var(--green-soft); color: var(--green); font-size: 15px;
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; display: none;
+  }
+  .modal-ok.on { display: block; }
+  .pwd-display {
+    background: var(--amber-soft); color: var(--amber-deep); padding: 12px 14px;
+    border-radius: 9px; margin-bottom: 12px; font-family: ui-monospace, monospace; font-weight: 500;
+  }
+  .check-list {
+    border: 0.5px solid var(--line); border-radius: 9px; padding: 4px;
+    max-height: 220px; overflow-y: auto; margin-bottom: 12px;
+  }
+  .check-list label {
+    display: flex; align-items: center; gap: 9px; padding: 7px 10px; cursor: pointer;
+    color: var(--ink); margin: 0; font-size: 15px; border-radius: 6px;
+  }
+  .check-list label:hover { background: #FBFAF7; }
+  .check-list input { width: auto; margin: 0; }
+  .check-list .meta { font-size: 13px; color: var(--muted); margin-left: auto; }
+
+  /* Audit */
+  .audit-row td { padding: 9px 18px; font-size: 15px; }
+  .audit-row .mod { font-family: ui-monospace, monospace; font-size: 14px; color: var(--soft); }
+  .audit-row .act { font-weight: 500; color: var(--ink); font-family: ui-monospace, monospace; font-size: 14px; }
+  .audit-row .det { color: var(--muted); }
+
+  .filter-bar { padding: 10px 18px; display: flex; gap: 10px; align-items: center; border-bottom: 0.5px solid var(--line); background: #FBFAF7; }
+  .filter-bar select { font-size: 15px; padding: 5px 10px; border: 0.5px solid var(--line); border-radius: 7px; background: var(--surface); }
+
+  .loading-row td { padding: 24px; text-align: center; color: var(--muted); font-size: 15px; }
+
+  /* Mobile */
+  @media (max-width: 768px) {
+    .container { padding: 16px; }
+    table, thead, tbody, tr, td, th { display: block; }
+    thead { display: none; }
+    tr { border-bottom: 0.5px solid var(--line); padding: 12px 0; }
+    td { padding: 4px 0; border-bottom: none; }
+    td.action-col { text-align: left; padding-top: 8px; }
+    /* iOS Safari auto-zooms inputs with font-size < 16px on focus */
+    .modal input, .modal select, .modal textarea { font-size: 17px; }
+    .modal-actions button { min-height: 44px; }
+    .tabs { overflow-x: auto; flex-wrap: nowrap; }
+    .tab { white-space: nowrap; }
+  }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand" onclick="location.href='/'" style="cursor:pointer" title="Back to My FK Space">
+      <div class="brand-mark">FK</div>
+      <div class="brand-name">FK Home</div>
+      <span class="sep">/</span>
+      <span style="font-size: 15px;">Admin</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <h1>Admin</h1>
+    <p class="sub">Manage users, groups, departments, and review activity.</p>
+
+    <div class="tabs">
+      <div class="tab on" data-tab="users" onclick="showTab('users')">Users</div>
+      <div class="tab" data-tab="employment" onclick="showTab('employment')">Employment</div>
+      <div class="tab" data-tab="leaves" onclick="showTab('leaves')">Leaves</div>
+      <div class="tab" data-tab="reports" onclick="showTab('reports')">Reports</div>
+      <div class="tab" data-tab="regularisation" onclick="showTab('regularisation')">Regularisations</div>
+      <div class="tab" data-tab="attpolicy" onclick="showTab('attpolicy')">Att. Policy</div>
+      <div class="tab" data-tab="holidays" onclick="showTab('holidays')">Holidays</div>
+      <div class="tab" data-tab="csrota" onclick="showTab('csrota')">CS Rota</div>
+      <div class="tab" data-tab="groups" onclick="showTab('groups')">Groups</div>
+      <div class="tab" data-tab="audit" onclick="showTab('audit')">Audit log</div>
+      <div class="tab" data-tab="backups" onclick="showTab('backups')" id="navTabBackups" style="display:none">Backups</div>
+      <div class="tab" data-tab="onboarding" onclick="showTab('onboarding')" id="navTabOnboarding" style="display:none">Onboarding</div>
+      <div class="tab" data-tab="insights" onclick="showTab('insights')" id="navTabInsights" style="display:none">Insights</div>
+      <div class="tab" data-tab="settings" onclick="showTab('settings')">Settings</div>
+    </div>
+
+    <!-- ===== USERS ===== -->
+    <div id="tabUsers" class="tab-pane">
+      <div class="card">
+        <div class="card-head">
+          <h2>Users</h2>
+          <button class="btn btn-primary" onclick="openCreateUser()"><i class="ti ti-plus"></i> Add user</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Departments</th><th>Groups</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody id="usersBody">
+            <tr class="loading-row"><td colspan="5">Loading users…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== EMPLOYMENT (r0.7) ===== -->
+    <div id="tabEmployment" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Employment records</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="meta" id="empMeta">—</span>
+            <button class="btn" id="empRecomputeBtn" onclick="recomputeAllBalances()">Recompute all balances</button>
+            <button class="btn btn-primary" id="empSaveAllBtn" onclick="saveAllEmployment()" disabled>Save changes</button>
+          </div>
+        </div>
+        <div style="padding:12px 18px;background:#FBFAF7;border-bottom:0.5px solid var(--line);font-size:13px;color:var(--muted)">
+          <i class="ti ti-info-circle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>
+          Edit cells directly. <b>Joined date</b> drives leave accrual. After filling joined dates, click <b>Recompute all balances</b>.
+        </div>
+        <div style="overflow-x:auto">
+          <table id="empTable" style="min-width:1100px">
+            <thead>
+              <tr>
+                <th style="position:sticky;left:0;background:#FAF7F2;z-index:2">Name</th>
+                <th>Joined</th>
+                <th>Salary</th>
+                <th>Curr.</th>
+                <th>Type</th>
+                <th>Pattern</th>
+                <th>Prob. ends</th>
+                <th>Notice (d)</th>
+                <th>Emerg. contact</th>
+                <th>Balance</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="empBody">
+              <tr class="loading-row"><td colspan="11">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== REPORTS REVIEW QUEUE (r0.7) ===== -->
+    <div id="tabReports" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Daily reports</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="meta" id="reportsMeta">—</span>
+            <select id="reportsFilter" onchange="loadReports()" style="font-size:14px;padding:6px 10px;border:0.5px solid var(--line);border-radius:6px;background:white">
+              <option value="unreviewed">Unreviewed</option>
+              <option value="not_satisfactory">Not satisfactory</option>
+              <option value="all">All reports</option>
+            </select>
+          </div>
+        </div>
+        <div style="padding:12px 18px;background:#FBFAF7;border-bottom:0.5px solid var(--line);font-size:13px;color:var(--muted)">
+          <i class="ti ti-info-circle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>
+          Last 30 days. Click <b>Not satisfactory</b> to flag (comment required). Agent + HR are notified.
+        </div>
+        <div id="reportsList" style="padding:0">
+          <div style="padding:22px;text-align:center;color:var(--muted)">Loading…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== LEAVES ===== -->
+    <div id="tabLeaves" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Pending leave requests</h2>
+          <span class="meta" id="leavesPendingMeta">—</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Who</th><th>Type</th><th>Dates</th><th>Days</th><th>Reason</th><th></th></tr>
+          </thead>
+          <tbody id="leavesPendingBody">
+            <tr class="loading-row"><td colspan="6">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== GROUPS ===== -->
+    <div id="tabGroups" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Groups</h2>
+          <span class="meta">Group permissions are read-only in this view. Coming soon: full group editor.</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Group</th><th>Description</th><th>Members</th><th>Permissions</th></tr>
+          </thead>
+          <tbody id="groupsBody">
+            <tr class="loading-row"><td colspan="4">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== AUDIT ===== -->
+    <div id="tabAudit" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Audit log</h2>
+          <span class="meta" id="auditMeta">—</span>
+        </div>
+        <div class="filter-bar">
+          <span style="font-size:14px;color:var(--muted)">Filter:</span>
+          <select id="auditModule" onchange="loadAudit()">
+            <option value="">All modules</option>
+            <option value="auth">auth</option>
+            <option value="me">me</option>
+            <option value="leaves">leaves</option>
+            <option value="admin">admin</option>
+          </select>
+        </div>
+        <table>
+          <thead>
+            <tr><th>When</th><th>Who</th><th>Module · Action</th><th>Target</th></tr>
+          </thead>
+          <tbody id="auditBody">
+            <tr class="loading-row"><td colspan="4">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== BACKUPS (r0.8, owner-only) ===== -->
+    <div id="tabBackups" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Backups</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="meta" id="backupsHealth">—</span>
+            <button class="btn" onclick="downloadLatestBackup()"><i class="ti ti-download"></i> Download latest</button>
+            <button class="btn btn-primary" id="runBackupBtn" onclick="runBackupNow()"><i class="ti ti-cloud-upload"></i> Run backup now</button>
+          </div>
+        </div>
+        <div style="padding:12px 18px;background:#FBFAF7;border-bottom:0.5px solid var(--line);font-size:13px;color:var(--muted)">
+          <i class="ti ti-info-circle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>
+          Nightly backup runs at 02:00 London. Off-site copy lives in Backblaze B2. Manual run takes ~30s.
+        </div>
+        <div id="backupsDiag" style="padding:10px 18px;display:none;background:#FFF5E5;border-bottom:0.5px solid var(--line);font-size:13px;color:#9A5B1F">
+          <i class="ti ti-alert-triangle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>
+          <span id="backupsDiagText"></span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Started</th><th>Trigger</th><th>Status</th><th>Size</th><th>Duration</th><th>Object key</th></tr>
+          </thead>
+          <tbody id="backupsBody">
+            <tr class="loading-row"><td colspan="6">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== REGULARISATIONS QUEUE (HR-1) ===== -->
+    <div id="tabRegularisation" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Pending attendance corrections</h2>
+          <span class="meta" id="regMeta">—</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Who</th><th>Date</th><th>Reason</th><th>Times</th><th></th></tr>
+          </thead>
+          <tbody id="regBody">
+            <tr class="loading-row"><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== ATTENDANCE POLICY (HR-1) ===== -->
+    <div id="tabAttpolicy" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Pattern anchor</h2>
+          <span class="meta">Sets the Monday that marks the start of the 6-day-week cycle. Alternates 6 / 5 / 6 / 5 from this date.</span>
+        </div>
+        <div style="padding: 18px;">
+          <form id="anchorForm" style="display:grid;grid-template-columns:1fr auto;gap:12px;max-width:480px;align-items:end">
+            <div>
+              <label style="font-size:15px;color:var(--muted)">Anchor Monday</label>
+              <input type="date" id="anchorDate" style="width:100%;padding:10px 12px;border:0.5px solid var(--line);border-radius:9px" />
+            </div>
+            <button type="submit" class="btn btn-primary">Save anchor</button>
+          </form>
+          <p class="modal-sub" style="margin-top:14px" id="anchorMeta">—</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Shift policies (per department)</h2>
+          <span class="meta">Start/end time, grace, break window.</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Department</th><th>Start</th><th>End</th><th>Grace (m)</th><th></th></tr>
+          </thead>
+          <tbody id="policyBody">
+            <tr class="loading-row"><td colspan="6">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== HOLIDAYS (HR-1) ===== -->
+    <div id="tabHolidays" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Holidays</h2>
+          <button class="btn btn-primary" onclick="openHolidayModal()"><i class="ti ti-plus"></i> Add holiday</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Name</th><th>CS works?</th><th></th></tr>
+          </thead>
+          <tbody id="holidayBody">
+            <tr class="loading-row"><td colspan="4">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== CS ROTA (HR-1) ===== -->
+    <div id="tabCsrota" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Customer Service rota</h2>
+          <span class="meta">Upload the next 4-week rota. CSV format below.</span>
+        </div>
+        <div style="padding: 18px;">
+          <div style="margin-bottom:16px">
+            <button class="btn" onclick="downloadRotaTemplate()"><i class="ti ti-download"></i> Download template</button>
+            <span class="meta" style="margin-left:10px;font-size:14px;color:var(--muted)">CSV with rows per agent, columns per date, cells = Working / Off / Leave</span>
+          </div>
+          <form id="rotaUploadForm" style="border:1px dashed var(--line-strong);border-radius:10px;padding:18px;text-align:center;background:#FBFAF7">
+            <label style="display:block;font-size:15px;color:var(--muted);margin-bottom:8px">Upload CSV</label>
+            <input type="file" id="rotaFile" accept=".csv" style="margin:0 auto 12px;display:block" />
+            <button type="submit" class="btn btn-primary">Upload rota</button>
+          </form>
+          <div id="rotaResult" style="margin-top:14px;font-size:15px;color:var(--muted)"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Current rota</h2>
+          <span class="meta" id="rotaCurrentMeta">—</span>
+        </div>
+        <div style="padding: 18px;overflow-x:auto" id="rotaCurrentBody">
+          <p class="loading-row" style="text-align:center;color:var(--muted);font-size:15px;padding:18px">Loading…</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== HR INSIGHTS (r0.11) ===== -->
+    <div id="tabInsights" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>People on probation</h2>
+          <span id="insProbCount" style="font-size:14px;color:var(--muted)">—</span>
+        </div>
+        <div style="padding:0 18px 18px">
+          <table class="data-table" id="insProbTable">
+            <thead><tr><th>Person</th><th>Status</th><th>Hire date</th><th>Probation ends</th><th></th></tr></thead>
+            <tbody id="insProbBody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Overdue tasks</h2>
+          <span id="insOverdueCount" style="font-size:14px;color:var(--muted)">—</span>
+        </div>
+        <div style="padding:0 18px 18px">
+          <table class="data-table">
+            <thead><tr><th>Task</th><th>Assignee</th><th>About</th><th>Days overdue</th><th></th></tr></thead>
+            <tbody id="insOverdueBody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Onboarding in progress</h2>
+          <span id="insOnbCount" style="font-size:14px;color:var(--muted)">—</span>
+        </div>
+        <div style="padding:0 18px 18px">
+          <table class="data-table">
+            <thead><tr><th>Person</th><th>Hire date</th><th>Progress</th><th></th></tr></thead>
+            <tbody id="insOnbBody"><tr><td colspan="4" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== ONBOARDING TEMPLATES (r0.10) ===== -->
+    <div id="tabOnboarding" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Onboarding checklist template</h2>
+          <button class="btn btn-primary" onclick="openOnboardingItem()"><i class="ti ti-plus"></i> Add item</button>
+        </div>
+        <p style="padding:0 18px;font-size:14px;color:var(--muted);margin:0 0 12px">
+          This list is copied to every new hire's Onboarding drawer. Tanu (or HR) edits it here.
+          Adding an item here doesn't affect existing users; it only applies to future hires.
+        </p>
+        <div style="padding:0 18px 18px">
+          <table class="data-table">
+            <thead><tr><th>Order</th><th>Title</th><th>Details</th><th>Active</th><th></th></tr></thead>
+            <tbody id="onbTemplateBody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== SETTINGS ===== -->
+    <div id="tabSettings" class="tab-pane" style="display:none">
+      <div class="card">
+        <div class="card-head"><h2>Team break</h2></div>
+        <div style="padding: 18px">
+          <form id="breakForm" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:480px">
+            <div>
+              <label style="font-size:15px;color:var(--muted)">Start time</label>
+              <input type="time" id="breakStart" style="width:100%;padding:10px 12px;border:0.5px solid var(--line);border-radius:9px" />
+            </div>
+            <div>
+              <label style="font-size:15px;color:var(--muted)">Duration (minutes)</label>
+              <input type="number" id="breakDuration" min="1" max="240" style="width:100%;padding:10px 12px;border:0.5px solid var(--line);border-radius:9px" />
+            </div>
+            <button type="submit" class="btn btn-primary" style="grid-column:1 / -1">Save break time</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- r0.10 — Review settings -->
+      <div class="card" id="settingsReviewCard" style="display:none">
+        <div class="card-head"><h2>Review cycle settings</h2></div>
+        <div style="padding: 18px;max-width:480px">
+          <p style="font-size:14px;color:var(--muted);margin:0 0 14px">
+            These control how the system schedules and chases reviews. Changes apply on the next daily 06:00 task tick.
+          </p>
+          <form id="reviewSettingsForm" style="display:grid;gap:12px">
+            <div>
+              <label style="font-size:14px;color:var(--muted)">Days before due date the task opens</label>
+              <input type="number" id="setReviewOpen" min="1" max="30" style="width:120px;padding:8px 11px;border:0.5px solid var(--line);border-radius:8px" />
+            </div>
+            <div>
+              <label style="font-size:14px;color:var(--muted)">Days after due before going overdue (red)</label>
+              <input type="number" id="setReviewGrace" min="0" max="30" style="width:120px;padding:8px 11px;border:0.5px solid var(--line);border-radius:8px" />
+            </div>
+            <div>
+              <label style="font-size:14px;color:var(--muted)">Days between overdue re-nudges</label>
+              <input type="number" id="setReviewNudge" min="1" max="30" style="width:120px;padding:8px 11px;border:0.5px solid var(--line);border-radius:8px" />
+            </div>
+            <button type="submit" class="btn btn-primary" style="width:200px">Save review settings</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- r0.10 — Backfill -->
+      <div class="card" id="settingsBackfillCard" style="display:none">
+        <div class="card-head"><h2>Backfill review schedules</h2></div>
+        <div style="padding: 18px;max-width:600px">
+          <p style="font-size:14px;color:var(--muted);margin:0 0 14px">
+            Run this <strong>once</strong> after filling in hire dates for existing employees in the Employment tab.
+            For every active user with a hire date, the system generates their 1-month, 4-month, 8-month, and annual review schedule. Reviewers get a notification.
+            This is idempotent — re-running it won't duplicate existing review records.
+          </p>
+          <button class="btn btn-primary" onclick="runBackfill()" id="backfillBtn">Generate review schedules now</button>
+          <div id="backfillResult" style="margin-top:14px;font-size:14px;color:var(--ink)"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CREATE USER MODAL ===== -->
+  <div class="modal-bg" id="createUserModal">
+    <div class="modal">
+      <h2>Add a new user</h2>
+      <p class="modal-sub">They'll get a temporary password they must change on first login.</p>
+      <div class="modal-err" id="cuErr"></div>
+      <div class="modal-ok" id="cuOk"></div>
+      <div id="cuPwdBox" style="display:none">
+        <p style="font-size:15px;color:var(--muted);margin:0 0 6px">Share this password with the new user. They'll be required to change it on first login.</p>
+        <div class="pwd-display" id="cuPwdValue">—</div>
+      </div>
+      <form id="createUserForm">
+        <label>Full name</label>
+        <input type="text" id="cuFullName" required placeholder="e.g. Satyam Kumar" />
+        <label>Email</label>
+        <input type="email" id="cuEmail" required placeholder="satyam@fksports.co.uk" />
+        <label>Display name (optional)</label>
+        <input type="text" id="cuDisplayName" placeholder="What people call them" />
+        <label>Primary department</label>
+        <select id="cuDept" required>
+          <option value="">— pick a department —</option>
+        </select>
+        <label>Groups (everyone gets "Employee" automatically)</label>
+        <div class="check-list" id="cuGroups">Loading…</div>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="closeModal('createUserModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="cuBtn">Create user</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===== EDIT USER MODAL ===== -->
+  <div class="modal-bg" id="editUserModal">
+    <div class="modal">
+      <h2 id="euTitle">Edit user</h2>
+      <p class="modal-sub" id="euSub">—</p>
+      <div class="modal-err" id="euErr"></div>
+      <div class="modal-ok" id="euOk"></div>
+      <form id="editUserForm">
+        <input type="hidden" id="euId" />
+        <label>Full name</label>
+        <input type="text" id="euFullName" required />
+        <label>Display name</label>
+        <input type="text" id="euDisplayName" />
+        <label>Employment status</label>
+        <select id="euEmpStatus">
+          <option value="active">Active</option>
+          <option value="on_leave">On leave</option>
+          <option value="left">Left the company</option>
+        </select>
+        <label>Departments &amp; roles</label>
+        <div class="check-list" id="euDepts">Loading…</div>
+        <label>Groups</label>
+        <div class="check-list" id="euGroups">Loading…</div>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="closeModal('editUserModal')">Cancel</button>
+          <button type="button" class="btn btn-danger" onclick="resetPassword()">Reset password</button>
+          <button type="submit" class="btn btn-primary" id="euBtn">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===== ADD/EDIT HOLIDAY MODAL (HR-1) ===== -->
+  <div class="modal-bg" id="holidayModal">
+    <div class="modal">
+      <h2>Add holiday</h2>
+      <p class="modal-sub">Office closed except CS (unless you tick "CS works through this holiday").</p>
+      <div class="modal-err" id="holErr"></div>
+      <form id="holForm">
+        <label>Date</label>
+        <input type="date" id="holDate" required />
+        <label>Name</label>
+        <input type="text" id="holName" placeholder="Christmas Day" required />
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="holCsWorks" style="width:auto;margin:0" />
+          <span>CS works through this holiday (don't mark CS people as off)</span>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="closeModal('holidayModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="holBtn">Add holiday</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===== EDIT POLICY MODAL (HR-1) ===== -->
+  <div class="modal-bg" id="policyModal">
+    <div class="modal">
+      <h2 id="polTitle">Edit shift policy</h2>
+      <p class="modal-sub" id="polSub">—</p>
+      <div class="modal-err" id="polErr"></div>
+      <form id="polForm">
+        <input type="hidden" id="polSlug" />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label>Start time</label>
+            <input type="time" id="polStart" required />
+          </div>
+          <div>
+            <label>End time</label>
+            <input type="time" id="polEnd" required />
+          </div>
+        </div>
+        <label>Grace minutes</label>
+        <input type="number" id="polGrace" min="0" max="60" required />
+        <p class="hint" style="font-size:12px;color:var(--muted);margin:6px 0 0">
+          Break time is set company-wide in Settings → Team break.
+        </p>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="closeModal('policyModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="polBtn">Save policy</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===== ADJUST LEAVE BALANCE MODAL (r0.7) ===== -->
+  <div class="modal-bg" id="adjustModal">
+    <div class="modal">
+      <h2 id="adjustTitle">Adjust leave balance</h2>
+      <p class="modal-sub">Positive adds days, negative subtracts. The adjustment is shown transparently on the user's Time off card.</p>
+      <div class="modal-err" id="adjustErr"></div>
+      <form id="adjustForm">
+        <input type="hidden" id="adjustUserId" />
+        <label>Delta (days)</label>
+        <input type="number" step="0.5" id="adjustDelta" placeholder="e.g. +5 or -2" required />
+        <label>Note (required)</label>
+        <input type="text" id="adjustNote" placeholder="e.g. Carryover from pre-FK-Home era" required />
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="closeModal('adjustModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary">Apply adjustment</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===== FLAG REPORT MODAL (r0.7) ===== -->
+  <div class="modal-bg" id="reviewModal">
+    <div class="modal">
+      <h2 id="reviewTitle">Flag report</h2>
+      <p class="modal-sub">The agent and HR will both be notified. Be specific.</p>
+      <div class="modal-err" id="reviewErr"></div>
+      <form id="reviewForm">
+        <input type="hidden" id="reviewReportId" />
+        <input type="hidden" id="reviewDecision" />
+        <label>What's the issue?</label>
+        <textarea id="reviewComment" rows="4" placeholder="e.g. Missed two stand-ups, no detail on actual work." style="width:100%;font-family:inherit;font-size:14px;padding:8px;border:0.5px solid var(--line);border-radius:6px;resize:vertical" required></textarea>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="closeModal('reviewModal')">Cancel</button>
+          <button type="submit" class="btn btn-danger">Flag as Not satisfactory</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+<script>
+let me_ = null;
+let departments_ = [];
+let groups_ = [];
+
+async function init() {
+  // Check auth + permissions
+  const r = await fetch('/api/auth/me', { credentials: 'include' });
+  if (!r.ok) { location.href = '/login.html'; return; }
+  me_ = await r.json();
+  if (!me_.permissions.includes('admin.users.view')) {
+    alert('You do not have permission to view this page.');
+    location.href = '/';
+    return;
+  }
+
+  // Load shared data
+  const [d, g] = await Promise.all([
+    fetch('/api/admin/departments', { credentials: 'include' }).then(r => r.ok ? r.json() : { departments: [] }),
+    fetch('/api/admin/groups', { credentials: 'include' }).then(r => r.ok ? r.json() : { groups: [] }),
+  ]);
+  departments_ = d.departments || [];
+  groups_ = g.groups || [];
+
+  // Auto-jump to tab from URL hash (e.g. /admin.html#leaves)
+  const hash = (location.hash || '').replace('#', '');
+  if (hash === 'leaves') showTab('leaves');
+  else if (hash === 'employment') showTab('employment');
+  else if (hash === 'reports') showTab('reports');
+  else if (hash === 'regularisation') showTab('regularisation');
+  else if (hash === 'attpolicy') showTab('attpolicy');
+  else if (hash === 'holidays') showTab('holidays');
+  else if (hash === 'csrota') showTab('csrota');
+  else if (hash === 'groups') showTab('groups');
+  else if (hash === 'audit') showTab('audit');
+  else if (hash === 'backups') showTab('backups');
+  else if (hash === 'settings') showTab('settings');
+  else loadUsers();
+
+  // r0.8 — Reveal the Backups tab for users who can manage backups (owner only).
+  if ((me_.permissions || []).includes('admin.backup.manage')) {
+    const t = document.getElementById('navTabBackups');
+    if (t) t.style.display = '';
+  }
+  // r0.10 — Reveal the Onboarding tab for HR/owner.
+  if ((me_.permissions || []).includes('admin.onboarding_templates.edit')) {
+    const t = document.getElementById('navTabOnboarding');
+    if (t) t.style.display = '';
+  }
+  // r0.11 — Reveal the Insights tab for HR/owner (anyone with profile.view.any).
+  if ((me_.permissions || []).includes('profile.view.any')) {
+    const t = document.getElementById('navTabInsights');
+    if (t) t.style.display = '';
+  }
+}
+
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === id));
+  document.querySelectorAll('.tab-pane').forEach(p => p.style.display = 'none');
+  document.getElementById('tab' + id.charAt(0).toUpperCase() + id.slice(1)).style.display = '';
+  if (id === 'users') loadUsers();
+  if (id === 'employment') loadEmployment();
+  if (id === 'leaves') loadLeaves();
+  if (id === 'reports') loadReports();
+  if (id === 'groups') loadGroups();
+  if (id === 'audit') loadAudit();
+  if (id === 'settings') loadSettings();
+  if (id === 'regularisation') loadRegularisations();
+  if (id === 'attpolicy') loadAttPolicy();
+  if (id === 'holidays') loadHolidays();
+  if (id === 'csrota') loadCsRota();
+  if (id === 'backups') loadBackups();
+  if (id === 'onboarding') loadOnboardingTemplates();
+  if (id === 'insights') loadInsights();
+}
+
+// ---- USERS ----
+async function loadUsers() {
+  const tbody = document.getElementById('usersBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="5">Loading users…</td></tr>';
+  try {
+    const r = await fetch('/api/admin/users', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const data = await r.json();
+    if (data.users.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--muted)">No users yet. Click "Add user" to create the first one.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.users.map(userRow).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--red)">Failed to load users.</td></tr>';
+  }
+}
+
+function userRow(u) {
+  const depts = (u.departments || []).map(d => `<span class="chip">${escapeHtml(d.name)} · ${roleDisplay(d.role)}</span>`).join('') || '<span style="color:var(--muted);font-size:14px">none</span>';
+  const grps = (u.groups || []).map(g => `<span class="chip ${g.slug === 'owner' ? 'amber' : ''}">${escapeHtml(g.name)}</span>`).join('') || '<span style="color:var(--muted);font-size:14px">none</span>';
+  return `
+    <tr>
+      <td>
+        <div class="name-cell" style="cursor:pointer" onclick="location.href='/profile.html?id=${u.id}'" title="View profile">
+          <span class="avatar" style="background:${u.avatar_colour || '#F1EFE8'}">${escapeHtml(u.initials || '—')}</span>
+          <div>
+            <div class="nm">${escapeHtml(u.display_name || u.full_name)}</div>
+            <div class="em">${escapeHtml(u.email)}</div>
+          </div>
+        </div>
+      </td>
+      <td>${depts}</td>
+      <td>${grps}</td>
+      <td><span class="status-pill ${u.employment_status}">${u.employment_status.replace('_',' ')}</span></td>
+      <td class="action-col">
+        <button class="btn" onclick="event.stopPropagation();openEditUser(${u.id})"><i class="ti ti-edit"></i> Edit</button>
+      </td>
+    </tr>`;
+}
+
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function roleDisplay(role) {
+  if (role === 'manager') return 'Manager';
+  if (role === 'lead') return 'Executive';
+  return 'Specialist';
+}
+
+// ---- CREATE USER ----
+function openCreateUser() {
+  // Populate dept dropdown
+  const deptSel = document.getElementById('cuDept');
+  deptSel.innerHTML = '<option value="">— pick a department —</option>' +
+    departments_.map(d => `<option value="${d.slug}">${escapeHtml(d.name)}</option>`).join('');
+
+  // Populate group checkboxes (exclude employee-base — always added; exclude owner — Bobby only)
+  const cgBox = document.getElementById('cuGroups');
+  cgBox.innerHTML = groups_
+    .filter(g => g.slug !== 'employee-base' && g.slug !== 'owner')
+    .map(g => `
+      <label>
+        <input type="checkbox" value="${g.slug}" />
+        <span>${escapeHtml(g.name)}</span>
+        <span class="meta">${escapeHtml(g.description || '')}</span>
+      </label>`).join('');
+
+  document.getElementById('cuFullName').value = '';
+  document.getElementById('cuEmail').value = '';
+  document.getElementById('cuDisplayName').value = '';
+  document.getElementById('cuPwdBox').style.display = 'none';
+  document.getElementById('cuErr').classList.remove('on');
+  document.getElementById('cuOk').classList.remove('on');
+  document.getElementById('createUserModal').classList.add('on');
+}
+
+document.getElementById('createUserForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('cuErr');
+  const ok = document.getElementById('cuOk');
+  const btn = document.getElementById('cuBtn');
+  err.classList.remove('on'); ok.classList.remove('on');
+
+  const checked = Array.from(document.querySelectorAll('#cuGroups input:checked')).map(x => x.value);
+  const body = {
+    full_name: document.getElementById('cuFullName').value.trim(),
+    email: document.getElementById('cuEmail').value.trim(),
+    display_name: document.getElementById('cuDisplayName').value.trim() || undefined,
+    primary_department_slug: document.getElementById('cuDept').value || undefined,
+    group_slugs: checked,
+  };
+
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const r = await fetch('/api/admin/users', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      err.textContent = data.error || 'Failed';
+      err.classList.add('on');
+      btn.disabled = false; btn.textContent = 'Create user';
+      return;
+    }
+    document.getElementById('cuPwdValue').textContent = data.initial_password;
+    document.getElementById('cuPwdBox').style.display = '';
+    ok.textContent = `User created. Share the password with ${data.user.display_name || data.user.full_name}.`;
+    ok.classList.add('on');
+    btn.textContent = 'Done — close this';
+    btn.disabled = false;
+    btn.type = 'button';
+    btn.onclick = () => {
+      closeModal('createUserModal');
+      btn.type = 'submit';
+      btn.onclick = null;
+      loadUsers();
+    };
+  } catch (er) {
+    err.textContent = 'Network error';
+    err.classList.add('on');
+    btn.disabled = false; btn.textContent = 'Create user';
+  }
+});
+
+// ---- EDIT USER ----
+async function openEditUser(id) {
+  const r = await fetch('/api/admin/users', { credentials: 'include' });
+  const data = await r.json();
+  const u = data.users.find(x => x.id === id);
+  if (!u) return alert('User not found');
+
+  document.getElementById('euId').value = u.id;
+  document.getElementById('euTitle').textContent = u.full_name;
+  document.getElementById('euSub').textContent = u.email;
+  document.getElementById('euFullName').value = u.full_name;
+  document.getElementById('euDisplayName').value = u.display_name || '';
+  document.getElementById('euEmpStatus').value = u.employment_status;
+  document.getElementById('euErr').classList.remove('on');
+  document.getElementById('euOk').classList.remove('on');
+
+  // Depts
+  const userDepts = (u.departments || []).reduce((acc, d) => { acc[d.slug] = d; return acc; }, {});
+  document.getElementById('euDepts').innerHTML = departments_.map(d => {
+    const m = userDepts[d.slug];
+    const checked = m ? 'checked' : '';
+    const role = m ? m.role : 'agent';
+    const isPrimary = m ? m.is_primary : false;
+    return `
+      <label style="display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:9px">
+        <input type="checkbox" data-slug="${d.slug}" ${checked} />
+        <span>${escapeHtml(d.name)}</span>
+        <select data-slug-role="${d.slug}" style="font-size:14px;padding:3px 6px;border:0.5px solid var(--line);border-radius:6px">
+          <option value="agent" ${role === 'agent' ? 'selected' : ''}>Specialist</option>
+          <option value="lead" ${role === 'lead' ? 'selected' : ''}>Executive</option>
+          <option value="manager" ${role === 'manager' ? 'selected' : ''}>Manager</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:4px;margin:0;font-size:14px;color:var(--muted)">
+          <input type="checkbox" data-slug-primary="${d.slug}" ${isPrimary ? 'checked' : ''} />primary
+        </label>
+      </label>`;
+  }).join('');
+
+  // Groups
+  const userGroups = new Set((u.groups || []).map(g => g.slug));
+  document.getElementById('euGroups').innerHTML = groups_
+    .filter(g => g.slug !== 'employee-base')
+    .map(g => {
+      const isOwner = g.slug === 'owner';
+      return `
+        <label>
+          <input type="checkbox" value="${g.slug}" ${userGroups.has(g.slug) ? 'checked' : ''} ${isOwner ? 'disabled' : ''} />
+          <span>${escapeHtml(g.name)}</span>
+          <span class="meta">${escapeHtml(g.description || '')}</span>
+        </label>`;
+    }).join('') + `<div style="font-size:13px;color:var(--muted);padding:6px 10px">Employee (base) is always included.</div>`;
+
+  document.getElementById('editUserModal').classList.add('on');
+}
+
+document.getElementById('editUserForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = parseInt(document.getElementById('euId').value, 10);
+  const err = document.getElementById('euErr');
+  const ok = document.getElementById('euOk');
+  const btn = document.getElementById('euBtn');
+  err.classList.remove('on'); ok.classList.remove('on');
+  btn.disabled = true; btn.textContent = 'Saving…';
+
+  try {
+    // 1. Update basic fields
+    const updateBody = {
+      full_name: document.getElementById('euFullName').value.trim(),
+      display_name: document.getElementById('euDisplayName').value.trim() || undefined,
+      employment_status: document.getElementById('euEmpStatus').value,
+    };
+    let r = await fetch(`/api/admin/users/${id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify(updateBody)
+    });
+    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Update failed'); }
+
+    // 2. Departments
+    const deptInputs = Array.from(document.querySelectorAll('#euDepts input[data-slug]:checked'));
+    const memberships = deptInputs.map(inp => {
+      const slug = inp.dataset.slug;
+      const role = document.querySelector(`#euDepts select[data-slug-role="${slug}"]`).value;
+      const primary = document.querySelector(`#euDepts input[data-slug-primary="${slug}"]`).checked;
+      return { department_slug: slug, role, is_primary: primary };
+    });
+    r = await fetch(`/api/admin/users/${id}/departments`, {
+      method: 'PUT', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ memberships })
+    });
+    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Departments failed'); }
+
+    // 3. Groups
+    const groupSlugs = Array.from(document.querySelectorAll('#euGroups input:checked')).map(x => x.value);
+    r = await fetch(`/api/admin/users/${id}/groups`, {
+      method: 'PUT', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ group_slugs: groupSlugs })
+    });
+    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Groups failed'); }
+
+    ok.textContent = 'Saved.';
+    ok.classList.add('on');
+    setTimeout(() => { closeModal('editUserModal'); loadUsers(); }, 800);
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.add('on');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save changes';
+  }
+});
+
+async function resetPassword() {
+  const id = parseInt(document.getElementById('euId').value, 10);
+  const name = document.getElementById('euTitle').textContent;
+  if (!confirm(`Reset password for ${name}? They'll be forced to change it on next login.`)) return;
+  try {
+    const r = await fetch(`/api/admin/users/${id}/reset-password`, {
+      method: 'POST', credentials: 'include'
+    });
+    const data = await r.json();
+    if (!r.ok) return alert(data.error || 'Failed');
+    alert(`Password reset. Temporary password: ${data.initial_password}\n\nPlease share this with the user.`);
+  } catch (e) { alert('Network error'); }
+}
+
+// ---- LEAVES ----
+async function loadLeaves() {
+  const tbody = document.getElementById('leavesPendingBody');
+  const meta = document.getElementById('leavesPendingMeta');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="6">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/leaves/pending', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const data = await r.json();
+    if (data.requests.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--muted)">No pending leave requests.</td></tr>';
+      meta.textContent = '0 pending';
+      return;
+    }
+    meta.textContent = `${data.requests.length} pending`;
+    tbody.innerHTML = data.requests.map(lr => `
+      <tr>
+        <td>
+          <div class="name-cell">
+            <span class="avatar" style="background:${lr.user_avatar_colour || '#F1EFE8'}">${escapeHtml(lr.user_initials || '—')}</span>
+            <div>
+              <div class="nm">${escapeHtml(lr.user_display_name || lr.user_full_name)}</div>
+            </div>
+          </div>
+        </td>
+        <td><span class="chip">${escapeHtml(lr.request_type || 'annual')}</span></td>
+        <td>${formatDateRange(lr.start_date, lr.end_date)}</td>
+        <td>${lr.total_days}</td>
+        <td style="font-size:15px;color:var(--muted);max-width:280px">${escapeHtml(lr.reason || '—')}</td>
+        <td class="action-col">
+          <button class="btn" onclick="decideLeave(${lr.id}, 'rejected')">Reject</button>
+          <button class="btn btn-primary" onclick="decideLeave(${lr.id}, 'approved')">Approve</button>
+        </td>
+      </tr>`).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--red)">Failed to load.</td></tr>';
+  }
+}
+
+function formatDateRange(s, e) {
+  const sd = new Date(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  const ed = new Date(e).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  return s === e ? sd : `${sd} → ${ed}`;
+}
+
+async function decideLeave(id, decision) {
+  let note = '';
+  if (decision === 'rejected') {
+    note = prompt('Reason for rejection (optional, but recommended):') || '';
+  }
+  try {
+    const r = await fetch(`/api/leaves/${id}/decide`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ decision, decision_note: note })
+    });
+    if (!r.ok) {
+      const d = await r.json();
+      alert(d.error || 'Failed');
+      return;
+    }
+    loadLeaves();
+  } catch (e) {
+    alert('Network error');
+  }
+}
+
+// ---- GROUPS ----
+async function loadGroups() {
+  const tbody = document.getElementById('groupsBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/admin/groups', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const data = await r.json();
+    groups_ = data.groups;
+    tbody.innerHTML = data.groups.map(g => `
+      <tr>
+        <td>
+          <div class="nm">${escapeHtml(g.name)}</div>
+          ${g.is_system ? '<span class="chip muted" style="margin-top:3px">system</span>' : ''}
+        </td>
+        <td style="color:var(--muted);font-size:15px">${escapeHtml(g.description || '')}</td>
+        <td>${g.member_count}</td>
+        <td>
+          ${(g.permissions || []).slice(0, 5).map(p => `<span class="chip" style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(p)}</span>`).join('')}
+          ${(g.permissions || []).length > 5 ? `<span class="chip muted" style="font-size:12px">+${g.permissions.length - 5} more</span>` : ''}
+        </td>
+      </tr>`).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--red)">Failed to load.</td></tr>';
+  }
+}
+
+// ---- AUDIT ----
+async function loadAudit() {
+  const tbody = document.getElementById('auditBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
+  const mod = document.getElementById('auditModule').value;
+  const qs = mod ? `?module=${encodeURIComponent(mod)}` : '';
+  try {
+    const r = await fetch('/api/admin/audit' + qs, { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const data = await r.json();
+    document.getElementById('auditMeta').textContent = `${data.entries.length} entries shown`;
+    if (data.entries.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--muted)">No audit entries.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.entries.map(e => `
+      <tr class="audit-row">
+        <td style="color:var(--muted);white-space:nowrap">${formatWhen(e.occurred_at)}</td>
+        <td>${escapeHtml(e.actor_name || '—')}</td>
+        <td><span class="mod">${escapeHtml(e.module)}</span> · <span class="act">${escapeHtml(e.action)}</span></td>
+        <td class="det">${escapeHtml(e.target_type || '')}${e.target_id ? ' #' + e.target_id : ''}${e.details ? ' · ' + escapeHtml(e.details) : ''}</td>
+      </tr>`).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--red)">Failed to load.</td></tr>';
+  }
+}
+
+function formatWhen(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString('en-GB', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
+}
+
+// ---- SETTINGS ----
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/admin/break', { credentials: 'include' });
+    if (r.ok) {
+      const data = await r.json();
+      if (data.break) {
+        document.getElementById('breakStart').value = data.break.start_time.slice(0, 5);
+        document.getElementById('breakDuration').value = data.break.duration_minutes;
+      }
+    }
+    // r0.10 — Review settings + backfill (HR/owner only)
+    const settingsR = await fetch('/api/admin/settings', { credentials: 'include' });
+    if (settingsR.ok) {
+      document.getElementById('settingsReviewCard').style.display = '';
+      const sd = await settingsR.json();
+      const map = {};
+      for (const row of sd.settings) {
+        // value may be jsonb-parsed (number) or string
+        map[row.key] = typeof row.value === 'number' ? row.value : Number(row.value);
+      }
+      const o = document.getElementById('setReviewOpen');
+      const g = document.getElementById('setReviewGrace');
+      const n = document.getElementById('setReviewNudge');
+      if (o) o.value = map.review_open_window_days || 7;
+      if (g) g.value = map.review_grace_days || 3;
+      if (n) n.value = map.review_nudge_interval_days || 7;
+    }
+    // Backfill button is for HR/owner — surface via probing the endpoint
+    // Just show it if review settings card is visible (same permission level)
+    document.getElementById('settingsBackfillCard').style.display = document.getElementById('settingsReviewCard').style.display;
+  } catch (err) {}
+}
+
+document.getElementById('reviewSettingsForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const updates = {
+    review_open_window_days: parseInt(document.getElementById('setReviewOpen').value, 10),
+    review_grace_days: parseInt(document.getElementById('setReviewGrace').value, 10),
+    review_nudge_interval_days: parseInt(document.getElementById('setReviewNudge').value, 10),
+  };
+  try {
+    for (const [k, v] of Object.entries(updates)) {
+      if (!Number.isFinite(v)) continue;
+      const r = await fetch('/api/admin/settings/' + encodeURIComponent(k), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ value: v })
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(()=>({}));
+        return alert('Failed to save ' + k + ': ' + (d.error || 'unknown'));
+      }
+    }
+    alert('Review settings saved.');
+  } catch (e) { alert('Failed'); }
+});
+
+async function runBackfill() {
+  if (!confirm('Generate review schedules for all active employees with hire dates set?\n\nThis is safe to run multiple times — it skips users who already have schedules.')) return;
+  const btn = document.getElementById('backfillBtn');
+  const result = document.getElementById('backfillResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  result.textContent = '';
+  try {
+    const r = await fetch('/api/admin/backfill/review-schedules', {
+      method: 'POST', credentials: 'include'
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      result.innerHTML = '<span style="color:var(--red)">' + (d.error || 'Failed') + '</span>';
+    } else {
+      result.innerHTML = '<span style="color:var(--green)">Done. ' +
+        'Processed ' + d.users_processed + ' users, ' +
+        'created ' + d.reviews_created + ' review records ' +
+        '(' + d.users_with_new_reviews + ' users had new reviews scheduled).</span>';
+    }
+  } catch (e) {
+    result.innerHTML = '<span style="color:var(--red)">Network error.</span>';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Generate review schedules now';
+}
+
+// ---- ONBOARDING TEMPLATES (r0.10) ----
+async function loadOnboardingTemplates() {
+  const tbody = document.getElementById('onbTemplateBody');
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/admin/onboarding-templates', { credentials: 'include' });
+    if (!r.ok) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:18px">Permission denied or failed.</td></tr>';
+      return;
+    }
+    const d = await r.json();
+    const tmpls = d.templates || [];
+    if (tmpls.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">No items.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = tmpls.map(t => {
+      const sortVal = t.sort_order || 100;
+      const titleSafe = (t.title || '').replace(/'/g, '&apos;').replace(/"/g, '&quot;');
+      const bodySafe = (t.body || '').replace(/'/g, '&apos;').replace(/"/g, '&quot;');
+      return '<tr>' +
+        '<td>' + sortVal + '</td>' +
+        '<td style="font-weight:500">' + escapeHtmlA(t.title) + '</td>' +
+        '<td style="color:var(--muted)">' + escapeHtmlA(t.body || '') + '</td>' +
+        '<td>' + (t.is_active ? '<span style="color:var(--green)">Yes</span>' : '<span style="color:var(--muted)">No</span>') + '</td>' +
+        '<td class="action-col">' +
+          '<button class="btn" onclick="editOnboardingItem(' + t.id + ',\'' + titleSafe + '\',\'' + bodySafe + '\',' + sortVal + ',' + (t.is_active ? 1 : 0) + ')">Edit</button> ' +
+          '<button class="btn" onclick="deleteOnboardingItem(' + t.id + ')" style="color:var(--red)">Delete</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:18px">Failed.</td></tr>';
+  }
+}
+
+function openOnboardingItem() {
+  editOnboardingItem(null, '', '', 100, 1);
+}
+
+function editOnboardingItem(id, title, body, sortOrder, isActive) {
+  const titleDecoded = String(title).replace(/&apos;/g, "'").replace(/&quot;/g, '"');
+  const bodyDecoded = String(body).replace(/&apos;/g, "'").replace(/&quot;/g, '"');
+  const newTitle = prompt('Title:', titleDecoded);
+  if (newTitle == null) return;
+  const newBody = prompt('Details (optional):', bodyDecoded) || '';
+  const newSort = prompt('Sort order (lower = appears first):', String(sortOrder));
+  if (newSort == null) return;
+  const newActive = confirm('Should this item be active? (OK=active, Cancel=inactive)');
+  const payload = {
+    title: newTitle.trim(),
+    body: newBody.trim() || null,
+    sort_order: parseInt(newSort, 10) || 100,
+    is_active: newActive,
+  };
+  if (!payload.title) return alert('Title required');
+  const url = id ? '/api/admin/onboarding-templates/' + id : '/api/admin/onboarding-templates';
+  const method = id ? 'PATCH' : 'POST';
+  fetch(url, {
+    method, headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify(payload)
+  }).then(r => r.json().then(d => {
+    if (!r.ok) return alert(d.error || 'Failed');
+    loadOnboardingTemplates();
+  }));
+}
+
+function deleteOnboardingItem(id) {
+  if (!confirm('Delete this onboarding template item?\n\nExisting employees who already have this item in their onboarding will keep it. Only future hires will be affected.')) return;
+  fetch('/api/admin/onboarding-templates/' + id, {
+    method: 'DELETE', credentials: 'include'
+  }).then(r => r.json().then(d => {
+    if (!r.ok) return alert(d.error || 'Failed');
+    loadOnboardingTemplates();
+  }));
+}
+
+// ---- HR INSIGHTS (r0.11) ----
+async function loadInsights() {
+  const probBody = document.getElementById('insProbBody');
+  const overdueBody = document.getElementById('insOverdueBody');
+  const onbBody = document.getElementById('insOnbBody');
+  probBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">Loading…</td></tr>';
+  overdueBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">Loading…</td></tr>';
+  onbBody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:18px">Loading…</td></tr>';
+
+  try {
+    const r = await fetch('/api/admin/insights', { credentials: 'include' });
+    if (!r.ok) {
+      probBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:18px">Permission denied or failed.</td></tr>';
+      return;
+    }
+    const d = await r.json();
+
+    // Probation section
+    document.getElementById('insProbCount').textContent =
+      d.probation.length + (d.probation.length === 1 ? ' person' : ' people');
+    if (d.probation.length === 0) {
+      probBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">No one on probation. 👍</td></tr>';
+    } else {
+      probBody.innerHTML = d.probation.map(p => {
+        const initials = escapeHtmlA(p.initials || '');
+        const colour = p.avatar_colour || '#888780';
+        const statusMap = {
+          'in_probation': { label: 'Probation', cls: 'amber' },
+          'probation_pass_expected': { label: 'On track', cls: 'green' },
+          'extended': { label: 'Extended', cls: 'amber' },
+          'failed': { label: 'Failed', cls: 'red' },
+        };
+        const s = statusMap[p.probation_status] || { label: p.probation_status, cls: '' };
+        let endLbl = '—';
+        if (p.probation_end_date) {
+          const end = new Date(p.probation_end_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+          const days = p.days_past_end_date;
+          if (days != null && days > 0) {
+            endLbl = end + ' <span style="color:var(--red);font-size:12px">(' + days + ' day' + (days === 1 ? '' : 's') + ' ago)</span>';
+          } else if (days != null && days >= -7) {
+            endLbl = end + ' <span style="color:var(--amber-deep);font-size:12px">(in ' + (-days) + ' day' + (days === -1 ? '' : 's') + ')</span>';
+          } else {
+            endLbl = end;
+          }
+        }
+        return '<tr style="cursor:pointer" onclick="location.href=\'/profile.html?id=' + p.id + '\'">' +
+          '<td><div style="display:flex;gap:10px;align-items:center">' +
+            '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500">' + initials + '</span>' +
+            '<span>' + escapeHtmlA(p.display_name || p.full_name) + '</span>' +
+          '</div></td>' +
+          '<td><span class="chip ' + s.cls + '">' + s.label + '</span></td>' +
+          '<td style="color:var(--muted)">' + (p.hire_date ? new Date(p.hire_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—') + '</td>' +
+          '<td>' + endLbl + '</td>' +
+          '<td class="action-col"><button class="btn" onclick="event.stopPropagation();location.href=\'/profile.html?id=' + p.id + '\'">View</button></td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    // Overdue tasks section
+    document.getElementById('insOverdueCount').textContent =
+      d.overdue_tasks.length + (d.overdue_tasks.length === 1 ? ' task' : ' tasks');
+    if (d.overdue_tasks.length === 0) {
+      overdueBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">No overdue tasks. 🎉</td></tr>';
+    } else {
+      overdueBody.innerHTML = d.overdue_tasks.map(t => {
+        const assigneeName = t.assignee_display_name || t.assignee_full_name || '—';
+        const relatedName = t.related_display_name || t.related_full_name || '—';
+        const initials = escapeHtmlA(t.assignee_initials || '');
+        const colour = t.assignee_avatar_colour || '#888780';
+        const days = t.days_overdue || 0;
+        return '<tr>' +
+          '<td style="font-weight:500">' + escapeHtmlA(t.title) +
+            (t.reason === 'orchestrator' ? ' <span style="font-size:11px;color:var(--muted)">(orchestrator)</span>' : '') +
+            '</td>' +
+          '<td><div style="display:flex;gap:8px;align-items:center">' +
+            '<span style="width:22px;height:22px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500">' + initials + '</span>' +
+            '<span>' + escapeHtmlA(assigneeName) + '</span>' +
+          '</div></td>' +
+          '<td><span style="color:var(--muted);font-size:13px">' + escapeHtmlA(relatedName) + '</span></td>' +
+          '<td><span style="color:var(--red);font-weight:500">' + days + ' day' + (days === 1 ? '' : 's') + '</span></td>' +
+          '<td class="action-col"><button class="btn" onclick="location.href=\'/profile.html?id=' + t.related_user_id + '#reviews\'">Open</button></td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    // Onboarding in progress section
+    document.getElementById('insOnbCount').textContent =
+      d.onboarding.length + (d.onboarding.length === 1 ? ' person' : ' people');
+    if (d.onboarding.length === 0) {
+      onbBody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:18px">All caught up — no incomplete onboarding.</td></tr>';
+    } else {
+      onbBody.innerHTML = d.onboarding.map(o => {
+        const initials = escapeHtmlA(o.initials || '');
+        const colour = o.avatar_colour || '#888780';
+        const pct = o.total_items > 0 ? Math.round(o.done_items * 100 / o.total_items) : 0;
+        return '<tr style="cursor:pointer" onclick="location.href=\'/profile.html?id=' + o.id + '#onboarding\'">' +
+          '<td><div style="display:flex;gap:10px;align-items:center">' +
+            '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500">' + initials + '</span>' +
+            '<span>' + escapeHtmlA(o.display_name || o.full_name) + '</span>' +
+          '</div></td>' +
+          '<td style="color:var(--muted)">' + (o.hire_date ? new Date(o.hire_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—') + '</td>' +
+          '<td><div style="display:flex;align-items:center;gap:10px">' +
+            '<div style="width:120px;height:8px;background:var(--line);border-radius:99px;overflow:hidden">' +
+              '<div style="height:100%;width:' + pct + '%;background:#3B6D11"></div>' +
+            '</div>' +
+            '<span style="font-size:12px;color:var(--muted)">' + o.done_items + '/' + o.total_items + '</span>' +
+          '</div></td>' +
+          '<td class="action-col"><button class="btn" onclick="event.stopPropagation();location.href=\'/profile.html?id=' + o.id + '#onboarding\'">Open</button></td>' +
+        '</tr>';
+      }).join('');
+    }
+  } catch (e) {
+    console.error('[loadInsights]', e);
+    probBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:18px">Failed to load.</td></tr>';
+  }
+}
+
+document.getElementById('breakForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const start_time = document.getElementById('breakStart').value;
+  const duration_minutes = parseInt(document.getElementById('breakDuration').value, 10);
+  try {
+    const r = await fetch('/api/admin/break', {
+      method: 'PUT', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ start_time: start_time + ':00', duration_minutes })
+    });
+    const data = await r.json();
+    if (!r.ok) return alert(data.error || 'Failed');
+    alert('Break time updated.');
+  } catch (er) { alert('Network error'); }
+});
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('on');
+}
+
+// ============================================================
+// r0.8 — BACKUPS (owner only)
+// ============================================================
+async function loadBackups() {
+  const body = document.getElementById('backupsBody');
+  body.innerHTML = '<tr class="loading-row"><td colspan="6">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/admin/backups', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const data = await r.json();
+
+    // Health pill
+    try {
+      const h = await fetch('/api/admin/backups/health', { credentials: 'include' }).then(x => x.ok ? x.json() : null);
+      const el = document.getElementById('backupsHealth');
+      if (!h) { el.textContent = '—'; }
+      else if (h.status === 'healthy') {
+        el.innerHTML = '<span style="color:#1D9E75">● Healthy</span> · last ' + (h.hours_since != null ? h.hours_since + 'h ago' : '—');
+      } else if (h.status === 'stale') {
+        el.innerHTML = '<span style="color:#C58A1F">● Stale</span> · last ' + (h.hours_since != null ? h.hours_since + 'h ago' : '—');
+      } else {
+        el.innerHTML = '<span style="color:#C0392B">● Missing</span> · ' + (h.last_success_at ? (h.hours_since + 'h ago') : 'no backup yet');
+      }
+    } catch (_) { /* ignore */ }
+
+    // Diagnostics banner — show only if any env var is missing
+    const diag = data.diag || {};
+    const missing = Object.entries(diag).filter(([k, v]) => v === 'MISSING').map(([k]) => k);
+    if (missing.length > 0) {
+      const dEl = document.getElementById('backupsDiag');
+      dEl.style.display = '';
+      document.getElementById('backupsDiagText').textContent =
+        'Backup environment variables not set on Railway: ' + missing.join(', ') + '. Backups will fail until these are filled in.';
+    }
+
+    const rows = data.backups || [];
+    if (rows.length === 0) {
+      body.innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--muted)">No backups yet. Click "Run backup now" to create the first one.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(backupRow).join('');
+  } catch (err) {
+    console.error('[loadBackups]', err);
+    body.innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--red)">Failed to load backups.</td></tr>';
+  }
+}
+
+function backupRow(b) {
+  const startedFmt = b.started_at
+    ? new Date(b.started_at).toLocaleString('en-GB', { timeZone: 'Europe/London', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    : '—';
+  let statusHtml;
+  if (b.status === 'success') statusHtml = '<span style="color:#1D9E75;font-weight:500">● success</span>';
+  else if (b.status === 'failed') statusHtml = '<span style="color:#C0392B;font-weight:500" title="' + escapeHtml(b.error_message || '') + '">● failed</span>';
+  else statusHtml = '<span style="color:#888">● running</span>';
+  const sizeMb = b.size_bytes ? (b.size_bytes / 1024 / 1024).toFixed(2) + ' MB' : '—';
+  const dur = b.duration_ms ? (b.duration_ms / 1000).toFixed(1) + 's' : '—';
+  const trig = b.trigger === 'manual' ? '<span class="chip">manual</span>' : '<span class="chip" style="background:#EDEDE6">cron</span>';
+  const key = b.object_key ? '<span style="font-family:ui-monospace,monospace;font-size:12px">' + escapeHtml(b.object_key) + '</span>' : '—';
+  return `<tr><td>${startedFmt}</td><td>${trig}</td><td>${statusHtml}</td><td>${sizeMb}</td><td>${dur}</td><td>${key}</td></tr>`;
+}
+
+async function runBackupNow() {
+  const btn = document.getElementById('runBackupBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader"></i> Starting…';
+  try {
+    const r = await fetch('/api/admin/backups/run', { method: 'POST', credentials: 'include' });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(data.error || 'Failed to start backup');
+    } else {
+      // Poll for ~45 seconds, refreshing the table
+      btn.innerHTML = '<i class="ti ti-loader"></i> Running…';
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        await loadBackups();
+      }
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="ti ti-cloud-upload"></i> Run backup now';
+  }
+}
+
+function downloadLatestBackup() {
+  // Browser handles the streaming download; auth cookie carries the session.
+  window.location.href = '/api/admin/backups/download-latest';
+}
+
+// ============================================================
+// HR-1 admin tabs: regularisations, attendance policy, holidays, CS rota
+// ============================================================
+
+function escapeHtmlA(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function formatTimeA(t) {
+  if (!t) return '—';
+  if (typeof t === 'string' && /^\d{2}:\d{2}/.test(t)) return t.slice(0, 5);
+  return '—';
+}
+function dateOnly(v) {
+  // Postgres DATE columns come back as JS Date via pg → ISO via JSON, like "2026-05-25T00:00:00.000Z"
+  // <input type="date"> and display want YYYY-MM-DD.
+  if (!v) return '';
+  if (typeof v === 'string') return v.slice(0, 10);
+  try { return new Date(v).toISOString().slice(0, 10); } catch (e) { return String(v); }
+}
+
+// ---- REGULARISATIONS ----
+async function loadRegularisations() {
+  const tbody = document.getElementById('regBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="5">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/attendance/regularise/pending', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const data = await r.json();
+    const rows = data.requests || [];
+    document.getElementById('regMeta').textContent = rows.length + ' pending';
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:22px">All clear — no pending corrections.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => {
+      const times = (r.requested_first_login ? 'In: ' + formatTimeA(r.requested_first_login) : '') +
+        (r.requested_first_login && r.requested_last_logout ? ' · ' : '') +
+        (r.requested_last_logout ? 'Out: ' + formatTimeA(r.requested_last_logout) : '') || '—';
+      return '<tr>' +
+        '<td><div class="name-cell"><span class="nm">' + escapeHtmlA(r.full_name) + '</span></div></td>' +
+        '<td>' + dateOnly(r.for_date) + '</td>' +
+        '<td>' + escapeHtmlA(r.reason) + '</td>' +
+        '<td style="font-size:14px;color:var(--muted)">' + times + '</td>' +
+        '<td class="action-col">' +
+          '<button class="btn btn-primary" onclick="decideReg(' + r.id + ', \'approve\')">Approve</button> ' +
+          '<button class="btn btn-danger" onclick="decideReg(' + r.id + ', \'deny\')">Deny</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:22px">Failed to load.</td></tr>';
+  }
+}
+async function decideReg(id, decision) {
+  try {
+    const r = await fetch('/api/attendance/regularise/' + id + '/decide', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ decision })
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error || 'Action failed');
+      return;
+    }
+    loadRegularisations();
+  } catch (e) {
+    alert('Network error');
+  }
+}
+
+// ---- ATTENDANCE POLICY (anchor + per-dept) ----
+async function loadAttPolicy() {
+  // Anchor
+  try {
+    const r = await fetch('/api/attendance/anchor', { credentials: 'include' });
+    if (r.ok) {
+      const d = await r.json();
+      if (d && d.anchor_monday) {
+        const v = dateOnly(d.anchor_monday);
+        document.getElementById('anchorDate').value = v;
+        document.getElementById('anchorMeta').textContent =
+          'Currently set to ' + v + ' (6-day week). Alternates every Monday from here.';
+      } else {
+        document.getElementById('anchorMeta').textContent = 'Not yet set.';
+      }
+    }
+  } catch (e) {}
+
+  // Policies
+  const tbody = document.getElementById('policyBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="6">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/attendance/policy', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const d = await r.json();
+    const rows = d.policies || [];
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:22px">No policies set.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(p => {
+      return '<tr>' +
+        '<td>' + escapeHtmlA(p.department_slug) + '</td>' +
+        '<td>' + formatTimeA(p.start_time) + '</td>' +
+        '<td>' + formatTimeA(p.end_time) + '</td>' +
+        '<td>' + (p.grace_minutes != null ? p.grace_minutes : '—') + '</td>' +
+        '<td class="action-col">' +
+          '<button class="btn" onclick=\'openPolicyEdit(' + JSON.stringify(JSON.stringify(p)) + ')\'>Edit</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:22px">Failed to load.</td></tr>';
+  }
+}
+
+document.getElementById('anchorForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const d = document.getElementById('anchorDate').value;
+  if (!d) return;
+  try {
+    const r = await fetch('/api/attendance/anchor', {
+      method: 'PUT', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ anchor_monday: d })
+    });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(data.error || 'Failed to save');
+      return;
+    }
+    document.getElementById('anchorMeta').textContent = 'Saved. Anchor = ' + d + '.';
+  } catch (e) {
+    alert('Network error');
+  }
+});
+
+function openPolicyEdit(jsonStr) {
+  const p = JSON.parse(jsonStr);
+  document.getElementById('polSlug').value = p.department_slug;
+  document.getElementById('polTitle').textContent = 'Edit policy: ' + p.department_slug;
+  document.getElementById('polSub').textContent = 'All times are local (London).';
+  document.getElementById('polStart').value = (p.start_time || '').slice(0,5);
+  document.getElementById('polEnd').value = (p.end_time || '').slice(0,5);
+  document.getElementById('polGrace').value = p.grace_minutes != null ? p.grace_minutes : 5;
+  document.getElementById('polErr').classList.remove('on');
+  document.getElementById('policyModal').classList.add('on');
+}
+document.getElementById('polForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const slug = document.getElementById('polSlug').value;
+  const body = {
+    start_time: document.getElementById('polStart').value,
+    end_time: document.getElementById('polEnd').value,
+    grace_minutes: parseInt(document.getElementById('polGrace').value, 10)
+  };
+  const err = document.getElementById('polErr');
+  err.classList.remove('on');
+  try {
+    const r = await fetch('/api/attendance/policy/' + encodeURIComponent(slug), {
+      method: 'PUT', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      err.textContent = d.error || 'Save failed';
+      err.classList.add('on');
+      return;
+    }
+    closeModal('policyModal');
+    loadAttPolicy();
+  } catch (e) {
+    err.textContent = 'Network error';
+    err.classList.add('on');
+  }
+});
+
+// ---- HOLIDAYS ----
+async function loadHolidays() {
+  const tbody = document.getElementById('holidayBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
+  try {
+    const r = await fetch('/api/attendance/holidays', { credentials: 'include' });
+    if (!r.ok) throw new Error('load failed');
+    const d = await r.json();
+    const rows = d.holidays || [];
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:22px">No holidays set.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(h =>
+      '<tr>' +
+        '<td>' + dateOnly(h.holiday_date) + '</td>' +
+        '<td>' + escapeHtmlA(h.name) + '</td>' +
+        '<td>' + (h.office_closed_for_cs ? '<span class="chip muted">CS off</span>' : '<span class="chip amber">CS works</span>') + '</td>' +
+        '<td class="action-col">' +
+          '<button class="btn btn-danger" onclick="deleteHoliday(' + h.id + ', \'' + escapeHtmlA(h.name) + '\')">Delete</button>' +
+        '</td>' +
+      '</tr>'
+    ).join('');
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--red);padding:22px">Failed to load.</td></tr>';
+  }
+}
+function openHolidayModal() {
+  document.getElementById('holDate').value = '';
+  document.getElementById('holName').value = '';
+  document.getElementById('holCsWorks').checked = true;
+  document.getElementById('holErr').classList.remove('on');
+  document.getElementById('holidayModal').classList.add('on');
+}
+document.getElementById('holForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    holiday_date: document.getElementById('holDate').value,
+    name: document.getElementById('holName').value.trim(),
+    // Form asks "CS works through" — backend stores `office_closed_for_cs` (true = office IS closed for CS)
+    office_closed_for_cs: !document.getElementById('holCsWorks').checked
+  };
+  const err = document.getElementById('holErr');
+  err.classList.remove('on');
+  try {
+    const r = await fetch('/api/attendance/holidays', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      err.textContent = d.error || 'Save failed';
+      err.classList.add('on');
+      return;
+    }
+    closeModal('holidayModal');
+    loadHolidays();
+  } catch (e) {
+    err.textContent = 'Network error';
+    err.classList.add('on');
+  }
+});
+async function deleteHoliday(id, name) {
+  if (!confirm('Delete holiday "' + name + '"?')) return;
+  try {
+    const r = await fetch('/api/attendance/holidays/' + id, {
+      method: 'DELETE', credentials: 'include'
+    });
+    if (!r.ok) { alert('Delete failed'); return; }
+    loadHolidays();
+  } catch (e) {
+    alert('Network error');
+  }
+}
+
+// ---- CS ROTA ----
+async function downloadRotaTemplate() {
+  try {
+    const r = await fetch('/api/attendance/cs-rota/template', { credentials: 'include' });
+    if (!r.ok) { alert('Template download failed'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cs-rota-template.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Network error');
+  }
+}
+document.getElementById('rotaUploadForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('rotaFile').files[0];
+  const res = document.getElementById('rotaResult');
+  if (!file) { res.textContent = 'Pick a CSV file first.'; res.style.color = 'var(--red)'; return; }
+  res.textContent = 'Uploading…';
+  res.style.color = 'var(--muted)';
+  try {
+    const text = await file.text();
+    const r = await fetch('/api/attendance/cs-rota', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+      body: JSON.stringify({ csv: text })
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      res.textContent = d.error || 'Upload failed';
+      res.style.color = 'var(--red)';
+      return;
+    }
+    res.textContent = 'Uploaded. ' + (d.entries || 0) + ' rota entries saved · ' + (d.start || '?') + ' → ' + (d.end || '?') + '.';
+    res.style.color = 'var(--green)';
+    document.getElementById('rotaFile').value = '';
+    loadCsRotaCurrent();
+  } catch (err) {
+    res.textContent = 'Network error';
+    res.style.color = 'var(--red)';
+  }
+});
+async function loadCsRota() {
+  // Just loads the "current rota" view
+  loadCsRotaCurrent();
+}
+async function loadCsRotaCurrent() {
+  const box = document.getElementById('rotaCurrentBody');
+  box.innerHTML = '<p style="text-align:center;color:var(--muted);font-size:15px;padding:18px">Loading…</p>';
+  try {
+    const r = await fetch('/api/attendance/cs-rota/current', { credentials: 'include' });
+    if (!r.ok) {
+      box.innerHTML = '<p style="text-align:center;color:var(--muted);font-size:15px;padding:18px">No rota uploaded yet.</p>';
+      return;
+    }
+    const d = await r.json();
+    if (!d.rota || !d.entries || d.entries.length === 0) {
+      box.innerHTML = '<p style="text-align:center;color:var(--muted);font-size:15px;padding:18px">No current rota.</p>';
+      document.getElementById('rotaCurrentMeta').textContent = '—';
+      return;
+    }
+    document.getElementById('rotaCurrentMeta').textContent =
+      dateOnly(d.rota.start_date) + ' → ' + dateOnly(d.rota.end_date) + ' · uploaded ' +
+      new Date(d.rota.uploaded_at).toLocaleDateString('en-GB');
+    // Group entries by user + dates
+    const userMap = {};
+    const dateSet = new Set();
+    for (const e of d.entries) {
+      const dt = dateOnly(e.entry_date);
+      if (!userMap[e.full_name]) userMap[e.full_name] = {};
+      userMap[e.full_name][dt] = e.status;
+      dateSet.add(dt);
+    }
+    const dates = Array.from(dateSet).sort();
+    let html = '<table style="font-size:14px"><thead><tr><th>Agent</th>';
+    for (const dt of dates) {
+      const day = new Date(dt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' });
+      html += '<th style="text-align:center;text-transform:none;letter-spacing:0">' + day + '</th>';
+    }
+    html += '</tr></thead><tbody>';
+    for (const name of Object.keys(userMap).sort()) {
+      html += '<tr><td>' + escapeHtmlA(name) + '</td>';
+      for (const dt of dates) {
+        const v = userMap[name][dt] || '—';
+        let cls = 'muted';
+        if (v === 'working') cls = 'green';
+        else if (v === 'off') cls = 'muted';
+        else if (v === 'leave') cls = 'amber';
+        const label = v === 'working' ? 'W' : v === 'off' ? '—' : v === 'leave' ? 'L' : v[0].toUpperCase();
+        html += '<td style="text-align:center"><span class="chip ' + cls + '" style="margin:0">' + label + '</span></td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<p style="text-align:center;color:var(--red);font-size:15px;padding:18px">Failed to load.</p>';
+  }
+}
+
+// ============================================================
+// r0.7 — EMPLOYMENT TAB (bulk-edit grid)
+// ============================================================
+let empUsers_ = [];
+let empDirty_ = {}; // userId -> partial update
+
+async function loadEmployment() {
+  const tbody = document.getElementById('empBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="11">Loading…</td></tr>';
+  empDirty_ = {};
+  document.getElementById('empSaveAllBtn').disabled = true;
+  try {
+    // Always fetch fresh — the global cache assumption was wrong.
+    const r = await fetch('/api/admin/users', { credentials: 'include' });
+    if (!r.ok) throw new Error('users fetch failed: ' + r.status);
+    const u = await r.json();
+    empUsers_ = (u.users || []).filter(x => x.employment_status === 'active').sort((a, b) => a.full_name.localeCompare(b.full_name));
+
+    // Pull balances for each user (lightweight — single batched call)
+    const balances = await fetch('/api/admin/leaves/accrual-log?limit=1', { credentials: 'include' });
+    // accrual-log doesn't give us current balance; just render rows with N/A and rely on the per-user adjust modal for accurate numbers.
+
+    document.getElementById('empMeta').textContent = empUsers_.length + ' active employees';
+    if (empUsers_.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No active employees.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = empUsers_.map(u => renderEmpRow(u)).join('');
+  } catch (err) {
+    console.error('[loadEmployment]', err);
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">Failed to load.</td></tr>';
+  }
+}
+
+function renderEmpRow(u) {
+  const hd = u.hire_date ? String(u.hire_date).slice(0, 10) : '';
+  const ped = u.probation_end_date ? String(u.probation_end_date).slice(0, 10) : '';
+  return '<tr data-uid="' + u.id + '">' +
+    '<td style="position:sticky;left:0;background:white;z-index:1;font-weight:500">' + escapeHtmlA(u.full_name) + '</td>' +
+    '<td><input type="date" value="' + hd + '" data-f="hire_date" onchange="empChange(' + u.id + ', this)" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px;width:130px"></td>' +
+    '<td><input type="number" step="0.01" value="' + (u.monthly_salary != null ? u.monthly_salary : '') + '" data-f="monthly_salary" onchange="empChange(' + u.id + ', this)" placeholder="0.00" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px;width:100px"></td>' +
+    '<td><select data-f="salary_currency" onchange="empChange(' + u.id + ', this)" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px">' +
+      '<option value="INR"' + ((u.salary_currency || 'INR') === 'INR' ? ' selected' : '') + '>INR</option>' +
+      '<option value="GBP"' + (u.salary_currency === 'GBP' ? ' selected' : '') + '>GBP</option>' +
+    '</select></td>' +
+    '<td><select data-f="employment_type" onchange="empChange(' + u.id + ', this)" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px">' +
+      '<option value="full_time"' + ((u.employment_type || 'full_time') === 'full_time' ? ' selected' : '') + '>Full-time</option>' +
+      '<option value="part_time"' + (u.employment_type === 'part_time' ? ' selected' : '') + '>Part-time</option>' +
+      '<option value="contractor"' + (u.employment_type === 'contractor' ? ' selected' : '') + '>Contractor</option>' +
+    '</select></td>' +
+    '<td><select data-f="work_pattern" onchange="empChange(' + u.id + ', this)" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px">' +
+      '<option value="alternating"' + ((u.work_pattern || 'alternating') === 'alternating' ? ' selected' : '') + '>Alternating 5/6</option>' +
+      '<option value="cs_rota"' + (u.work_pattern === 'cs_rota' ? ' selected' : '') + '>CS rota</option>' +
+    '</select></td>' +
+    '<td><input type="date" value="' + ped + '" data-f="probation_end_date" onchange="empChange(' + u.id + ', this)" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px;width:130px"></td>' +
+    '<td><input type="number" value="' + (u.notice_period_days != null ? u.notice_period_days : 30) + '" data-f="notice_period_days" onchange="empChange(' + u.id + ', this)" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px;width:60px"></td>' +
+    '<td><input type="text" value="' + escapeAttrA(u.emergency_contact || '') + '" data-f="emergency_contact" onchange="empChange(' + u.id + ', this)" placeholder="Name + phone" style="font-size:13px;padding:4px 6px;border:0.5px solid var(--line);border-radius:4px;width:160px"></td>' +
+    '<td><button class="btn" style="font-size:12px;padding:4px 10px" onclick="openAdjustModal(' + u.id + ', \'' + escapeAttrA(u.full_name) + '\')">Adjust</button></td>' +
+    '<td><button class="btn" style="font-size:12px;padding:4px 10px" onclick="recomputeUserBalance(' + u.id + ', \'' + escapeAttrA(u.full_name) + '\')">Recompute</button></td>' +
+  '</tr>';
+}
+
+function escapeAttrA(s) {
+  if (s == null) return '';
+  return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function empChange(uid, el) {
+  if (!empDirty_[uid]) empDirty_[uid] = { id: uid };
+  const field = el.dataset.f;
+  let val = el.value;
+  if (val === '') val = null;
+  empDirty_[uid][field] = val;
+  document.getElementById('empSaveAllBtn').disabled = Object.keys(empDirty_).length === 0;
+  el.style.background = '#FAEEDA'; // dirty highlight
+}
+
+async function saveAllEmployment() {
+  const updates = Object.values(empDirty_);
+  if (updates.length === 0) return;
+  const btn = document.getElementById('empSaveAllBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/admin/users/bulk-employment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ updates })
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.error || 'Save failed');
+      btn.disabled = false;
+      btn.textContent = 'Save changes';
+      return;
+    }
+    btn.textContent = 'Saved ' + data.updated;
+    setTimeout(() => { btn.textContent = 'Save changes'; }, 1500);
+    empDirty_ = {};
+    // Clear dirty highlights
+    document.querySelectorAll('#empBody input, #empBody select').forEach(el => el.style.background = '');
+    if (data.errors && data.errors.length) {
+      alert(data.errors.length + ' row(s) had errors. See console.');
+      console.error('bulk-employment errors:', data.errors);
+    }
+  } catch (err) {
+    alert('Network error');
+    btn.disabled = false;
+    btn.textContent = 'Save changes';
+  }
+}
+
+async function recomputeUserBalance(uid, name) {
+  if (!confirm('Recompute ' + name + '\'s leave balance from joined date? Existing taken/pending will be re-summed from approved requests this year.')) return;
+  try {
+    const r = await fetch('/api/admin/leaves/recompute', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ user_id: uid })
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.error || 'Failed');
+      return;
+    }
+    alert('Done. ' + name + ' now has ' + (data.accrued_days || 0) + ' days accrued (' + (data.tenure_months || 0) + ' months tenure).');
+  } catch (e) {
+    alert('Network error');
+  }
+}
+
+async function recomputeAllBalances() {
+  if (!confirm('Recompute leave balances for ALL active employees from their joined dates?\n\nThis wipes accrued days and rebuilds them based on tenure. Existing approved leaves remain counted as taken. Manual adjustments are preserved.\n\nProceed?')) return;
+  const btn = document.getElementById('empRecomputeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Recomputing…';
+  try {
+    const r = await fetch('/api/admin/leaves/recompute', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ all: true })
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.error || 'Failed');
+      btn.disabled = false;
+      btn.textContent = 'Recompute all balances';
+      return;
+    }
+    alert('Recomputed ' + data.count + ' user(s).');
+    btn.disabled = false;
+    btn.textContent = 'Recompute all balances';
+  } catch (e) {
+    alert('Network error');
+    btn.disabled = false;
+    btn.textContent = 'Recompute all balances';
+  }
+}
+
+// --- Leave adjustment modal -------------------------------------------------
+function openAdjustModal(uid, name) {
+  const m = document.getElementById('adjustModal');
+  document.getElementById('adjustUserId').value = uid;
+  document.getElementById('adjustTitle').textContent = 'Adjust leave balance: ' + name;
+  document.getElementById('adjustDelta').value = '';
+  document.getElementById('adjustNote').value = '';
+  document.getElementById('adjustErr').classList.remove('on');
+  m.classList.add('on');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const f = document.getElementById('adjustForm');
+  if (f) {
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const uid = parseInt(document.getElementById('adjustUserId').value, 10);
+      const delta = parseFloat(document.getElementById('adjustDelta').value);
+      const note = document.getElementById('adjustNote').value.trim();
+      const err = document.getElementById('adjustErr');
+      err.classList.remove('on');
+      if (!Number.isFinite(delta)) {
+        err.textContent = 'Enter a number (positive to add, negative to subtract).';
+        err.classList.add('on');
+        return;
+      }
+      if (!note || note.length < 3) {
+        err.textContent = 'Add a note so this adjustment is auditable.';
+        err.classList.add('on');
+        return;
+      }
+      try {
+        const r = await fetch('/api/admin/leaves/adjust', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ user_id: uid, delta, note })
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          err.textContent = data.error || 'Save failed';
+          err.classList.add('on');
+          return;
+        }
+        closeModal('adjustModal');
+        alert('Adjustment saved.');
+      } catch (e2) {
+        err.textContent = 'Network error';
+        err.classList.add('on');
+      }
+    });
+  }
+});
+
+// ============================================================
+// r0.7 — REPORTS REVIEW QUEUE
+// ============================================================
+let reports_ = [];
+
+async function loadReports() {
+  const wrap = document.getElementById('reportsList');
+  wrap.innerHTML = '<div style="padding:22px;text-align:center;color:var(--muted)">Loading…</div>';
+  try {
+    const r = await fetch('/api/admin/reports/pending', { credentials: 'include' });
+    if (!r.ok) {
+      wrap.innerHTML = '<div style="padding:22px;text-align:center;color:var(--red)">Failed to load.</div>';
+      return;
+    }
+    const data = await r.json();
+    reports_ = data.reports || [];
+    renderReports();
+  } catch (e) {
+    wrap.innerHTML = '<div style="padding:22px;text-align:center;color:var(--red)">Network error.</div>';
+  }
+}
+
+function renderReports() {
+  const filter = document.getElementById('reportsFilter').value;
+  const wrap = document.getElementById('reportsList');
+  let rows = reports_;
+  if (filter === 'unreviewed') rows = rows.filter(r => !r.decision);
+  else if (filter === 'not_satisfactory') rows = rows.filter(r => r.decision === 'not_satisfactory');
+  document.getElementById('reportsMeta').textContent =
+    rows.length + (rows.length === 1 ? ' report' : ' reports') +
+    (reports_.length !== rows.length ? ' of ' + reports_.length : '');
+  if (rows.length === 0) {
+    wrap.innerHTML = '<div style="padding:28px;text-align:center;color:var(--muted);font-size:14px">No reports match this filter.</div>';
+    return;
+  }
+  wrap.innerHTML = rows.map(r => renderReportCard(r)).join('');
+}
+
+function renderReportCard(r) {
+  const decision = r.decision;
+  const decisionColours = {
+    not_satisfactory: { bg: '#FCEBEB', fg: '#A32D2D', label: 'Not satisfactory' },
+    satisfactory:     { bg: '#F1EFE8', fg: '#5F5E5A', label: 'Satisfactory' },
+    good:             { bg: '#EAF3DE', fg: '#3B6D11', label: 'Good' },
+  };
+  const dec = decision ? decisionColours[decision] : null;
+  const snap = 'In <b>' + (r.snapshot_first_login ? String(r.snapshot_first_login).slice(0,5) : '—') + '</b>' +
+               ' · Out <b>' + (r.snapshot_last_logout ? String(r.snapshot_last_logout).slice(0,5) : '—') + '</b>' +
+               ' · Active <b>' + formatMinsR(r.snapshot_active_min) + '</b>' +
+               ' · Idle <b>' + formatMinsR(r.snapshot_idle_min) + '</b>' +
+               ' · Break <b>' + formatMinsR(r.snapshot_break_min) + '</b>';
+  const notes = r.notes ? escapeHtmlA(r.notes) : '<span style="color:var(--soft);font-style:italic">(no notes written)</span>';
+  return '<div class="report-card" id="rc-' + r.id + '" style="border-bottom:0.5px solid var(--line);padding:16px 18px">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;gap:12px;flex-wrap:wrap">' +
+      '<div>' +
+        '<div style="font-size:15px;font-weight:500;color:var(--ink)">' + escapeHtmlA(r.full_name) + ' <span style="color:var(--muted);font-weight:400">· ' + escapeHtmlA(r.dept_name || '—') + '</span></div>' +
+        '<div style="font-size:13px;color:var(--muted);margin-top:2px">' + dateOnlyR(r.for_date) + '</div>' +
+      '</div>' +
+      (dec
+        ? '<div style="display:flex;align-items:center;gap:8px"><span style="background:' + dec.bg + ';color:' + dec.fg + ';padding:3px 10px;border-radius:99px;font-size:12px;font-weight:500">' + dec.label + '</span>' +
+          (r.reviewer_name ? '<span style="font-size:12px;color:var(--muted)">by ' + escapeHtmlA(r.reviewer_name) + '</span>' : '') +
+          '</div>'
+        : '<span style="background:#FAEEDA;color:#854F0B;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:500">Awaiting review</span>'
+      ) +
+    '</div>' +
+    '<div style="background:#FBFAF7;border:0.5px solid var(--line);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--muted);margin-bottom:8px">' + snap + '</div>' +
+    '<div style="font-size:14px;line-height:1.5;color:var(--ink);white-space:pre-wrap;margin-bottom:10px">' + notes + '</div>' +
+    (decision === 'not_satisfactory' && r.comment
+      ? '<div style="background:#FCEBEB;border-left:3px solid #A32D2D;padding:8px 12px;font-size:13px;color:#7A1F1F;margin-bottom:10px;border-radius:0 6px 6px 0"><b>Reviewer note:</b> ' + escapeHtmlA(r.comment) + '</div>'
+      : '') +
+    '<div id="rc-actions-' + r.id + '" style="display:flex;gap:6px;flex-wrap:wrap">' +
+      '<button class="btn btn-danger" style="font-size:12px;padding:6px 12px" onclick="openReviewModal(' + r.id + ', \'not_satisfactory\', \'' + escapeAttrA(r.full_name) + '\')">Not satisfactory</button>' +
+      '<button class="btn" style="font-size:12px;padding:6px 12px" onclick="submitReview(' + r.id + ', \'satisfactory\', null)">Satisfactory</button>' +
+      '<button class="btn btn-primary" style="font-size:12px;padding:6px 12px" onclick="submitReview(' + r.id + ', \'good\', null)">Good</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function formatMinsR(m) {
+  if (m == null || isNaN(m)) return '—';
+  m = Math.floor(m);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+function dateOnlyR(d) {
+  if (!d) return '—';
+  try {
+    return new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+  } catch (e) { return String(d).slice(0, 10); }
+}
+
+function openReviewModal(reportId, decision, name) {
+  document.getElementById('reviewReportId').value = reportId;
+  document.getElementById('reviewDecision').value = decision;
+  document.getElementById('reviewTitle').textContent = 'Flag report: ' + name;
+  document.getElementById('reviewComment').value = '';
+  document.getElementById('reviewErr').classList.remove('on');
+  document.getElementById('reviewModal').classList.add('on');
+}
+
+async function submitReview(reportId, decision, comment) {
+  try {
+    const r = await fetch('/api/admin/reports/' + reportId + '/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ decision, comment })
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.error || 'Failed');
+      return false;
+    }
+    // Update local state
+    const rep = reports_.find(x => x.id === reportId);
+    if (rep) {
+      rep.decision = decision;
+      rep.comment = comment;
+      rep.reviewer_name = (window.me_ && (me_.display_name || me_.full_name)) || 'You';
+      rep.reviewed_at = new Date().toISOString();
+    }
+    renderReports();
+    return true;
+  } catch (e) {
+    alert('Network error');
+    return false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const f = document.getElementById('reviewForm');
+  if (f) {
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const id = parseInt(document.getElementById('reviewReportId').value, 10);
+      const decision = document.getElementById('reviewDecision').value;
+      const comment = document.getElementById('reviewComment').value.trim();
+      const err = document.getElementById('reviewErr');
+      err.classList.remove('on');
+      if (decision === 'not_satisfactory' && comment.length < 3) {
+        err.textContent = 'Add a short comment so the agent understands.';
+        err.classList.add('on');
+        return;
+      }
+      const ok = await submitReview(id, decision, comment);
+      if (ok) closeModal('reviewModal');
+    });
+  }
+});
+
+init();
+</script>
+</body>
+</html>

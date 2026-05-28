@@ -1,0 +1,1419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FK Home · Profile</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
+<style>
+  :root {
+    --bg: #FAF7F2; --surface: #FFFFFF; --nav: #14161B; --nav-elev: #1F232B;
+    --ink: #14161B; --muted: #6B6760; --soft: #888780;
+    --line: rgba(20,22,27,0.12); --line-strong: rgba(20,22,27,0.20);
+    --amber: #EF9F27; --amber-warm: #FAC775; --amber-soft: #FAEEDA; --amber-deep: #854F0B;
+    --green: #3B6D11; --green-soft: #EAF3DE;
+    --red: #A32D2D; --red-soft: #FCEBEB;
+    --r-md: 10px; --r-lg: 14px;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+  }
+  button, input, select, textarea { font-family: inherit; }
+  a { color: inherit; text-decoration: none; }
+
+  .topbar {
+    background: var(--surface); border-bottom: 0.5px solid var(--line);
+    padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .brand-mark {
+    width: 28px; height: 28px; background: var(--nav); border-radius: 7px;
+    color: var(--amber); font-weight: 600; font-size: 15px;
+    display: flex; align-items: center; justify-content: center; letter-spacing: -0.5px;
+  }
+  .brand-name { font-size: 16px; font-weight: 500; }
+  .brand .sep { color: var(--soft); margin: 0 4px; }
+  .topbar-right { display: flex; gap: 14px; align-items: center; }
+  .home-link {
+    font-size: 14px; color: var(--muted); padding: 5px 11px;
+    border: 0.5px solid var(--line); border-radius: 99px; cursor: pointer;
+    background: var(--surface); display: flex; align-items: center; gap: 6px;
+  }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 22px 24px 60px; }
+
+  /* ===== Header card ===== */
+  .header-card {
+    background: var(--surface); border: 0.5px solid var(--line); border-radius: var(--r-lg);
+    padding: 20px 22px; display: flex; gap: 18px; align-items: center; margin-bottom: 18px;
+  }
+  .avatar-lg {
+    width: 64px; height: 64px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; font-weight: 600; color: var(--ink);
+    flex-shrink: 0;
+  }
+  .header-info { flex: 1; min-width: 0; }
+  .header-info h1 {
+    font-size: 22px; font-weight: 500; margin: 0 0 4px; letter-spacing: -0.3px;
+  }
+  .header-meta {
+    font-size: 14px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap;
+  }
+  .header-meta span { display: flex; align-items: center; gap: 5px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 99px; font-size: 12px; font-weight: 500;
+    background: var(--green-soft); color: var(--green);
+  }
+  .pill.off { background: var(--red-soft); color: var(--red); }
+  .pill.idle { background: var(--amber-soft); color: var(--amber-deep); }
+  .pill.probation { background: var(--amber-soft); color: var(--amber-deep); }
+  .pill.on-track { background: var(--green-soft); color: var(--green); }
+
+  /* r0.12 — Personal drawer info blocks */
+  .info-block {
+    background: var(--bg); border: 0.5px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 14px;
+  }
+  .info-block-title {
+    font-size: 13px; font-weight: 500; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;
+  }
+  .info-row {
+    font-size: 14px; margin-bottom: 8px; color: var(--ink);
+  }
+  .info-row:last-child { margin-bottom: 0; }
+  .info-label {
+    color: var(--muted); display: inline-block; min-width: 120px;
+  }
+
+  /* Status chips on review rows */
+  .status-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 99px; font-size: 12px; font-weight: 500;
+    background: var(--line); color: var(--ink); white-space: nowrap;
+  }
+  .status-chip.status-grey { background: rgba(20,22,27,0.06); color: var(--muted); }
+  .status-chip.status-blue { background: rgba(40,90,180,0.10); color: #2D5BAF; }
+  .status-chip.status-green { background: var(--green-soft); color: var(--green); }
+  .status-chip.status-amber { background: var(--amber-soft); color: var(--amber-deep); }
+  .status-chip.status-red { background: var(--red-soft); color: var(--red); }
+  .review-row .note-title { font-size: 15px; font-weight: 500; }
+  .header-actions { display: flex; gap: 8px; align-items: center; }
+  .header-action-btn {
+    padding: 6px 12px; border: 0.5px solid var(--line);
+    border-radius: 8px; background: var(--surface); cursor: pointer;
+    font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px;
+  }
+  .header-action-btn:hover { color: var(--ink); background: var(--bg); }
+
+  /* ===== Layout ===== */
+  .profile-grid {
+    display: grid; grid-template-columns: 220px 1fr; gap: 18px; align-items: start;
+  }
+  @media (max-width: 760px) {
+    .profile-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ===== Drawer sidebar ===== */
+  .drawer-nav {
+    background: var(--surface); border: 0.5px solid var(--line); border-radius: var(--r-lg);
+    padding: 10px 8px; position: sticky; top: 16px;
+  }
+  .drawer-tab {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    border-radius: 8px; cursor: pointer; color: var(--muted); font-size: 14px;
+    transition: background 0.1s;
+  }
+  .drawer-tab:hover { background: rgba(20,22,27,0.04); color: var(--ink); }
+  .drawer-tab.on {
+    background: var(--amber-soft); color: var(--amber-deep); font-weight: 500;
+  }
+  .drawer-tab i { font-size: 16px; }
+  .drawer-tab .count {
+    margin-left: auto; background: var(--line); color: var(--muted);
+    font-size: 11px; padding: 1px 6px; border-radius: 99px; min-width: 20px; text-align: center;
+  }
+  .drawer-tab.on .count { background: var(--amber); color: white; }
+
+  /* ===== Main panel ===== */
+  .panel {
+    background: var(--surface); border: 0.5px solid var(--line); border-radius: var(--r-lg);
+    padding: 22px 24px;
+  }
+  .panel h2 {
+    font-size: 18px; font-weight: 500; margin: 0 0 4px;
+  }
+  .panel .sub {
+    font-size: 13px; color: var(--muted); margin: 0 0 18px;
+  }
+
+  /* ===== Files list ===== */
+  .file-list { display: flex; flex-direction: column; gap: 8px; }
+  .file-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; border: 0.5px solid var(--line); border-radius: 10px;
+    background: var(--bg);
+  }
+  .file-icon {
+    width: 36px; height: 36px; border-radius: 8px; background: var(--amber-soft);
+    color: var(--amber-deep); display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex-shrink: 0;
+  }
+  .file-info { flex: 1; min-width: 0; }
+  .file-name {
+    font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .file-meta { font-size: 12px; color: var(--muted); }
+  .file-actions { display: flex; gap: 6px; }
+  .icon-btn {
+    width: 30px; height: 30px; border-radius: 7px; border: 0.5px solid var(--line);
+    background: var(--surface); cursor: pointer; color: var(--muted);
+    display: flex; align-items: center; justify-content: center; font-size: 15px;
+  }
+  .icon-btn:hover { color: var(--ink); background: var(--bg); }
+  .icon-btn.danger:hover { color: var(--red); }
+
+  /* ===== Empty state ===== */
+  .empty {
+    text-align: center; padding: 36px 16px; color: var(--muted);
+  }
+  .empty i { font-size: 28px; margin-bottom: 8px; display: block; }
+  .empty .lbl { font-size: 14px; }
+
+  /* ===== Upload area ===== */
+  .upload-bar {
+    display: flex; gap: 10px; align-items: center; margin-top: 16px;
+    padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 10px;
+    background: var(--bg);
+  }
+  .upload-bar .label { font-size: 13px; color: var(--muted); flex: 1; }
+  .btn {
+    padding: 7px 14px; border-radius: 8px; border: 0.5px solid var(--line);
+    background: var(--surface); cursor: pointer; font-size: 14px; color: var(--ink);
+  }
+  .btn:hover { background: var(--bg); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary {
+    background: var(--nav); color: white; border-color: var(--nav);
+  }
+  .btn-primary:hover { background: var(--nav-elev); }
+  .btn-sm { padding: 5px 10px; font-size: 13px; }
+
+  /* ===== Salary form ===== */
+  .form-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+  }
+  .form-grid .full { grid-column: 1 / -1; }
+  label {
+    display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px;
+  }
+  input[type="text"], input[type="number"], input[type="date"], input[type="email"], textarea, select {
+    width: 100%; padding: 8px 11px; border: 0.5px solid var(--line);
+    border-radius: 8px; font-size: 14px; background: var(--surface); color: var(--ink);
+  }
+  textarea { min-height: 64px; resize: vertical; }
+  input:focus, textarea:focus, select:focus {
+    outline: none; border-color: var(--amber);
+  }
+  .deductions {
+    display: grid; grid-template-columns: 2fr 1fr; gap: 10px; margin-bottom: 8px;
+  }
+  .form-actions {
+    display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px;
+  }
+
+  /* ===== Notes ===== */
+  .notes-list { display: flex; flex-direction: column; gap: 10px; }
+  .note {
+    padding: 12px 14px; border: 0.5px solid var(--line); border-radius: 10px;
+    background: var(--bg);
+  }
+  .note-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-bottom: 6px;
+  }
+  .note-title { font-size: 14px; font-weight: 500; }
+  .note-body { font-size: 13px; color: var(--ink); white-space: pre-wrap; }
+  .note-meta {
+    font-size: 12px; color: var(--muted); margin-top: 8px;
+    display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .note.completed {
+    background: var(--green-soft);
+  }
+  .note .check {
+    width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--line-strong);
+    cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  }
+  .note.completed .check {
+    background: var(--green); border-color: var(--green); color: white;
+  }
+
+  /* ===== History modal ===== */
+  .modal-bg {
+    display: none; position: fixed; inset: 0; background: rgba(20,22,27,0.5);
+    z-index: 100; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-bg.on { display: flex; }
+  .modal {
+    background: var(--surface); border-radius: 14px; padding: 24px;
+    max-width: 520px; width: 100%; max-height: 80vh; overflow-y: auto;
+  }
+  .modal h2 { font-size: 18px; font-weight: 500; margin: 0 0 14px; }
+
+  /* ===== Misc ===== */
+  .hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+  .err-banner {
+    background: var(--red-soft); color: var(--red); padding: 10px 14px;
+    border-radius: 8px; font-size: 13px; margin-bottom: 14px; display: none;
+  }
+  .err-banner.on { display: block; }
+  .loading { text-align: center; padding: 40px 16px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand" onclick="location.href='/'">
+    <div class="brand-mark">f.</div>
+    <div class="brand-name">FK Home</div>
+    <div class="sep">·</div>
+    <div style="color: var(--muted); font-size: 14px;">Profile</div>
+  </div>
+  <div class="topbar-right">
+    <div class="home-link" onclick="location.href='/'"><i class="ti ti-home"></i> Back home</div>
+  </div>
+</div>
+
+<div class="container">
+  <div id="errBanner" class="err-banner"></div>
+
+  <div id="loadingState" class="loading">Loading profile…</div>
+
+  <div id="mainState" style="display:none">
+    <!-- Header card -->
+    <div class="header-card">
+      <div class="avatar-lg" id="hdrAvatar">—</div>
+      <div class="header-info">
+        <h1 id="hdrName">—</h1>
+        <div class="header-meta" id="hdrMeta"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;align-items:flex-end">
+        <div id="hdrStatus"></div>
+        <div class="header-actions" id="hdrActions"></div>
+      </div>
+    </div>
+
+    <div class="profile-grid">
+      <!-- Drawer sidebar -->
+      <nav class="drawer-nav" id="drawerNav"></nav>
+
+      <!-- Main panel -->
+      <div class="panel" id="panel">
+        <h2 id="panelTitle">—</h2>
+        <p class="sub" id="panelSub">—</p>
+        <div id="panelBody"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Salary history modal -->
+<div class="modal-bg" id="historyModal">
+  <div class="modal">
+    <h2>Salary history</h2>
+    <div id="historyBody">Loading…</div>
+    <div class="form-actions">
+      <button class="btn" onclick="document.getElementById('historyModal').classList.remove('on')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Change password modal (r0.10) -->
+<div class="modal-bg" id="pwModal">
+  <div class="modal">
+    <h2>Change password</h2>
+    <div id="pwErr" class="err-banner"></div>
+    <label>Current password</label>
+    <div style="position:relative">
+      <input type="password" id="pwCurrent" required style="padding-right:38px" />
+      <i class="ti ti-eye" style="position:absolute;right:10px;top:8px;cursor:pointer;color:var(--muted)" onclick="togglePwEye('pwCurrent', this)"></i>
+    </div>
+    <label style="margin-top:10px">New password (min 8 chars)</label>
+    <div style="position:relative">
+      <input type="password" id="pwNew" required minlength="8" style="padding-right:38px" />
+      <i class="ti ti-eye" style="position:absolute;right:10px;top:8px;cursor:pointer;color:var(--muted)" onclick="togglePwEye('pwNew', this)"></i>
+    </div>
+    <label style="margin-top:10px">Confirm new password</label>
+    <div style="position:relative">
+      <input type="password" id="pwNew2" required minlength="8" style="padding-right:38px" />
+      <i class="ti ti-eye" style="position:absolute;right:10px;top:8px;cursor:pointer;color:var(--muted)" onclick="togglePwEye('pwNew2', this)"></i>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="document.getElementById('pwModal').classList.remove('on')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitChangePassword()">Change password</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ============================================================================
+  // Profile page state
+  // ============================================================================
+  const params = new URLSearchParams(location.search);
+  const profileUserId = parseInt(params.get('id'), 10);
+  let initialDrawer = (location.hash || '').replace('#', '') || null;
+  let overview = null;
+  let viewer = null;
+  let currentDrawer = null;
+
+  const DRAWER_LABELS = {
+    onboarding: { name: 'Onboarding',  icon: 'ti-checklist',     desc: 'Your onboarding checklist and signed documents.' },
+    reviews:    { name: 'Reviews',     icon: 'ti-trending-up',   desc: 'All review records — 1-month, 4-month, 8-month, annual.' },
+    employment: { name: 'Employment',  icon: 'ti-briefcase',     desc: 'Offer letter, contract, amendments, job description.' },
+    salary:     { name: 'Salary',      icon: 'ti-cash',          desc: 'CTC structure, deductions, salary documents.' },
+    payroll:    { name: 'Payroll',     icon: 'ti-receipt',       desc: 'Payslips and tax records.' },
+    insurance:  { name: 'Insurance',   icon: 'ti-shield-check',  desc: 'Health, life, and other insurance policies.' },
+    personal:   { name: 'Personal',    icon: 'ti-user',          desc: 'ID documents, address proofs, personal records.' },
+  };
+
+  const REVIEW_TYPE_LABEL = {
+    '1_month': '1-month',
+    '4_month': '4-month (probation decision)',
+    '8_month': '8-month',
+    'annual':  'Annual',
+    'ad_hoc':  'Ad-hoc',
+  };
+  const REVIEW_STATUS_OPTIONS = {
+    '1_month':  ['scheduled','needs_improvement','satisfactory','good'],
+    '4_month':  ['scheduled','pass','extend','fail'],
+    '8_month':  ['scheduled','needs_improvement','satisfactory','good'],
+    'annual':   ['scheduled','needs_improvement','satisfactory','good'],
+    'ad_hoc':   ['scheduled','needs_improvement','satisfactory','good'],
+  };
+  const STATUS_LABEL = {
+    scheduled:          'Scheduled',
+    needs_improvement:  'Needs improvement',
+    satisfactory:       'Satisfactory',
+    good:               'Good',
+    pass:               'Pass probation',
+    extend:             'Extend probation',
+    fail:               'End employment',
+  };
+  const STATUS_COLOR = {
+    scheduled:          'grey',
+    needs_improvement:  'amber',
+    satisfactory:       'blue',
+    good:               'green',
+    pass:               'green',
+    extend:             'amber',
+    fail:               'red',
+  };
+
+  const ICON_FOR_MIME = {
+    'application/pdf': 'ti-file-text',
+    'image/jpeg': 'ti-photo',
+    'image/png': 'ti-photo',
+    'application/msword': 'ti-file-description',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'ti-file-description',
+  };
+
+  // ============================================================================
+  // Helpers
+  // ============================================================================
+  function showError(msg) {
+    const b = document.getElementById('errBanner');
+    b.textContent = msg;
+    b.classList.add('on');
+    setTimeout(() => b.classList.remove('on'), 5000);
+  }
+  // Eye icon toggle for password fields
+  function togglePwEye(inputId, iconEl) {
+    const inp = document.getElementById(inputId);
+    if (!inp) return;
+    if (inp.type === 'password') {
+      inp.type = 'text';
+      iconEl.classList.remove('ti-eye');
+      iconEl.classList.add('ti-eye-off');
+    } else {
+      inp.type = 'password';
+      iconEl.classList.remove('ti-eye-off');
+      iconEl.classList.add('ti-eye');
+    }
+  }
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[c]);
+  }
+  function escapeAttr(s) {
+    // Same as escapeHtml but for use inside HTML attribute values.
+    return escapeHtml(s);
+  }
+  function fmtSize(bytes) {
+    if (!bytes && bytes !== 0) return '—';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    } catch { return String(iso).slice(0, 10); }
+  }
+  function fmtDateTime(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+        + ' \u00b7 ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+    } catch { return String(iso); }
+  }
+
+  // ============================================================================
+  // Boot
+  // ============================================================================
+  async function boot() {
+    if (!Number.isFinite(profileUserId)) {
+      document.getElementById('loadingState').textContent = 'No profile id in URL.';
+      return;
+    }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/overview', { credentials: 'include' });
+      if (r.status === 401) { location.href = '/login.html'; return; }
+      if (r.status === 403) {
+        document.getElementById('loadingState').innerHTML = 'You do not have permission to view this profile. <a href="/" style="color:var(--amber-deep)">Back home</a>';
+        return;
+      }
+      if (!r.ok) throw new Error('Failed to load');
+      const data = await r.json();
+      overview = data;
+      viewer = data.viewer;
+
+      renderHeader();
+      renderDrawerNav();
+
+      // Pick initial drawer
+      if (!initialDrawer || !data.drawers.includes(initialDrawer)) {
+        initialDrawer = data.drawers[0] || 'personal';
+      }
+      selectDrawer(initialDrawer);
+
+      document.getElementById('loadingState').style.display = 'none';
+      document.getElementById('mainState').style.display = '';
+    } catch (e) {
+      console.error(e);
+      document.getElementById('loadingState').textContent = 'Failed to load profile.';
+    }
+  }
+
+  function renderHeader() {
+    const u = overview.user;
+    const initials = u.initials || (u.full_name || '?').split(' ').map(s => s[0]).join('').slice(0,2).toUpperCase();
+    const av = document.getElementById('hdrAvatar');
+    av.textContent = initials;
+    av.style.background = u.avatar_colour || 'var(--amber-warm)';
+    document.getElementById('hdrName').textContent = u.display_name || u.full_name;
+
+    const meta = document.getElementById('hdrMeta');
+    const depts = (u.departments || []).map(d => d.name + (d.role !== 'agent' ? ' \u00b7 ' + d.role : '')).join(', ');
+    let html = '';
+    if (depts) html += '<span><i class="ti ti-building"></i>' + escapeHtml(depts) + '</span>';
+    if (u.hire_date) html += '<span><i class="ti ti-calendar"></i>Joined ' + fmtDate(u.hire_date) + '</span>';
+    if (u.email) html += '<span><i class="ti ti-mail"></i>' + escapeHtml(u.email) + '</span>';
+    meta.innerHTML = html;
+
+    const status = u.status || 'offline';
+    let pillCls = '', pillTxt = status;
+    if (status === 'active') { pillCls = ''; pillTxt = 'Active'; }
+    else if (status === 'idle') { pillCls = 'idle'; pillTxt = 'Idle'; }
+    else if (status === 'on_break') { pillCls = 'idle'; pillTxt = 'On break'; }
+    else if (status === 'heads_down') { pillCls = ''; pillTxt = 'Heads down'; }
+    else if (status === 'running_late') { pillCls = 'idle'; pillTxt = 'Running late'; }
+    else if (status === 'off_sick') { pillCls = 'off'; pillTxt = 'Off sick'; }
+    else if (status === 'on_leave') { pillCls = 'off'; pillTxt = 'On leave'; }
+    else { pillCls = 'off'; pillTxt = 'Offline'; }
+
+    // r0.10 — Add probation pill alongside the status pill (only while in probation)
+    // r0.11 — Added probation_pass_expected ("On track") state
+    let probationPill = '';
+    if (u.probation_status === 'in_probation') {
+      probationPill = '<span class="pill probation"><i class="ti ti-clock"></i>Probation</span>';
+    } else if (u.probation_status === 'probation_pass_expected') {
+      probationPill = '<span class="pill on-track"><i class="ti ti-circle-check"></i>On track</span>';
+    } else if (u.probation_status === 'extended') {
+      probationPill = '<span class="pill probation"><i class="ti ti-alert-triangle"></i>Probation extended</span>';
+    } else if (u.probation_status === 'failed') {
+      probationPill = '<span class="pill off"><i class="ti ti-x"></i>Probation failed</span>';
+    }
+
+    document.getElementById('hdrStatus').innerHTML =
+      probationPill +
+      '<span class="pill ' + pillCls + '" style="margin-left:6px">' + escapeHtml(pillTxt) + '</span>';
+
+    // r0.10 — Header action buttons
+    const actions = document.getElementById('hdrActions');
+    let acts = '';
+    if (viewer.is_self) {
+      acts += '<button class="header-action-btn" onclick="openChangePasswordModal()"><i class="ti ti-key"></i>Change password</button>';
+    }
+    if (!viewer.is_self && viewer.can_reset_password) {
+      acts += '<button class="header-action-btn" onclick="resetPassword()"><i class="ti ti-refresh"></i>Reset password</button>';
+    }
+    // r0.11 — Manage probation button stays visible until user is confirmed
+    const probInProgress = ['in_probation','probation_pass_expected','extended'].includes(u.probation_status);
+    if (viewer.can_manage_probation && probInProgress) {
+      acts += '<button class="header-action-btn" onclick="manageProbation()"><i class="ti ti-user-check"></i>Manage probation</button>';
+    }
+    actions.innerHTML = acts;
+  }
+
+  // ---------- Header actions ----------
+  function openChangePasswordModal() {
+    document.getElementById('pwCurrent').value = '';
+    document.getElementById('pwNew').value = '';
+    document.getElementById('pwNew2').value = '';
+    document.getElementById('pwErr').classList.remove('on');
+    document.getElementById('pwModal').classList.add('on');
+  }
+  async function submitChangePassword() {
+    const cur = document.getElementById('pwCurrent').value;
+    const n1 = document.getElementById('pwNew').value;
+    const n2 = document.getElementById('pwNew2').value;
+    const err = document.getElementById('pwErr');
+    err.classList.remove('on');
+    if (n1.length < 8) { err.textContent = 'New password must be at least 8 characters.'; err.classList.add('on'); return; }
+    if (n1 !== n2) { err.textContent = 'New passwords do not match.'; err.classList.add('on'); return; }
+    try {
+      const r = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ currentPassword: cur, newPassword: n1 })
+      });
+      const d = await r.json();
+      if (!r.ok) { err.textContent = d.error || 'Failed'; err.classList.add('on'); return; }
+      document.getElementById('pwModal').classList.remove('on');
+      alert('Password changed.');
+    } catch (e) { err.textContent = 'Failed'; err.classList.add('on'); }
+  }
+  async function resetPassword() {
+    if (!confirm('Reset this user\u2019s password? They will be told the new seed password and forced to change on next login.')) return;
+    try {
+      const r = await fetch('/api/admin/users/' + profileUserId + '/reset-password', {
+        method: 'POST', credentials: 'include'
+      });
+      const d = await r.json();
+      if (!r.ok) { showError(d.error || 'Failed'); return; }
+      alert('New seed password: ' + (d.seed_password || d.initial_password || '(check audit log)'));
+    } catch (e) { showError('Failed.'); }
+  }
+  async function manageProbation() {
+    const choice = prompt('Set probation status:\n  c = Confirmed (passed)\n  e = Extended\n  f = Failed\n  o = On track (pass expected)\n\nEnter c, e, f, or o:');
+    if (!choice) return;
+    const map = { c: 'confirmed', e: 'extended', f: 'failed', o: 'probation_pass_expected' };
+    const status = map[choice.toLowerCase()];
+    if (!status) { showError('Invalid choice'); return; }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/probation', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ status })
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Failed'); return; }
+      boot(); // reload overview
+    } catch (e) { showError('Failed.'); }
+  }
+
+  // r0.11 — Self-service personal info save
+  // r0.12 — Added date_of_birth
+  async function savePersonalInfo() {
+    const phone = document.getElementById('piPhone').value.trim();
+    const emergency_contact = document.getElementById('piEmergency').value.trim();
+    const personal_address = document.getElementById('piAddress').value.trim();
+    const dobEl = document.getElementById('piDob');
+    const date_of_birth = dobEl ? dobEl.value : null;
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/personal', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ phone, emergency_contact, personal_address, date_of_birth })
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Failed'); return; }
+      // Update in-memory user so the form doesn't reset to old values on next render
+      overview.user.phone = phone;
+      overview.user.emergency_contact = emergency_contact;
+      overview.user.personal_address = personal_address;
+      if (date_of_birth) overview.user.date_of_birth = date_of_birth;
+      // Subtle feedback
+      const btn = document.querySelector('button[onclick="savePersonalInfo()"]');
+      if (btn) { const t = btn.textContent; btn.textContent = 'Saved'; setTimeout(() => btn.textContent = t, 1500); }
+    } catch (e) { showError('Failed.'); }
+  }
+
+  function renderDrawerNav() {
+    const nav = document.getElementById('drawerNav');
+    nav.innerHTML = overview.drawers.map(d => {
+      const lbl = DRAWER_LABELS[d];
+      let count = overview.counts[d] || 0;
+      // For onboarding, show as "done/total" if any exist
+      let badge = '';
+      if (d === 'onboarding' && overview.counts.__onboarding_total > 0) {
+        badge = '<span class="count">' + (overview.counts.__onboarding_completed || 0) + '/' + overview.counts.__onboarding_total + '</span>';
+      } else if (count > 0) {
+        badge = '<span class="count">' + count + '</span>';
+      }
+      return '<div class="drawer-tab" data-drawer="' + d + '" onclick="selectDrawer(\'' + d + '\')">' +
+        '<i class="ti ' + lbl.icon + '"></i>' +
+        '<span>' + lbl.name + '</span>' +
+        badge +
+        '</div>';
+    }).join('');
+  }
+
+  function selectDrawer(drawer) {
+    currentDrawer = drawer;
+    location.hash = drawer;
+    document.querySelectorAll('.drawer-tab').forEach(t => {
+      t.classList.toggle('on', t.getAttribute('data-drawer') === drawer);
+    });
+    const lbl = DRAWER_LABELS[drawer];
+    document.getElementById('panelTitle').textContent = lbl.name;
+    document.getElementById('panelSub').textContent = lbl.desc;
+    loadDrawer(drawer);
+  }
+
+  async function loadDrawer(drawer) {
+    const body = document.getElementById('panelBody');
+    body.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer, { credentials: 'include' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        body.innerHTML = '<div class="empty"><i class="ti ti-lock"></i><div class="lbl">' +
+          escapeHtml(d.error || 'Cannot load drawer') + '</div></div>';
+        return;
+      }
+      const data = await r.json();
+      if (drawer === 'salary') renderSalary(data);
+      else if (drawer === 'reviews') renderReviewsDrawer(data);
+      else if (drawer === 'onboarding') renderOnboardingDrawer(data);
+      else renderFilesDrawer(data, drawer);
+    } catch (e) {
+      body.innerHTML = '<div class="empty"><i class="ti ti-alert-triangle"></i><div class="lbl">Failed to load.</div></div>';
+    }
+  }
+
+  // ============================================================================
+  // Files drawer (Personal, Employment, Payroll, Insurance)
+  // ============================================================================
+  function renderFilesDrawer(data, drawer) {
+    const body = document.getElementById('panelBody');
+    const files = data.files || [];
+    const canUpload = canUploadHere(drawer);
+
+    let html = '';
+
+    // r0.11 — Personal info self-edit (only on Personal drawer for own profile,
+    // or for HR/owner viewing someone else's profile)
+    if (drawer === 'personal') {
+      const canEditPersonal = viewer.is_self || viewer.can_edit_any;
+      const u = overview.user;
+      const dobStr = u.date_of_birth ? String(u.date_of_birth).slice(0, 10) : '';
+
+      if (canEditPersonal) {
+        // ---- Block 1: Contact ----
+        html += '<div class="info-block">' +
+          '<div class="info-block-title">Contact</div>' +
+          '<div class="form-grid" style="gap:10px">' +
+            '<div><label>Phone</label><input type="text" id="piPhone" value="' + escapeAttr(u.phone || '') + '" placeholder="+44 …" /></div>' +
+            '<div><label>Email</label><input type="text" value="' + escapeAttr(u.email || '') + '" disabled style="opacity:0.7" /></div>' +
+          '</div>' +
+        '</div>';
+
+        // ---- Block 2: Personal ----
+        // DOB is only visible if the user has it (server redacts for non-authorised viewers).
+        // If null AND it's not their own, the input is disabled.
+        html += '<div class="info-block">' +
+          '<div class="info-block-title">Personal</div>' +
+          '<div class="form-grid" style="gap:10px">' +
+            '<div><label>Date of birth</label><input type="date" id="piDob" value="' + escapeAttr(dobStr) + '" /></div>' +
+            '<div></div>' +
+            '<div class="full"><label>Home address</label><textarea id="piAddress" placeholder="Street, city, postcode">' + escapeHtml(u.personal_address || '') + '</textarea></div>' +
+          '</div>' +
+        '</div>';
+
+        // ---- Block 3: Emergency contact ----
+        html += '<div class="info-block">' +
+          '<div class="info-block-title">Emergency contact</div>' +
+          '<div><label>Name, relationship, phone</label><textarea id="piEmergency" placeholder="e.g. Jane Doe — spouse — +44 7700 900111">' + escapeHtml(u.emergency_contact || '') + '</textarea></div>' +
+        '</div>';
+
+        // ---- Save button ----
+        html += '<div style="margin-bottom:18px;text-align:right"><button class="btn btn-primary" onclick="savePersonalInfo()">Save details</button></div>';
+
+      } else if (u.phone || u.emergency_contact || u.personal_address || dobStr) {
+        // Read-only display — same three blocks
+        // ---- Block 1: Contact ----
+        if (u.phone || u.email) {
+          html += '<div class="info-block">' +
+            '<div class="info-block-title">Contact</div>' +
+            (u.phone ? '<div class="info-row"><span class="info-label">Phone</span> ' + escapeHtml(u.phone) + '</div>' : '') +
+            (u.email ? '<div class="info-row"><span class="info-label">Email</span> ' + escapeHtml(u.email) + '</div>' : '') +
+          '</div>';
+        }
+        // ---- Block 2: Personal ----
+        if (dobStr || u.personal_address) {
+          html += '<div class="info-block">' +
+            '<div class="info-block-title">Personal</div>' +
+            (dobStr ? '<div class="info-row"><span class="info-label">Date of birth</span> ' + fmtDate(dobStr) + '</div>' : '') +
+            (u.personal_address ? '<div class="info-row" style="white-space:pre-wrap"><span class="info-label">Home address</span> ' + escapeHtml(u.personal_address) + '</div>' : '') +
+          '</div>';
+        }
+        // ---- Block 3: Emergency contact ----
+        if (u.emergency_contact) {
+          html += '<div class="info-block">' +
+            '<div class="info-block-title">Emergency contact</div>' +
+            '<div class="info-row" style="white-space:pre-wrap">' + escapeHtml(u.emergency_contact) + '</div>' +
+          '</div>';
+        }
+      }
+    }
+
+    if (files.length === 0) {
+      html += '<div class="empty"><i class="ti ti-folder-open"></i><div class="lbl">No files in this drawer yet.</div></div>';
+    } else {
+      html += '<div class="file-list">';
+      for (const f of files) {
+        const icon = ICON_FOR_MIME[f.mime_type] || 'ti-file';
+        html += '<div class="file-row">' +
+          '<div class="file-icon"><i class="ti ' + icon + '"></i></div>' +
+          '<div class="file-info">' +
+            '<div class="file-name">' + escapeHtml(f.filename) + '</div>' +
+            '<div class="file-meta">' + fmtSize(f.size_bytes) + ' \u00b7 ' +
+              'Uploaded ' + fmtDateTime(f.uploaded_at) +
+              (f.uploaded_by_name ? ' by ' + escapeHtml(f.uploaded_by_name) : '') +
+              (f.description ? ' \u00b7 ' + escapeHtml(f.description) : '') +
+            '</div>' +
+          '</div>' +
+          '<div class="file-actions">' +
+            '<a class="icon-btn" href="/api/files/' + f.id + '" target="_blank" title="Download"><i class="ti ti-download"></i></a>' +
+            (canDeleteFile(drawer, f) ? '<button class="icon-btn danger" onclick="deleteFile(' + f.id + ')" title="Delete"><i class="ti ti-trash"></i></button>' : '') +
+          '</div>' +
+        '</div>';
+      }
+      html += '</div>';
+    }
+
+    if (canUpload) {
+      html += '<div class="upload-bar">' +
+        '<div class="label">Add a file to ' + escapeHtml(DRAWER_LABELS[drawer].name) + ' (PDF, JPG, PNG, DOC, DOCX \u00b7 max 15 MB)</div>' +
+        '<input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style="display:none" onchange="uploadFile()" />' +
+        '<button class="btn btn-primary btn-sm" onclick="document.getElementById(\'fileInput\').click()">Choose file</button>' +
+        '</div>';
+    }
+
+    // Recently deleted (recycle bin)
+    if (viewer.can_delete_any || (viewer.is_self && drawer === 'personal')) {
+      html += '<div style="margin-top:18px"><a style="font-size:13px;color:var(--muted);cursor:pointer" onclick="toggleDeleted(\'' + drawer + '\')">Recently deleted \u203a</a><div id="deletedBox" style="margin-top:8px"></div></div>';
+    }
+
+    document.getElementById('panelBody').innerHTML = html;
+  }
+
+  function canUploadHere(drawer) {
+    if (viewer.can_upload_any) return true;
+    if (drawer === 'salary') return viewer.can_edit_salary;
+    if (viewer.is_self && drawer === 'personal' && viewer.can_upload_own) return true;
+    return false;
+  }
+  function canDeleteFile(drawer, f) {
+    if (viewer.can_delete_any) return true;
+    if (viewer.is_self && drawer === 'personal') return true;
+    return false;
+  }
+
+  // r0.11 — Can the viewer delete an attached file (on a review or onboarding item)?
+  // Rule: anyone who can delete generally, OR the uploader of the file, OR
+  // the file's user if it's on their own onboarding item.
+  function canDeleteAttached(f) {
+    if (viewer.can_delete_any) return true;
+    if (viewer.can_edit_any || viewer.can_edit_dept) return true;
+    if (f.uploaded_by_user_id && f.uploaded_by_user_id === viewer.user_id) return true;
+    if (viewer.is_self) return true;
+    return false;
+  }
+
+  async function deleteAttachedFile(id, drawer) {
+    if (!confirm('Delete this attached file? You can restore it from Recently Deleted for 90 days.')) return;
+    try {
+      const r = await fetch('/api/files/' + id, { method: 'DELETE', credentials: 'include' });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Delete failed'); return; }
+      loadDrawer(drawer);
+    } catch (e) { showError('Delete failed.'); }
+  }
+
+  async function uploadFile() {
+    const input = document.getElementById('fileInput');
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    if (file.size > 15 * 1024 * 1024) {
+      showError('File too large (max 15 MB).');
+      input.value = ''; return;
+    }
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('user_id', String(profileUserId));
+    fd.append('drawer', currentDrawer);
+    try {
+      const r = await fetch('/api/files/upload', { method: 'POST', body: fd, credentials: 'include' });
+      const data = await r.json();
+      if (!r.ok) { showError(data.error || 'Upload failed'); return; }
+      input.value = '';
+      // Refresh
+      overview.counts[currentDrawer] = (overview.counts[currentDrawer] || 0) + 1;
+      renderDrawerNav();
+      document.querySelectorAll('.drawer-tab').forEach(t => {
+        t.classList.toggle('on', t.getAttribute('data-drawer') === currentDrawer);
+      });
+      loadDrawer(currentDrawer);
+    } catch (e) { showError('Upload failed.'); }
+  }
+
+  async function deleteFile(id) {
+    if (!confirm('Move this file to recently deleted? You can restore it for 90 days.')) return;
+    try {
+      const r = await fetch('/api/files/' + id, { method: 'DELETE', credentials: 'include' });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Delete failed'); return; }
+      overview.counts[currentDrawer] = Math.max(0, (overview.counts[currentDrawer] || 1) - 1);
+      renderDrawerNav();
+      document.querySelectorAll('.drawer-tab').forEach(t => {
+        t.classList.toggle('on', t.getAttribute('data-drawer') === currentDrawer);
+      });
+      loadDrawer(currentDrawer);
+    } catch (e) { showError('Delete failed.'); }
+  }
+
+  async function toggleDeleted(drawer) {
+    const box = document.getElementById('deletedBox');
+    if (box.dataset.open === '1') { box.innerHTML = ''; box.dataset.open = '0'; return; }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer + '/deleted', { credentials: 'include' });
+      if (!r.ok) { box.innerHTML = '<div class="hint">Cannot load.</div>'; return; }
+      const d = await r.json();
+      if (d.files.length === 0) {
+        box.innerHTML = '<div class="hint">Nothing here.</div>';
+      } else {
+        box.innerHTML = '<div class="file-list">' + d.files.map(f =>
+          '<div class="file-row" style="opacity:0.7">' +
+            '<div class="file-icon"><i class="ti ti-trash"></i></div>' +
+            '<div class="file-info">' +
+              '<div class="file-name">' + escapeHtml(f.filename) + '</div>' +
+              '<div class="file-meta">Deleted ' + fmtDateTime(f.deleted_at) +
+                (f.deleted_by_name ? ' by ' + escapeHtml(f.deleted_by_name) : '') + '</div>' +
+            '</div>' +
+            '<div class="file-actions">' +
+              '<button class="btn btn-sm" onclick="restoreFile(' + f.id + ')">Restore</button>' +
+            '</div>' +
+          '</div>'
+        ).join('') + '</div>';
+      }
+      box.dataset.open = '1';
+    } catch (e) { box.innerHTML = '<div class="hint">Failed.</div>'; }
+  }
+
+  async function restoreFile(id) {
+    try {
+      const r = await fetch('/api/files/' + id + '/restore', { method: 'POST', credentials: 'include' });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Restore failed'); return; }
+      loadDrawer(currentDrawer);
+    } catch (e) { showError('Failed.'); }
+  }
+
+  // ============================================================================
+  // Salary drawer
+  // ============================================================================
+  function renderSalary(data) {
+    const body = document.getElementById('panelBody');
+    const canEdit = viewer.can_edit_salary;
+    const canView = viewer.can_view_salary || viewer.can_edit_salary;
+    if (!canView) {
+      body.innerHTML = '<div class="empty"><i class="ti ti-lock"></i><div class="lbl">You don\'t have permission to view salary.</div></div>';
+      return;
+    }
+    const s = data.salary || {};
+    const dis = canEdit ? '' : ' disabled';
+    body.innerHTML =
+      '<div class="form-grid">' +
+        '<div><label>Monthly CTC</label><input type="number" id="salCtc" step="0.01" value="' + (s.monthly_ctc != null ? s.monthly_ctc : '') + '"' + dis + ' /></div>' +
+        '<div><label>Currency</label><input type="text" id="salCurrency" maxlength="3" value="' + escapeHtml(s.currency || 'INR') + '"' + dis + ' /></div>' +
+        '<div><label>Effective from</label><input type="date" id="salEffectiveFrom" value="' + (s.effective_from ? String(s.effective_from).slice(0,10) : '') + '"' + dis + ' /></div>' +
+        '<div></div>' +
+        '<div class="full"><label>Deductions (label and monthly amount)</label>' +
+          '<div class="deductions"><input type="text" id="salDed1Label" placeholder="e.g. PF" value="' + escapeHtml(s.deduction_1_label || '') + '"' + dis + ' /><input type="number" id="salDed1Amount" step="0.01" value="' + (s.deduction_1_amount != null ? s.deduction_1_amount : 0) + '"' + dis + ' /></div>' +
+          '<div class="deductions"><input type="text" id="salDed2Label" value="' + escapeHtml(s.deduction_2_label || '') + '"' + dis + ' /><input type="number" id="salDed2Amount" step="0.01" value="' + (s.deduction_2_amount != null ? s.deduction_2_amount : 0) + '"' + dis + ' /></div>' +
+          '<div class="deductions"><input type="text" id="salDed3Label" value="' + escapeHtml(s.deduction_3_label || '') + '"' + dis + ' /><input type="number" id="salDed3Amount" step="0.01" value="' + (s.deduction_3_amount != null ? s.deduction_3_amount : 0) + '"' + dis + ' /></div>' +
+        '</div>' +
+        '<div class="full"><label>Notes</label><textarea id="salNotes"' + dis + '>' + escapeHtml(s.notes || '') + '</textarea></div>' +
+      '</div>' +
+      (s.updated_at ? '<p class="hint">Last updated ' + fmtDateTime(s.updated_at) + (s.updated_by_name ? ' by ' + escapeHtml(s.updated_by_name) : '') + '</p>' : '') +
+      '<div class="form-actions">' +
+        '<button class="btn" onclick="openSalaryHistory()">History</button>' +
+        (canEdit ? '<button class="btn btn-primary" onclick="saveSalary()">Save salary</button>' : '') +
+      '</div>' +
+      '<div style="margin-top:18px">' +
+        '<h3 style="font-size:14px;font-weight:500;margin:0 0 8px">Salary documents</h3>' +
+        '<div id="salaryFilesBox">Loading…</div>' +
+      '</div>';
+
+    // Also load salary drawer FILES alongside
+    fetch('/api/profile/' + profileUserId + '/drawer/salary', { credentials: 'include' })
+      .then(r => r.json())
+      .then(d => {
+        const fb = document.getElementById('salaryFilesBox');
+        const files = d.files || [];
+        if (files.length === 0) {
+          fb.innerHTML = '<div class="hint">No salary documents uploaded.</div>';
+        } else {
+          fb.innerHTML = '<div class="file-list">' + files.map(f => {
+            const icon = ICON_FOR_MIME[f.mime_type] || 'ti-file';
+            return '<div class="file-row">' +
+              '<div class="file-icon"><i class="ti ' + icon + '"></i></div>' +
+              '<div class="file-info">' +
+                '<div class="file-name">' + escapeHtml(f.filename) + '</div>' +
+                '<div class="file-meta">' + fmtSize(f.size_bytes) + ' \u00b7 ' + fmtDateTime(f.uploaded_at) + '</div>' +
+              '</div>' +
+              '<div class="file-actions">' +
+                '<a class="icon-btn" href="/api/files/' + f.id + '" target="_blank"><i class="ti ti-download"></i></a>' +
+                (canDeleteFile('salary', f) ? '<button class="icon-btn danger" onclick="deleteFile(' + f.id + ')"><i class="ti ti-trash"></i></button>' : '') +
+              '</div>' +
+            '</div>';
+          }).join('') + '</div>';
+        }
+        if (canEdit) {
+          fb.innerHTML += '<div class="upload-bar" style="margin-top:10px">' +
+            '<div class="label">Add salary document (PDF, JPG, PNG, DOC, DOCX \u00b7 max 15 MB)</div>' +
+            '<input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style="display:none" onchange="uploadFile()" />' +
+            '<button class="btn btn-primary btn-sm" onclick="document.getElementById(\'fileInput\').click()">Choose file</button>' +
+            '</div>';
+        }
+      });
+  }
+
+  async function saveSalary() {
+    const body = {
+      monthly_ctc: parseFloat(document.getElementById('salCtc').value),
+      currency: document.getElementById('salCurrency').value.trim().toUpperCase(),
+      effective_from: document.getElementById('salEffectiveFrom').value,
+      deduction_1_label: document.getElementById('salDed1Label').value.trim() || null,
+      deduction_1_amount: parseFloat(document.getElementById('salDed1Amount').value || 0),
+      deduction_2_label: document.getElementById('salDed2Label').value.trim() || null,
+      deduction_2_amount: parseFloat(document.getElementById('salDed2Amount').value || 0),
+      deduction_3_label: document.getElementById('salDed3Label').value.trim() || null,
+      deduction_3_amount: parseFloat(document.getElementById('salDed3Amount').value || 0),
+      notes: document.getElementById('salNotes').value || null,
+    };
+    if (isNaN(body.monthly_ctc) || body.monthly_ctc < 0) { showError('Monthly CTC must be a positive number'); return; }
+    if (!body.effective_from) { showError('Pick an effective-from date'); return; }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/salary', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok) { showError(d.error || 'Save failed'); return; }
+      loadDrawer('salary');
+    } catch (e) { showError('Save failed.'); }
+  }
+
+  async function openSalaryHistory() {
+    document.getElementById('historyModal').classList.add('on');
+    const box = document.getElementById('historyBody');
+    box.textContent = 'Loading…';
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/salary/history', { credentials: 'include' });
+      if (!r.ok) { box.textContent = 'Cannot load.'; return; }
+      const d = await r.json();
+      if (!d.history || d.history.length === 0) {
+        box.innerHTML = '<div class="hint">No history yet.</div>';
+        return;
+      }
+      box.innerHTML = d.history.map(h => {
+        const a = h.after_data || {};
+        const b = h.before_data;
+        return '<div style="padding:10px 0;border-bottom:0.5px solid var(--line)">' +
+          '<div style="font-size:13px;font-weight:500">' + fmtDateTime(h.occurred_at) +
+          (h.actor_name ? ' \u00b7 by ' + escapeHtml(h.actor_name) : '') + '</div>' +
+          '<div style="font-size:13px;color:var(--muted);margin-top:4px">' +
+            (b ? 'Changed from ' + (b.monthly_ctc || '—') + ' ' + (b.currency || '') + ' \u2192 ' : 'Set to ') +
+            (a.monthly_ctc || '—') + ' ' + (a.currency || '') +
+            (a.effective_from ? ' (effective ' + fmtDate(a.effective_from) + ')' : '') +
+          '</div></div>';
+      }).join('');
+    } catch (e) { box.textContent = 'Failed.'; }
+  }
+
+  // ============================================================================
+  // Reviews drawer (r0.10) — one row per review, with type/date/status/notes/files
+  // ============================================================================
+  function renderReviewsDrawer(data) {
+    const body = document.getElementById('panelBody');
+    const notes = (data.notes || []).slice();
+    // Sort: incomplete first (by review_date asc), then complete (by review_date desc)
+    notes.sort((a, b) => {
+      if (a.is_completed !== b.is_completed) return a.is_completed ? 1 : -1;
+      const ad = a.review_date || a.created_at;
+      const bd = b.review_date || b.created_at;
+      return a.is_completed ? (bd > ad ? 1 : -1) : (ad > bd ? 1 : -1);
+    });
+
+    const canAdd = viewer.can_schedule_reviews;
+    const canComplete = viewer.can_complete_reviews || viewer.can_edit_any || viewer.can_edit_dept;
+
+    let html = '';
+    if (notes.length === 0) {
+      html += '<div class="empty"><i class="ti ti-note"></i><div class="lbl">No reviews yet. Once a hire date is set, the system schedules 1-, 4-, 8-month and annual reviews.</div></div>';
+    } else {
+      html += '<div class="notes-list">';
+      for (const n of notes) {
+        const typeLabel = REVIEW_TYPE_LABEL[n.review_type] || 'Review';
+        const statusLbl = STATUS_LABEL[n.status] || (n.status || '—');
+        const statusCol = STATUS_COLOR[n.status] || 'grey';
+        const reviewDateStr = n.review_date ? fmtDate(n.review_date) : '—';
+        const completed = n.is_completed;
+
+        html += '<div class="note review-row ' + (completed ? 'completed' : '') + '">' +
+          '<div class="note-head">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div class="note-title">' + escapeHtml(typeLabel) + ' \u00b7 ' + reviewDateStr + '</div>' +
+            '</div>' +
+            '<span class="status-chip status-' + statusCol + '">' + escapeHtml(statusLbl) + '</span>' +
+          '</div>' +
+          (canComplete ?
+            '<div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">' +
+              '<label style="margin:0;font-size:13px;color:var(--muted)">Status:</label>' +
+              '<select onchange="updateReviewStatus(' + n.id + ',this.value,\'' + n.review_type + '\')" style="width:auto;min-width:160px">' +
+                REVIEW_STATUS_OPTIONS[n.review_type].map(s =>
+                  '<option value="' + s + '"' + (s === n.status ? ' selected' : '') + '>' + STATUS_LABEL[s] + '</option>'
+                ).join('') +
+              '</select>' +
+              (canAdd ?
+                '<label style="margin:0;font-size:13px;color:var(--muted);margin-left:8px">Date:</label>' +
+                '<input type="date" value="' + (n.review_date ? String(n.review_date).slice(0,10) : '') + '"' +
+                  ' onchange="updateReviewDate(' + n.id + ',this.value)" style="width:auto" />'
+                : '') +
+            '</div>'
+            : '') +
+          '<div style="margin-top:10px"><textarea id="reviewBody_' + n.id + '" placeholder="Review notes — what went well, areas to improve, plans agreed…"' +
+            (canComplete ? '' : ' readonly') + '>' + escapeHtml(n.body || '') + '</textarea>' +
+            (canComplete ? '<div style="margin-top:6px;text-align:right"><button class="btn btn-sm" onclick="saveReviewBody(' + n.id + ')">Save notes</button></div>' : '') +
+          '</div>' +
+          // Attached files
+          (n.attached_files && n.attached_files.length > 0 ?
+            '<div style="margin-top:10px"><div style="font-size:12px;color:var(--muted);margin-bottom:6px">Attached files:</div>' +
+              '<div class="file-list">' +
+              n.attached_files.map(f => {
+                const icon = ICON_FOR_MIME[f.mime_type] || 'ti-file';
+                const canDel = canDeleteAttached(f);
+                return '<div class="file-row" style="padding:6px 10px">' +
+                  '<div class="file-icon" style="width:28px;height:28px"><i class="ti ' + icon + '"></i></div>' +
+                  '<div class="file-info"><div class="file-name">' + escapeHtml(f.filename) + '</div>' +
+                    '<div class="file-meta">' + fmtSize(f.size_bytes) + '</div></div>' +
+                  '<div class="file-actions">' +
+                    '<a class="icon-btn" href="/api/files/' + f.id + '" target="_blank" title="Download"><i class="ti ti-download"></i></a>' +
+                    (canDel ? '<button class="icon-btn danger" onclick="deleteAttachedFile(' + f.id + ',\'reviews\')" title="Delete"><i class="ti ti-trash"></i></button>' : '') +
+                  '</div>' +
+                '</div>';
+              }).join('') +
+              '</div></div>'
+            : '') +
+          (canComplete ?
+            '<div style="margin-top:10px"><input type="file" id="reviewFile_' + n.id + '" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style="display:none" onchange="uploadReviewFile(' + n.id + ')" />' +
+              '<button class="btn btn-sm" onclick="document.getElementById(\'reviewFile_' + n.id + '\').click()"><i class="ti ti-paperclip"></i> Attach file</button>' +
+            '</div>'
+            : '') +
+          '<div class="note-meta">' +
+            // r0.11 — show reviewer name on every review (so reviewee knows who's reviewing)
+            (n.reviewer_name ? '<span><i class="ti ti-user-check"></i>Reviewer: ' + escapeHtml(n.reviewer_name) + '</span>' : '') +
+            (n.completed_by_name ? '<span><i class="ti ti-check"></i>Completed by ' + escapeHtml(n.completed_by_name) + ' \u00b7 ' + fmtDateTime(n.completed_at) + '</span>'
+              : '<span style="color:var(--muted)"><i class="ti ti-clock"></i>Not yet completed</span>') +
+          '</div>' +
+        '</div>';
+      }
+      html += '</div>';
+    }
+
+    // Add ad-hoc review form
+    if (canAdd) {
+      html += '<div style="margin-top:20px;padding-top:18px;border-top:0.5px solid var(--line)">' +
+        '<h3 style="font-size:14px;font-weight:500;margin:0 0 10px">Schedule an ad-hoc review</h3>' +
+        '<div style="display:grid;grid-template-columns:1fr 200px;gap:10px;align-items:end">' +
+          '<div><label>Title</label><input type="text" id="newReviewTitle" placeholder="e.g. Mid-cycle check-in" /></div>' +
+          '<div><label>Review date</label><input type="date" id="newReviewDate" /></div>' +
+        '</div>' +
+        '<div class="form-actions"><button class="btn btn-primary" onclick="addAdHocReview()">Schedule</button></div>' +
+        '</div>';
+    }
+    body.innerHTML = html;
+  }
+
+  async function updateReviewStatus(noteId, status, reviewType) {
+    if (status !== 'scheduled' && !confirm('Mark this review as completed with status "' + STATUS_LABEL[status] + '"? This closes the review task.')) {
+      loadDrawer('reviews'); // reset selector
+      return;
+    }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes/' + noteId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ status })
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Failed'); return; }
+      loadDrawer('reviews');
+    } catch (e) { showError('Failed.'); }
+  }
+
+  async function updateReviewDate(noteId, date) {
+    if (!date) return;
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes/' + noteId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ review_date: date })
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Failed'); return; }
+      loadDrawer('reviews');
+    } catch (e) { showError('Failed.'); }
+  }
+
+  async function saveReviewBody(noteId) {
+    const body = document.getElementById('reviewBody_' + noteId).value;
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes/' + noteId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ body })
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Failed'); return; }
+      // Don't reload — keep cursor position
+    } catch (e) { showError('Failed.'); }
+  }
+
+  async function uploadReviewFile(noteId) {
+    const input = document.getElementById('reviewFile_' + noteId);
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    if (file.size > 15 * 1024 * 1024) { showError('File too large (max 15 MB).'); input.value = ''; return; }
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('user_id', String(profileUserId));
+    fd.append('drawer', 'reviews');
+    fd.append('profile_note_id', String(noteId));
+    try {
+      const r = await fetch('/api/files/upload', { method: 'POST', body: fd, credentials: 'include' });
+      const data = await r.json();
+      if (!r.ok) { showError(data.error || 'Upload failed'); return; }
+      input.value = '';
+      loadDrawer('reviews');
+    } catch (e) { showError('Upload failed.'); }
+  }
+
+  async function addAdHocReview() {
+    const title = document.getElementById('newReviewTitle').value.trim();
+    const reviewDate = document.getElementById('newReviewDate').value;
+    if (!title) { showError('Title required'); return; }
+    if (!reviewDate) { showError('Date required'); return; }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ kind: 'review', title, review_type: 'ad_hoc', review_date: reviewDate, status: 'scheduled' })
+      });
+      const d = await r.json();
+      if (!r.ok) { showError(d.error || 'Failed'); return; }
+      overview.counts.reviews = (overview.counts.reviews || 0) + 1;
+      renderDrawerNav();
+      document.querySelectorAll('.drawer-tab').forEach(t => { t.classList.toggle('on', t.getAttribute('data-drawer') === currentDrawer); });
+      loadDrawer('reviews');
+    } catch (e) { showError('Failed.'); }
+  }
+
+  // ============================================================================
+  // Onboarding drawer (r0.10) — checklist with optional file attach per item
+  // ============================================================================
+  function renderOnboardingDrawer(data) {
+    const body = document.getElementById('panelBody');
+    const notes = data.notes || [];
+    const canEditAny = viewer.can_edit_any || viewer.can_edit_dept;
+    const total = notes.length;
+    const done = notes.filter(n => n.is_completed).length;
+    const allDone = total > 0 && done === total;
+
+    let html = '';
+    // Progress strip
+    if (total > 0) {
+      const pct = total > 0 ? Math.round(done * 100 / total) : 0;
+      html += '<div style="margin-bottom:18px">' +
+        '<div style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:6px">' +
+          '<span>' + done + ' of ' + total + ' done</span>' +
+          '<span>' + pct + '%</span>' +
+        '</div>' +
+        '<div style="height:8px;background:var(--line);border-radius:99px;overflow:hidden">' +
+          '<div style="height:100%;width:' + pct + '%;background:var(--green);transition:width 0.3s"></div>' +
+        '</div>' +
+      '</div>';
+    }
+    if (allDone) {
+      html += '<div style="padding:12px 14px;background:var(--green-soft);color:var(--green);border-radius:10px;margin-bottom:14px;display:flex;align-items:center;gap:8px"><i class="ti ti-circle-check"></i> All onboarding items complete.</div>';
+    }
+
+    if (notes.length === 0) {
+      html += '<div class="empty"><i class="ti ti-checklist"></i><div class="lbl">No onboarding items yet.</div></div>';
+    } else {
+      html += '<div class="notes-list">';
+      // Show incomplete first, then completed at bottom
+      const sorted = notes.slice().sort((a,b) => {
+        if (a.is_completed !== b.is_completed) return a.is_completed ? 1 : -1;
+        return (a.created_at > b.created_at) ? 1 : -1;
+      });
+      for (const n of sorted) {
+        const canDel = canEditAny;
+        const canTick = canEditAny || viewer.is_self;
+        html += '<div class="note ' + (n.is_completed ? 'completed' : '') + '">' +
+          '<div class="note-head">' +
+            (canTick ?
+              '<div class="check" onclick="toggleOnboarding(' + n.id + ',' + !n.is_completed + ')">' +
+              (n.is_completed ? '<i class="ti ti-check" style="font-size:12px"></i>' : '') +
+              '</div>'
+              : '<div class="check" style="cursor:default;opacity:0.5">' + (n.is_completed ? '<i class="ti ti-check" style="font-size:12px"></i>' : '') + '</div>') +
+            '<div class="note-title" style="flex:1">' + escapeHtml(n.title) + '</div>' +
+            (canDel ? '<button class="icon-btn danger" onclick="deleteNote(' + n.id + ')"><i class="ti ti-trash"></i></button>' : '') +
+          '</div>' +
+          (n.body ? '<div class="note-body">' + escapeHtml(n.body) + '</div>' : '') +
+          // Attached files
+          (n.attached_files && n.attached_files.length > 0 ?
+            '<div style="margin-top:8px"><div class="file-list">' +
+              n.attached_files.map(f => {
+                const icon = ICON_FOR_MIME[f.mime_type] || 'ti-file';
+                const canDel = canDeleteAttached(f);
+                return '<div class="file-row" style="padding:6px 10px">' +
+                  '<div class="file-icon" style="width:28px;height:28px"><i class="ti ' + icon + '"></i></div>' +
+                  '<div class="file-info"><div class="file-name">' + escapeHtml(f.filename) + '</div></div>' +
+                  '<div class="file-actions">' +
+                    '<a class="icon-btn" href="/api/files/' + f.id + '" target="_blank" title="Download"><i class="ti ti-download"></i></a>' +
+                    (canDel ? '<button class="icon-btn danger" onclick="deleteAttachedFile(' + f.id + ',\'onboarding\')" title="Delete"><i class="ti ti-trash"></i></button>' : '') +
+                  '</div>' +
+                '</div>';
+              }).join('') +
+            '</div></div>'
+            : '') +
+          (canTick ?
+            '<div style="margin-top:8px"><input type="file" id="obFile_' + n.id + '" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style="display:none" onchange="uploadOnboardingFile(' + n.id + ')" />' +
+              '<button class="btn btn-sm" onclick="document.getElementById(\'obFile_' + n.id + '\').click()"><i class="ti ti-paperclip"></i> Attach file</button>' +
+            '</div>'
+            : '') +
+          '<div class="note-meta">' +
+            (n.is_completed && n.completed_by_name ? '<span><i class="ti ti-check"></i>Done by ' + escapeHtml(n.completed_by_name) + ' \u00b7 ' + fmtDate(n.completed_at) + '</span>' : '') +
+          '</div>' +
+        '</div>';
+      }
+      html += '</div>';
+    }
+
+    if (canEditAny) {
+      html += '<div style="margin-top:20px;padding-top:18px;border-top:0.5px solid var(--line)">' +
+        '<h3 style="font-size:14px;font-weight:500;margin:0 0 10px">Add an onboarding item</h3>' +
+        '<label>Title</label><input type="text" id="newObTitle" placeholder="e.g. Complete safety training" />' +
+        '<label style="margin-top:10px">Details (optional)</label><textarea id="newObBody"></textarea>' +
+        '<div class="form-actions"><button class="btn btn-primary" onclick="addOnboardingItem()">Add item</button></div>' +
+        '</div>';
+    }
+    body.innerHTML = html;
+  }
+
+  async function addOnboardingItem() {
+    const title = document.getElementById('newObTitle').value.trim();
+    const body = document.getElementById('newObBody').value.trim();
+    if (!title) { showError('Title required'); return; }
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ kind: 'onboarding', title, body: body || null })
+      });
+      const d = await r.json();
+      if (!r.ok) { showError(d.error || 'Failed'); return; }
+      overview.counts.onboarding = (overview.counts.onboarding || 0) + 1;
+      renderDrawerNav();
+      document.querySelectorAll('.drawer-tab').forEach(t => { t.classList.toggle('on', t.getAttribute('data-drawer') === currentDrawer); });
+      loadDrawer('onboarding');
+    } catch (e) { showError('Failed.'); }
+  }
+
+  async function uploadOnboardingFile(noteId) {
+    const input = document.getElementById('obFile_' + noteId);
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    if (file.size > 15 * 1024 * 1024) { showError('File too large (max 15 MB).'); input.value = ''; return; }
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('user_id', String(profileUserId));
+    fd.append('drawer', 'onboarding');
+    fd.append('profile_note_id', String(noteId));
+    try {
+      const r = await fetch('/api/files/upload', { method: 'POST', body: fd, credentials: 'include' });
+      const data = await r.json();
+      if (!r.ok) { showError(data.error || 'Upload failed'); return; }
+      input.value = '';
+      loadDrawer('onboarding');
+    } catch (e) { showError('Upload failed.'); }
+  }
+
+  async function deleteNote(id) {
+    if (!confirm('Delete this note?')) return;
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes/' + id, {
+        method: 'DELETE', credentials: 'include'
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Delete failed'); return; }
+      loadDrawer(currentDrawer);
+    } catch (e) { showError('Failed.'); }
+  }
+
+  async function toggleOnboarding(id, complete) {
+    try {
+      const r = await fetch('/api/profile/' + profileUserId + '/notes/' + id, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ is_completed: complete })
+      });
+      if (!r.ok) { const d = await r.json().catch(()=>({})); showError(d.error || 'Failed'); return; }
+      loadDrawer(currentDrawer);
+    } catch (e) { showError('Failed.'); }
+  }
+
+  // ============================================================================
+  // Init
+  // ============================================================================
+  boot();
+</script>
+</body>
+</html>

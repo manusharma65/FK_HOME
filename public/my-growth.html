@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FK Home · My Growth</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
+<style>
+  :root {
+    --bg: #FAF7F2; --surface: #FFFFFF; --nav: #14161B;
+    --ink: #14161B; --muted: #6B6760; --soft: #888780;
+    --line: rgba(20,22,27,0.12); --line-strong: rgba(20,22,27,0.20);
+    --amber: #EF9F27; --amber-warm: #FAC775; --amber-soft: #FAEEDA; --amber-deep: #854F0B;
+    --green: #3B6D11; --green-soft: #EAF3DE;
+    --red: #A32D2D; --red-soft: #FCEBEB;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+  }
+  button, input, select { font-family: inherit; }
+
+  .topbar {
+    background: var(--surface); border-bottom: 0.5px solid var(--line);
+    padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 28px; height: 28px; background: var(--nav); border-radius: 7px;
+    color: var(--amber); font-weight: 600; font-size: 15px;
+    display: flex; align-items: center; justify-content: center; letter-spacing: -0.5px;
+  }
+  .brand-name { font-size: 16px; font-weight: 500; }
+  .brand .sep { color: var(--soft); margin: 0 4px; }
+  .topbar-right { display: flex; gap: 14px; align-items: center; }
+  .home-link {
+    font-size: 15px; color: var(--muted); padding: 5px 11px;
+    border: 0.5px solid var(--line); border-radius: 99px;
+    cursor: pointer; background: var(--surface);
+    display: flex; align-items: center; gap: 6px; text-decoration: none;
+  }
+
+  .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 26px; font-weight: 500; margin: 0 0 6px; letter-spacing: -0.3px; }
+  .sub { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+
+  .switcher {
+    background: var(--surface); border: 0.5px solid var(--line); border-radius: 14px;
+    padding: 12px 16px; margin-bottom: 18px; display: none; align-items: center; gap: 10px;
+  }
+  .switcher.on { display: flex; }
+  .switcher label { font-size: 15px; color: var(--muted); font-weight: 500; }
+  .switcher select {
+    padding: 7px 10px; font-size: 15px;
+    border: 0.5px solid var(--line); border-radius: 8px;
+    background: var(--surface); color: var(--ink); flex: 1; max-width: 320px;
+  }
+  .switcher select:focus { border-color: var(--amber); outline: none; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 0.5px solid var(--line); }
+  .tab {
+    padding: 9px 16px; font-size: 15px; color: var(--muted); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -0.5px;
+    text-decoration: none; display: inline-block;
+  }
+  .tab.on { color: var(--ink); border-bottom-color: var(--amber); font-weight: 500; }
+  .tab:hover { color: var(--ink); }
+
+  .card {
+    background: var(--surface); border: 0.5px solid var(--line);
+    border-radius: 14px; padding: 0; margin-bottom: 18px; overflow: hidden;
+  }
+  .card-head {
+    padding: 14px 18px; border-bottom: 0.5px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .card-head h2 { font-size: 16px; font-weight: 500; margin: 0; }
+  .card-head .meta { font-size: 14px; color: var(--muted); }
+  .card-body { padding: 14px 18px; }
+
+  .summary-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px; padding: 14px 18px;
+  }
+  .summary-tile {
+    background: var(--bg); border-radius: 9px; padding: 10px 12px; text-align: left;
+  }
+  .summary-tile .v { font-size: 24px; font-weight: 500; color: var(--ink); }
+  .summary-tile .l { font-size: 13px; color: var(--soft); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+  .summary-tile.late .v { color: var(--amber-deep); }
+  .summary-tile.danger .v { color: var(--red); }
+  .summary-tile.green .v { color: var(--green); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 18px; font-size: 15px; border-bottom: 0.5px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 14px; text-transform: uppercase; letter-spacing: 0.4px; background: #FBFAF7; }
+  tr:last-child td { border-bottom: none; }
+
+  .pill {
+    display: inline-block; font-size: 13px; padding: 2px 8px; border-radius: 99px;
+    font-weight: 500;
+  }
+  .pill.green { background: var(--green-soft); color: var(--green); }
+  .pill.amber { background: var(--amber-soft); color: var(--amber-deep); }
+  .pill.red { background: var(--red-soft); color: var(--red); }
+  .pill.muted { background: #F1EFE8; color: var(--muted); }
+
+  .empty { text-align: center; padding: 28px 16px; color: var(--muted); font-size: 15px; }
+  .loading-row td { padding: 24px; text-align: center; color: var(--muted); font-size: 15px; }
+
+  /* Mobile */
+  @media (max-width: 768px) {
+    .container { padding: 16px; }
+    .switcher { flex-wrap: wrap; }
+    .switcher select { max-width: 100%; width: 100%; }
+    table, thead, tbody, tr, td, th { display: block; }
+    thead { display: none; }
+    tr { border-bottom: 0.5px solid var(--line); padding: 10px 0; }
+    td { padding: 4px 0; border-bottom: none; }
+    .summary-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand" onclick="location.href='/'" style="cursor:pointer" title="Back to My FK Space">
+      <div class="brand-mark">FK</div>
+      <span class="brand-name">FK Home</span>
+      <span class="sep">·</span>
+      <span style="font-size:16px;color:var(--muted)">My Growth</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <h1 id="pageTitle">My Growth</h1>
+    <p class="sub" id="pageSub">—</p>
+
+    <div class="switcher" id="switcher">
+      <label for="userSelect">Viewing:</label>
+      <select id="userSelect" onchange="onUserChange()">
+        <option value="">Loading…</option>
+      </select>
+    </div>
+
+    <div class="tabs">
+      <a class="tab on" id="tabAttendanceLink" href="#attendance" onclick="showTab('attendance');return false;">Attendance</a>
+      <a class="tab" id="tabLeavesLink" href="#leaves" onclick="showTab('leaves');return false;">Leaves</a>
+      <a class="tab" id="tabLatenessLink" href="#lateness" onclick="showTab('lateness');return false;">Lateness</a>
+    </div>
+
+    <div id="paneAttendance">
+      <div class="card">
+        <div class="card-head">
+          <h2>Last 30 days</h2>
+          <span class="meta" id="attMeta">—</span>
+        </div>
+        <div class="summary-grid" id="attSummary">
+          <div class="summary-tile"><div class="v" id="sumOnTime">—</div><div class="l">On time</div></div>
+          <div class="summary-tile late"><div class="v" id="sumLate">—</div><div class="l">Late</div></div>
+          <div class="summary-tile danger"><div class="v" id="sumNotIn">—</div><div class="l">No-show</div></div>
+          <div class="summary-tile"><div class="v" id="sumLeave">—</div><div class="l">On leave</div></div>
+          <div class="summary-tile"><div class="v" id="sumSick">—</div><div class="l">Sick</div></div>
+          <div class="summary-tile"><div class="v" id="sumOff">—</div><div class="l">Off / pattern</div></div>
+        </div>
+        <table>
+          <thead><tr><th>Date</th><th>Status</th><th>In</th><th>Out</th><th>Active</th><th>Late</th><th>Pay</th></tr></thead>
+          <tbody id="attBody"><tr class="loading-row"><td colspan="7">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="paneLeaves" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Leaves this year</h2>
+          <span class="meta" id="leaveMeta">—</span>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-tile"><div class="v" id="leaveAccrued">—</div><div class="l">Accrued</div></div>
+          <div class="summary-tile"><div class="v" id="leaveUsed">—</div><div class="l">Used</div></div>
+          <div class="summary-tile late"><div class="v" id="leavePending">—</div><div class="l">Pending</div></div>
+          <div class="summary-tile" id="leaveAdjustTile" style="display:none"><div class="v" id="leaveAdjust">—</div><div class="l">Adjustment</div></div>
+          <div class="summary-tile green"><div class="v" id="leaveRemaining">—</div><div class="l">Remaining</div></div>
+        </div>
+        <div id="leaveAdjustNote" style="display:none;padding:8px 18px;font-size:12px;color:var(--muted);background:#FBFAF7;border-top:0.5px solid var(--line)">
+          <i class="ti ti-info-circle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>
+          <span id="leaveAdjustNoteText">—</span>
+        </div>
+        <table>
+          <thead><tr><th>Type</th><th>Dates</th><th>Days</th><th>Status</th><th>Reason</th></tr></thead>
+          <tbody id="leaveBody"><tr class="loading-row"><td colspan="5">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="paneLateness" style="display:none">
+      <div class="card">
+        <div class="card-head">
+          <h2>Lateness · last 30 days</h2>
+          <span class="meta" id="lateMeta">—</span>
+        </div>
+        <table>
+          <thead><tr><th>Date</th><th>Shift start</th><th>Clocked in</th><th>Late by</th></tr></thead>
+          <tbody id="lateBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Regularisation requests</h2>
+          <span class="meta" id="regMeta">—</span>
+        </div>
+        <table>
+          <thead><tr><th>Date</th><th>Reason</th><th>Requested times</th><th>Status</th></tr></thead>
+          <tbody id="regBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+let me_ = null;
+let viewingUserId = null;
+let viewingName = null;
+
+async function init() {
+  const r = await fetch('/api/auth/me', { credentials: 'include' });
+  if (!r.ok) { location.href = '/login.html'; return; }
+  me_ = await r.json();
+  viewingUserId = me_.id;
+  viewingName = me_.display_name || me_.full_name;
+  updateTitle();
+
+  if (me_.permissions.includes('attendance.view.any') || me_.permissions.includes('attendance.view.dept')) {
+    await loadSwitcher();
+  }
+
+  const hash = (location.hash || '').replace('#', '');
+  if (hash === 'leaves') showTab('leaves');
+  else if (hash === 'lateness') showTab('lateness');
+  else showTab('attendance');
+
+  reloadAll();
+}
+
+function updateTitle() {
+  const isSelf = viewingUserId === me_.id;
+  document.getElementById('pageTitle').textContent = isSelf ? 'My Growth' : viewingName + "'s growth";
+  document.getElementById('pageSub').textContent = isSelf
+    ? 'Your attendance, leaves and lateness history.'
+    : 'Viewing as ' + (me_.display_name || me_.full_name) + '.';
+}
+
+async function loadSwitcher() {
+  try {
+    const r = await fetch('/api/team/search', { credentials: 'include' });
+    if (!r.ok) return;
+    const data = await r.json();
+    let users = data.people || [];
+
+    // If user only has dept-scoped view (not company-wide), filter dropdown
+    // to people they can actually see in their own dept(s).
+    if (!me_.permissions.includes('attendance.view.any')
+        && me_.permissions.includes('attendance.view.dept')) {
+      const myDeptSlugs = new Set((me_.departments || []).map(d => d.slug));
+      users = users.filter(u => (u.departments || []).some(d => myDeptSlugs.has(d.slug)));
+    }
+
+    const sel = document.getElementById('userSelect');
+    // Always show "you" first
+    const meOpt = '<option value="' + me_.id + '" selected>' +
+                  escapeHtml(me_.display_name || me_.full_name) + ' (you)</option>';
+    const otherOpts = users.map(u =>
+      '<option value="' + u.id + '">' + escapeHtml(u.name) + '</option>'
+    ).join('');
+    sel.innerHTML = meOpt + otherOpts;
+    if (users.length > 0 || me_.permissions.includes('attendance.view.any')) {
+      document.getElementById('switcher').classList.add('on');
+    }
+  } catch (e) { console.error('[loadSwitcher]', e); }
+}
+
+function onUserChange() {
+  const sel = document.getElementById('userSelect');
+  viewingUserId = parseInt(sel.value, 10);
+  viewingName = sel.options[sel.selectedIndex].textContent.replace(' (you)', '');
+  updateTitle();
+  reloadAll();
+}
+
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  document.getElementById('tab' + cap(id) + 'Link').classList.add('on');
+  document.getElementById('paneAttendance').style.display = id === 'attendance' ? '' : 'none';
+  document.getElementById('paneLeaves').style.display = id === 'leaves' ? '' : 'none';
+  document.getElementById('paneLateness').style.display = id === 'lateness' ? '' : 'none';
+  if (history.replaceState) history.replaceState(null, '', '#' + id);
+}
+function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+function reloadAll() {
+  loadAttendance();
+  loadLeaves();
+  loadLateness();
+}
+
+async function loadAttendance() {
+  const body = document.getElementById('attBody');
+  body.innerHTML = '<tr class="loading-row"><td colspan="7">Loading…</td></tr>';
+  try {
+    const params = new URLSearchParams({ days: '30' });
+    if (viewingUserId !== me_.id) params.set('user_id', viewingUserId);
+    const r = await fetch('/api/attendance/me/week?' + params.toString(), { credentials: 'include' });
+    if (!r.ok) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">Cannot load attendance.</td></tr>';
+      return;
+    }
+    const data = await r.json();
+    const rows = data.days || [];
+    document.getElementById('attMeta').textContent = rows.length + ' days';
+
+    const counts = { on_time: 0, late: 0, not_yet_in: 0, on_leave: 0, off_sick: 0, off: 0 };
+    for (const d of rows) {
+      if (counts[d.status] !== undefined) counts[d.status]++;
+      else if (d.status && d.status.startsWith('off_')) counts.off++;
+    }
+    document.getElementById('sumOnTime').textContent = counts.on_time;
+    document.getElementById('sumLate').textContent = counts.late;
+    document.getElementById('sumNotIn').textContent = counts.not_yet_in;
+    document.getElementById('sumLeave').textContent = counts.on_leave;
+    document.getElementById('sumSick').textContent = counts.off_sick;
+    document.getElementById('sumOff').textContent = counts.off;
+
+    if (rows.length === 0) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">No attendance records yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(d => {
+      // Day-of-week from the date string YYYY-MM-DD (date-only, no TZ shift)
+      const ds = String(d.for_date).slice(0, 10);
+      const dow = new Date(ds + 'T12:00:00').getDay(); // 0=Sun 6=Sat
+      const isWeekend = dow === 0 || dow === 6;
+      let payCell = '<span style="color:var(--soft)">—</span>';
+      if (isWeekend) {
+        if (d.weekend_pay_status === 'paid') {
+          payCell = '<span class="pill on" style="background:#EAF3DE;color:#3B6D11">Paid</span>';
+        } else if (d.weekend_pay_status === 'unpaid') {
+          payCell = '<span class="pill on" style="background:#FCEBEB;color:#A32D2D">Unpaid</span>';
+        } else {
+          payCell = '<span class="pill on" style="background:#F1EFE8;color:var(--muted)">Pending</span>';
+        }
+      } else if (d.status === 'off_sick') {
+        const h = d.sick_notified_hours;
+        if (h != null && h < 4) {
+          payCell = '<span class="pill on" style="background:#FCEBEB;color:#A32D2D">Unpaid</span>';
+        } else if (h != null) {
+          payCell = '<span class="pill on" style="background:#EAF3DE;color:#3B6D11">Paid</span>';
+        }
+      }
+      return '<tr>' +
+        '<td>' + dateOnly(d.for_date) + '</td>' +
+        '<td>' + statusPill(d.status) + '</td>' +
+        '<td>' + timeOnly(d.first_login) + '</td>' +
+        '<td>' + timeOnly(d.last_logout) + '</td>' +
+        '<td>' + formatMins(d.active_minutes) + '</td>' +
+        '<td>' + (d.late_minutes > 0 ? d.late_minutes + 'm' : '—') + '</td>' +
+        '<td>' + payCell + '</td>' +
+      '</tr>';
+    }).join('');
+  } catch (e) {
+    console.error('[loadAttendance]', e);
+    body.innerHTML = '<tr><td colspan="7" class="empty">Network error.</td></tr>';
+  }
+}
+
+async function loadLeaves() {
+  const body = document.getElementById('leaveBody');
+  body.innerHTML = '<tr class="loading-row"><td colspan="5">Loading…</td></tr>';
+  try {
+    const url = (viewingUserId !== me_.id)
+      ? ('/api/leaves/mine?user_id=' + viewingUserId)
+      : '/api/leaves/mine';
+    const r = await fetch(url, { credentials: 'include' });
+    if (!r.ok) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">Cannot load leaves.</td></tr>';
+      return;
+    }
+    const data = await r.json();
+    const rows = data.requests || data.leaves || [];
+    const balance = data.balance || {};
+
+    document.getElementById('leaveAccrued').textContent = formatDays((balance.annual || 0) + (balance.carryover || 0));
+    document.getElementById('leaveRemaining').textContent = formatDays(balance.remaining);
+    document.getElementById('leaveUsed').textContent = formatDays(balance.used);
+    document.getElementById('leavePending').textContent = formatDays(balance.pending);
+    const adj = Number(balance.adjustment || 0);
+    if (adj !== 0) {
+      document.getElementById('leaveAdjustTile').style.display = '';
+      const sign = adj > 0 ? '+' : '';
+      const colour = adj > 0 ? 'var(--green)' : 'var(--red)';
+      document.getElementById('leaveAdjust').innerHTML = '<span style="color:' + colour + '">' + sign + formatDays(adj) + '</span>';
+      if (balance.adjustment_note) {
+        document.getElementById('leaveAdjustNote').style.display = '';
+        document.getElementById('leaveAdjustNoteText').textContent = balance.adjustment_note;
+      }
+    }
+    document.getElementById('leaveMeta').textContent = rows.length + (rows.length === 1 ? ' request' : ' requests');
+
+    if (rows.length === 0) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">No leave requests this year.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(l =>
+      '<tr>' +
+        '<td>' + (l.leave_type || l.type || '—') + '</td>' +
+        '<td>' + dateOnly(l.start_date) + ' → ' + dateOnly(l.end_date) + '</td>' +
+        '<td>' + (l.days || '—') + '</td>' +
+        '<td>' + leavePill(l.status) + '</td>' +
+        '<td style="color:var(--muted)">' + (escapeHtml(l.reason) || '—') + '</td>' +
+      '</tr>'
+    ).join('');
+  } catch (e) {
+    console.error('[loadLeaves]', e);
+    body.innerHTML = '<tr><td colspan="5" class="empty">Network error.</td></tr>';
+  }
+}
+
+async function loadLateness() {
+  const lateBody = document.getElementById('lateBody');
+  const regBody = document.getElementById('regBody');
+  lateBody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
+  regBody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
+  try {
+    const params = new URLSearchParams({ days: '30' });
+    if (viewingUserId !== me_.id) params.set('user_id', viewingUserId);
+    const r = await fetch('/api/attendance/me/lateness?' + params.toString(), { credentials: 'include' });
+    if (!r.ok) {
+      lateBody.innerHTML = '<tr><td colspan="4" class="empty">Cannot load lateness.</td></tr>';
+      regBody.innerHTML = '<tr><td colspan="4" class="empty">Cannot load.</td></tr>';
+      return;
+    }
+    const data = await r.json();
+    const lates = data.lates || [];
+    const regs = data.regularisations || [];
+    document.getElementById('lateMeta').textContent = lates.length + ' late arrivals';
+    document.getElementById('regMeta').textContent = regs.length + ' requests';
+
+    if (lates.length === 0) {
+      lateBody.innerHTML = '<tr><td colspan="4" class="empty">No late arrivals in the last 30 days.</td></tr>';
+    } else {
+      lateBody.innerHTML = lates.map(l =>
+        '<tr>' +
+          '<td>' + dateOnly(l.for_date) + '</td>' +
+          '<td>' + (l.shift_start_local || '—').slice(0,5) + '</td>' +
+          '<td>' + timeOnly(l.first_login) + '</td>' +
+          '<td><span class="pill amber">' + l.late_minutes + 'm</span></td>' +
+        '</tr>'
+      ).join('');
+    }
+
+    if (regs.length === 0) {
+      regBody.innerHTML = '<tr><td colspan="4" class="empty">No regularisation requests.</td></tr>';
+    } else {
+      regBody.innerHTML = regs.map(r =>
+        '<tr>' +
+          '<td>' + dateOnly(r.for_date) + '</td>' +
+          '<td>' + escapeHtml(r.reason || '—') + '</td>' +
+          '<td style="font-size:14px;color:var(--muted)">' +
+            (r.requested_first_login ? 'In: ' + (r.requested_first_login || '').slice(0,5) : '') +
+            (r.requested_first_login && r.requested_last_logout ? ' · ' : '') +
+            (r.requested_last_logout ? 'Out: ' + (r.requested_last_logout || '').slice(0,5) : '') +
+            (!r.requested_first_login && !r.requested_last_logout ? '—' : '') +
+          '</td>' +
+          '<td>' + regPill(r.status) + '</td>' +
+        '</tr>'
+      ).join('');
+    }
+  } catch (e) {
+    console.error('[loadLateness]', e);
+    lateBody.innerHTML = '<tr><td colspan="4" class="empty">Network error.</td></tr>';
+  }
+}
+
+function statusPill(s) {
+  const map = {
+    on_time: ['green', 'On time'],
+    late: ['amber', 'Late'],
+    very_late: ['red', 'Very late'],
+    not_yet_in: ['red', 'No-show'],
+    on_leave: ['muted', 'On leave'],
+    off_sick: ['muted', 'Sick'],
+    off_pattern: ['muted', 'Off (pattern)'],
+    off_cs_rota: ['muted', 'Off (rota)'],
+    off_holiday: ['muted', 'Off (holiday)'],
+    worked_voluntary: ['green', 'Worked extra'],
+    pending: ['muted', '—']
+  };
+  const [cls, lbl] = map[s] || ['muted', s || '—'];
+  return '<span class="pill ' + cls + '">' + lbl + '</span>';
+}
+function leavePill(s) {
+  const map = { pending: ['amber', 'Pending'], approved: ['green', 'Approved'], denied: ['red', 'Denied'], cancelled: ['muted', 'Cancelled'] };
+  const [cls, lbl] = map[s] || ['muted', s || '—'];
+  return '<span class="pill ' + cls + '">' + lbl + '</span>';
+}
+function regPill(s) {
+  const map = { pending: ['amber', 'Pending'], approved: ['green', 'Approved'], denied: ['red', 'Denied'] };
+  const [cls, lbl] = map[s] || ['muted', s || '—'];
+  return '<span class="pill ' + cls + '">' + lbl + '</span>';
+}
+function dateOnly(v) {
+  if (!v) return '—';
+  if (typeof v === 'string') return v.slice(0, 10);
+  try { return new Date(v).toISOString().slice(0, 10); } catch (e) { return String(v); }
+}
+function timeOnly(v) {
+  if (!v) return '—';
+  if (typeof v === 'string' && /^\d{2}:\d{2}/.test(v)) return v.slice(0, 5);
+  try { return new Date(v).toTimeString().slice(0, 5); } catch (e) { return '—'; }
+}
+function formatMins(m) {
+  if (m == null) return '—';
+  m = Math.floor(m);
+  if (m < 60) return m + 'm';
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  return r === 0 ? h + 'h' : h + 'h ' + r + 'm';
+}
+function formatDays(n) {
+  if (n == null) return '—';
+  const num = Number(n);
+  return Number.isInteger(num) ? String(num) : num.toFixed(1);
+}
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+init();
+</script>
+</body>
+</html>

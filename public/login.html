@@ -1,218 +1,124 @@
 <!DOCTYPE html>
-<!-- CampaignPulse login — deploy 2026-05-19 r31l (supplier thanks page, ETA inline update, kemballs simplified, button stage-gating, WhatsApp dropped) -->
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>CampaignPulse — Login</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FK Home · Sign in</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #FAF7F2;
+    --ink: #14161B;
+    --muted: #6B6760;
+    --line: rgba(20,22,27,0.12);
+    --amber: #EF9F27;
+    --amber-soft: #FAEEDA;
+    --error: #A32D2D;
+    --error-soft: #FCEBEB;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
   }
-  .login-card {
-    background: white;
-    border-radius: 20px;
-    padding: 40px 36px;
-    width: 100%;
-    max-width: 400px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  .card {
+    width: 100%; max-width: 380px;
+    background: #FFFFFF; border: 0.5px solid var(--line); border-radius: 16px;
+    padding: 32px 28px;
   }
-  .logo { text-align: center; margin-bottom: 32px; }
-  .logo-icon {
-    width: 60px; height: 60px;
-    background: linear-gradient(135deg, #e8391d, #ff6b4a);
-    border-radius: 16px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 28px;
-    margin: 0 auto 12px;
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .brand-mark {
+    width: 32px; height: 32px; background: var(--ink); border-radius: 8px;
+    color: var(--amber); font-weight: 600; font-size: 15px;
+    display: flex; align-items: center; justify-content: center; letter-spacing: -0.5px;
   }
-  .logo-title { font-size: 22px; font-weight: 800; color: #1a1a2e; letter-spacing: -0.5px; }
-  .logo-sub { font-size: 13px; color: #888; margin-top: 4px; }
-  .form-group { margin-bottom: 18px; }
-  label {
-    display: block; font-size: 13px; font-weight: 600;
-    color: #444; margin-bottom: 6px;
+  .brand-name { font-size: 17px; font-weight: 500; }
+  h1 { font-size: 24px; font-weight: 500; margin: 0 0 4px; letter-spacing: -0.3px; }
+  .sub { font-size: 15px; color: var(--muted); margin: 0 0 24px; }
+  .field { margin-bottom: 14px; }
+  label { display: block; font-size: 15px; color: var(--muted); margin-bottom: 6px; }
+  input[type="email"], input[type="password"] {
+    width: 100%; padding: 11px 13px; font-size: 16px;
+    border: 0.5px solid var(--line); border-radius: 9px;
+    background: #FFFFFF; color: var(--ink); outline: none;
   }
-  input {
-    width: 100%; padding: 14px 16px;
-    border: 1.5px solid #e0e0e0; border-radius: 10px;
-    font-size: 16px; font-family: inherit;
-    transition: border-color 0.2s; outline: none;
-    -webkit-appearance: none;
+  input:focus { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+  button {
+    width: 100%; padding: 12px 14px; font-size: 16px; font-weight: 500;
+    background: var(--ink); color: #FFFFFF; border: none; border-radius: 9px;
+    cursor: pointer; margin-top: 10px;
   }
-  input:focus { border-color: #e8391d; }
-  /* Password input wrapper with eye toggle button */
-  .pw-wrap { position: relative; }
-  .pw-wrap input { padding-right: 44px; }
-  .pw-eye {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 28px;
-    height: 28px;
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #888;
-    border-radius: 6px;
-    transition: background 0.15s, color 0.15s;
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .err {
+    background: var(--error-soft); color: var(--error); font-size: 15px;
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; display: none;
   }
-  .pw-eye:hover { background: #f3f3f3; color: #444; }
-  .pw-eye:focus-visible { outline: 2px solid #e8391d; outline-offset: 1px; }
-  .pw-eye svg { width: 18px; height: 18px; }
-
-  .error {
-    background: #fff5f5; border: 1px solid #feb2b2; color: #c53030;
-    padding: 12px 14px; border-radius: 8px;
-    font-size: 13px; margin-bottom: 16px;
-    display: none;
-  }
-  .btn-login {
-    width: 100%; padding: 15px;
-    background: linear-gradient(135deg, #e8391d, #ff6b4a);
-    color: white; border: none; border-radius: 10px;
-    font-size: 16px; font-weight: 700;
-    cursor: pointer; font-family: inherit;
-    transition: opacity 0.2s, transform 0.1s;
-    margin-top: 4px;
-  }
-  .btn-login:active { transform: scale(0.98); opacity: 0.9; }
-  .btn-login:disabled { opacity: 0.6; cursor: not-allowed; }
-  .footer { text-align: center; margin-top: 24px; font-size: 12px; color: #aaa; }
+  .err.on { display: block; }
+  .foot { margin-top: 22px; font-size: 14px; color: var(--muted); text-align: center; }
 </style>
 </head>
 <body>
-<div class="login-card">
-  <div class="logo">
-    <div class="logo-icon">⚡</div>
-    <div class="logo-title">CampaignPulse</div>
-    <div class="logo-sub">FK Sports — Operations Dashboard</div>
-  </div>
-
-  <div class="error" id="error-msg"></div>
-
-  <div class="form-group">
-    <label>Email address</label>
-    <input type="email" id="email" placeholder="you@fksports.co.uk" autocomplete="email" autocapitalize="none">
-  </div>
-  <div class="form-group">
-    <label>Password</label>
-    <div class="pw-wrap">
-      <input type="password" id="password" placeholder="Enter your password" autocomplete="current-password">
-      <button type="button" class="pw-eye" aria-label="Show password" onclick="togglePwVisibility('password', this)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-      </button>
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark">FK</div>
+      <div class="brand-name">FK Home</div>
     </div>
+    <h1>Welcome back</h1>
+    <p class="sub">Sign in to your space at FK Sports.</p>
+    <div id="err" class="err"></div>
+    <form id="loginForm" autocomplete="on">
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="email" required autocomplete="email" autofocus />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <div style="position:relative">
+          <input type="password" id="password" required autocomplete="current-password" style="padding-right:42px" />
+          <i class="ti ti-eye" id="pwEye" style="position:absolute;right:12px;top:13px;cursor:pointer;color:var(--muted);font-size:18px" onclick="togglePwEye()"></i>
+        </div>
+      </div>
+      <button type="submit" id="btn">Sign in</button>
+    </form>
+    <div class="foot">FK Home · r0.13</div>
   </div>
-
-  <button class="btn-login" id="login-btn" onclick="doLogin()">Sign in</button>
-
-  <div class="footer">FK Sports · Secure access · Session expires after 24hrs inactivity</div>
-</div>
-
 <script>
-  // Eye toggle for password fields. Re-usable for any input by ID.
-  function togglePwVisibility(inputId, btn) {
-    var inp = document.getElementById(inputId);
-    if (!inp) return;
-    var isPassword = inp.type === 'password';
-    inp.type = isPassword ? 'text' : 'password';
-    btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
-    // Swap icon: open eye when password visible, slashed eye when hidden
-    btn.innerHTML = isPassword
-      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-        '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>' +
-        '<line x1="1" y1="1" x2="23" y2="23"/>' +
-        '</svg>'
-      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-        '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
-        '<circle cx="12" cy="12" r="3"/>' +
-        '</svg>';
+function togglePwEye() {
+  const inp = document.getElementById('password');
+  const eye = document.getElementById('pwEye');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    eye.classList.remove('ti-eye'); eye.classList.add('ti-eye-off');
+  } else {
+    inp.type = 'password';
+    eye.classList.remove('ti-eye-off'); eye.classList.add('ti-eye');
   }
-
-  // Decide where to send a logged-in user based on role + department.
-  function destinationFor(user) {
-    if (!user) return '/index.html';
-    var role = (user.role || '').toLowerCase();
-    var dept = (user.department || '').toLowerCase();
-    // r31f — new logistics/accounts/warehouse roles go to the logistics module.
-    // The logistics page itself applies sidebar gating per role + auto-routes warehouse_agent to warehouse page.
-    if (role === 'logistics_agent' || role === 'accounts_agent' || role === 'warehouse_agent') return '/logistics.html';
-    if (role === 'owner' || role === 'manager' || dept === 'manager') return '/shell.html';
-    if (dept === 'google') return '/google.html';
-    return '/index.html';
+}
+const form = document.getElementById('loginForm');
+const errBox = document.getElementById('err');
+const btn = document.getElementById('btn');
+function showError(m){ errBox.textContent = m; errBox.classList.add('on'); }
+function clearError(){ errBox.classList.remove('on'); }
+form.addEventListener('submit', async (e) => {
+  e.preventDefault(); clearError();
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value
+      })
+    });
+    const data = await r.json();
+    if (!r.ok) { showError(data.error || 'Login failed'); btn.disabled = false; btn.textContent = 'Sign in'; return; }
+    window.location.href = '/';
+  } catch (err) {
+    showError('Network error. Try again.'); btn.disabled = false; btn.textContent = 'Sign in';
   }
-
-  // If already logged in, route them where they belong
-  (function() {
-    var savedToken = localStorage.getItem('cp_token');
-    if (!savedToken) return;
-    fetch('/api/auth/me', { headers: { 'x-auth-token': savedToken } })
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        if (d && d.name) window.location.replace(destinationFor(d));
-      }).catch(function(){});
-  })();
-
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') doLogin();
-  });
-
-  async function doLogin() {
-    const email = document.getElementById('email').value.trim();
-    const password = document.getElementById('password').value;
-    const btn = document.getElementById('login-btn');
-    const errEl = document.getElementById('error-msg');
-
-    errEl.style.display = 'none';
-    if (!email || !password) {
-      errEl.textContent = 'Please enter your email and password.';
-      errEl.style.display = 'block';
-      return;
-    }
-
-    btn.disabled = true;
-    btn.textContent = 'Signing in...';
-
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-      const data = await res.json();
-      if (data.success && data.token) {
-        localStorage.setItem('cp_token', data.token);
-        localStorage.setItem('cp_user', JSON.stringify({ name: data.name, department: data.department, role: data.role, email: data.email }));
-        window.location.replace(destinationFor(data));
-      } else {
-        errEl.textContent = data.error || 'Login failed. Please try again.';
-        errEl.style.display = 'block';
-        btn.disabled = false;
-        btn.textContent = 'Sign in';
-      }
-    } catch(e) {
-      errEl.textContent = 'Connection error. Please try again.';
-      errEl.style.display = 'block';
-      btn.disabled = false;
-      btn.textContent = 'Sign in';
-    }
-  }
+});
 </script>
 </body>
 </html>
