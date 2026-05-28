@@ -42,6 +42,15 @@ const TEMPLATES = {
     related_type: 'leave_request',
   },
 
+  // r0.14 — Birthday pre-notify (HR only, one day before)
+  'birthday.upcoming': {
+    title: c => 'Birthday tomorrow: ' + c.name,
+    body:  c => c.name + ' turns ' + c.age + ' tomorrow (' + c.dateText + ').',
+    recipients: c => 'group:hr-team',
+    action_url: c => '/',
+    related_type: 'birthday',
+  },
+
   // Lateness / sick
   'lateness.reported': {
     title: c => c.name + ' is running late',
@@ -56,6 +65,22 @@ const TEMPLATES = {
     recipients: c => 'managers_of:' + c.actorUserId,
     action_url: c => '/',
     related_type: 'sick_log',
+  },
+
+  // r0.14 — Status nudges (sitting too long on a transient status)
+  'status.self_nudge': {
+    title: c => 'Still "' + c.statusLabel + '"?',
+    body:  c => 'You\'ve been on "' + c.statusLabel + '" for an hour. If you\'re back, switch yourself to Active.',
+    recipients: c => [c.targetUserId],
+    action_url: c => '/',
+    related_type: 'status_nudge',
+  },
+  'status.manager_escalation': {
+    title: c => c.name + ' still on "' + c.statusLabel + '"',
+    body:  c => c.name + ' has been on "' + c.statusLabel + '" for over 90 minutes.',
+    recipients: c => 'managers_of:' + c.actorUserId,
+    action_url: c => '/',
+    related_type: 'status_nudge',
   },
 
   // Attendance idle / regularisation
@@ -285,6 +310,24 @@ async function notifyManagersOf(actorUserId, opts) {
   await notify(Object.assign({}, opts, { userIds, related_user_id: actorUserId }));
 }
 
+// r0.14 — resolve all active members of a permission group by slug
+// (e.g. 'hr-team'). Used for the 'group:<slug>' recipient pattern.
+async function getGroupMembers(groupSlug) {
+  try {
+    const r = await db.query(
+      "SELECT DISTINCT ug.user_id FROM user_groups ug " +
+      "JOIN groups g ON g.id = ug.group_id " +
+      "JOIN users u ON u.id = ug.user_id " +
+      "WHERE g.slug = $1 AND u.deleted_at IS NULL AND u.employment_status = 'active'",
+      [groupSlug]
+    );
+    return r.rows.map(x => x.user_id);
+  } catch (err) {
+    console.error('[notify] getGroupMembers failed:', err.message);
+    return [];
+  }
+}
+
 // ---------- notifyEvent: template-driven ----------
 async function notifyEvent(eventType, ctx) {
   const tpl = TEMPLATES[eventType];
@@ -303,6 +346,10 @@ async function notifyEvent(eventType, ctx) {
     if (typeof recipients === 'string' && recipients.indexOf('managers_of:') === 0) {
       const actorId = parseInt(recipients.split(':')[1], 10);
       userIds = await getEscalationRecipients(actorId);
+    } else if (typeof recipients === 'string' && recipients.indexOf('group:') === 0) {
+      // r0.14 — notify every active member of a permission group, e.g. 'group:hr-team'
+      const slug = recipients.split(':')[1];
+      userIds = await getGroupMembers(slug);
     } else if (Array.isArray(recipients)) {
       userIds = recipients.filter(x => Number.isFinite(x));
     } else {
@@ -325,4 +372,4 @@ async function notifyEvent(eventType, ctx) {
   }
 }
 
-module.exports = { notify, notifyManagersOf, getEscalationRecipients, notifyEvent };
+module.exports = { notify, notifyManagersOf, getEscalationRecipients, getGroupMembers, notifyEvent };

@@ -1,5 +1,14 @@
 // FK Home — bootstrap
-// Build marker: r0.13 (2026-05-27) — Ship 1: shell foundation.
+// Build marker: r0.14 (2026-05-28) — Ship 2: module loading infrastructure
+//                                    (loadModule + #moduleView), Home as a
+//                                    module, HR Insights migrated to a module
+//                                    (#hr/insights). Plus: salary edit for HR,
+//                                    onboarding+review backfill, birthday
+//                                    pre-notify (HR) + birthday banner, status
+//                                    set rework (In meeting / WFH + geo),
+//                                    status nudges (1h self / 1.5h manager),
+//                                    Company Today simplification.
+// Previous: r0.13 (2026-05-27) — Ship 1: shell foundation.
 //                                    Sidebar regrouped into WORKSPACE/HR/DAY/
 //                                    SYSTEM/YOU with permission-based item
 //                                    hiding. Mobile hamburger + overlay
@@ -40,7 +49,7 @@ app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 
 // Health check
-app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.13' }));
+app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.14' }));
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -226,6 +235,11 @@ function startCronJobs() {
         lifecycle.tickProbationNudges()
           .then(r => console.log('[cron probation nudge] nudged=' + r.nudged))
           .catch(e => console.error('[cron probation nudge]', e.message));
+        // r0.14 — Birthday pre-notify: tell HR one day before each
+        // active employee's birthday (no task, just a notification).
+        lifecycle.tickBirthdayNudges()
+          .then(r => console.log('[cron birthday nudge] nudged=' + r.nudged + ' candidates=' + r.candidates))
+          .catch(e => console.error('[cron birthday nudge]', e.message));
       }
     } catch (e) {
       console.error('[cron task tick check]', e.message);
@@ -244,7 +258,7 @@ async function start() {
     await seedInitialData();
     console.log('[boot] seed verified');
     app.listen(PORT, () => {
-      console.log(`[boot] FK Home r0.13 listening on port ${PORT}`);
+      console.log(`[boot] FK Home r0.14 listening on port ${PORT}`);
       startCronJobs();
       // Run one immediate 5-min tick on boot, in case the server was down for a while.
       attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron boot tick]', e.message));

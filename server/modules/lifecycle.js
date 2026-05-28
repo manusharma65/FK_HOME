@@ -526,6 +526,67 @@ async function tickProbationNudges() {
   }
 }
 
+// r0.14 — Birthday pre-notify. Runs daily; finds active employees whose
+// birthday (month+day) is TOMORROW and notifies HR once. De-duped via a
+// guard on the notifications table (related_type='birthday' same day).
+async function tickBirthdayNudges() {
+  try {
+    // "Tomorrow" in London time, as month/day.
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
+    });
+    const now = new Date();
+    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const parts = fmt.formatToParts(tomorrow);
+    const get = t => parts.find(p => p.type === t).value;
+    const tmMonth = get('month'); // '01'..'12'
+    const tmDay = get('day');     // '01'..'31'
+    const tmYear = parseInt(get('year'), 10);
+
+    const rows = await db.query(
+      `SELECT id, full_name, display_name, date_of_birth
+         FROM users
+        WHERE deleted_at IS NULL
+          AND employment_status = 'active'
+          AND date_of_birth IS NOT NULL
+          AND to_char(date_of_birth, 'MM') = $1
+          AND to_char(date_of_birth, 'DD') = $2`,
+      [tmMonth, tmDay]
+    );
+
+    let nudged = 0;
+    for (const u of rows.rows) {
+      // De-dupe: skip if we already fired a birthday notice referencing this
+      // user within the last 20 hours.
+      const dup = await db.query(
+        `SELECT 1 FROM notifications
+          WHERE related_type = 'birthday' AND related_user_id = $1
+            AND created_at > NOW() - INTERVAL '20 hours' LIMIT 1`,
+        [u.id]
+      );
+      if (dup.rows.length > 0) continue;
+
+      const dob = new Date(u.date_of_birth);
+      const age = tmYear - dob.getUTCFullYear();
+      const name = u.display_name || u.full_name || 'An employee';
+      const dateText = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/London', day: 'numeric', month: 'long'
+      }).format(tomorrow);
+
+      await notifyEvent('birthday.upcoming', {
+        name, age, dateText,
+        targetUserId: u.id,      // related_user_id on the notification
+        related_id: u.id,
+      });
+      nudged++;
+    }
+    return { nudged, candidates: rows.rows.length };
+  } catch (e) {
+    console.error('[lifecycle.tickBirthdayNudges] failed:', e.message);
+    return { nudged: 0, error: e.message };
+  }
+}
+
 module.exports = {
   // routing
   getReviewerFor, getOrchestratorFor,
@@ -536,7 +597,7 @@ module.exports = {
   // lifecycle
   cancelTasksForUser, completeReview,
   // cron
-  tickTasks, tickProbationNudges,
+  tickTasks, tickProbationNudges, tickBirthdayNudges,
   // settings
   getSettings, invalidateSettings,
 };

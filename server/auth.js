@@ -20,7 +20,7 @@ async function attachUserToRequest(req, res, next) {
     const r = await db.query(
       `SELECT s.token, s.user_id, s.expires_at,
               u.email, u.full_name, u.display_name, u.initials, u.avatar_colour,
-              u.must_change_password, u.employment_status, u.deleted_at
+              u.must_change_password, u.employment_status, u.deleted_at, u.date_of_birth
        FROM user_sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token = $1 AND s.expires_at > NOW()`,
       [token]
@@ -39,6 +39,7 @@ async function attachUserToRequest(req, res, next) {
       display_name: row.display_name || row.full_name,
       initials: row.initials,
       avatar_colour: row.avatar_colour,
+      date_of_birth: row.date_of_birth,
       must_change_password: row.must_change_password,
       token,
       permissions: perms,

@@ -1211,6 +1211,48 @@ async function tickFiveMinute() {
          AND last_active_at < NOW() - INTERVAL '30 minutes'`
     );
 
+    // 6) r0.14 — Status nudges. For users sitting on a transient status
+    //    (off_sick / heads_down / in_meeting), remind them after 1 hour to
+    //    come off it; escalate to their manager after 1.5 hours if still on it.
+    //    'changed_at' is when the status was set; status_nudge_at / status_escalated
+    //    guard against repeat firing.
+    const nudgeStatuses = ['off_sick', 'heads_down', 'in_meeting'];
+    const statusNudge = await db.query(
+      `SELECT us.user_id, us.status, us.changed_at, us.status_nudge_at, us.status_escalated,
+              EXTRACT(EPOCH FROM (NOW() - us.changed_at))/60 AS mins,
+              COALESCE(u.display_name, u.full_name, 'Someone') AS name
+         FROM user_status us
+         JOIN users u ON u.id = us.user_id
+        WHERE us.status = ANY($1)
+          AND us.changed_at IS NOT NULL`,
+      [nudgeStatuses]
+    );
+
+    const STATUS_LABELS = { off_sick: 'Feeling sick', heads_down: 'Heads down', in_meeting: 'In meeting' };
+    for (const u of statusNudge.rows) {
+      const mins = u.mins || 0;
+      const label = STATUS_LABELS[u.status] || u.status;
+      // 1-hour self nudge (once)
+      if (mins >= 60 && !u.status_nudge_at) {
+        await db.query(`UPDATE user_status SET status_nudge_at = NOW() WHERE user_id = $1`, [u.user_id]);
+        await notifyEvent('status.self_nudge', {
+          targetUserId: u.user_id,
+          statusLabel: label,
+          related_id: u.user_id,
+        });
+      }
+      // 1.5-hour manager escalation (once)
+      if (mins >= 90 && !u.status_escalated) {
+        await db.query(`UPDATE user_status SET status_escalated = TRUE WHERE user_id = $1`, [u.user_id]);
+        await notifyEvent('status.manager_escalation', {
+          actorUserId: u.user_id,
+          name: u.name,
+          statusLabel: label,
+          related_id: u.user_id,
+        });
+      }
+    }
+
   } catch (err) {
     console.error('[cron tickFiveMinute] failed:', err.message);
   }

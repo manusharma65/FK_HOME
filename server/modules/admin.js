@@ -1089,6 +1089,7 @@ router.post('/backfill/review-schedules', requirePermission('admin.backfill.run'
     );
     let totalUsers = 0;
     let totalReviews = 0;
+    let onboardingApplied = 0; // r0.14 — also backfill onboarding for existing staff
     const perReviewer = {}; // reviewerUserId -> count
     for (const u of users.rows) {
       const r = await lifecycle.generateReviewSchedule(u.id, { silent: true });
@@ -1099,6 +1100,10 @@ router.post('/backfill/review-schedules', requirePermission('admin.backfill.run'
           perReviewer[r.reviewerUserId] = (perReviewer[r.reviewerUserId] || 0) + r.created;
         }
       }
+      // r0.14 — apply onboarding template too. Idempotent: applyOnboardingTemplate
+      // skips items that already exist and returns the count of NEW rows created.
+      const obCreated = await lifecycle.applyOnboardingTemplate(u.id, req.user.id);
+      if (obCreated > 0) onboardingApplied++;
     }
     // Notify each reviewer once with their total
     for (const [uid, count] of Object.entries(perReviewer)) {
@@ -1109,13 +1114,14 @@ router.post('/backfill/review-schedules', requirePermission('admin.backfill.run'
     }
     await logAudit({
       req, module: 'admin', action: 'backfill.review_schedules',
-      after: { usersProcessed: users.rows.length, reviewsCreated: totalReviews }
+      after: { usersProcessed: users.rows.length, reviewsCreated: totalReviews, onboardingApplied }
     });
     res.json({
       ok: true,
       users_processed: users.rows.length,
       users_with_new_reviews: totalUsers,
       reviews_created: totalReviews,
+      users_with_onboarding_applied: onboardingApplied,
     });
   } catch (e) {
     console.error('[admin/backfill] failed:', e.message);

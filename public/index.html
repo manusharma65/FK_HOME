@@ -561,6 +561,24 @@
     /* Late strip stack on small screens */
     .late-strip { flex-wrap: wrap; }
   }
+  /* r0.14 — Shared styles for migrated modules, scoped to #moduleView so
+     they never affect the home/shell UI. Ported from admin.html. */
+  #moduleView .chip {
+    display: inline-block; font-size: 13px; padding: 2px 8px; border-radius: 99px;
+    background: #F1EFE8; color: #5F5E5A; font-weight: 500;
+  }
+  #moduleView .chip.amber { background: var(--amber-soft); color: var(--amber-deep); }
+  #moduleView .chip.green { background: var(--green-soft); color: var(--green); }
+  #moduleView .chip.red   { background: var(--red-soft); color: var(--red); }
+  #moduleView .chip.muted { background: #F1EFE8; color: var(--muted); }
+  #moduleView .btn {
+    padding: 6px 12px; font-size: 14px; font-weight: 500;
+    border: 0.5px solid var(--line); border-radius: 8px; cursor: pointer;
+    background: var(--surface); color: var(--ink);
+  }
+  #moduleView .btn:hover { background: #F1EFE8; }
+  #moduleView .data-table th { font-weight: 500; }
+  #moduleView .data-table tr:hover td { background: rgba(20,22,27,0.02); }
 </style>
 </head>
 <body>
@@ -637,7 +655,7 @@
         <i class="ti ti-clock"></i>
         <span>Attendance</span>
       </div>
-      <div class="nav-item" id="navHrInsights" style="display:none" onclick="location.href='/admin.html#insights'">
+      <div class="nav-item" id="navHrInsights" data-route="#hr/insights" style="display:none" onclick="location.hash='#hr/insights'">
         <i class="ti ti-chart-bar"></i>
         <span>Insights</span>
       </div>
@@ -749,6 +767,23 @@
         </div>
       </div>
 
+      <!-- r0.14 — Home content lives inside #homeView. The module loader
+           hides this and shows #moduleView when a module route is active.
+           Home cards and their wiring are never re-rendered, only shown/hidden. -->
+      <div id="homeView">
+      <!-- r0.14 — Birthday banner: shown only on the user's own birthday. -->
+      <div id="birthdayBanner" style="display:none;margin:0 16px 0;">
+        <div style="background:var(--amber-soft);border:0.5px solid var(--amber-warm);border-radius:14px;padding:16px 20px;display:flex;align-items:center;gap:14px;margin-top:14px">
+          <div style="width:44px;height:44px;border-radius:50%;background:#FFFFFF;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <i class="ti ti-gift" style="font-size:22px;color:var(--amber-deep)"></i>
+          </div>
+          <div style="flex:1">
+            <div style="font-size:16px;font-weight:500;color:var(--amber-deep)" id="birthdayMsg">Happy birthday! 🎂</div>
+            <div style="font-size:13px;color:var(--muted);margin-top:2px">Wishing you a brilliant year ahead from everyone at FK Sports.</div>
+          </div>
+          <button onclick="dismissBirthday()" aria-label="Dismiss" style="border:none;background:transparent;color:var(--soft);font-size:18px;cursor:pointer;flex-shrink:0"><i class="ti ti-x"></i></button>
+        </div>
+      </div>
       <div class="padded">
         <h1 id="greeting">—</h1>
         <p class="greet-sub" id="greetSub">—</p>
@@ -940,10 +975,10 @@
             </div>
             <div class="off-label">Not expected — off today</div>
             <div class="kpi-row off">
-              <div class="kpi"><div class="v" id="kpiOffPattern">—</div><div class="l">Off · pattern</div></div>
-              <div class="kpi"><div class="v" id="kpiOffCsRota">—</div><div class="l">Off · CS rota</div></div>
-              <div class="kpi"><div class="v" id="kpiOffHoliday">—</div><div class="l">Off · holiday</div></div>
-              <div class="kpi voluntary"><div class="v" id="kpiVoluntary">—</div><div class="l">Voluntary</div></div>
+              <div class="kpi" id="kpiOffWrap" title="Pattern / CS rota / holiday" style="cursor:default">
+                <div class="v" id="kpiOff">—</div><div class="l" id="kpiOffLabel">Off</div>
+              </div>
+              <div class="kpi voluntary"><div class="v" id="kpiVoluntary">—</div><div class="l">Worked anyway</div></div>
             </div>
             <button class="view-all" onclick="openPeopleModal()">View all people →</button>
           </div>
@@ -970,6 +1005,10 @@
 
         </div>
       </div>
+      </div><!-- /#homeView -->
+
+      <!-- r0.14 — Modules render here (Insights, and future migrated tabs). -->
+      <div id="moduleView" class="padded" style="display:none"></div>
     </main>
   </div>
 
@@ -1143,6 +1182,10 @@
   <!-- ===== TOAST ===== -->
   <div id="toast" class="toast"></div>
 
+<!-- r0.14 — Module system (loader + registered modules). Loaded before the
+     main app script so window.fkLoadRoute and window.fkModules exist at boot. -->
+<script src="/modules/loader.js"></script>
+<script src="/modules/hr-insights.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1276,6 +1319,9 @@ function render() {
   document.getElementById('greeting').textContent = `${greeting}, ${me.display_name}.`;
   document.getElementById('greetSub').textContent = subGreeting();
 
+  // r0.14 — birthday banner
+  maybeShowBirthday();
+
   // Status pill
   applyStatusPill(dash.status);
 
@@ -1316,7 +1362,8 @@ function applyStatusPill(s) {
   pill.className = 'status-pill';
   const map = {
     active: 'Active', idle: 'Idle', running_late: 'Running late',
-    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Off sick',
+    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Feeling sick',
+    in_meeting: 'In meeting', wfh: 'Working from home',
     on_leave: 'On leave', offline: 'Active'
   };
   label.textContent = map[s.status] || 'Active';
@@ -1560,6 +1607,7 @@ function renderPersonRow(p) {
   const statusColour = {
     active: '#639922', idle: '#EF9F27', running_late: '#EF9F27',
     on_break: '#85B7EB', heads_down: '#7F77DD', off_sick: '#A32D2D',
+    in_meeting: '#378ADD', wfh: '#1D9E75',
     on_leave: '#888780', offline: '#B4B2A9'
   }[p.status] || '#B4B2A9';
   const isLate = p.status === 'running_late';
@@ -1682,25 +1730,63 @@ function closeModal(id) {
 
 // --- STATUS ---
 function openStatusModal() {
+  // r0.14 - new status set. Dropped 'On break' and 'Running late' from here
+  // (running late has its own flow). Added In meeting + WFH.
   const opts = [
-    { v: 'active', label: 'Active', desc: 'Working as usual' },
-    { v: 'on_break', label: 'On break', desc: 'Back soon' },
-    { v: 'heads_down', label: 'Heads down', desc: 'Focus mode — please don\'t interrupt' },
-    { v: 'off_sick', label: 'Off sick', desc: 'Unwell today' },
+    { v: 'active',     label: 'Active',            desc: 'Working as usual',                      icon: 'ti-circle-filled' },
+    { v: 'in_meeting', label: 'In meeting',        desc: 'In a call or meeting',                  icon: 'ti-users' },
+    { v: 'heads_down', label: 'Heads down',        desc: 'Focus mode — please don\'t interrupt', icon: 'ti-headphones' },
+    { v: 'off_sick',   label: 'Feeling sick',      desc: 'Unwell today',                          icon: 'ti-mood-sick' },
+    { v: 'wfh',        label: 'Working from home', desc: 'Asks for your location',                icon: 'ti-home' },
   ];
   const wrap = document.getElementById('statusOptions');
   wrap.innerHTML = opts.map(o => `
-    <button class="btn-secondary" style="text-align:left;padding:12px 14px;display:flex;flex-direction:column;align-items:flex-start;gap:2px"
+    <button class="btn-secondary" style="text-align:left;padding:12px 14px;display:flex;align-items:center;gap:12px"
             onclick="setStatus('${o.v}')">
-      <span style="font-size:15px;font-weight:500">${o.label}</span>
-      <span style="font-size:14px;color:var(--muted)">${o.desc}</span>
+      <i class="ti ${o.icon}" style="font-size:18px;color:var(--amber)"></i>
+      <span style="display:flex;flex-direction:column;gap:2px">
+        <span style="font-size:15px;font-weight:500">${o.label}</span>
+        <span style="font-size:14px;color:var(--muted)">${o.desc}</span>
+      </span>
     </button>`).join('');
   openModal('statusModal');
 }
+
+// r0.14 - birthday banner: show only on the user's own birthday (month+day).
+function maybeShowBirthday() {
+  try {
+    if (!me || !me.date_of_birth) return;
+    const dob = new Date(me.date_of_birth);
+    const now = new Date();
+    if (dob.getUTCMonth() === now.getMonth() && dob.getUTCDate() === now.getDate()) {
+      if (window.__birthdayDismissed) return;
+      const name = (me.display_name || me.full_name || '').split(' ')[0];
+      document.getElementById('birthdayMsg').textContent = 'Happy birthday' + (name ? ', ' + name : '') + '! 🎂';
+      document.getElementById('birthdayBanner').style.display = 'block';
+    }
+  } catch (e) { console.error('[birthday]', e); }
+}
+function dismissBirthday() {
+  window.__birthdayDismissed = true;
+  document.getElementById('birthdayBanner').style.display = 'none';
+}
+
+// r0.14 - capture a single geolocation stamp for WFH.
+function captureLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(new Error('no-geo')); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+      err => reject(err),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  });
+}
+
 async function setStatus(s) {
   if (s === 'off_sick') {
     closeModal('statusModal');
-    if (!confirm('Mark yourself as off sick today?')) return;
+    if (!confirm('Mark yourself as feeling sick today?')) return;
     try {
       const r = await fetch('/api/me/sick', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({}) });
       if (!r.ok) { alert('Failed to update'); return; }
@@ -1708,9 +1794,30 @@ async function setStatus(s) {
     } catch (err) { alert('Network error'); }
     return;
   }
+
+  // r0.14 - WFH must include a location, or it won't activate.
+  let body = { status: s };
+  if (s === 'wfh') {
+    let loc;
+    try {
+      loc = await captureLocation();
+    } catch (err) {
+      alert('Working from home needs your location. Please allow location access and try again - WFH was not set.');
+      return;
+    }
+    body.wfh_lat = loc.lat;
+    body.wfh_lng = loc.lng;
+    body.wfh_accuracy_m = loc.accuracy;
+  }
+
   try {
-    const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: s }) });
-    if (!r.ok) { alert('Failed to update'); return; }
+    const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify(body) });
+    if (!r.ok) {
+      let msg = 'Failed to update';
+      try { const d = await r.json(); if (d.error) msg = d.error; } catch (e) {}
+      alert(msg);
+      return;
+    }
     closeModal('statusModal');
     await reload();
   } catch (err) { alert('Network error'); }
@@ -1785,20 +1892,34 @@ document.addEventListener('click', function(e) {
   }
 });
 
-// r0.13 — Simple hash router (Ship 1: highlights active nav item based on
-// current URL hash). Ship 2 will plug module loading into the same dispatcher.
+// r0.13 — Hash router. r0.14 (Ship 2): now also dispatches module loading
+// via fkLoadRoute() (defined in /modules/loader.js). Highlights the active
+// nav item AND swaps the content area between home and the matching module.
 function fkRoute() {
   const hash = (location.hash || '#home').slice(1).split('/')[0];
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('on'));
+  // Match the most specific data-route (full hash first, then first segment).
+  const fullRoute = (location.hash || '#home');
   const items = document.querySelectorAll('.nav-item[data-route]');
+  let matched = false;
   for (const el of items) {
-    const route = (el.getAttribute('data-route') || '').slice(1);
-    if (route === hash) { el.classList.add('on'); break; }
+    const route = el.getAttribute('data-route') || '';
+    if (route === fullRoute) { el.classList.add('on'); matched = true; break; }
+  }
+  if (!matched) {
+    for (const el of items) {
+      const route = (el.getAttribute('data-route') || '').slice(1);
+      if (route === hash) { el.classList.add('on'); matched = true; break; }
+    }
   }
   // Default: highlight My FK Space if no route matched
   if (!document.querySelector('.nav-item.on')) {
     const home = document.getElementById('navHome');
     if (home) home.classList.add('on');
+  }
+  // r0.14 — load the module (or home) for this route.
+  if (typeof window.fkLoadRoute === 'function') {
+    window.fkLoadRoute(location.hash);
   }
 }
 window.addEventListener('hashchange', fkRoute);
@@ -2151,9 +2272,9 @@ function formatTime(t) {
 function statusLabel(s) {
   return ({
     on_time: 'On time', late: 'Late', very_late: 'Very late', not_yet_in: 'Not yet in',
-    on_leave: 'On leave', off_sick: 'Sick',
+    on_leave: 'On leave', off_sick: 'Feeling sick',
     off_pattern: 'Off (pattern)', off_cs_rota: 'Off (rota)', off_holiday: 'Off (holiday)',
-    worked_voluntary: 'Worked', pending: 'Pending'
+    worked_voluntary: 'Worked', pending: 'Not yet in'
   })[s] || s || '—';
 }
 function statusPillClass(s) {
@@ -2355,9 +2476,15 @@ async function loadAttOverview() {
     document.getElementById('kpiNotIn').textContent = counts.not_yet_in;
     document.getElementById('kpiLeave').textContent = counts.on_leave;
     document.getElementById('kpiSick').textContent = counts.off_sick;
-    document.getElementById('kpiOffPattern').textContent = counts.off_pattern;
-    document.getElementById('kpiOffCsRota').textContent = counts.off_cs_rota;
-    document.getElementById('kpiOffHoliday').textContent = counts.off_holiday;
+    // r0.14 — merged "Off" bucket (pattern + CS rota + holiday) with a
+    // breakdown tooltip, instead of three separate counters.
+    const offTotal = counts.off_pattern + counts.off_cs_rota + counts.off_holiday;
+    document.getElementById('kpiOff').textContent = offTotal;
+    const offParts = [];
+    if (counts.off_pattern)  offParts.push(counts.off_pattern + ' on their day off');
+    if (counts.off_cs_rota)  offParts.push(counts.off_cs_rota + ' on CS rota');
+    if (counts.off_holiday)  offParts.push(counts.off_holiday + ' on holiday');
+    document.getElementById('kpiOffWrap').title = offParts.length ? offParts.join(' · ') : 'No one off today';
     document.getElementById('kpiVoluntary').textContent = counts.worked_voluntary;
 
     const total = attOverviewRows.length;

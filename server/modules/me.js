@@ -103,6 +103,7 @@ router.get('/dashboard', async (req, res) => {
         display_name: req.user.display_name,
         initials: req.user.initials,
         avatar_colour: req.user.avatar_colour,
+        date_of_birth: req.user.date_of_birth,
         departments: req.user.departments,
       },
       status: statusRes.rows[0] || { status: 'active', status_note: null, status_until: null },
@@ -136,24 +137,47 @@ router.get('/dashboard', async (req, res) => {
 // ---------- SET STATUS ----------
 router.post('/status', async (req, res) => {
   if (!req.user.can('me.status.set')) return res.status(403).json({ error: 'Permission denied' });
-  const { status, status_note, status_until } = req.body || {};
-  const allowed = ['active','idle','running_late','on_break','heads_down','off_sick'];
+  const { status, status_note, status_until, wfh_lat, wfh_lng, wfh_accuracy_m } = req.body || {};
+  // r0.14 — added in_meeting + wfh. running_late/on_break kept for existing flows.
+  const allowed = ['active','idle','running_late','on_break','heads_down','off_sick','in_meeting','wfh'];
   if (!allowed.includes(status)) return res.status(400).json({ error: `Status must be one of: ${allowed.join(', ')}` });
+
+  // r0.14 — WFH requires a location stamp. No location = no WFH (enforced here;
+  // the browser controls the actual permission prompt, but without coords the
+  // status cannot be set).
+  let lat = null, lng = null, acc = null, locAt = null;
+  if (status === 'wfh') {
+    const la = Number(wfh_lat), lo = Number(wfh_lng);
+    if (!Number.isFinite(la) || !Number.isFinite(lo)) {
+      return res.status(400).json({ error: 'WFH requires location. Please allow location access to use this status.' });
+    }
+    lat = la; lng = lo;
+    acc = Number.isFinite(Number(wfh_accuracy_m)) ? Number(wfh_accuracy_m) : null;
+    locAt = new Date();
+  }
 
   try {
     const prev = await db.query(`SELECT status FROM user_status WHERE user_id = $1`, [req.user.id]);
     const before = prev.rows[0]?.status || 'offline';
 
     await db.query(
-      `INSERT INTO user_status (user_id, status, status_note, status_until, changed_at, last_active_at)
-       VALUES ($1,$2,$3,$4,NOW(),NOW())
+      `INSERT INTO user_status (user_id, status, status_note, status_until, changed_at, last_active_at,
+                                wfh_lat, wfh_lng, wfh_accuracy_m, wfh_location_at,
+                                status_nudge_at, status_escalated)
+       VALUES ($1,$2,$3,$4,NOW(),NOW(),$5,$6,$7,$8,NULL,FALSE)
        ON CONFLICT (user_id) DO UPDATE SET
          status = EXCLUDED.status,
          status_note = EXCLUDED.status_note,
          status_until = EXCLUDED.status_until,
          changed_at = NOW(),
-         last_active_at = NOW()`,
-      [req.user.id, status, status_note || null, status_until || null]
+         last_active_at = NOW(),
+         wfh_lat = EXCLUDED.wfh_lat,
+         wfh_lng = EXCLUDED.wfh_lng,
+         wfh_accuracy_m = EXCLUDED.wfh_accuracy_m,
+         wfh_location_at = EXCLUDED.wfh_location_at,
+         status_nudge_at = NULL,
+         status_escalated = FALSE`,
+      [req.user.id, status, status_note || null, status_until || null, lat, lng, acc, locAt]
     );
     await logShift({ user_id: req.user.id, event_type: 'status_change', status_before: before, status_after: status, note: status_note, req });
     res.json({ ok: true, status, status_note, status_until });

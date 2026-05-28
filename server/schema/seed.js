@@ -183,9 +183,10 @@ const GROUPS = [
       'attendance.cs_rota.view',
       'hr.dashboard.view','hr.chronic_idle.action',
       'daily_report.view.any','daily_report.review.any',
-      // r0.9 — HR-3. Full profile access including salary VIEW (but not edit).
+      // r0.9 — HR-3. Full profile access including salary VIEW.
+      // r0.14 — HR can now also EDIT salary (owner + HR), per Bobby.
       'profile.view.any','profile.edit.any',
-      'profile.salary.view',
+      'profile.salary.view','profile.salary.edit',
       'files.upload.any','files.delete.any',
       // r0.10 — Lifecycle: HR can schedule, complete, manage probation, edit templates
       'reviews.complete','reviews.schedule','probation.manage',
