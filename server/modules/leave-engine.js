@@ -68,6 +68,24 @@ function isAnniversaryToday(joinedDate, today) {
 
 // --- Accrual rate ----------------------------------------------------------
 
+// r0.15 — Safely convert a pg date column (which may come back as a Date
+// object OR a string depending on driver settings) to YYYY-MM-DD.
+function toIsoDate(v) {
+  if (v == null) return null;
+  if (v instanceof Date) {
+    if (isNaN(v.getTime())) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  const s = String(v);
+  // Already-formatted YYYY-MM-DD or YYYY-MM-DD with time suffix
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1];
+  // Try parsing as a date
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
 // r0.15 (HR-1.5) — Returns the user's most recent hire-anniversary on or before today.
 // E.g. hire 15 Apr 2024, today 28 May 2026 → returns 2026-04-15.
 function lastAnniversary(hireDate, today) {
@@ -250,7 +268,7 @@ async function tickMonthlyAccrual() {
     );
     let accrued = 0;
     for (const u of users.rows) {
-      const joined = String(u.hire_date).slice(0, 10);
+      const joined = toIsoDate(u.hire_date); if (!joined) { console.warn("[leave-engine] skip user " + u.id + ": invalid hire_date " + u.hire_date); continue; }
       if (!isAnniversaryToday(joined, today)) continue;
 
       const tenure = monthsBetween(joined, today);
@@ -416,7 +434,7 @@ async function runBackfillIfNeeded() {
     );
     let processed = 0;
     for (const u of users.rows) {
-      const joined = String(u.hire_date).slice(0, 10);
+      const joined = toIsoDate(u.hire_date); if (!joined) { console.warn("[leave-engine] skip user " + u.id + ": invalid hire_date " + u.hire_date); continue; }
       const anniv = lastAnniversary(joined, today);
       // Months elapsed from current anniversary up to today (inclusive of months
       // whose anniversary-day has passed).
