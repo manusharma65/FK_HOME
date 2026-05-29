@@ -405,7 +405,8 @@ router.post('/:userId/notes', async (req, res) => {
 
   // Reviews need extra fields
   if (kind === 'review') {
-    if (!['1_month','4_month','8_month','annual','ad_hoc'].includes(review_type)) {
+    // r0.16 — review_type list expanded to match migration 15 (Monday board).
+    if (!['1_month','3_month','4_month','6_month','8_month','annual','ad_hoc'].includes(review_type)) {
       return res.status(400).json({ error: 'Invalid review_type' });
     }
     if (!review_date || !/^\d{4}-\d{2}-\d{2}$/.test(review_date)) {

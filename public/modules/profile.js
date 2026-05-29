@@ -752,9 +752,15 @@ window.fkModules['profile'] = {
     }
 
     async function loadAttendanceMonth() {
+      console.log('[profile attendance] loadAttendanceMonth fired', { attYear, attMonth, profileUserId });
       const label = new Date(Date.UTC(attYear, attMonth - 1, 1))
         .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-      document.getElementById('attMonthLabel').textContent = label;
+      const labelEl = document.getElementById('attMonthLabel');
+      if (!labelEl) {
+        console.error('[profile attendance] attMonthLabel element missing — scaffold did not render');
+        return;
+      }
+      labelEl.textContent = label;
       const grid = document.getElementById('attGrid');
       const rollup = document.getElementById('attRollup');
       grid.innerHTML = '<div style="grid-column:span 7;color:var(--muted);text-align:center;padding:14px">Loading…</div>';
@@ -777,7 +783,9 @@ window.fkModules['profile'] = {
         const leading = firstDow === 0 ? 6 : (firstDow - 1);
         const daysInMonth = new Date(Date.UTC(attYear, attMonth, 0)).getUTCDate();
         const today = new Date();
-        const todayY = today.getFullYear(), todayM = today.getMonth() + 1, todayD = today.getDate();
+        const todayIso = today.getFullYear() + '-' +
+          String(today.getMonth() + 1).padStart(2, '0') + '-' +
+          String(today.getDate()).padStart(2, '0');
 
         // Index days by date for quick lookup
         const byDate = {};
@@ -794,10 +802,11 @@ window.fkModules['profile'] = {
           const status = rec ? rec.status : null;
           let cls = 'att-day';
           let flag = '';
-          if (attYear > todayY || (attYear === todayY && attMonth > todayM) ||
-              (attYear === todayY && attMonth === todayM && day > todayD)) {
+          // r0.16 — Compare ISO date strings: 'YYYY-MM-DD' lexicographic compare
+          // is equivalent to date compare. No fragile triple-tier math.
+          if (dateStr > todayIso) {
             cls += ' att-future';
-          } else if (attYear === todayY && attMonth === todayM && day === todayD) {
+          } else if (dateStr === todayIso) {
             cls += ' att-today'; flag = 'Today';
           } else if (status === 'on_time' || status === 'worked_voluntary') { cls += ' att-worked'; flag = 'W'; }
           else if (status === 'late' || status === 'very_late') { cls += ' att-late'; flag = 'L'; }
