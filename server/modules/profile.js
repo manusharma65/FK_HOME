@@ -201,6 +201,7 @@ router.get('/:userId/drawer/:drawer', async (req, res) => {
         `SELECT n.id, n.title, n.body, n.is_completed, n.completed_at,
                 n.completed_by_user_id,
                 n.review_type, n.review_date, n.status,
+                n.cancelled_at, n.cancelled_by, n.cancel_reason,
                 (SELECT COALESCE(display_name, full_name) FROM users WHERE id = n.completed_by_user_id) AS completed_by_name,
                 n.author_user_id,
                 (SELECT COALESCE(display_name, full_name) FROM users WHERE id = n.author_user_id) AS author_name,
@@ -500,17 +501,15 @@ router.patch('/:userId/notes/:noteId', async (req, res) => {
   if (!allowed) return res.status(403).json({ error: 'Permission denied' });
 
   // Validate status for reviews
+  // r0.16: Monday-style outcomes apply uniformly across all review types.
+  // Legacy outcomes (pass/extend/fail/satisfactory/good) are still accepted
+  // for backward-compat with rows created before r0.16.
   if (status != null && c.kind === 'review') {
-    const validForType = {
-      '1_month':  ['scheduled','needs_improvement','satisfactory','good'],
-      '4_month':  ['scheduled','pass','extend','fail'],
-      '8_month':  ['scheduled','needs_improvement','satisfactory','good'],
-      'annual':   ['scheduled','needs_improvement','satisfactory','good'],
-      'ad_hoc':   ['scheduled','needs_improvement','satisfactory','good'],
-    };
-    const allowedStatuses = validForType[c.review_type] || [];
+    const mondayOutcomes = ['scheduled','needs_improvement','passed','excellent','salary_reviewed','in_process'];
+    const legacyOutcomes = ['pass','extend','fail','satisfactory','good']; // pre-r0.16
+    const allowedStatuses = [...mondayOutcomes, ...legacyOutcomes];
     if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ error: 'Invalid status for this review type' });
+      return res.status(400).json({ error: 'Invalid status for review' });
     }
   }
   if (review_date != null && !/^\d{4}-\d{2}-\d{2}$/.test(review_date)) {
@@ -575,14 +574,15 @@ router.patch('/:userId/notes/:noteId', async (req, res) => {
 
       // 4-month probation decision flow
       if (c.review_type === '4_month') {
-        if (status === 'pass') {
+        // r0.16 — map both legacy and Monday outcomes
+        if (status === 'pass' || status === 'passed') {
           // r0.11 — Flip to "on track" state. HR confirms at 6 months.
           await db.query(
             `UPDATE users SET probation_status = 'probation_pass_expected',
                               updated_at = NOW()
               WHERE id = $1`,
             [userId]);
-        } else if (status === 'extend') {
+        } else if (status === 'extend' || status === 'needs_improvement') {
           // Push probation_end_date forward by another 3 months from now
           await db.query(
             `UPDATE users SET probation_status = 'extended',
@@ -619,6 +619,94 @@ router.patch('/:userId/notes/:noteId', async (req, res) => {
     res.json({ ok: true, note: r.rows[0] });
   } catch (e) {
     console.error('[profile/notes/patch] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- GET /api/profile/:userId/attendance-days?year=&month= ----------
+// r0.16 — Returns per-day attendance for one user/month. Gated on profile view
+// (own + dept + any), NOT on salary view, so agents can see their own calendar.
+// Returns same shape as /api/payroll/month/:userId/days but accessible to a
+// wider audience.
+router.get('/:userId/attendance-days', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad userId' });
+
+  const allowed = await canViewProfile(req.user, userId);
+  if (!allowed) return res.status(403).json({ error: 'Permission denied' });
+
+  const year = parseInt(req.query.year, 10);
+  const month = parseInt(req.query.month, 10);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return res.status(400).json({ error: 'Bad year/month' });
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  const start = `${year}-${pad(month)}-01`;
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const end = `${year}-${pad(month)}-${pad(last)}`;
+
+  try {
+    const days = await db.query(
+      `SELECT for_date, status, is_paid, weekend_pay_status,
+              first_login, late_minutes, sick_notified_hours, active_minutes
+         FROM attendance_day
+        WHERE user_id = $1 AND for_date BETWEEN $2 AND $3
+        ORDER BY for_date`,
+      [userId, start, end]
+    );
+    res.json({ user_id: userId, year, month, days: days.rows });
+  } catch (e) {
+    console.error('[profile/attendance-days] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/notes/:noteId/cancel ----------
+// r0.16 — Mark a scheduled review as cancelled. Keeps the row (struck-through
+// in UI) so the audit trail remains. Reverts is_completed=false so it doesn't
+// count as a completed review.
+router.post('/:userId/notes/:noteId/cancel', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const noteId = parseInt(req.params.noteId, 10);
+  if (!Number.isFinite(userId) || !Number.isFinite(noteId)) return res.status(400).json({ error: 'Bad id' });
+  const { reason } = req.body || {};
+
+  let allowed = req.user.can('profile.edit.any');
+  if (!allowed && req.user.can('profile.edit.dept')) {
+    allowed = await isSameDept(req.user.id, userId);
+  }
+  if (!allowed) return res.status(403).json({ error: 'Permission denied' });
+
+  try {
+    const cur = await db.query(
+      `SELECT id, kind, title, cancelled_at FROM profile_notes WHERE id = $1 AND user_id = $2`,
+      [noteId, userId]
+    );
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (cur.rows[0].kind !== 'review') return res.status(400).json({ error: 'Only reviews can be cancelled' });
+    if (cur.rows[0].cancelled_at) return res.status(400).json({ error: 'Already cancelled' });
+
+    await db.query(
+      `UPDATE profile_notes
+         SET cancelled_at = NOW(), cancelled_by = $1, cancel_reason = $2,
+             status = 'cancelled', updated_at = NOW()
+       WHERE id = $3`,
+      [req.user.id, (reason || '').toString().slice(0, 500), noteId]
+    );
+    // Close any open tasks tied to this review
+    await db.query(
+      `UPDATE tasks SET status = 'cancelled', updated_at = NOW()
+        WHERE related_profile_note_id = $1 AND status NOT IN ('done','cancelled')`,
+      [noteId]
+    );
+    await logAudit({
+      req, module: 'profile', action: 'note.cancelled',
+      target_type: 'profile_note', target_id: noteId,
+      after: { reason: reason || null }
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[profile/notes/cancel] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
 });

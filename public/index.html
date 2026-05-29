@@ -623,7 +623,7 @@
         <span>Running late?</span>
       </button>
 
-      <p class="nav-section">WORKSPACE</p>
+      <p class="nav-section collapsible" id="navSectionWorkspace">WORKSPACE</p>
       <div class="nav-item on" id="navHome" data-route="#home">
         <i class="ti ti-home"></i>
         <span>My FK Space</span>
@@ -663,7 +663,7 @@
         <span>Leaves</span>
         <span class="count" id="navHrLeavesCount" style="display:none">0</span>
       </div>
-      <div class="nav-item" id="navHrAttendance" style="display:none" onclick="location.href='/admin.html#regularisations'">
+      <div class="nav-item" id="navHrAttendance" style="display:none" onclick="location.hash='#profile/me/attendance'">
         <i class="ti ti-clock"></i>
         <span>Attendance</span>
       </div>
@@ -676,7 +676,7 @@
         <span>Payroll</span>
       </div>
 
-      <p class="nav-section" style="margin-top:22px">DAY</p>
+      <p class="nav-section collapsible" id="navSectionDay" style="margin-top:22px">DAY</p>
       <div class="nav-item" onclick="location.href='/my-growth.html'">
         <i class="ti ti-trending-up"></i>
         <span>My Growth</span>
@@ -718,7 +718,7 @@
         <span>Backups</span>
       </div>
 
-      <p class="nav-section" style="margin-top:22px">YOU</p>
+      <p class="nav-section collapsible" id="navSectionYou" style="margin-top:22px">YOU</p>
       <div class="nav-item" id="navYouOnboarding" style="display:none" onclick="goToMyOnboarding()">
         <i class="ti ti-clipboard-check"></i>
         <span>Your onboarding</span>
@@ -1203,6 +1203,7 @@
 <script src="/modules/loader.js"></script>
 <script src="/modules/hr-insights.js"></script>
 <script src="/modules/hr-payroll.js"></script>
+<script src="/modules/profile.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1356,8 +1357,11 @@ function render() {
     try { saved = localStorage.getItem(storageKey); } catch (e) {}
     if (saved === '1') applyCollapsed(true);
   }
+  setupCollapsibleSection('navSectionWorkspace');
   setupCollapsibleSection('navSectionHR');
+  setupCollapsibleSection('navSectionDay');
   setupCollapsibleSection('navSectionSystem');
+  setupCollapsibleSection('navSectionYou');
 
   // YOU — Your onboarding shows only if user has incomplete onboarding items
   // (will be wired in stage 4 when the home content loads — for now hidden by default)
@@ -1919,12 +1923,11 @@ document.getElementById('lateForm').addEventListener('submit', async (e) => {
 });
 
 // --- MY PROFILE ---
+// r0.16 — sidebar Profile click goes to the new module. Other links (notifications,
+// insights, payroll → profile.html) still work in parallel so the production team
+// is not disrupted while we test the module on staging.
 function goToMyProfile() {
-  if (window.fkUser && window.fkUser.id) {
-    location.href = '/profile.html?id=' + window.fkUser.id;
-  } else {
-    location.href = '/profile.html';
-  }
+  location.hash = '#profile/me';
 }
 
 function goToMyOnboarding() {

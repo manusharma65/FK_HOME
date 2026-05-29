@@ -51,7 +51,31 @@ window.fkModules = window.fkModules || {};
   }
 
   async function showModule(key) {
-    const mod = window.fkModules[key];
+    // r0.16 — support parameterised routes:
+    //   'profile'                   -> moduleKey='profile', params={}
+    //   'profile/42'                -> moduleKey='profile', params={userId:'42'}
+    //   'profile/me'                -> moduleKey='profile', params={userId:'me'}
+    //   'profile/me/attendance'     -> moduleKey='profile', params={userId:'me', drawer:'attendance'}
+    //   'hr/insights'               -> moduleKey='hr/insights' (registered directly)
+    // Try the full key first, then walk back stripping segments to support
+    // 'profile/42' resolving to a 'profile' module registration.
+    let mod = window.fkModules[key];
+    let moduleKey = key;
+    let params = {};
+    if (!mod) {
+      const parts = key.split('/');
+      const stripped = [];
+      while (parts.length > 1 && !mod) {
+        stripped.unshift(parts.pop());
+        moduleKey = parts.join('/');
+        mod = window.fkModules[moduleKey];
+      }
+      // First stripped segment = userId, second = drawer (profile-module convention)
+      if (mod) {
+        if (stripped[0] != null) params.userId = stripped[0];
+        if (stripped[1] != null) params.drawer = stripped[1];
+      }
+    }
     if (!mod) {
       // Unknown module — fall back to home so the user never gets a blank shell.
       console.warn('[loader] no module registered for', key, '— falling back to home');
@@ -79,9 +103,9 @@ window.fkModules = window.fkModules || {};
     try {
       const html = (typeof mod.render === 'function') ? mod.render() : '';
       mv.innerHTML = html || '';
-      current = { key, mod };
+      current = { key: moduleKey, mod };
       if (typeof mod.mount === 'function') {
-        await mod.mount(mv);
+        await mod.mount(mv, { params, fullKey: key });
       }
     } catch (e) {
       console.error('[loader] module failed:', key, e);

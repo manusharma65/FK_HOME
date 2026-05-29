@@ -22,12 +22,11 @@ router.use(requireAuth);
 
 // ---------- multer setup ----------
 const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
+// r0.16 — narrowed to PDF + PNG only (Bobby's spec). Existing JPG/DOC/DOCX
+// rows in DB remain viewable; only NEW uploads must be PDF/PNG.
 const ALLOWED_MIME = new Set([
   'application/pdf',
-  'image/jpeg',
   'image/png',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ]);
 const ALLOWED_DRAWERS = new Set([
   'personal','employment','salary','reviews',
@@ -167,6 +166,61 @@ router.post('/upload', (req, res) => {
   });
 });
 
+// ---------- POST /api/files/:id/replace ----------
+// r0.16 — Replace a file: upload new content, HARD-DELETE old row (not soft).
+// Keeps the same drawer + profile_note_id link. Same permissions as upload.
+router.post('/:id/replace', (req, res) => {
+  upload.single('file')(req, res, async (err) => {
+    if (err) {
+      const msg = (err && err.message) || 'Upload failed';
+      return res.status(400).json({ error: msg });
+    }
+    if (!req.file) return res.status(400).json({ error: 'No file received' });
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+
+    try {
+      const r = await db.query(
+        `SELECT id, user_id, drawer, filename, profile_note_id FROM files WHERE id = $1`,
+        [id]
+      );
+      if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+      const old = r.rows[0];
+
+      // Same upload permission check as POST /upload
+      const allowed = await canUploadTo(req.user, old.user_id, old.drawer);
+      if (!allowed) return res.status(403).json({ error: 'Permission denied' });
+      if (old.drawer === 'salary' && !req.user.can('profile.salary.edit')) {
+        return res.status(403).json({ error: 'Salary drawer is restricted' });
+      }
+
+      // Hard-delete the old row, insert the new one
+      await db.query(`DELETE FROM files WHERE id = $1`, [id]);
+      const ins = await db.query(
+        `INSERT INTO files
+           (user_id, drawer, filename, mime_type, size_bytes, content,
+            uploaded_by_user_id, profile_note_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, user_id, drawer, filename, mime_type, size_bytes,
+                   uploaded_by_user_id, uploaded_at, profile_note_id`,
+        [old.user_id, old.drawer, req.file.originalname, req.file.mimetype,
+         req.file.size, req.file.buffer, req.user.id, old.profile_note_id]
+      );
+      const row = ins.rows[0];
+      await logAudit({
+        req, module: 'profile', action: 'file.replaced',
+        target_type: 'file', target_id: row.id,
+        before: { old_id: old.id, old_filename: old.filename },
+        after: { user_id: old.user_id, drawer: old.drawer, filename: row.filename, size: row.size_bytes }
+      });
+      res.json({ ok: true, file: row });
+    } catch (e) {
+      console.error('[files/replace] failed:', e.message);
+      res.status(500).json({ error: 'Replace failed' });
+    }
+  });
+});
+
 // ---------- GET /api/files/:id/meta ----------
 router.get('/:id/meta', async (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -189,9 +243,13 @@ router.get('/:id/meta', async (req, res) => {
 });
 
 // ---------- GET /api/files/:id ----------
+// Default: inline view (for any user with view permission)
+// With ?download=1: forces attachment download — gated on profile.salary.view
+// (Owner + HR only, per r0.16 spec).
 router.get('/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  const isDownload = req.query.download === '1' || req.query.download === 'true';
   try {
     const r = await db.query(
       `SELECT id, user_id, drawer, filename, mime_type, size_bytes, content, deleted_at
@@ -203,11 +261,15 @@ router.get('/:id', async (req, res) => {
     if (!allowed) return res.status(403).json({ error: 'Permission denied' });
     if (row.deleted_at) return res.status(410).json({ error: 'File deleted' });
 
+    // r0.16 — download gate: only Owner + HR can force-download. Own files exempt.
+    if (isDownload && req.user.id !== row.user_id && !req.user.can('profile.salary.view')) {
+      return res.status(403).json({ error: 'Download is restricted to HR' });
+    }
+
     res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
     res.setHeader('Content-Length', row.size_bytes);
-    // Inline display for PDFs/images, attachment for docx etc
     const inlineOk = ['application/pdf','image/jpeg','image/png'].includes(row.mime_type);
-    const disposition = inlineOk ? 'inline' : 'attachment';
+    const disposition = (isDownload || !inlineOk) ? 'attachment' : 'inline';
     res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(row.filename)}"`);
     res.send(row.content);
   } catch (e) {
