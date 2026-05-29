@@ -52,7 +52,7 @@ app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 
 // Health check
-app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.16.3' }));
+app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.16.4' }));
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));

@@ -622,9 +622,21 @@ window.fkModules['profile'] = {
       if (addBtn) addBtn.addEventListener('click', () => openAddReviewForm());
     }
 
+    // r0.16.4 — Menus are appended to document.body (so they're not scoped to
+    // #prof-mod). Clean them + the outside-click listener via one helper so
+    // unmount can fully tear down. window.__fkProfMenuCloser holds the live
+    // listener ref so it can be removed if the user navigates with a menu open.
+    function closeProfMenus() {
+      document.querySelectorAll('.more-menu').forEach(m => m.remove());
+      if (window.__fkProfMenuCloser) {
+        document.removeEventListener('click', window.__fkProfMenuCloser);
+        window.__fkProfMenuCloser = null;
+      }
+    }
+
     function showReviewMoreMenu(btn) {
       // close any existing
-      document.querySelectorAll('#prof-mod .more-menu').forEach(m => m.remove());
+      closeProfMenus();
       const rid = btn.dataset.rid;
       const menu = document.createElement('div');
       menu.className = 'more-menu';
@@ -637,7 +649,7 @@ window.fkModules['profile'] = {
       menu.style.left = (rect.right + window.scrollX - menu.offsetWidth) + 'px';
       menu.querySelectorAll('button').forEach(b => {
         b.addEventListener('click', async () => {
-          menu.remove();
+          closeProfMenus();
           if (b.dataset.act === 'cancel') {
             const reason = prompt('Reason for cancelling this review? (optional)');
             if (reason === null) return;
@@ -663,12 +675,12 @@ window.fkModules['profile'] = {
           }
         });
       });
-      // Close on outside click
+      // Close on outside click — stash the ref so unmount can remove it if the
+      // user navigates away with the menu still open.
       setTimeout(() => {
-        document.addEventListener('click', function once() {
-          menu.remove();
-          document.removeEventListener('click', once);
-        }, { once: true });
+        const closer = function () { closeProfMenus(); };
+        window.__fkProfMenuCloser = closer;
+        document.addEventListener('click', closer, { once: true });
       }, 0);
     }
 
@@ -726,9 +738,12 @@ window.fkModules['profile'] = {
 
     async function renderAttendanceDrawer() {
       const body = document.getElementById('profPanelBody');
-      // r0.16.2 — Only build the scaffold if it doesn't already exist.
-      // Otherwise a re-call would wipe the month label back to "—".
-      if (!document.getElementById('attMonthLabel')) {
+      // r0.16.4 — Gate the scaffold build on the LIVE panel body, not a
+      // document-wide lookup. A stale #attMonthLabel left elsewhere in the DOM
+      // used to make this skip the build, so #attGrid was never created and
+      // loadAttendanceMonth crashed on a null grid. loadDrawer always clears
+      // `body` first, so this rebuilds the scaffold on every open.
+      if (!body.querySelector('#attMonthLabel')) {
         body.innerHTML =
         '<div class="att-cal">' +
           '<div class="att-cal-head">' +
@@ -764,10 +779,13 @@ window.fkModules['profile'] = {
       const label = new Date(Date.UTC(attYear, attMonth - 1, 1))
         .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
       const labelEl = document.getElementById('attMonthLabel');
-      if (!labelEl) return; // scaffold not in DOM yet — skip silently
-      labelEl.textContent = label;
       const grid = document.getElementById('attGrid');
       const rollup = document.getElementById('attRollup');
+      // r0.16.4 — Grab all three together and guard before any write. The old
+      // code wrote grid.innerHTML before the try block, so a null grid threw
+      // OUTSIDE the catch and bubbled up to loadDrawer, wiping the whole panel.
+      if (!labelEl || !grid || !rollup) return; // scaffold not in DOM — skip silently
+      labelEl.textContent = label;
       grid.innerHTML = '<div style="grid-column:span 7;color:var(--muted);text-align:center;padding:14px">Loading…</div>';
       rollup.innerHTML = '';
 
@@ -855,6 +873,13 @@ window.fkModules['profile'] = {
   },
 
   unmount() {
-    document.querySelectorAll('#prof-mod .more-menu').forEach(m => m.remove());
+    // r0.16.4 — Menus live on document.body, and the outside-click listener is
+    // on document, so neither dies when the loader clears #moduleView. Remove
+    // both explicitly. (.more-menu is body-level, not under #prof-mod.)
+    document.querySelectorAll('.more-menu').forEach(m => m.remove());
+    if (window.__fkProfMenuCloser) {
+      document.removeEventListener('click', window.__fkProfMenuCloser);
+      window.__fkProfMenuCloser = null;
+    }
   }
 };
