@@ -321,11 +321,14 @@ window.fkModules['profile'] = {
     }
 
     // --- File row component (r0.16 NEW) -------------------------------
-    function fileRowHtml(file) {
-      const isOwnFile = file.user_id === viewer.user_id;
+    // r0.16.3 — fileRowHtml takes drawer explicitly. Backend doesn't return
+    // file.user_id or file.drawer (those are implicit at the query level).
+    // All files in `data.files` belong to profileUserId and to `drawer`.
+    function fileRowHtml(file, drawer) {
+      const isOwnFile = profileUserId === viewer.user_id;
       const canDownload = viewer.can_view_salary || isOwnFile;
-      const canDelete = viewer.can_delete_any || (isOwnFile && file.drawer === 'personal');
-      const canReplace = viewer.can_upload_any || (isOwnFile && file.drawer === 'personal');
+      const canDelete = viewer.can_delete_any || (isOwnFile && drawer === 'personal');
+      const canReplace = viewer.can_upload_any || (isOwnFile && drawer === 'personal');
       const downloadBtn = canDownload
         ? '<button class="file-download" data-id="' + file.id + '"><i class="ti ti-download"></i>Download</button>'
         : '<button disabled title="Download restricted to Owner + HR"><i class="ti ti-lock"></i>Download</button>';
@@ -515,7 +518,7 @@ window.fkModules['profile'] = {
       if (files.length === 0) {
         html += '<div style="color:var(--muted);padding:10px 0">No files in this drawer yet.</div>';
       } else {
-        html += files.map(fileRowHtml).join('');
+        html += files.map(f => fileRowHtml(f, drawer)).join('');
       }
       html += '</div>';
 
@@ -580,7 +583,9 @@ window.fkModules['profile'] = {
     }
     function renderReviewsDrawer(data) {
       const body = document.getElementById('profPanelBody');
-      const reviews = (data.notes || []).filter(n => n.kind === 'review');
+      // Backend already filters by kind='review' in SQL — no need to re-filter client-side.
+      // (The kind column isn't even selected in the response.)
+      const reviews = data.notes || [];
       const files = data.files || [];
       const canEdit = viewer.can_edit_any || viewer.can_edit_dept;
 
@@ -721,7 +726,10 @@ window.fkModules['profile'] = {
 
     async function renderAttendanceDrawer() {
       const body = document.getElementById('profPanelBody');
-      body.innerHTML =
+      // r0.16.2 — Only build the scaffold if it doesn't already exist.
+      // Otherwise a re-call would wipe the month label back to "—".
+      if (!document.getElementById('attMonthLabel')) {
+        body.innerHTML =
         '<div class="att-cal">' +
           '<div class="att-cal-head">' +
             '<div class="att-cal-nav">' +
@@ -742,24 +750,21 @@ window.fkModules['profile'] = {
           '</div>' +
           '<div class="att-rollup" id="attRollup"></div>' +
         '</div>';
-      document.getElementById('attPrev').addEventListener('click', () => {
-        attMonth--; if (attMonth < 1) { attMonth = 12; attYear--; } loadAttendanceMonth();
-      });
-      document.getElementById('attNext').addEventListener('click', () => {
-        attMonth++; if (attMonth > 12) { attMonth = 1; attYear++; } loadAttendanceMonth();
-      });
+        document.getElementById('attPrev').addEventListener('click', () => {
+          attMonth--; if (attMonth < 1) { attMonth = 12; attYear--; } loadAttendanceMonth();
+        });
+        document.getElementById('attNext').addEventListener('click', () => {
+          attMonth++; if (attMonth > 12) { attMonth = 1; attYear++; } loadAttendanceMonth();
+        });
+      }
       await loadAttendanceMonth();
     }
 
     async function loadAttendanceMonth() {
-      console.log('[profile attendance] loadAttendanceMonth fired', { attYear, attMonth, profileUserId });
       const label = new Date(Date.UTC(attYear, attMonth - 1, 1))
         .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
       const labelEl = document.getElementById('attMonthLabel');
-      if (!labelEl) {
-        console.error('[profile attendance] attMonthLabel element missing — scaffold did not render');
-        return;
-      }
+      if (!labelEl) return; // scaffold not in DOM yet — skip silently
       labelEl.textContent = label;
       const grid = document.getElementById('attGrid');
       const rollup = document.getElementById('attRollup');
