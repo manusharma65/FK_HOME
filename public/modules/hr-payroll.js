@@ -60,7 +60,7 @@ window.fkModules['hr/payroll'] = {
         '</div>' +
       '</div>' +
 
-      '<div id="prDrillWrap" style="display:none;margin-top:14px"></div>';
+      '<div id="prDrillWrap" style="display:none;position:fixed;inset:0;background:rgba(20,22,27,0.55);z-index:1000;align-items:flex-start;justify-content:center;padding:5vh 20px;overflow-y:auto"></div>';
   },
 
   async mount(rootEl) {
@@ -124,26 +124,32 @@ window.fkModules['hr/payroll'] = {
             '<td style="padding:10px 8px;text-align:right"><button class="btn pr-view" data-uid="' + row.user_id + '" data-name="' + esc(row.name) + '">View</button></td>' +
           '</tr>';
         }).join('');
-
-        // Wire View buttons
-        document.querySelectorAll('.pr-view').forEach(btn => {
-          btn.addEventListener('click', () => drillUser(parseInt(btn.dataset.uid, 10), btn.dataset.name));
-        });
       } catch (e) {
         console.error('[payroll]', e);
         body.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--red);padding:18px">Failed to load.</td></tr>';
       }
     }
 
+    // r0.15.2 — Event delegation for View buttons. Works even after re-renders.
+    document.addEventListener('click', function payrollClickHandler(ev) {
+      const btn = ev.target.closest && ev.target.closest('.pr-view');
+      if (!btn) return;
+      ev.preventDefault();
+      const uid = parseInt(btn.dataset.uid, 10);
+      const name = btn.dataset.name || '';
+      console.log('[payroll] View clicked for user', uid, name);
+      drillUser(uid, name);
+    });
+
     async function drillUser(userId, name) {
       const { y, m } = getYM();
       const wrap = document.getElementById('prDrillWrap');
-      wrap.style.display = '';
-      wrap.innerHTML = '<div class="card"><div style="padding:14px;text-align:center;color:var(--muted)">Loading day-by-day for ' + name + '…</div></div>';
+      wrap.style.display = 'flex';
+      wrap.innerHTML = '<div class="card" style="max-width:680px;width:100%;padding:14px 16px;background:var(--surface)"><div style="padding:14px;text-align:center;color:var(--muted)">Loading day-by-day for ' + esc(name) + '…</div></div>';
       try {
         const r = await fetch('/api/payroll/month/' + userId + '/days?year=' + y + '&month=' + m, { credentials: 'include' });
         if (!r.ok) {
-          wrap.innerHTML = '<div class="card" style="padding:14px;color:var(--red)">Failed to load drill</div>';
+          wrap.innerHTML = '<div class="card" style="max-width:680px;width:100%;padding:14px;color:var(--red);background:var(--surface)">Failed to load drill</div>';
           return;
         }
         const d = await r.json();
@@ -160,38 +166,59 @@ window.fkModules['hr/payroll'] = {
           worked_voluntary: { lbl: 'Worked', cls: 'green' },
           pending: { lbl: 'Pending', cls: 'muted' },
         };
-        const rowsHtml = d.days.map(day => {
-          const dt = new Date(day.for_date);
-          const dayName = dt.toLocaleDateString('en-GB', { weekday: 'short' });
-          const dayNum = dt.getUTCDate();
-          const lbl = labels[day.status] || { lbl: day.status, cls: 'muted' };
-          const paidTxt = day.is_paid === true ? '<span class="chip green">Paid</span>' :
-                          day.is_paid === false ? '<span class="chip red">Unpaid</span>' :
-                          '<span style="font-size:12px;color:var(--muted)">—</span>';
-          const wendTxt = day.weekend_pay_status ? (' · weekend ' + day.weekend_pay_status) : '';
-          return '<tr style="border-top:0.5px solid var(--line)">' +
-            '<td style="padding:8px 12px;width:40px;color:var(--muted)">' + esc(dayName) + '</td>' +
-            '<td style="padding:8px 8px;width:30px">' + dayNum + '</td>' +
-            '<td style="padding:8px 8px"><span class="chip ' + lbl.cls + '">' + esc(lbl.lbl) + '</span><span style="font-size:11px;color:var(--muted);margin-left:6px">' + esc(wendTxt) + '</span></td>' +
-            '<td style="padding:8px 8px;text-align:right">' + paidTxt + '</td>' +
-          '</tr>';
-        }).join('');
+        const rowsHtml = d.days.length === 0
+          ? '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--muted)">No attendance records for this month.</td></tr>'
+          : d.days.map(day => {
+              const dt = new Date(day.for_date);
+              const dayName = dt.toLocaleDateString('en-GB', { weekday: 'short' });
+              const dayNum = dt.getUTCDate();
+              const lbl = labels[day.status] || { lbl: day.status, cls: 'muted' };
+              const paidTxt = day.is_paid === true ? '<span class="chip green">Paid</span>' :
+                              day.is_paid === false ? '<span class="chip red">Unpaid</span>' :
+                              '<span style="font-size:12px;color:var(--muted)">—</span>';
+              const wendTxt = day.weekend_pay_status ? (' · weekend ' + day.weekend_pay_status) : '';
+              return '<tr style="border-top:0.5px solid var(--line)">' +
+                '<td style="padding:8px 12px;width:40px;color:var(--muted)">' + esc(dayName) + '</td>' +
+                '<td style="padding:8px 8px;width:30px">' + dayNum + '</td>' +
+                '<td style="padding:8px 8px"><span class="chip ' + lbl.cls + '">' + esc(lbl.lbl) + '</span>' +
+                  (wendTxt ? '<span style="font-size:11px;color:var(--muted);margin-left:6px">' + esc(wendTxt) + '</span>' : '') +
+                '</td>' +
+                '<td style="padding:8px 8px;text-align:right">' + paidTxt + '</td>' +
+              '</tr>';
+            }).join('');
         wrap.innerHTML =
-          '<div class="card" style="padding:14px 16px">' +
+          '<div class="card" id="prDrillCard" style="max-width:680px;width:100%;padding:14px 16px;background:var(--surface);max-height:90vh;overflow-y:auto">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
               '<div style="font-size:15px;font-weight:500">' + esc(name) + ' · ' + monthName(y, m) + '</div>' +
-              '<button class="btn" id="prDrillClose">Close</button>' +
+              '<button class="btn" id="prDrillClose" aria-label="Close"><i class="ti ti-x"></i></button>' +
             '</div>' +
             '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>' + rowsHtml + '</tbody></table></div>' +
           '</div>';
-        document.getElementById('prDrillClose').addEventListener('click', () => {
-          wrap.style.display = 'none'; wrap.innerHTML = '';
-        });
       } catch (e) {
         console.error('[payroll drill]', e);
-        wrap.innerHTML = '<div class="card" style="padding:14px;color:var(--red)">Failed to load drill</div>';
+        wrap.innerHTML = '<div class="card" style="max-width:680px;width:100%;padding:14px;color:var(--red);background:var(--surface)">Failed to load drill</div>';
       }
     }
+
+    // r0.15.3 — Close handlers for the modal: close button, click outside, ESC.
+    function closeDrill() {
+      const wrap = document.getElementById('prDrillWrap');
+      if (!wrap) return;
+      wrap.style.display = 'none';
+      wrap.innerHTML = '';
+    }
+    document.addEventListener('click', function (ev) {
+      // close on X button
+      if (ev.target.closest && ev.target.closest('#prDrillClose')) { closeDrill(); return; }
+      // close on backdrop click (only when clicking the wrap itself, not inner card)
+      if (ev.target.id === 'prDrillWrap') closeDrill();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') {
+        const wrap = document.getElementById('prDrillWrap');
+        if (wrap && wrap.style.display !== 'none') closeDrill();
+      }
+    });
 
     document.getElementById('prPrev').addEventListener('click', () => {
       let { y, m } = getYM(); m--; if (m < 1) { m = 12; y--; } setYM(y, m); load();

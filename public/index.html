@@ -119,6 +119,18 @@
   .late-btn i { font-size: 16px; color: var(--amber); }
 
   .nav-section { font-size: 13px; color: #5F5E5A; letter-spacing: 0.5px; margin: 0 0 6px; padding: 0 10px; }
+  /* r0.15.3 — collapsible sidebar sections (HR + SYSTEM). */
+  .nav-section.collapsible {
+    cursor: pointer; user-select: none;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 10px; margin: 0 0 4px; border-radius: 6px;
+  }
+  .nav-section.collapsible:hover { background: rgba(255,255,255,0.05); }
+  .nav-section.collapsible::after {
+    content: '▾'; font-size: 11px; transition: transform 0.15s ease;
+    color: #5F5E5A;
+  }
+  .nav-section.collapsible.collapsed::after { transform: rotate(-90deg); }
   .nav-item {
     padding: 8px 10px; display: flex; align-items: center; gap: 10px;
     margin-bottom: 2px; cursor: pointer; border-radius: var(--r-sm);
@@ -632,7 +644,7 @@
         <span class="soon-badge">soon</span>
       </div>
 
-      <p class="nav-section" id="navSectionHR" style="margin-top:22px;display:none">HR</p>
+      <p class="nav-section collapsible" id="navSectionHR" style="margin-top:22px;display:none">HR</p>
       <div class="nav-item" id="navHrPeople" style="display:none" onclick="location.href='/admin.html#users'">
         <i class="ti ti-users"></i>
         <span>People</span>
@@ -680,7 +692,7 @@
         <span class="count" id="chatUnreadCount" style="display:none">0</span>
       </div>
 
-      <p class="nav-section" id="navSectionSystem" style="margin-top:22px;display:none">SYSTEM</p>
+      <p class="nav-section collapsible" id="navSectionSystem" style="margin-top:22px;display:none">SYSTEM</p>
       <div class="nav-item" id="navSysHolidays" style="display:none" onclick="location.href='/admin.html#holidays'">
         <i class="ti ti-calendar"></i>
         <span>Holidays</span>
@@ -1301,6 +1313,51 @@ function render() {
     show('navSysBackups'); anySys = true;
   }
   if (anySys) showText('navSectionSystem');
+
+  // r0.15.3 — Collapsible sidebar sections (HR + SYSTEM). Click the header
+  // to collapse/expand the items below. Persisted in localStorage.
+  function setupCollapsibleSection(headerId) {
+    const header = document.getElementById(headerId);
+    if (!header) return;
+    const storageKey = 'fk_nav_collapsed_' + headerId;
+    function getItems() {
+      const items = [];
+      let n = header.nextElementSibling;
+      while (n && !n.classList.contains('nav-section')) {
+        if (n.classList.contains('nav-item')) items.push(n);
+        n = n.nextElementSibling;
+      }
+      return items;
+    }
+    function applyCollapsed(collapsed) {
+      if (collapsed) header.classList.add('collapsed'); else header.classList.remove('collapsed');
+      const items = getItems();
+      items.forEach(it => {
+        if (collapsed) {
+          if (it.style.display !== 'none') it.dataset.preCollapseDisplay = it.style.display || '';
+          it.style.display = 'none';
+        } else {
+          // restore to whatever it was before, or '' (which lets the perm gating's own
+          // display:none stick if the item was originally hidden)
+          if (it.dataset.preCollapseDisplay !== undefined) {
+            it.style.display = it.dataset.preCollapseDisplay;
+            delete it.dataset.preCollapseDisplay;
+          }
+        }
+      });
+    }
+    header.addEventListener('click', function () {
+      const nowCollapsed = !header.classList.contains('collapsed');
+      try { localStorage.setItem(storageKey, nowCollapsed ? '1' : '0'); } catch (e) {}
+      applyCollapsed(nowCollapsed);
+    });
+    // Restore saved state
+    let saved = null;
+    try { saved = localStorage.getItem(storageKey); } catch (e) {}
+    if (saved === '1') applyCollapsed(true);
+  }
+  setupCollapsibleSection('navSectionHR');
+  setupCollapsibleSection('navSectionSystem');
 
   // YOU — Your onboarding shows only if user has incomplete onboarding items
   // (will be wired in stage 4 when the home content loads — for now hidden by default)

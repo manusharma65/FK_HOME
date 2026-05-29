@@ -1079,54 +1079,16 @@ router.put('/settings/:key', requirePermission('admin.settings.edit'), async (re
 // ============================================================================
 // r0.10 — Backfill: generate review schedules for all active users with hire_date
 // ============================================================================
+// r0.15.3 — DISABLED. The bulk backfill generated phantom-overdue reviews and
+// pre-onboarding items for staff who've been here for years, cluttering
+// Insights. Per Bobby, HR adds review schedules manually per-person now.
+// Per-user generation still works via the user-edit flow in admin.js.
 
 router.post('/backfill/review-schedules', requirePermission('admin.backfill.run'), async (req, res) => {
-  try {
-    const users = await db.query(
-      `SELECT id FROM users
-        WHERE deleted_at IS NULL AND employment_status = 'active'
-          AND hire_date IS NOT NULL`
-    );
-    let totalUsers = 0;
-    let totalReviews = 0;
-    let onboardingApplied = 0; // r0.14 — also backfill onboarding for existing staff
-    const perReviewer = {}; // reviewerUserId -> count
-    for (const u of users.rows) {
-      const r = await lifecycle.generateReviewSchedule(u.id, { silent: true });
-      if (r && r.created > 0) {
-        totalUsers++;
-        totalReviews += r.created;
-        if (r.reviewerUserId) {
-          perReviewer[r.reviewerUserId] = (perReviewer[r.reviewerUserId] || 0) + r.created;
-        }
-      }
-      // r0.14 — apply onboarding template too. Idempotent: applyOnboardingTemplate
-      // skips items that already exist and returns the count of NEW rows created.
-      const obCreated = await lifecycle.applyOnboardingTemplate(u.id, req.user.id);
-      if (obCreated > 0) onboardingApplied++;
-    }
-    // Notify each reviewer once with their total
-    for (const [uid, count] of Object.entries(perReviewer)) {
-      await notifyEvent('schedule.generated', {
-        targetUserId: parseInt(uid, 10),
-        taskCount: count,
-      });
-    }
-    await logAudit({
-      req, module: 'admin', action: 'backfill.review_schedules',
-      after: { usersProcessed: users.rows.length, reviewsCreated: totalReviews, onboardingApplied }
-    });
-    res.json({
-      ok: true,
-      users_processed: users.rows.length,
-      users_with_new_reviews: totalUsers,
-      reviews_created: totalReviews,
-      users_with_onboarding_applied: onboardingApplied,
-    });
-  } catch (e) {
-    console.error('[admin/backfill] failed:', e.message);
-    res.status(500).json({ error: 'Failed' });
-  }
+  return res.status(410).json({
+    error: 'Bulk backfill is disabled.',
+    detail: 'Phantom-overdue records cluttered Insights. Add reviews per-person via the user profile instead.'
+  });
 });
 
 // ============================================================================

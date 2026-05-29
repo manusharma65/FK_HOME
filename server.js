@@ -52,7 +52,7 @@ app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 
 // Health check
-app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.15.1' }));
+app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.15.3' }));
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -264,7 +264,7 @@ async function start() {
     // r0.15 (HR-1.5) — one-time leave-balance backfill. Self-guards via system_state.
     await leaveEngine.runBackfillIfNeeded();
     app.listen(PORT, () => {
-      console.log(`[boot] FK Home r0.15.1 listening on port ${PORT}`);
+      console.log(`[boot] FK Home r0.15.3 listening on port ${PORT}`);
       startCronJobs();
       // Run one immediate 5-min tick on boot, in case the server was down for a while.
       attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron boot tick]', e.message));
