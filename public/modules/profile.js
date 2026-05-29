@@ -765,10 +765,10 @@ window.fkModules['profile'] = {
           '</div>' +
           '<div class="att-rollup" id="attRollup"></div>' +
         '</div>';
-        document.getElementById('attPrev').addEventListener('click', () => {
+        body.querySelector('#attPrev').addEventListener('click', () => {
           attMonth--; if (attMonth < 1) { attMonth = 12; attYear--; } loadAttendanceMonth();
         });
-        document.getElementById('attNext').addEventListener('click', () => {
+        body.querySelector('#attNext').addEventListener('click', () => {
           attMonth++; if (attMonth > 12) { attMonth = 1; attYear++; } loadAttendanceMonth();
         });
       }
@@ -778,12 +778,17 @@ window.fkModules['profile'] = {
     async function loadAttendanceMonth() {
       const label = new Date(Date.UTC(attYear, attMonth - 1, 1))
         .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-      const labelEl = document.getElementById('attMonthLabel');
-      const grid = document.getElementById('attGrid');
-      const rollup = document.getElementById('attRollup');
-      // r0.16.4 — Grab all three together and guard before any write. The old
-      // code wrote grid.innerHTML before the try block, so a null grid threw
-      // OUTSIDE the catch and bubbled up to loadDrawer, wiping the whole panel.
+      // r0.16.5 — Scope ALL lookups to the live panel body. index.html's home
+      // dashboard has its own #attMonthLabel (line ~874), so a document-wide
+      // getElementById grabbed THAT one and wrote the month into the hidden home
+      // card, leaving the profile label stuck on "—". Querying within the panel
+      // makes a duplicate id elsewhere in the shell impossible to bind.
+      const panel = document.getElementById('profPanelBody');
+      const labelEl = panel && panel.querySelector('#attMonthLabel');
+      const grid = panel && panel.querySelector('#attGrid');
+      const rollup = panel && panel.querySelector('#attRollup');
+      // Grab all three together and guard before any write — a null element
+      // must degrade locally, never escape and wipe the panel.
       if (!labelEl || !grid || !rollup) return; // scaffold not in DOM — skip silently
       labelEl.textContent = label;
       grid.innerHTML = '<div style="grid-column:span 7;color:var(--muted);text-align:center;padding:14px">Loading…</div>';
