@@ -735,41 +735,41 @@ router.get('/reports/pending', async (req, res) => {
   const canAny = req.user.can('daily_report.review.any');
   const canDept = req.user.can('daily_report.review.dept');
   if (!canAny && !canDept) return res.status(403).json({ error: 'Permission denied' });
+
+  // r0.19.1 — optional ?user_id= filters to one person; ?days= widens the
+  // window (default 30; default 365 when a person is picked, so managers see
+  // real history not just the review queue). Permission logic is UNCHANGED:
+  // canAny still sees everyone, canDept still constrained to managed-dept users
+  // via the same subquery — user_id only narrows further, never widens.
+  const filterUserId = req.query.user_id ? parseInt(req.query.user_id, 10) : null;
+  let days = parseInt(req.query.days, 10);
+  if (!Number.isInteger(days) || days < 1 || days > 1825) days = filterUserId ? 365 : 30;
+
   try {
+    const cols = `dr.id, dr.user_id, dr.for_date, dr.notes,
+                    dr.snapshot_first_login, dr.snapshot_last_logout,
+                    dr.snapshot_active_min, dr.snapshot_idle_min, dr.snapshot_break_min,
+                    dr.created_at, dr.updated_at,
+                    u.full_name, u.display_name, u.initials, u.avatar_colour,
+                    rev.decision, rev.comment, rev.reviewed_at,
+                    revu.full_name AS reviewer_name,
+                    (SELECT d.name FROM user_department_memberships m JOIN departments d ON d.id = m.department_id
+                     WHERE m.user_id = u.id AND m.is_primary = TRUE AND m.deleted_at IS NULL LIMIT 1) AS dept_name`;
+    const joins = `FROM daily_reports dr
+               JOIN users u ON u.id = dr.user_id
+          LEFT JOIN daily_report_reviews rev ON rev.report_id = dr.id
+          LEFT JOIN users revu ON revu.id = rev.reviewer_id`;
+
     let sql, params;
     if (canAny) {
-      sql = `SELECT dr.id, dr.user_id, dr.for_date, dr.notes,
-                    dr.snapshot_first_login, dr.snapshot_last_logout,
-                    dr.snapshot_active_min, dr.snapshot_idle_min, dr.snapshot_break_min,
-                    dr.created_at, dr.updated_at,
-                    u.full_name, u.display_name, u.initials, u.avatar_colour,
-                    rev.decision, rev.comment, rev.reviewed_at,
-                    revu.full_name AS reviewer_name,
-                    (SELECT d.name FROM user_department_memberships m JOIN departments d ON d.id = m.department_id
-                     WHERE m.user_id = u.id AND m.is_primary = TRUE AND m.deleted_at IS NULL LIMIT 1) AS dept_name
-               FROM daily_reports dr
-               JOIN users u ON u.id = dr.user_id
-          LEFT JOIN daily_report_reviews rev ON rev.report_id = dr.id
-          LEFT JOIN users revu ON revu.id = rev.reviewer_id
-              WHERE dr.for_date >= CURRENT_DATE - INTERVAL '30 days'
-              ORDER BY dr.for_date DESC, u.full_name`;
-      params = [];
+      params = [days];
+      let where = `WHERE dr.for_date >= CURRENT_DATE - ($1 || ' days')::interval`;
+      if (filterUserId) { params.push(filterUserId); where += ` AND dr.user_id = $${params.length}`; }
+      sql = `SELECT ${cols} ${joins} ${where} ORDER BY dr.for_date DESC, u.full_name`;
     } else {
       // Dept-scoped — get caller's managed depts
-      sql = `SELECT dr.id, dr.user_id, dr.for_date, dr.notes,
-                    dr.snapshot_first_login, dr.snapshot_last_logout,
-                    dr.snapshot_active_min, dr.snapshot_idle_min, dr.snapshot_break_min,
-                    dr.created_at, dr.updated_at,
-                    u.full_name, u.display_name, u.initials, u.avatar_colour,
-                    rev.decision, rev.comment, rev.reviewed_at,
-                    revu.full_name AS reviewer_name,
-                    (SELECT d.name FROM user_department_memberships m JOIN departments d ON d.id = m.department_id
-                     WHERE m.user_id = u.id AND m.is_primary = TRUE AND m.deleted_at IS NULL LIMIT 1) AS dept_name
-               FROM daily_reports dr
-               JOIN users u ON u.id = dr.user_id
-          LEFT JOIN daily_report_reviews rev ON rev.report_id = dr.id
-          LEFT JOIN users revu ON revu.id = rev.reviewer_id
-              WHERE dr.for_date >= CURRENT_DATE - INTERVAL '30 days'
+      params = [req.user.id, days];
+      let where = `WHERE dr.for_date >= CURRENT_DATE - ($2 || ' days')::interval
                 AND u.id IN (
                   SELECT m2.user_id FROM user_department_memberships m2
                   WHERE m2.deleted_at IS NULL
@@ -778,9 +778,9 @@ router.get('/reports/pending', async (req, res) => {
                       WHERE m1.user_id = $1 AND m1.deleted_at IS NULL
                         AND m1.role IN ('manager','lead')
                     )
-                )
-              ORDER BY dr.for_date DESC, u.full_name`;
-      params = [req.user.id];
+                )`;
+      if (filterUserId) { params.push(filterUserId); where += ` AND dr.user_id = $${params.length}`; }
+      sql = `SELECT ${cols} ${joins} ${where} ORDER BY dr.for_date DESC, u.full_name`;
     }
     const r = await db.query(sql, params);
     res.json({ reports: r.rows });

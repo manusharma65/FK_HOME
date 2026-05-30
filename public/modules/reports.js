@@ -31,6 +31,7 @@ window.fkModules['hr/reports'] = {
             '</div>' +
             '<div style="display:flex;gap:8px;align-items:center">' +
               '<span class="meta" id="repMeta">—</span>' +
+              '<select id="repPerson"><option value="">Everyone</option></select>' +
               '<select id="repFilter">' +
                 '<option value="unreviewed">Unreviewed</option>' +
                 '<option value="not_satisfactory">Not satisfactory</option>' +
@@ -84,15 +85,38 @@ window.fkModules['hr/reports'] = {
     async function load() {
       const wrap = $('repList');
       wrap.innerHTML = '<div style="padding:22px;text-align:center;color:var(--muted)">Loading…</div>';
+      const personId = $('repPerson').value;
+      // When a specific person is picked, ask the server for their full history
+      // (wider window) via ?user_id=. "Everyone" keeps the default 30-day queue.
+      const url = personId
+        ? '/api/admin/reports/pending?user_id=' + encodeURIComponent(personId) + '&days=365'
+        : '/api/admin/reports/pending';
       try {
-        const r = await fetch('/api/admin/reports/pending', { credentials: 'include' });
+        const r = await fetch(url, { credentials: 'include' });
         if (!r.ok) { wrap.innerHTML = '<div style="padding:22px;text-align:center;color:var(--red)">Failed to load.</div>'; return; }
         const data = await r.json();
         reports_ = data.reports || [];
+        populatePeople();
         renderReports();
       } catch (e) {
         wrap.innerHTML = '<div style="padding:22px;text-align:center;color:var(--red)">Network error.</div>';
       }
+    }
+
+    // Build the person dropdown from whoever appears in the loaded reports,
+    // preserving the current selection. (Everyone-view shows all people seen in
+    // the last 30 days; that's the set a manager can review.)
+    let peopleSeen_ = {};
+    function populatePeople() {
+      for (const r of reports_) {
+        if (r.user_id && !peopleSeen_[r.user_id]) peopleSeen_[r.user_id] = r.display_name || r.full_name;
+      }
+      const sel = $('repPerson');
+      const current = sel.value;
+      const opts = Object.entries(peopleSeen_).sort((a, b) => a[1].localeCompare(b[1]));
+      sel.innerHTML = '<option value="">Everyone</option>' +
+        opts.map(([id, name]) => '<option value="' + id + '">' + escapeHtml(name) + '</option>').join('');
+      sel.value = current;
     }
 
     function renderReports() {
@@ -169,6 +193,7 @@ window.fkModules['hr/reports'] = {
     }
 
     $('repFilter').addEventListener('change', renderReports);
+    $('repPerson').addEventListener('change', load);
     $('repReviewCancel').addEventListener('click', () => $('repReviewModal').classList.remove('on'));
     $('repReviewForm').addEventListener('submit', async (e) => {
       e.preventDefault();
