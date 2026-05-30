@@ -118,7 +118,7 @@
   .late-btn:hover { background: #3A2A14; }
   .late-btn i { font-size: 16px; color: var(--amber); }
 
-  .nav-section { font-size: 13px; color: #5F5E5A; letter-spacing: 0.5px; margin: 0 0 6px; padding: 0 10px; }
+  .nav-section { font-size: 12px; font-weight: 700; color: #B8B5AC; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 6px; padding: 0 10px; }
   /* r0.15.3 — collapsible sidebar sections (HR + SYSTEM). */
   .nav-section.collapsible {
     cursor: pointer; user-select: none;
@@ -686,7 +686,7 @@
       </div>
 
       <p class="nav-section collapsible" id="navSectionDay" style="margin-top:22px">DAY</p>
-      <div class="nav-item" onclick="location.href='/my-growth.html'">
+      <div class="nav-item" data-route="#my-growth" onclick="location.hash='#my-growth'">
         <i class="ti ti-trending-up"></i>
         <span>My Growth</span>
       </div>
@@ -695,7 +695,7 @@
         <span>My work</span>
         <span class="soon-badge">soon</span>
       </div>
-      <div class="nav-item" onclick="location.href='/chat.html'">
+      <div class="nav-item" data-route="#chat" onclick="location.hash='#chat'">
         <i class="ti ti-message-2"></i>
         <span>Team chat</span>
         <span class="count" id="chatUnreadCount" style="display:none">0</span>
@@ -885,7 +885,7 @@
               <div class="card-title"><i class="ti ti-clock-hour-4"></i> My attendance</div>
               <div style="display:flex;align-items:center;gap:10px">
                 <span class="card-meta" id="attMonthLabel">—</span>
-                <a href="/my-growth.html#attendance" style="font-size:14px;color:var(--amber);text-decoration:none">See history →</a>
+                <a href="#my-growth/attendance" style="font-size:14px;color:var(--amber);text-decoration:none">See history →</a>
               </div>
             </div>
             <div class="timeoff-row">
@@ -906,7 +906,7 @@
           <div class="card timeoff-card">
             <div class="card-header">
               <div class="card-title"><i class="ti ti-beach"></i> Time off</div>
-              <a href="/my-growth.html#leaves" style="font-size:14px;color:var(--amber);text-decoration:none">See leaves →</a>
+              <a href="#my-growth/leaves" style="font-size:14px;color:var(--amber);text-decoration:none">See leaves →</a>
             </div>
             <div class="timeoff-row">
               <span class="lbl">Accrued</span>
@@ -1016,7 +1016,7 @@
           <div class="card team-card">
             <div class="card-header">
               <div class="card-title"><i class="ti ti-message-2"></i> Team</div>
-              <span class="card-meta" id="teamChatMeta" style="cursor:pointer" onclick="location.href='/chat.html'">Open chat →</span>
+              <span class="card-meta" id="teamChatMeta" style="cursor:pointer" onclick="location.hash='#chat'">Open chat →</span>
             </div>
             <div id="teamChatMessages" style="min-height:80px">
               <div style="font-size:14px;color:#888780;padding:8px 0">Loading…</div>
@@ -1045,7 +1045,7 @@
   <nav class="mobile-bottom-nav" id="mobNav">
     <div class="mob-item on"><i class="ti ti-home"></i><span class="label">Space</span></div>
     <div class="mob-item" onclick="showSoonToast('My work')"><i class="ti ti-checkbox"></i><span class="label">My work</span></div>
-    <div class="mob-item" onclick="location.href='/chat.html'"><i class="ti ti-message-2"></i><span class="label">Team</span></div>
+    <div class="mob-item" onclick="location.hash='#chat'"><i class="ti ti-message-2"></i><span class="label">Team</span></div>
     <div class="mob-item" onclick="goToMyProfile()"><i class="ti ti-user"></i><span class="label">Profile</span></div>
     <div class="mob-item" onclick="openSidebar()"><i class="ti ti-menu-2"></i><span class="label">More</span></div>
   </nav>
@@ -1230,6 +1230,8 @@
 <script src="/modules/reports.js"></script>
 <script src="/modules/regularisations.js"></script>
 <script src="/modules/attendance.js"></script>
+<script src="/modules/chat.js"></script>
+<script src="/modules/my-growth.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1731,7 +1733,7 @@ async function openDM(userId) {
     }
     const data = await r.json();
     if (data.channel_id) {
-      window.location.href = `/chat.html#channel/${data.channel_id}`;
+      location.hash = `#chat/${data.channel_id}`;
     }
   } catch (e) {
     showToast('Network error');
@@ -2291,7 +2293,7 @@ async function handleNotifClick(id, url) {
     // Chat notifications: action_url is "/#chat/<channelId>" — open chat.html on that channel
     const chatMatch = url.match(/^\/?#chat\/(\d+)$/);
     if (chatMatch) {
-      location.href = `/chat.html#channel/${chatMatch[1]}`;
+      location.hash = `#chat/${chatMatch[1]}`;
       return;
     }
     // r0.19 (Ship C) — leave notifications used to point at /admin.html#leaves

@@ -62,8 +62,9 @@ router.get('/channels', async (req, res) => {
        WHERE c.is_archived = FALSE
        ORDER BY (CASE WHEN c.type = 'all_hands' THEN 0
                       WHEN c.type = 'department' THEN 1
-                      WHEN c.type = 'dm' THEN 2
-                      ELSE 3 END), c.name`,
+                      WHEN c.type = 'group' THEN 2
+                      WHEN c.type = 'dm' THEN 3
+                      ELSE 4 END), c.name`,
       [req.user.id]
     );
 
@@ -264,6 +265,212 @@ router.post('/dm/:userId/open', async (req, res) => {
   } catch (err) {
     console.error('[chat/dm/open] error:', err);
     res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ============================================================================
+// CUSTOM GROUPS (r0.20, Ship D)
+// A custom group is a chat_channels row with type='group' (no schema change —
+// type is free text; name, created_by_user_id, is_archived, members all exist).
+// Anyone can create a group. Membership is managed by anyone already in the
+// group (Google-Chat style). Archive hides the group for everyone.
+// ============================================================================
+
+// Helper: is this channel a custom group, and is the caller a member?
+async function getGroupForMember(userId, channelId) {
+  const r = await db.query(
+    `SELECT c.id, c.name, c.type, c.is_archived,
+            EXISTS (SELECT 1 FROM chat_channel_members m WHERE m.channel_id = c.id AND m.user_id = $2) AS is_member
+       FROM chat_channels c WHERE c.id = $1`,
+    [channelId, userId]
+  );
+  return r.rows[0] || null;
+}
+
+// ---- CREATE GROUP ----
+//   body: { name, member_ids: [int] }   (creator auto-added)
+router.post('/groups', async (req, res) => {
+  const { name, member_ids } = req.body || {};
+  const groupName = (name || '').trim();
+  if (!groupName) return res.status(400).json({ error: 'Group name required' });
+  if (groupName.length > 80) return res.status(400).json({ error: 'Name too long (80 char max)' });
+
+  // De-dupe + validate member ids; always include the creator.
+  const ids = Array.isArray(member_ids) ? member_ids.map(x => parseInt(x, 10)).filter(Number.isFinite) : [];
+  const memberSet = new Set(ids);
+  memberSet.add(req.user.id);
+  const members = Array.from(memberSet);
+
+  try {
+    // Only allow adding active, non-deleted users.
+    const valid = await db.query(
+      `SELECT id FROM users WHERE id = ANY($1::int[]) AND deleted_at IS NULL AND employment_status = 'active'`,
+      [members]
+    );
+    const validIds = valid.rows.map(r => r.id);
+    if (!validIds.includes(req.user.id)) validIds.push(req.user.id); // safety
+
+    // Unique-ish slug from name + timestamp suffix.
+    const baseSlug = 'grp-' + groupName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    const slug = baseSlug + '-' + Date.now().toString(36);
+
+    const ch = await db.query(
+      `INSERT INTO chat_channels (slug, name, type, created_by_user_id, is_archived)
+       VALUES ($1, $2, 'group', $3, FALSE) RETURNING id`,
+      [slug, groupName, req.user.id]
+    );
+    const channelId = ch.rows[0].id;
+
+    // Insert members.
+    const values = validIds.map((_, i) => `($1, $${i + 2})`).join(',');
+    await db.query(
+      `INSERT INTO chat_channel_members (channel_id, user_id) VALUES ${values} ON CONFLICT DO NOTHING`,
+      [channelId, ...validIds]
+    );
+
+    await logAudit({ req, module: 'chat', action: 'group.created', target_type: 'chat_channel', target_id: channelId, after: { name: groupName, members: validIds } });
+
+    // Notify the people added (not the creator).
+    const notifyIds = validIds.filter(id => id !== req.user.id);
+    if (notifyIds.length > 0) {
+      await notifyEvent('chat.message', {
+        userIds: notifyIds,
+        isDm: false,
+        senderName: req.user.display_name || req.user.full_name,
+        channelName: groupName,
+        channelId,
+        bodyPreview: 'added you to the group',
+        actorUserId: req.user.id,
+        related_id: channelId,
+      }).catch(() => {});
+    }
+
+    res.json({ ok: true, channel_id: channelId, created: true });
+  } catch (err) {
+    console.error('[chat/groups/create] error:', err);
+    res.status(500).json({ error: 'Failed to create group' });
+  }
+});
+
+// ---- ADD MEMBERS ----   body: { member_ids: [int] }
+router.post('/channels/:id/members', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  const g = await getGroupForMember(req.user.id, id);
+  if (!g) return res.status(404).json({ error: 'Not found' });
+  if (g.type !== 'group') return res.status(400).json({ error: 'Can only manage members of custom groups' });
+  if (!g.is_member) return res.status(403).json({ error: 'Join the group to manage members' });
+
+  const ids = Array.isArray(req.body && req.body.member_ids) ? req.body.member_ids.map(x => parseInt(x, 10)).filter(Number.isFinite) : [];
+  if (ids.length === 0) return res.status(400).json({ error: 'No members given' });
+
+  try {
+    const valid = await db.query(
+      `SELECT id FROM users WHERE id = ANY($1::int[]) AND deleted_at IS NULL AND employment_status = 'active'`,
+      [ids]
+    );
+    const validIds = valid.rows.map(r => r.id);
+    if (validIds.length === 0) return res.status(400).json({ error: 'No valid users' });
+    const values = validIds.map((_, i) => `($1, $${i + 2})`).join(',');
+    await db.query(
+      `INSERT INTO chat_channel_members (channel_id, user_id) VALUES ${values} ON CONFLICT DO NOTHING`,
+      [id, ...validIds]
+    );
+    await logAudit({ req, module: 'chat', action: 'group.members_added', target_type: 'chat_channel', target_id: id, after: { added: validIds } });
+
+    const notifyIds = validIds.filter(uid => uid !== req.user.id);
+    if (notifyIds.length > 0) {
+      await notifyEvent('chat.message', {
+        userIds: notifyIds, isDm: false,
+        senderName: req.user.display_name || req.user.full_name,
+        channelName: g.name, channelId: id,
+        bodyPreview: 'added you to the group',
+        actorUserId: req.user.id, related_id: id,
+      }).catch(() => {});
+    }
+    res.json({ ok: true, added: validIds });
+  } catch (err) {
+    console.error('[chat/members/add] error:', err);
+    res.status(500).json({ error: 'Failed to add members' });
+  }
+});
+
+// ---- REMOVE MEMBER ----
+router.delete('/channels/:id/members/:userId', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const target = parseInt(req.params.userId, 10);
+  if (!id || !target) return res.status(400).json({ error: 'Bad id' });
+  const g = await getGroupForMember(req.user.id, id);
+  if (!g) return res.status(404).json({ error: 'Not found' });
+  if (g.type !== 'group') return res.status(400).json({ error: 'Can only manage members of custom groups' });
+  if (!g.is_member) return res.status(403).json({ error: 'Join the group to manage members' });
+
+  try {
+    await db.query(`DELETE FROM chat_channel_members WHERE channel_id = $1 AND user_id = $2`, [id, target]);
+    await logAudit({ req, module: 'chat', action: 'group.member_removed', target_type: 'chat_channel', target_id: id, after: { removed: target } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[chat/members/remove] error:', err);
+    res.status(500).json({ error: 'Failed to remove member' });
+  }
+});
+
+// ---- GROUP MEMBERS (for the manage modal) ----
+router.get('/channels/:id/members', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  if (!(await userIsInChannel(req.user.id, id))) return res.status(403).json({ error: 'Not a member' });
+  try {
+    const r = await db.query(
+      `SELECT u.id, u.display_name, u.full_name, u.initials, u.avatar_colour
+         FROM chat_channel_members m JOIN users u ON u.id = m.user_id
+        WHERE m.channel_id = $1 AND u.deleted_at IS NULL
+        ORDER BY u.full_name`,
+      [id]
+    );
+    res.json({ members: r.rows });
+  } catch (err) {
+    console.error('[chat/members/list] error:', err);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---- RENAME GROUP ----   body: { name }
+router.post('/channels/:id/rename', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  const g = await getGroupForMember(req.user.id, id);
+  if (!g) return res.status(404).json({ error: 'Not found' });
+  if (g.type !== 'group') return res.status(400).json({ error: 'Only custom groups can be renamed' });
+  if (!g.is_member) return res.status(403).json({ error: 'Join the group to rename it' });
+  const newName = (req.body && req.body.name || '').trim();
+  if (!newName) return res.status(400).json({ error: 'Name required' });
+  if (newName.length > 80) return res.status(400).json({ error: 'Name too long (80 char max)' });
+  try {
+    await db.query(`UPDATE chat_channels SET name = $1 WHERE id = $2`, [newName, id]);
+    await logAudit({ req, module: 'chat', action: 'group.renamed', target_type: 'chat_channel', target_id: id, before: { name: g.name }, after: { name: newName } });
+    res.json({ ok: true, name: newName });
+  } catch (err) {
+    console.error('[chat/rename] error:', err);
+    res.status(500).json({ error: 'Failed to rename' });
+  }
+});
+
+// ---- ARCHIVE GROUP ----   hides it for everyone
+router.post('/channels/:id/archive', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  const g = await getGroupForMember(req.user.id, id);
+  if (!g) return res.status(404).json({ error: 'Not found' });
+  if (g.type !== 'group') return res.status(400).json({ error: 'Only custom groups can be archived' });
+  if (!g.is_member) return res.status(403).json({ error: 'Join the group to archive it' });
+  try {
+    await db.query(`UPDATE chat_channels SET is_archived = TRUE WHERE id = $1`, [id]);
+    await logAudit({ req, module: 'chat', action: 'group.archived', target_type: 'chat_channel', target_id: id });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[chat/archive] error:', err);
+    res.status(500).json({ error: 'Failed to archive' });
   }
 });
 
