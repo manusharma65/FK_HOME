@@ -659,12 +659,20 @@
         <span>Onboarding</span>
         <span class="count" id="navHrOnboardingCount" style="display:none">0</span>
       </div>
-      <div class="nav-item" id="navHrLeaves" style="display:none" onclick="location.href='/admin.html#leaves'">
+      <div class="nav-item" id="navHrLeaves" data-route="#hr/leaves" style="display:none" onclick="location.hash='#hr/leaves'">
         <i class="ti ti-beach"></i>
         <span>Leaves</span>
         <span class="count" id="navHrLeavesCount" style="display:none">0</span>
       </div>
-      <div class="nav-item" id="navHrAttendance" style="display:none" onclick="location.hash='#profile/me/attendance'">
+      <div class="nav-item" id="navHrReports" data-route="#hr/reports" style="display:none" onclick="location.hash='#hr/reports'">
+        <i class="ti ti-notes"></i>
+        <span>Reports</span>
+      </div>
+      <div class="nav-item" id="navHrRegularisations" data-route="#hr/regularisations" style="display:none" onclick="location.hash='#hr/regularisations'">
+        <i class="ti ti-edit"></i>
+        <span>Regularisations</span>
+      </div>
+      <div class="nav-item" id="navHrAttendance" data-route="#hr/attendance" style="display:none" onclick="location.hash='#hr/attendance'">
         <i class="ti ti-clock"></i>
         <span>Attendance</span>
       </div>
@@ -1218,6 +1226,10 @@
 <script src="/modules/settings.js"></script>
 <script src="/modules/users.js"></script>
 <script src="/modules/employment.js"></script>
+<script src="/modules/leaves.js"></script>
+<script src="/modules/reports.js"></script>
+<script src="/modules/regularisations.js"></script>
+<script src="/modules/attendance.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1298,6 +1310,9 @@ function render() {
   }
   if (can('leaves.approve.any') || can('leaves.approve.dept')) {
     show('navHrLeaves'); anyHR = true;
+  }
+  if (can('leaves.approve.any') || can('leaves.approve.dept') || can('attendance.view.any') || can('attendance.view.dept')) {
+    show('navHrReports'); show('navHrRegularisations'); anyHR = true;
   }
   if (can('attendance.view.any') || can('attendance.view.dept')) {
     show('navHrAttendance'); anyHR = true;
@@ -2277,6 +2292,16 @@ async function handleNotifClick(id, url) {
     const chatMatch = url.match(/^\/?#chat\/(\d+)$/);
     if (chatMatch) {
       location.href = `/chat.html#channel/${chatMatch[1]}`;
+      return;
+    }
+    // r0.19 (Ship C) — leave notifications used to point at /admin.html#leaves
+    // (full page jump). Route them to the in-shell Leaves module instead. If the
+    // url carries a request id (e.g. .../leaves/42 or #leaves?id=42), focus it.
+    if (/(?:^|\/|#)(?:admin\.html#)?leaves\b/i.test(url) || /hr\/leaves/i.test(url)) {
+      const idMatch = url.match(/(?:id=|leaves\/)(\d+)/i);
+      location.hash = idMatch ? ('#hr/leaves/' + idMatch[1]) : '#hr/leaves';
+      toggleNotifications();
+      fetchNotifications();
       return;
     }
     if (url.startsWith('/')) {

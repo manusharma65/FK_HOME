@@ -234,7 +234,26 @@ router.get('/pending', async (req, res) => {
       params = [managedDeptIds];
     }
     const r = await db.query(query, params);
-    res.json({ requests: r.rows });
+
+    // r0.19 (Ship C) — attach each requester's leave balance so the manager can
+    // see remaining days and the post-approval figure right on the request,
+    // without clicking away. Uses the same engine as /mine (adjustments-aware).
+    // De-dupe getBalance calls per user_id since a manager may have several
+    // pending requests from the same person.
+    const balanceCache = {};
+    const rows = [];
+    for (const row of r.rows) {
+      if (!(row.user_id in balanceCache)) {
+        try {
+          balanceCache[row.user_id] = await leaveEngine.getBalance(row.user_id);
+        } catch (e) {
+          console.error('[leaves/pending] getBalance failed for user', row.user_id, e.message);
+          balanceCache[row.user_id] = null;
+        }
+      }
+      rows.push({ ...row, balance: balanceCache[row.user_id] });
+    }
+    res.json({ requests: rows });
   } catch (err) {
     console.error('[leaves/pending] error:', err);
     res.status(500).json({ error: 'Failed to list pending' });
