@@ -19,7 +19,7 @@ window.fkModules['system/backups'] = {
 
   render() {
     return '' +
-      '<div id="bak-mod">' +
+      '<div id="bak-mod" class="fk-mod">' +
         '<div class="card">' +
           '<div class="card-head">' +
             '<h2 style="margin:0">Backups</h2>' +

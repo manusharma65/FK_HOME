@@ -14,8 +14,7 @@ window.fkModules['system/attpolicy'] = {
 
   render() {
     return '' +
-      '<div id="pol-mod">' +
-        '<style>#pol-mod td.action-col{text-align:right;width:1%;white-space:nowrap}</style>' +
+      '<div id="pol-mod" class="fk-mod">' +
         '<div class="card" style="margin-bottom:16px">' +
           '<div class="card-head">' +
             '<div>' +

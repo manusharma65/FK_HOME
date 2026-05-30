@@ -11,8 +11,7 @@ window.fkModules['system/groups'] = {
 
   render() {
     return '' +
-      '<div id="grp-mod">' +
-        '<style>#grp-mod .nm{font-weight:500}</style>' +
+      '<div id="grp-mod" class="fk-mod">' +
         '<div class="card">' +
           '<div class="card-head">' +
             '<div>' +

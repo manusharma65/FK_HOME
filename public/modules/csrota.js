@@ -13,7 +13,7 @@ window.fkModules['system/csrota'] = {
 
   render() {
     return '' +
-      '<div id="rota-mod">' +
+      '<div id="rota-mod" class="fk-mod">' +
         '<div class="card" style="margin-bottom:16px">' +
           '<div class="card-head">' +
             '<div>' +

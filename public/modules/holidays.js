@@ -18,8 +18,7 @@ window.fkModules['system/holidays'] = {
 
   render() {
     return '' +
-      '<div id="hol-mod">' +
-        '<style>#hol-mod td.action-col{text-align:right;width:1%;white-space:nowrap}</style>' +
+      '<div id="hol-mod" class="fk-mod">' +
         '<div class="card">' +
           '<div class="card-head">' +
             '<div>' +

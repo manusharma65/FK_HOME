@@ -18,7 +18,7 @@ window.fkModules['system/settings'] = {
 
   render() {
     return '' +
-      '<div id="set-mod">' +
+      '<div id="set-mod" class="fk-mod">' +
         '<div class="card">' +
           '<div class="card-head"><h2 style="margin:0">Team break</h2></div>' +
           '<div style="padding:18px">' +

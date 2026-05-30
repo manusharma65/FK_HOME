@@ -11,13 +11,7 @@ window.fkModules['system/audit'] = {
 
   render() {
     return '' +
-      '<div id="aud-mod">' +
-        '<style>' +
-          '#aud-mod .filter-bar{padding:10px 18px;display:flex;gap:10px;align-items:center;border-bottom:0.5px solid var(--line);background:#FBFAF7}' +
-          '#aud-mod .audit-row .mod{font-family:ui-monospace,monospace;font-size:14px;color:var(--soft)}' +
-          '#aud-mod .audit-row .act{font-weight:500;color:var(--ink);font-family:ui-monospace,monospace;font-size:14px}' +
-          '#aud-mod .audit-row .det{color:var(--muted)}' +
-        '</style>' +
+      '<div id="aud-mod" class="fk-mod">' +
         '<div class="card">' +
           '<div class="card-head">' +
             '<h2 style="margin:0">Audit log</h2>' +

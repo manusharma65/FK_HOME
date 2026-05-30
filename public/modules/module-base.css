@@ -1,0 +1,125 @@
+/* FK Home — shared module styling (r0.17.1)
+   ----------------------------------------------------------------------------
+   All migrated config modules wrap their content in <div class="fk-mod">.
+   This brings them up to the FK Home look (matching profile.js / the home
+   cards): roomy cards, breathing room around headers + action buttons, and
+   properly themed tables. Loaded once in index.html, after loader.js.
+---------------------------------------------------------------------------- */
+
+#moduleView .fk-mod .card {
+  background: var(--surface);
+  border: 0.5px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 22px 24px;
+  margin-bottom: 18px;
+}
+#moduleView .fk-mod .card:last-child { margin-bottom: 0; }
+
+/* Card header: title block on the left, action(s) on the right, with space
+   below before the table starts. */
+#moduleView .fk-mod .card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+#moduleView .fk-mod .card-head h2 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--ink);
+  margin: 0 0 4px;
+  letter-spacing: -0.2px;
+}
+#moduleView .fk-mod .card-head .meta,
+#moduleView .fk-mod .meta {
+  font-size: 14px;
+  color: var(--muted);
+  display: block;
+}
+
+/* Tables — themed to match FK Home, with breathing room. */
+#moduleView .fk-mod table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+#moduleView .fk-mod thead th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 14px 10px 0;
+  border-bottom: 0.5px solid var(--line);
+}
+#moduleView .fk-mod tbody td {
+  padding: 13px 14px 13px 0;
+  border-bottom: 0.5px solid var(--line);
+  color: var(--ink);
+  vertical-align: middle;
+}
+#moduleView .fk-mod tbody tr:last-child td { border-bottom: none; }
+#moduleView .fk-mod tbody tr:hover td { background: rgba(20,22,27,0.015); }
+#moduleView .fk-mod td.action-col {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+  padding-right: 0;
+}
+
+/* Chips */
+#moduleView .fk-mod .chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 99px;
+  background: #F1EFE8;
+  color: var(--muted);
+}
+#moduleView .fk-mod .chip.amber { background: var(--amber-soft); color: var(--amber-deep); }
+#moduleView .fk-mod .chip.green { background: var(--green-soft); color: var(--green); }
+#moduleView .fk-mod .chip.muted { background: #F1EFE8; color: var(--muted); }
+
+/* Buttons inherit the shell's #moduleView .btn; just ensure the primary +
+   danger variants read on-theme. */
+#moduleView .fk-mod .btn.btn-primary {
+  background: var(--ink);
+  color: var(--surface);
+  border-color: var(--ink);
+}
+#moduleView .fk-mod .btn.btn-primary:hover { background: #000; }
+#moduleView .fk-mod .btn.btn-danger {
+  color: var(--red);
+  border-color: var(--line);
+  background: var(--surface);
+}
+#moduleView .fk-mod .btn.btn-danger:hover { background: var(--red-soft); }
+
+/* Filter bar (audit) */
+#moduleView .fk-mod .filter-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+#moduleView .fk-mod .audit-row .mod { font-family: ui-monospace, monospace; font-size: 13px; color: var(--soft); }
+#moduleView .fk-mod .audit-row .act { font-weight: 500; color: var(--ink); font-family: ui-monospace, monospace; font-size: 13px; }
+#moduleView .fk-mod .audit-row .det { color: var(--muted); }
+#moduleView .fk-mod .nm { font-weight: 500; }
+
+/* Forms inside cards (att policy, settings, csrota) */
+#moduleView .fk-mod label { font-size: 14px; color: var(--muted); display: block; margin-bottom: 5px; }
+#moduleView .fk-mod input[type="date"],
+#moduleView .fk-mod input[type="time"],
+#moduleView .fk-mod input[type="text"],
+#moduleView .fk-mod input[type="number"] {
+  padding: 10px 12px;
+  border: 0.5px solid var(--line);
+  border-radius: var(--r-md);
+  font-size: 14px;
+}
+#moduleView .fk-mod .loading-row td { color: var(--muted); padding: 22px 0; text-align: center; }
