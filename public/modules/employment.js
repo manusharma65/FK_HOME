@@ -153,9 +153,12 @@ window.fkModules['hr/employment'] = {
       const body = $('empDrawerBody');
       body.style.display = '';
       body.innerHTML = '' +
-        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">' +
-          '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '—') + '</span>' +
-          '<div style="font-size:16px;font-weight:500">' + escapeHtml(u.full_name) + '</div>' +
+        '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">' +
+          '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">' +
+            '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '—') + '</span>' +
+            '<div style="font-size:16px;font-weight:500">' + escapeHtml(u.full_name) + '</div>' +
+          '</div>' +
+          '<button class="btn" id="dClose" aria-label="Close" style="padding:6px 9px;font-size:14px;line-height:1"><i class="ti ti-x"></i></button>' +
         '</div>' +
         '<div style="font-size:13px;color:var(--muted);margin:0 0 18px 40px">' + escapeHtml(u.email || '') + '</div>' +
 
@@ -203,6 +206,16 @@ window.fkModules['hr/employment'] = {
       body.querySelector('#dSave').addEventListener('click', () => saveOne(id));
       body.querySelector('#dAdjust').addEventListener('click', () => openAdjust(id, u.full_name));
       body.querySelector('#dRecompute').addEventListener('click', () => recomputeOne(id, u.full_name));
+      body.querySelector('#dClose').addEventListener('click', closeDrawer);
+    }
+
+    function closeDrawer() {
+      selectedId_ = null;
+      const body = $('empDrawerBody');
+      body.style.display = 'none';
+      body.innerHTML = '';
+      $('empDrawerEmpty').style.display = '';
+      renderRows();
     }
 
     async function saveOne(id) {

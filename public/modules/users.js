@@ -40,9 +40,12 @@ window.fkModules['hr/users'] = {
           '#usr-mod .status-pill.active{background:var(--green-soft);color:var(--green)}' +
           '#usr-mod .status-pill.on_leave{background:var(--amber-soft);color:var(--amber-deep)}' +
           '#usr-mod .status-pill.left{background:var(--red-soft);color:var(--red)}' +
-          '#usr-mod .check-list{display:flex;flex-direction:column;gap:7px;border:0.5px solid var(--line);border-radius:8px;padding:10px;max-height:220px;overflow:auto}' +
-          '#usr-mod .check-list label{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink);margin:0}' +
-          '#usr-mod .check-list label .meta{color:var(--muted);font-size:12px}' +
+          '#usr-mod .check-list{display:flex;flex-direction:column;gap:2px;border:0.5px solid var(--line);border-radius:8px;padding:6px;max-height:240px;overflow:auto}' +
+          '#usr-mod .check-list label{display:grid;grid-template-columns:auto 150px 1fr;align-items:center;gap:10px;font-size:14px;color:var(--ink);margin:0;padding:7px 8px;border-radius:6px;cursor:pointer}' +
+          '#usr-mod .check-list label:hover{background:var(--bg)}' +
+          '#usr-mod .check-list label .gname{font-weight:500}' +
+          '#usr-mod .check-list label .meta{color:var(--muted);font-size:12px;line-height:1.4}' +
+          '#usr-mod .check-list label input[type=checkbox]{width:auto;margin:0}' +
           '#usr-mod .pwd-display{font-family:ui-monospace,monospace;font-size:18px;background:#F1EFE8;border-radius:8px;padding:10px 14px;letter-spacing:1px;margin-bottom:8px}' +
           '#usr-mod .modal-ok{display:none;color:var(--green);font-size:14px;margin:6px 0}' +
           '#usr-mod .modal-ok.on{display:block}' +
@@ -220,7 +223,7 @@ window.fkModules['hr/users'] = {
         departments_.map(d => '<option value="' + d.slug + '">' + escapeHtml(d.name) + '</option>').join('');
       $('cuGroups').innerHTML = groups_
         .filter(g => g.slug !== 'employee-base' && g.slug !== 'owner')
-        .map(g => '<label><input type="checkbox" value="' + g.slug + '" /><span>' + escapeHtml(g.name) + '</span><span class="meta">' + escapeHtml(g.description || '') + '</span></label>').join('');
+        .map(g => '<label><input type="checkbox" value="' + g.slug + '" /><span class="gname">' + escapeHtml(g.name) + '</span><span class="meta">' + escapeHtml(g.description || '') + '</span></label>').join('');
       $('cuFullName').value = ''; $('cuEmail').value = ''; $('cuDisplayName').value = '';
       $('cuPwdBox').style.display = 'none';
       $('cuErr').classList.remove('on'); $('cuOk').classList.remove('on');
@@ -295,7 +298,7 @@ window.fkModules['hr/users'] = {
         .filter(g => g.slug !== 'employee-base')
         .map(g => {
           const isOwner = g.slug === 'owner';
-          return '<label><input type="checkbox" value="' + g.slug + '" ' + (userGroups.has(g.slug) ? 'checked' : '') + ' ' + (isOwner ? 'disabled' : '') + ' /><span>' + escapeHtml(g.name) + '</span><span class="meta">' + escapeHtml(g.description || '') + '</span></label>';
+          return '<label><input type="checkbox" value="' + g.slug + '" ' + (userGroups.has(g.slug) ? 'checked' : '') + ' ' + (isOwner ? 'disabled' : '') + ' /><span class="gname">' + escapeHtml(g.name) + '</span><span class="meta">' + escapeHtml(g.description || '') + '</span></label>';
         }).join('') + '<div style="font-size:13px;color:var(--muted);padding:6px 2px">Employee (base) is always included.</div>';
 
       $('euModal').classList.add('on');
