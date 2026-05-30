@@ -693,27 +693,31 @@
       </div>
 
       <p class="nav-section collapsible" id="navSectionSystem" style="margin-top:22px;display:none">SYSTEM</p>
-      <div class="nav-item" id="navSysHolidays" style="display:none" onclick="location.href='/admin.html#holidays'">
+      <div class="nav-item" id="navSysHolidays" data-route="#system/holidays" style="display:none" onclick="location.hash='#system/holidays'">
         <i class="ti ti-calendar"></i>
         <span>Holidays</span>
       </div>
-      <div class="nav-item" id="navSysCsRota" style="display:none" onclick="location.href='/admin.html#csrota'">
+      <div class="nav-item" id="navSysCsRota" data-route="#system/csrota" style="display:none" onclick="location.hash='#system/csrota'">
         <i class="ti ti-calendar-event"></i>
         <span>CS rota</span>
       </div>
-      <div class="nav-item" id="navSysSettings" style="display:none" onclick="location.href='/admin.html#settings'">
+      <div class="nav-item" id="navSysAttPolicy" data-route="#system/attpolicy" style="display:none" onclick="location.hash='#system/attpolicy'">
+        <i class="ti ti-clock-exclamation"></i>
+        <span>Attendance policy</span>
+      </div>
+      <div class="nav-item" id="navSysSettings" data-route="#system/settings" style="display:none" onclick="location.hash='#system/settings'">
         <i class="ti ti-settings"></i>
         <span>Settings</span>
       </div>
-      <div class="nav-item" id="navSysGroups" style="display:none" onclick="location.href='/admin.html#groups'">
+      <div class="nav-item" id="navSysGroups" data-route="#system/groups" style="display:none" onclick="location.hash='#system/groups'">
         <i class="ti ti-users-group"></i>
         <span>Groups</span>
       </div>
-      <div class="nav-item" id="navSysAudit" style="display:none" onclick="location.href='/admin.html#audit'">
+      <div class="nav-item" id="navSysAudit" data-route="#system/audit" style="display:none" onclick="location.hash='#system/audit'">
         <i class="ti ti-file-search"></i>
         <span>Audit log</span>
       </div>
-      <div class="nav-item" id="navSysBackups" style="display:none" onclick="location.href='/admin.html#backups'">
+      <div class="nav-item" id="navSysBackups" data-route="#system/backups" style="display:none" onclick="location.hash='#system/backups'">
         <i class="ti ti-database"></i>
         <span>Backups</span>
       </div>
@@ -1204,6 +1208,13 @@
 <script src="/modules/hr-insights.js"></script>
 <script src="/modules/hr-payroll.js"></script>
 <script src="/modules/profile.js"></script>
+<script src="/modules/holidays.js"></script>
+<script src="/modules/csrota.js"></script>
+<script src="/modules/attpolicy.js"></script>
+<script src="/modules/groups.js"></script>
+<script src="/modules/audit.js"></script>
+<script src="/modules/backups.js"></script>
+<script src="/modules/settings.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1299,7 +1310,7 @@ function render() {
   // SYSTEM section — owner-level mostly
   let anySys = false;
   if (can('admin.settings.edit')) {
-    show('navSysHolidays'); show('navSysSettings'); anySys = true;
+    show('navSysHolidays'); show('navSysAttPolicy'); show('navSysSettings'); anySys = true;
   }
   if (can('admin.cs_rota.edit')) {
     show('navSysCsRota'); anySys = true;

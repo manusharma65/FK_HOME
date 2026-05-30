@@ -87,8 +87,8 @@ window.fkModules['profile'] = {
         '#prof-mod .more-menu button.danger{color:var(--red)}' +
         // Attendance calendar
         '#prof-mod .att-cal{background:var(--surface);border:0.5px solid var(--line);border-radius:12px;padding:14px 16px}' +
-        '#prof-mod .att-cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}' +
-        '#prof-mod .att-cal-nav{display:flex;align-items:center;gap:10px}' +
+        '#prof-mod .att-cal-head{display:flex;align-items:center;justify-content:center;margin-bottom:14px}' +
+        '#prof-mod .att-cal-nav{display:inline-flex;align-items:center;gap:8px}' +
         '#prof-mod .att-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}' +
         '#prof-mod .att-cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;font-size:11px;color:var(--muted);margin-bottom:6px;text-align:center}' +
         '#prof-mod .att-day{aspect-ratio:1;border-radius:6px;padding:4px;font-size:11px;position:relative;display:flex;align-items:flex-start;justify-content:flex-end}' +
