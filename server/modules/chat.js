@@ -119,16 +119,22 @@ router.get('/channels/:id/messages', async (req, res) => {
     if (before) {
       sql = `SELECT m.id, m.body, m.created_at, m.edited_at, m.reply_to_id,
                     u.id AS sender_id, u.display_name AS sender_name, u.full_name AS sender_full_name,
-                    u.initials AS sender_initials, u.avatar_colour AS sender_avatar_colour
+                    u.initials AS sender_initials, u.avatar_colour AS sender_avatar_colour,
+                    rm.body AS reply_body, ru.display_name AS reply_sender_name
              FROM chat_messages m JOIN users u ON u.id = m.sender_user_id
+             LEFT JOIN chat_messages rm ON rm.id = m.reply_to_id
+             LEFT JOIN users ru ON ru.id = rm.sender_user_id
              WHERE m.channel_id = $1 AND m.deleted_at IS NULL AND m.id < $2
              ORDER BY m.id DESC LIMIT $3`;
       params = [id, before, limit];
     } else {
       sql = `SELECT m.id, m.body, m.created_at, m.edited_at, m.reply_to_id,
                     u.id AS sender_id, u.display_name AS sender_name, u.full_name AS sender_full_name,
-                    u.initials AS sender_initials, u.avatar_colour AS sender_avatar_colour
+                    u.initials AS sender_initials, u.avatar_colour AS sender_avatar_colour,
+                    rm.body AS reply_body, ru.display_name AS reply_sender_name
              FROM chat_messages m JOIN users u ON u.id = m.sender_user_id
+             LEFT JOIN chat_messages rm ON rm.id = m.reply_to_id
+             LEFT JOIN users ru ON ru.id = rm.sender_user_id
              WHERE m.channel_id = $1 AND m.deleted_at IS NULL
              ORDER BY m.id DESC LIMIT $2`;
       params = [id, limit];
@@ -471,6 +477,75 @@ router.post('/channels/:id/archive', async (req, res) => {
   } catch (err) {
     console.error('[chat/archive] error:', err);
     res.status(500).json({ error: 'Failed to archive' });
+  }
+});
+
+// ---- DELETE GROUP (HR + owner only) — hard delete + messages ----
+// Gated on profile.view.any (the codebase's "HR + owner" signal). Archive is
+// available to any member; permanent delete is restricted because deleting a
+// group destroys its message history (Bobby's requirement: stop people
+// deleting groups to hide what was said).
+router.post('/channels/:id/delete', async (req, res) => {
+  if (!(req.user.can('profile.view.any') || req.user.can('*'))) {
+    return res.status(403).json({ error: 'Only HR or the owner can delete a group' });
+  }
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const ch = await db.query(`SELECT id, name, type FROM chat_channels WHERE id = $1`, [id]);
+    if (ch.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (ch.rows[0].type !== 'group') return res.status(400).json({ error: 'Only custom groups can be deleted' });
+
+    // Hard delete: messages, reads, members, then the channel itself.
+    await db.query(`DELETE FROM chat_messages WHERE channel_id = $1`, [id]);
+    await db.query(`DELETE FROM chat_reads WHERE channel_id = $1`, [id]);
+    await db.query(`DELETE FROM chat_channel_members WHERE channel_id = $1`, [id]);
+    await db.query(`DELETE FROM chat_channels WHERE id = $1`, [id]);
+
+    await logAudit({ req, module: 'chat', action: 'group.deleted', target_type: 'chat_channel', target_id: id, before: { name: ch.rows[0].name } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[chat/delete] error:', err);
+    res.status(500).json({ error: 'Failed to delete group' });
+  }
+});
+
+// ---- EDIT OWN MESSAGE ----
+router.post('/messages/:id/edit', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { body } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  if (!body || typeof body !== 'string' || body.trim().length === 0) return res.status(400).json({ error: 'Body required' });
+  if (body.length > 5000) return res.status(400).json({ error: 'Message too long (5000 char max)' });
+  try {
+    const m = await db.query(`SELECT id, sender_user_id, deleted_at FROM chat_messages WHERE id = $1`, [id]);
+    if (m.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (m.rows[0].sender_user_id !== req.user.id) return res.status(403).json({ error: 'You can only edit your own messages' });
+    if (m.rows[0].deleted_at) return res.status(400).json({ error: 'Message was deleted' });
+    const r = await db.query(
+      `UPDATE chat_messages SET body = $1, edited_at = NOW() WHERE id = $2 RETURNING *`,
+      [body.trim(), id]
+    );
+    res.json({ ok: true, message: r.rows[0] });
+  } catch (err) {
+    console.error('[chat/edit] error:', err);
+    res.status(500).json({ error: 'Failed to edit' });
+  }
+});
+
+// ---- UNSEND (RECALL) OWN MESSAGE — soft delete ----
+router.post('/messages/:id/unsend', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const m = await db.query(`SELECT id, sender_user_id FROM chat_messages WHERE id = $1`, [id]);
+    if (m.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (m.rows[0].sender_user_id !== req.user.id) return res.status(403).json({ error: 'You can only unsend your own messages' });
+    await db.query(`UPDATE chat_messages SET deleted_at = NOW() WHERE id = $1`, [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[chat/unsend] error:', err);
+    res.status(500).json({ error: 'Failed to unsend' });
   }
 });
 

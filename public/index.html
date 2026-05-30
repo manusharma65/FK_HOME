@@ -132,11 +132,11 @@
   }
   .nav-section.collapsible.collapsed::after { transform: rotate(-90deg); }
   .nav-item {
-    padding: 8px 10px; display: flex; align-items: center; gap: 10px;
-    margin-bottom: 2px; cursor: pointer; border-radius: var(--r-sm);
-    color: #B4B2A9; font-size: 15px; transition: background 0.1s;
+    padding: 11px 12px; display: flex; align-items: center; gap: 12px;
+    margin-bottom: 3px; cursor: pointer; border-radius: var(--r-sm);
+    color: #E4E2DA; font-size: 16px; font-weight: 500; transition: background 0.1s;
   }
-  .nav-item i { font-size: 15px; color: #888780; }
+  .nav-item i { font-size: 19px; color: #C9C7BE; }
   .nav-item:hover { background: var(--nav-elev); color: #FAF7F2; }
   .nav-item:hover i { color: #FAF7F2; }
   .nav-item.on {
@@ -1872,15 +1872,42 @@ function dismissBirthday() {
 }
 
 // r0.14 - capture a single geolocation stamp for WFH.
+// r0.20.1 - distinguishes error codes + checks permission state; location MANDATORY.
 function captureLocation() {
   return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) { reject(new Error('no-geo')); return; }
+    if (!navigator.geolocation) { reject({ kind: 'unsupported' }); return; }
     navigator.geolocation.getCurrentPosition(
       pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
-      err => reject(err),
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      err => {
+        // err.code: 1=PERMISSION_DENIED 2=POSITION_UNAVAILABLE 3=TIMEOUT
+        let kind = 'denied';
+        if (err && err.code === 2) kind = 'unavailable';
+        else if (err && err.code === 3) kind = 'timeout';
+        reject({ kind: kind });
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   });
+}
+
+// Read the geolocation permission without triggering a prompt.
+async function geoPermissionState() {
+  try {
+    if (!navigator.permissions || !navigator.permissions.query) return 'unknown';
+    const st = await navigator.permissions.query({ name: 'geolocation' });
+    return st.state; // granted | denied | prompt
+  } catch (e) { return 'unknown'; }
+}
+
+function wfhBlockedMessage() {
+  const ua = navigator.userAgent;
+  let steps;
+  if (/Safari/.test(ua) && !/Chrome/.test(ua)) {
+    steps = 'Safari -> Settings -> Websites -> Location -> set this site to "Allow", then reload and try again.';
+  } else {
+    steps = 'Click the location/padlock icon at the left of the address bar -> set Location to "Allow" -> reload the page -> try again.';
+  }
+  return 'Working from home needs your location, and it is currently BLOCKED for this site.\n\n' + steps;
 }
 
 async function setStatus(s) {
@@ -1895,14 +1922,21 @@ async function setStatus(s) {
     return;
   }
 
-  // r0.14 - WFH must include a location, or it won't activate.
+  // r0.20.1 - WFH requires a location (mandatory). Check permission first so we
+  // can guide the user to re-enable instead of dead-ending silently.
   let body = { status: s };
   if (s === 'wfh') {
+    const perm = await geoPermissionState();
+    if (perm === 'denied') { alert(wfhBlockedMessage()); return; }
     let loc;
     try {
       loc = await captureLocation();
-    } catch (err) {
-      alert('Working from home needs your location. Please allow location access and try again - WFH was not set.');
+    } catch (e) {
+      const kind = (e && e.kind) || 'denied';
+      if (kind === 'denied') alert(wfhBlockedMessage());
+      else if (kind === 'timeout') alert('Could not get a location fix in time. Move somewhere with better signal (near a window) and try again - WFH was not set.');
+      else if (kind === 'unavailable') alert('Your device could not provide a location (location services may be off). Turn it on and try again - WFH was not set.');
+      else alert('This device does not support location. WFH needs a location, so it was not set.');
       return;
     }
     body.wfh_lat = loc.lat;
