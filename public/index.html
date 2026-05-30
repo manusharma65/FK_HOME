@@ -646,11 +646,11 @@
       </div>
 
       <p class="nav-section collapsible" id="navSectionHR" style="margin-top:22px;display:none">HR</p>
-      <div class="nav-item" id="navHrPeople" style="display:none" onclick="location.href='/admin.html#users'">
+      <div class="nav-item" id="navHrPeople" data-route="#hr/users" style="display:none" onclick="location.hash='#hr/users'">
         <i class="ti ti-users"></i>
         <span>People</span>
       </div>
-      <div class="nav-item" id="navHrEmployment" style="display:none" onclick="location.href='/admin.html#employment'">
+      <div class="nav-item" id="navHrEmployment" data-route="#hr/employment" style="display:none" onclick="location.hash='#hr/employment'">
         <i class="ti ti-briefcase"></i>
         <span>Employment</span>
       </div>
@@ -1216,6 +1216,8 @@
 <script src="/modules/audit.js"></script>
 <script src="/modules/backups.js"></script>
 <script src="/modules/settings.js"></script>
+<script src="/modules/users.js"></script>
+<script src="/modules/employment.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
