@@ -1796,6 +1796,9 @@ function renderFindResults() {
           '<div style="font-size:14px;color:var(--muted)">' + role + '</div>' +
         '</div>' +
         '<i class="ti ti-user" style="font-size:16px;color:var(--soft);cursor:pointer;padding:6px" title="View profile" onclick="findOpenProfile(' + p.id + ')"></i>' +
+        ((p.status === 'wfh' && p.wfh_lat != null && p.wfh_lng != null)
+          ? '<i class="ti ti-map-pin" style="font-size:16px;color:var(--green,#1D9E75);cursor:pointer;padding:6px" title="WFH location — view on map" onclick="event.stopPropagation();window.open(\'https://www.google.com/maps?q=' + p.wfh_lat + ',' + p.wfh_lng + '\',\'_blank\')"></i>'
+          : '') +
         '<i class="ti ti-message-2" style="font-size:16px;color:var(--soft);cursor:pointer;padding:6px" title="Message" onclick="findOpenDM(' + p.id + ')"></i>' +
       '</div>'
     );
@@ -1885,29 +1888,20 @@ function captureLocation() {
         else if (err && err.code === 3) kind = 'timeout';
         reject({ kind: kind });
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      { enableHighAccuracy: false, timeout: 20000, maximumAge: 600000 }
     );
   });
-}
-
-// Read the geolocation permission without triggering a prompt.
-async function geoPermissionState() {
-  try {
-    if (!navigator.permissions || !navigator.permissions.query) return 'unknown';
-    const st = await navigator.permissions.query({ name: 'geolocation' });
-    return st.state; // granted | denied | prompt
-  } catch (e) { return 'unknown'; }
 }
 
 function wfhBlockedMessage() {
   const ua = navigator.userAgent;
   let steps;
   if (/Safari/.test(ua) && !/Chrome/.test(ua)) {
-    steps = 'Safari -> Settings -> Websites -> Location -> set this site to "Allow", then reload and try again.';
+    steps = '1) Safari -> Settings -> Websites -> Location -> set this site to "Allow".\n2) On a Mac: System Settings -> Privacy & Security -> Location Services is ON and Safari is ticked.\n3) Reload the page and try again.';
   } else {
-    steps = 'Click the location/padlock icon at the left of the address bar -> set Location to "Allow" -> reload the page -> try again.';
+    steps = '1) Click the location/padlock icon at the left of the address bar -> set Location to "Allow".\n2) On a Mac: System Settings -> Privacy & Security -> Location Services is ON and Google Chrome is ticked.\n3) Reload the page and try again.';
   }
-  return 'Working from home needs your location, and it is currently BLOCKED for this site.\n\n' + steps;
+  return 'Working from home needs your location, and the browser could not get it.\n\n' + steps;
 }
 
 async function setStatus(s) {
@@ -1922,20 +1916,20 @@ async function setStatus(s) {
     return;
   }
 
-  // r0.20.1 - WFH requires a location (mandatory). Check permission first so we
-  // can guide the user to re-enable instead of dead-ending silently.
+  // r0.20.1 - WFH requires a location (mandatory). We ALWAYS attempt to read it
+  // and react to the real result — the Permissions API can be stale/wrong, so we
+  // never pre-judge and refuse. (r0.20.2: dropped the geoPermissionState pre-check
+  // that was short-circuiting valid attempts; low-accuracy + cached fix for desktop.)
   let body = { status: s };
   if (s === 'wfh') {
-    const perm = await geoPermissionState();
-    if (perm === 'denied') { alert(wfhBlockedMessage()); return; }
     let loc;
     try {
       loc = await captureLocation();
     } catch (e) {
       const kind = (e && e.kind) || 'denied';
       if (kind === 'denied') alert(wfhBlockedMessage());
-      else if (kind === 'timeout') alert('Could not get a location fix in time. Move somewhere with better signal (near a window) and try again - WFH was not set.');
-      else if (kind === 'unavailable') alert('Your device could not provide a location (location services may be off). Turn it on and try again - WFH was not set.');
+      else if (kind === 'timeout') alert('Could not get a location fix in time. Check you have a network connection and try again - WFH was not set.');
+      else if (kind === 'unavailable') alert('Your device could not provide a location. On a Mac, check System Settings -> Privacy & Security -> Location Services is ON and Google Chrome is ticked, then try again - WFH was not set.');
       else alert('This device does not support location. WFH needs a location, so it was not set.');
       return;
     }

@@ -88,6 +88,8 @@ window.fkModules['chat'] = {
         '<div class="chat-layout">' +
           '<aside class="channels-pane" id="chChannelsPane">' +
             '<div class="channels-head"><h2>Channels</h2><button class="new-btn" id="chNew"><i class="ti ti-plus"></i> New</button></div>' +
+            '<div style="padding:8px 12px;border-bottom:0.5px solid var(--line)"><input type="text" id="chSearch" placeholder="Search messages…" style="width:100%;padding:7px 10px;border:0.5px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--ink);outline:none" /></div>' +
+            '<div id="chSearchResults" style="display:none;overflow-y:auto;flex:1"></div>' +
             '<div id="chChannelsList" class="channels-list"><div class="msg-empty" style="padding:24px 16px">Loading…</div></div>' +
           '</aside>' +
           '<main class="messages-pane hide-mobile" id="chMessagesPane">' +
@@ -155,6 +157,7 @@ window.fkModules['chat'] = {
             '<div style="display:flex;gap:8px;margin-bottom:14px">' +
               '<button class="btn" id="chMgRename">Rename</button>' +
               '<button class="btn" id="chMgArchive">Archive</button>' +
+              '<button class="btn" id="chMgLeave">Leave group</button>' +
               '<button class="btn btn-danger" id="chMgDelete" style="display:none">Delete group</button>' +
             '</div>' +
             '<div style="font-size:13px;color:var(--muted);margin-bottom:6px">In this group</div>' +
@@ -477,6 +480,14 @@ window.fkModules['chat'] = {
       } catch (e) { $('chManageErr').textContent = 'Network error'; $('chManageErr').classList.add('on'); }
     });
     $('chManageClose').addEventListener('click', () => $('chManageModal').classList.remove('on'));
+    $('chMgLeave').addEventListener('click', async () => {
+      if (!confirm('Leave "' + (manageGroup.name || 'this group') + '"? You\'ll stop receiving its messages.')) return;
+      try {
+        const r = await fetch('/api/chat/channels/' + manageGroup.id + '/leave', { method: 'POST', credentials: 'include' });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        $('chManageModal').classList.remove('on'); resetToEmpty(); await loadChannels();
+      } catch (e) { alert('Network error'); }
+    });
     $('chMgRename').addEventListener('click', async () => {
       const name = prompt('Rename group:', manageGroup.name || ''); if (name == null) return;
       const t = name.trim(); if (!t) return;
@@ -514,6 +525,37 @@ window.fkModules['chat'] = {
 
     // ---- channel open ----
     $('chChannelsList').addEventListener('click', (e) => { const row = e.target.closest('[data-open]'); if (row) openChannel(parseInt(row.getAttribute('data-open'), 10)); });
+
+    // ---- message search ----
+    let searchTimer = null;
+    $('chSearch').addEventListener('input', (e) => {
+      const q = e.target.value.trim();
+      clearTimeout(searchTimer);
+      if (q.length < 2) { $('chSearchResults').style.display = 'none'; $('chChannelsList').style.display = ''; return; }
+      searchTimer = setTimeout(() => runSearch(q), 250);
+    });
+    async function runSearch(q) {
+      const panel = $('chSearchResults');
+      panel.style.display = ''; $('chChannelsList').style.display = 'none';
+      panel.innerHTML = '<div class="msg-empty" style="padding:18px 16px">Searching…</div>';
+      try {
+        const r = await fetch('/api/chat/search?q=' + encodeURIComponent(q), { credentials: 'include' });
+        const d = await r.json();
+        const rows = d.results || [];
+        if (!rows.length) { panel.innerHTML = '<div class="msg-empty" style="padding:18px 16px">No messages found.</div>'; return; }
+        panel.innerHTML = rows.map(m =>
+          '<div class="ch-row" data-search-open="' + m.channel_id + '" style="flex-direction:column;align-items:flex-start;gap:2px">' +
+          '<div style="font-size:12px;color:var(--soft)">' + escapeHtml(m.channel_label) + ' · ' + escapeHtml(m.sender_name) + '</div>' +
+          '<div style="font-size:14px;color:var(--ink)">' + escapeHtml(m.body.slice(0, 80)) + '</div></div>'
+        ).join('');
+      } catch (e) { panel.innerHTML = '<div class="msg-empty" style="padding:18px 16px">Search failed.</div>'; }
+    }
+    $('chSearchResults').addEventListener('click', (e) => {
+      const row = e.target.closest('[data-search-open]');
+      if (!row) return;
+      $('chSearch').value = ''; $('chSearchResults').style.display = 'none'; $('chChannelsList').style.display = '';
+      openChannel(parseInt(row.getAttribute('data-search-open'), 10));
+    });
 
     function startPolling() {
       pollTimer = setInterval(() => { if (document.hidden) return; if (currentChannel) loadMessages(currentChannel); loadChannels(); }, 5000);

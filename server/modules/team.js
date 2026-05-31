@@ -24,6 +24,7 @@ router.get('/whos-on', async (req, res) => {
       query = `
         SELECT u.id, u.full_name, u.display_name, u.initials, u.avatar_colour,
                s.status, s.status_note, s.status_until, s.last_active_at,
+               s.wfh_lat, s.wfh_lng, s.wfh_location_at,
                (SELECT json_agg(json_build_object('slug', d.slug, 'name', d.name, 'role', m.role))
                   FROM user_department_memberships m
                   JOIN departments d ON d.id = m.department_id
@@ -42,6 +43,7 @@ router.get('/whos-on', async (req, res) => {
       query = `
         SELECT u.id, u.full_name, u.display_name, u.initials, u.avatar_colour,
                s.status, s.status_note, s.status_until, s.last_active_at,
+               s.wfh_lat, s.wfh_lng, s.wfh_location_at,
                (SELECT json_agg(json_build_object('slug', d.slug, 'name', d.name, 'role', m.role))
                   FROM user_department_memberships m
                   JOIN departments d ON d.id = m.department_id
@@ -72,6 +74,9 @@ router.get('/whos-on', async (req, res) => {
       status: p.status || 'offline',
       status_note: p.status_note,
       status_until: p.status_until,
+      wfh_lat: p.wfh_lat,
+      wfh_lng: p.wfh_lng,
+      wfh_location_at: p.wfh_location_at,
       departments: p.departments || [],
       role_label: pickRoleLabel(p.departments || [], p.group_slugs || []),
     }));

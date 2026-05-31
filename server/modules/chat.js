@@ -120,7 +120,8 @@ router.get('/channels/:id/messages', async (req, res) => {
       sql = `SELECT m.id, m.body, m.created_at, m.edited_at, m.reply_to_id,
                     u.id AS sender_id, u.display_name AS sender_name, u.full_name AS sender_full_name,
                     u.initials AS sender_initials, u.avatar_colour AS sender_avatar_colour,
-                    rm.body AS reply_body, ru.display_name AS reply_sender_name
+                    CASE WHEN rm.deleted_at IS NULL THEN rm.body END AS reply_body,
+                    CASE WHEN rm.deleted_at IS NULL THEN ru.display_name END AS reply_sender_name
              FROM chat_messages m JOIN users u ON u.id = m.sender_user_id
              LEFT JOIN chat_messages rm ON rm.id = m.reply_to_id
              LEFT JOIN users ru ON ru.id = rm.sender_user_id
@@ -131,7 +132,8 @@ router.get('/channels/:id/messages', async (req, res) => {
       sql = `SELECT m.id, m.body, m.created_at, m.edited_at, m.reply_to_id,
                     u.id AS sender_id, u.display_name AS sender_name, u.full_name AS sender_full_name,
                     u.initials AS sender_initials, u.avatar_colour AS sender_avatar_colour,
-                    rm.body AS reply_body, ru.display_name AS reply_sender_name
+                    CASE WHEN rm.deleted_at IS NULL THEN rm.body END AS reply_body,
+                    CASE WHEN rm.deleted_at IS NULL THEN ru.display_name END AS reply_sender_name
              FROM chat_messages m JOIN users u ON u.id = m.sender_user_id
              LEFT JOIN chat_messages rm ON rm.id = m.reply_to_id
              LEFT JOIN users ru ON ru.id = rm.sender_user_id
@@ -546,6 +548,70 @@ router.post('/messages/:id/unsend', async (req, res) => {
   } catch (err) {
     console.error('[chat/unsend] error:', err);
     res.status(500).json({ error: 'Failed to unsend' });
+  }
+});
+
+// ---- LEAVE GROUP (member removes themselves) ----
+router.post('/channels/:id/leave', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const ch = await db.query(`SELECT type FROM chat_channels WHERE id = $1`, [id]);
+    if (ch.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (ch.rows[0].type !== 'group') return res.status(400).json({ error: 'You can only leave custom groups' });
+    await db.query(`DELETE FROM chat_channel_members WHERE channel_id = $1 AND user_id = $2`, [id, req.user.id]);
+    await logAudit({ req, module: 'chat', action: 'group.left', target_type: 'chat_channel', target_id: id });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[chat/leave] error:', err);
+    res.status(500).json({ error: 'Failed to leave group' });
+  }
+});
+
+// ---- SEARCH MESSAGES across the user's channels ----
+//   GET /api/chat/search?q=...   → up to 50 matches with channel + sender context
+router.get('/search', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.json({ results: [] });
+  try {
+    const r = await db.query(
+      `SELECT m.id, m.body, m.created_at, m.channel_id,
+              c.name AS channel_name, c.type AS channel_type,
+              u.display_name AS sender_name, u.full_name AS sender_full_name
+         FROM chat_messages m
+         JOIN chat_channels c ON c.id = m.channel_id
+         JOIN chat_channel_members mem ON mem.channel_id = c.id AND mem.user_id = $1
+         JOIN users u ON u.id = m.sender_user_id
+        WHERE m.deleted_at IS NULL
+          AND c.is_archived = FALSE
+          AND m.body ILIKE '%' || $2 || '%'
+        ORDER BY m.id DESC
+        LIMIT 50`,
+      [req.user.id, q]
+    );
+    // For DM channels, resolve the other person's name as the channel label.
+    const results = [];
+    for (const m of r.rows) {
+      let label = m.channel_name;
+      if (m.channel_type === 'dm') {
+        const o = await db.query(
+          `SELECT u.display_name, u.full_name FROM chat_channel_members ccm
+             JOIN users u ON u.id = ccm.user_id
+            WHERE ccm.channel_id = $1 AND ccm.user_id <> $2 LIMIT 1`,
+          [m.channel_id, req.user.id]
+        );
+        if (o.rows[0]) label = o.rows[0].display_name || o.rows[0].full_name;
+      }
+      results.push({
+        id: m.id, body: m.body, created_at: m.created_at,
+        channel_id: m.channel_id, channel_label: label || 'Channel',
+        sender_name: m.sender_name || m.sender_full_name,
+      });
+    }
+    res.json({ results });
+  } catch (err) {
+    console.error('[chat/search] error:', err);
+    res.status(500).json({ error: 'Search failed' });
   }
 });
 
