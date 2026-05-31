@@ -28,6 +28,23 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS moved_at       TIMESTAMPTZ;   -- mult
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS movement_note  TEXT;          -- "what moved today" (feeds daily report later)
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS meta           JSONB;         -- per-type fields (candidate salary/notice/CV-ref, campaign_id, etc.)
 
+-- ---------- Assignment / request model (Ship 2a) ----------
+-- A task is normally personal (assignee_user_id = the doer). Three ways a task
+-- reaches someone else, decided by the relationship between creator + target:
+--   * assignment  — manager/owner → someone they manage / same dept. Lands direct.
+--   * handoff     — my own task → a teammate. Lands direct.
+--   * request     — anyone → someone in ANOTHER department. Needs accept/decline.
+-- The doer (whoever completes it) is who gets scored — so assignee_user_id always
+-- points at the current doer. assigned_by_user_id records who put it there.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assigned_by_user_id INTEGER REFERENCES users(id);  -- who assigned/requested it (null = self-created)
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS request_status      TEXT
+  CHECK (request_status IS NULL OR request_status IN ('awaiting','accepted','declined'));      -- only set on cross-dept requests
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requester_user_id   INTEGER REFERENCES users(id);  -- who to notify + who it bounces back to on decline
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS decline_reason      TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reassign_history    JSONB;                          -- append-only log of handoffs/assigns for scoring transparency
+
+CREATE INDEX IF NOT EXISTS idx_tasks_request ON tasks(request_status) WHERE request_status IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_kind_status ON tasks(kind, status) WHERE status NOT IN ('done','cancelled');
 CREATE INDEX IF NOT EXISTS idx_tasks_dept ON tasks(department_id) WHERE department_id IS NOT NULL;

@@ -127,15 +127,6 @@ const TEMPLATES = {
     related_type: 'hr_chronic_idle_flag',
   },
 
-  // r0.20.2 — WFH set with location (notify owner + HR so they can see where)
-  'status.wfh_set': {
-    title: c => c.name + ' set Working from home',
-    body:  c => c.hasLocation ? 'Location captured \u00b7 view on their status' : 'No location captured',
-    recipients: c => c.userIds || [],
-    action_url: c => '/',
-    related_type: 'status_wfh',
-  },
-
   // System
   'system.welcome': {
     title: c => 'Welcome to FK Home',
@@ -243,6 +234,36 @@ const TEMPLATES = {
     recipients: c => c.hrUserIds || [],
     action_url: c => '/profile.html?id=' + c.targetUserId + '#onboarding',
     related_type: 'profile_note',
+  },
+
+  // r0.22 (Ship 2a) — task assignment + cross-department requests
+  'task.assigned': {
+    title: c => 'New task assigned to you',
+    body:  c => c.taskTitle,
+    recipients: c => [c.targetUserId],
+    action_url: c => '/#my-work',
+    related_type: 'task',
+  },
+  'request.received': {
+    title: c => 'You have a task request',
+    body:  c => c.taskTitle + ' \u2014 accept or decline in My Work',
+    recipients: c => [c.targetUserId],
+    action_url: c => '/#my-work',
+    related_type: 'task',
+  },
+  'request.accepted': {
+    title: c => 'Your request was accepted',
+    body:  c => c.taskTitle,
+    recipients: c => [c.targetUserId],
+    action_url: c => '/#my-work',
+    related_type: 'task',
+  },
+  'request.declined': {
+    title: c => 'Your request was declined',
+    body:  c => c.taskTitle + (c.reason ? ' \u2014 ' + c.reason : '') + ' \u2014 it\u2019s back on your plate',
+    recipients: c => [c.targetUserId],
+    action_url: c => '/#my-work',
+    related_type: 'task',
   },
 };
 
