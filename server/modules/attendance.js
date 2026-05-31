@@ -955,9 +955,12 @@ router.get('/hr/today', requirePermission('hr.dashboard.view'), async (req, res)
     const today = nowInLondon().date;
     const r = await db.query(
       `SELECT a.user_id, u.full_name, a.status, a.first_login, a.late_minutes,
-              d.slug AS dept_slug, d.name AS dept_name
+              d.slug AS dept_slug, d.name AS dept_name,
+              CASE WHEN s.status = 'wfh' THEN s.wfh_lat END AS wfh_lat,
+              CASE WHEN s.status = 'wfh' THEN s.wfh_lng END AS wfh_lng
        FROM attendance_day a
        JOIN users u ON u.id = a.user_id
+       LEFT JOIN user_status s ON s.user_id = a.user_id
        LEFT JOIN LATERAL (
          SELECT d2.slug, d2.name FROM user_department_memberships m
          JOIN departments d2 ON d2.id = m.department_id
@@ -987,9 +990,12 @@ router.get('/dept/today', requirePermission('attendance.view.dept'), async (req,
     }
     const r = await db.query(
       `SELECT a.user_id, u.full_name, a.status, a.first_login, a.late_minutes,
-              d.slug AS dept_slug, d.name AS dept_name
+              d.slug AS dept_slug, d.name AS dept_name,
+              CASE WHEN s.status = 'wfh' THEN s.wfh_lat END AS wfh_lat,
+              CASE WHEN s.status = 'wfh' THEN s.wfh_lng END AS wfh_lng
        FROM attendance_day a
        JOIN users u ON u.id = a.user_id
+       LEFT JOIN user_status s ON s.user_id = a.user_id
        JOIN LATERAL (
          SELECT d2.slug, d2.name FROM user_department_memberships m
          JOIN departments d2 ON d2.id = m.department_id

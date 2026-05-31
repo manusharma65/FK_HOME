@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>FK Home</title>
+<!-- FK Home r0.21 (HR-1.5 fix): anniversary leave model consistency + WFH pin in Company-today + in-shell profile link -->
+
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
 <style>
   :root {
@@ -1838,7 +1840,7 @@ function findOpenDM(userId) {
 }
 function findOpenProfile(userId) {
   closeModal('findModal');
-  location.href = '/profile.html?id=' + userId;
+  location.hash = '#profile/' + userId;
 }
 function escapeAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;'); }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -2704,9 +2706,12 @@ function renderPeopleTable() {
     .map(r => {
       const tm = r.first_login ? formatTime(r.first_login) : '—';
       const cls = statusPillClass(r.status);
-      const clickable = r.user_id ? ' onclick="location.href=\'/profile.html?id=' + r.user_id + '\'" style="cursor:pointer"' : '';
+      const clickable = r.user_id ? ' onclick="location.hash=\'#profile/' + r.user_id + '\'" style="cursor:pointer"' : '';
+      const pin = (r.wfh_lat != null && r.wfh_lng != null)
+        ? ' <i class="ti ti-map-pin" style="font-size:14px;color:var(--green,#1D9E75);cursor:pointer;vertical-align:middle" title="WFH location — view on map" onclick="event.stopPropagation();window.open(\'https://www.google.com/maps?q=' + r.wfh_lat + ',' + r.wfh_lng + '\',\'_blank\')"></i>'
+        : '';
       return '<div class="prow"' + clickable + '>' +
-        '<div class="nm">' + escapeHtml(r.full_name) + '</div>' +
+        '<div class="nm">' + escapeHtml(r.full_name) + pin + '</div>' +
         '<div class="dt">' + escapeHtml(r.dept_name || '—') + '</div>' +
         '<div class="tm">' + tm + '</div>' +
         '<div><span class="pill-status ' + cls + '">' + statusLabel(r.status) + '</span></div>' +

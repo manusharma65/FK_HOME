@@ -38,24 +38,33 @@ function formatDays(n) {
   return Number.isInteger(num) ? String(num) : num.toFixed(1);
 }
 
-// Helper — recompute leave balance after a request changes status
-async function recomputeBalance(userId, year) {
+// Helper — recompute leave balance after a request changes status.
+// r0.21 (HR-1.5 fix) — anniversary model: update the CURRENT leave-year row
+// (keyed by leave_year_start) and count taken/pending only WITHIN that year
+// (since the last hire-anniversary), not the calendar year.
+async function recomputeBalance(userId) {
+  const today = leaveEngine.nowLondonDate ? leaveEngine.nowLondonDate() : new Date().toISOString().slice(0, 10);
+  const u = await db.query(`SELECT hire_date FROM users WHERE id = $1`, [userId]);
+  const hire = u.rows[0] && u.rows[0].hire_date ? String(u.rows[0].hire_date).slice(0, 10) : null;
+  if (!hire) return; // no hire_date → engine owns nothing to recompute
+  const anniv = leaveEngine.lastAnniversary(hire, today);
+
   const r = await db.query(
     `SELECT
        COALESCE(SUM(CASE WHEN status='approved' THEN total_days END), 0) AS taken,
        COALESCE(SUM(CASE WHEN status='pending'  THEN total_days END), 0) AS pending
      FROM leave_requests
      WHERE user_id = $1
-       AND EXTRACT(YEAR FROM start_date) = $2
+       AND start_date >= $2
        AND request_type = 'annual'`,
-    [userId, year]
+    [userId, anniv]
   );
   const taken = Number(r.rows[0].taken);
   const pending = Number(r.rows[0].pending);
   await db.query(
     `UPDATE leave_balances SET taken_days = $1, pending_days = $2, updated_at = NOW()
-     WHERE user_id = $3 AND year = $4`,
-    [taken, pending, userId, year]
+     WHERE user_id = $3 AND leave_year_start = $4`,
+    [taken, pending, userId, anniv]
   );
 }
 
@@ -81,18 +90,12 @@ router.post('/request', async (req, res) => {
        RETURNING *`,
       [req.user.id, type, start_date, end_date, totalDays, !!is_half_day, half_day_part || null, reason || null]
     );
-    const year = new Date(start_date).getFullYear();
-    // Ensure balance row exists
-    const policy = await db.query(
-      `SELECT annual_days FROM leave_policies WHERE year = $1 AND policy_name = 'standard'`, [year]
-    );
-    const entitled = policy.rows[0]?.annual_days || 25;
-    await db.query(
-      `INSERT INTO leave_balances (user_id, year, entitled_days) VALUES ($1,$2,$3)
-       ON CONFLICT (user_id, year) DO NOTHING`,
-      [req.user.id, year, entitled]
-    );
-    await recomputeBalance(req.user.id, year);
+    // r0.21 (HR-1.5 fix) — anniversary model. The engine owns balance rows
+    // (keyed by leave_year_start), so we no longer invent a flat-25 calendar
+    // row here. Ensure the current leave-year row exists by asking the engine
+    // to recompute it from accrual, then update taken/pending.
+    await leaveEngine.recomputeBalanceFor(req.user.id, { note: 'Ensure balance row on leave request' });
+    await recomputeBalance(req.user.id);
 
     await logAudit({ req, module: 'leaves', action: 'request.created', target_type: 'leave_request', target_id: r.rows[0].id, after: r.rows[0] });
 
@@ -132,8 +135,7 @@ router.post('/:id/cancel', async (req, res) => {
       `UPDATE leave_requests SET status='cancelled', updated_at=NOW() WHERE id=$1`,
       [id]
     );
-    const year = new Date(lr.start_date).getFullYear();
-    await recomputeBalance(lr.user_id, year);
+    await recomputeBalance(lr.user_id);
 
     await logAudit({ req, module: 'leaves', action: 'request.cancelled', target_type: 'leave_request', target_id: id, before: lr });
     res.json({ ok: true });
@@ -297,7 +299,7 @@ router.post('/:id/decide', async (req, res) => {
     );
 
     const year = new Date(lr.start_date).getFullYear();
-    await recomputeBalance(lr.user_id, year);
+    await recomputeBalance(lr.user_id);
 
     // Log to accrual ledger so the take is visible in audit history.
     if (decision === 'approved') {

@@ -121,47 +121,55 @@ async function recomputeBalanceFor(userId, opts = {}) {
 
   const today = nowLondonDate();
   const joined = String(user.hire_date).slice(0, 10);
-  const totalMonths = monthsBetween(joined, today);
 
-  // Compute total accrued days
+  // r0.21 (HR-1.5 fix) — anniversary model. Only the CURRENT leave year counts
+  // (days expire on each anniversary, no carryover). Accrue months from the most
+  // recent anniversary up to today, with the rate governed by tenure at each
+  // accrual moment. Mirrors runBackfillIfNeeded so both writers agree.
+  const anniv = lastAnniversary(joined, today);
+  const monthsSinceAnniv = monthsBetween(anniv, today);
+  const tenureAtAnniv = monthsBetween(joined, anniv);
   let accrued = 0;
-  for (let m = 1; m <= totalMonths; m++) {
-    accrued += accrualRateForTenure(m);
+  for (let m = 1; m <= monthsSinceAnniv; m++) {
+    accrued += accrualRateForTenure(tenureAtAnniv + m);
   }
   accrued = Math.round(accrued * 100) / 100; // 2dp
+  const totalMonths = tenureAtAnniv + monthsSinceAnniv;
 
   const year = new Date().getFullYear();
 
-  // Reset taken_days to actual approved leaves taken this year (best effort)
+  // Taken / pending counted WITHIN the current leave year (since anniversary),
+  // not the calendar year — anything before the anniversary is in the expired
+  // prior year and must not reduce this year's allowance.
   const taken = await db.query(
     `SELECT COALESCE(SUM(total_days), 0) AS d
        FROM leave_requests
       WHERE user_id = $1
         AND status = 'approved'
-        AND EXTRACT(YEAR FROM start_date) = $2`,
-    [userId, year]
+        AND start_date >= $2`,
+    [userId, anniv]
   );
   const pending = await db.query(
     `SELECT COALESCE(SUM(total_days), 0) AS d
        FROM leave_requests
       WHERE user_id = $1
         AND status = 'pending'
-        AND EXTRACT(YEAR FROM start_date) = $2`,
-    [userId, year]
+        AND start_date >= $2`,
+    [userId, anniv]
   );
 
-  // Upsert leave_balances — preserve adjustment_days
+  // Upsert leave_balances on the anniversary key — preserve adjustment_days.
   await db.query(
     `INSERT INTO leave_balances
-       (user_id, year, entitled_days, carryover_days, taken_days, pending_days, recomputed_at, updated_at)
-     VALUES ($1, $2, $3, 0, $4, $5, NOW(), NOW())
-     ON CONFLICT (user_id, year) DO UPDATE
+       (user_id, year, leave_year_start, entitled_days, carryover_days, taken_days, pending_days, recomputed_at, updated_at)
+     VALUES ($1, $2, $3, $4, 0, $5, $6, NOW(), NOW())
+     ON CONFLICT (user_id, leave_year_start) DO UPDATE
        SET entitled_days = EXCLUDED.entitled_days,
            taken_days    = EXCLUDED.taken_days,
            pending_days  = EXCLUDED.pending_days,
            recomputed_at = NOW(),
            updated_at    = NOW()`,
-    [userId, year, accrued, Number(taken.rows[0].d), Number(pending.rows[0].d)]
+    [userId, year, anniv, accrued, Number(taken.rows[0].d), Number(pending.rows[0].d)]
   );
 
   await db.query(
@@ -216,13 +224,37 @@ async function adjustBalance(userId, delta, note, actorUserId) {
 // --- Compute the displayed balance (with adjustment) -----------------------
 
 async function getBalance(userId) {
-  const year = new Date().getFullYear();
-  const r = await db.query(
-    `SELECT entitled_days, carryover_days, taken_days, pending_days,
-            adjustment_days, adjustment_note, recomputed_at
-       FROM leave_balances WHERE user_id = $1 AND year = $2`,
-    [userId, year]
+  // r0.21 (HR-1.5 fix) — anniversary model. Read the user's CURRENT leave-year
+  // row (the most recent leave_year_start on or before today), NOT the calendar
+  // year. The accrual cron + backfill write rows keyed by leave_year_start, so
+  // reading by calendar year returned the wrong row (or errored after an
+  // anniversary created a second row in the same calendar year).
+  const today = nowLondonDate();
+  const u = await db.query(
+    `SELECT hire_date FROM users WHERE id = $1`, [userId]
   );
+  const hire = u.rows[0] ? toIsoDate(u.rows[0].hire_date) : null;
+  const anniv = hire ? lastAnniversary(hire, today) : null;
+
+  let r;
+  if (anniv) {
+    r = await db.query(
+      `SELECT entitled_days, carryover_days, taken_days, pending_days,
+              adjustment_days, adjustment_note, recomputed_at
+         FROM leave_balances WHERE user_id = $1 AND leave_year_start = $2`,
+      [userId, anniv]
+    );
+  } else {
+    // No hire_date — fall back to the most recent row by leave_year_start so a
+    // misconfigured user still shows something rather than erroring.
+    r = await db.query(
+      `SELECT entitled_days, carryover_days, taken_days, pending_days,
+              adjustment_days, adjustment_note, recomputed_at
+         FROM leave_balances WHERE user_id = $1
+        ORDER BY leave_year_start DESC NULLS LAST LIMIT 1`,
+      [userId]
+    );
+  }
   if (r.rows.length === 0) {
     return {
       annual: 0, carryover: 0, used: 0, pending: 0, adjustment: 0,
@@ -553,6 +585,7 @@ async function recomputeWeekendPayForRange(userId, fromDateStr, toDateStr) {
 // --- Module exports -------------------------------------------------------
 
 module.exports = {
+  nowLondonDate,
   recomputeBalanceFor,
   adjustBalance,
   getBalance,
