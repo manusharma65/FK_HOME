@@ -127,6 +127,15 @@ const TEMPLATES = {
     related_type: 'hr_chronic_idle_flag',
   },
 
+  // r0.20.2 — WFH set with location (notify owner + HR so they can see where)
+  'status.wfh_set': {
+    title: c => c.name + ' set Working from home',
+    body:  c => c.hasLocation ? 'Location captured \u00b7 view on their status' : 'No location captured',
+    recipients: c => c.userIds || [],
+    action_url: c => '/',
+    related_type: 'status_wfh',
+  },
+
   // System
   'system.welcome': {
     title: c => 'Welcome to FK Home',

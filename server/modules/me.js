@@ -9,7 +9,7 @@
 const express = require('express');
 const { db } = require('../db');
 const { requireAuth, logAudit, logShift } = require('../auth');
-const { notifyManagersOf, notifyEvent } = require('../notify');
+const { notifyManagersOf, notifyEvent, getGroupMembers } = require('../notify');
 
 const router = express.Router();
 
@@ -180,6 +180,24 @@ router.post('/status', async (req, res) => {
       [req.user.id, status, status_note || null, status_until || null, lat, lng, acc, locAt]
     );
     await logShift({ user_id: req.user.id, event_type: 'status_change', status_before: before, status_after: status, note: status_note, req });
+
+    // r0.20.2 — when WFH is set, notify owner + HR so they can see where the
+    // person is (location pin shows on their status in My People).
+    if (status === 'wfh') {
+      try {
+        const [owners, hr] = await Promise.all([getGroupMembers('owner'), getGroupMembers('hr-team')]);
+        const recips = [...new Set([...owners, ...hr])].filter(uid => uid !== req.user.id);
+        if (recips.length > 0) {
+          await notifyEvent('status.wfh_set', {
+            userIds: recips,
+            name: req.user.display_name || req.user.full_name,
+            hasLocation: lat != null && lng != null,
+            actorUserId: req.user.id,
+          });
+        }
+      } catch (e) { console.error('[me/status] wfh notify failed:', e.message); }
+    }
+
     res.json({ ok: true, status, status_note, status_until });
   } catch (err) {
     console.error('[me/status] error:', err);
