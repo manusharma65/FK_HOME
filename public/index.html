@@ -119,6 +119,22 @@
   .late-btn i { font-size: 16px; color: var(--amber); }
 
   .nav-section { font-size: 12px; font-weight: 700; color: #B8B5AC; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 6px; padding: 0 10px; }
+  /* r0.20.4 — Option C: icon-chip section headers (colour-coded, scannable). */
+  .nav-section.chip { display: flex; align-items: center; gap: 8px; padding: 5px 8px; margin: 0 0 4px; border-radius: 7px; }
+  .nav-section.chip .sec-ico { width: 24px; height: 24px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+  .nav-section.chip .sec-lbl { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }
+  .nav-section.chip.collapsible { cursor: pointer; user-select: none; justify-content: flex-start; }
+  .nav-section.chip.collapsible:hover { background: rgba(255,255,255,0.05); }
+  .nav-section.chip.collapsible::after { content: '\\203A'; margin-left: auto; transform: rotate(90deg); transition: transform 0.15s; color: #888780; font-size: 16px; }
+  .nav-section.chip.collapsible.collapsed::after { transform: rotate(0deg); }
+  /* section colour themes */
+  .sec-workspace .sec-ico { background: rgba(239,159,39,0.18); color: #FAC775; } .sec-workspace .sec-lbl { color: #FAC775; }
+  .sec-hr .sec-ico { background: rgba(93,202,165,0.18); color: #9FE1CB; } .sec-hr .sec-lbl { color: #9FE1CB; }
+  .sec-day .sec-ico { background: rgba(133,183,235,0.18); color: #B5D4F4; } .sec-day .sec-lbl { color: #B5D4F4; }
+  .sec-system .sec-ico { background: rgba(175,169,236,0.18); color: #CECBF6; } .sec-system .sec-lbl { color: #CECBF6; }
+  .sec-you .sec-ico { background: rgba(240,153,123,0.18); color: #F5C4B3; } .sec-you .sec-lbl { color: #F5C4B3; }
+  /* rows indent slightly under their chip */
+  .nav-section.chip ~ .nav-item { margin-left: 4px; }
   /* r0.15.3 — collapsible sidebar sections (HR + SYSTEM). */
   .nav-section.collapsible {
     cursor: pointer; user-select: none;
@@ -201,6 +217,15 @@
     padding: 0 24px 22px;
     align-items: start;
   }
+  /* r0.20.4 — two-zone masonry home layout */
+  .home-zone { padding: 0 24px; }
+  .zone-label { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; }
+  .zone-label .zt { font-size: 13px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+  .zone-label .zhint { font-size: 12px; color: var(--soft); }
+  .zone-label .zline { flex: 1; height: 0.5px; background: var(--line); }
+  .masonry { column-gap: 14px; columns: 2; }
+  .masonry > .card, .masonry > .idle-notice, .masonry > .late-strip { break-inside: avoid; margin-bottom: 14px; display: inline-block; width: 100%; }
+  @media (max-width: 900px) { .masonry { columns: 1; } }
   .left-col, .right-col { display: contents; }
   .card { min-width: 0; }   /* let grid items shrink below content width */
 
@@ -624,7 +649,7 @@
         <span>Running late?</span>
       </button>
 
-      <p class="nav-section collapsible" id="navSectionWorkspace">WORKSPACE</p>
+      <p class="nav-section chip collapsible sec-workspace" id="navSectionWorkspace"><span class="sec-ico"><i class="ti ti-layout-grid"></i></span><span class="sec-lbl">WORKSPACE</span></p>
       <div class="nav-item on" id="navHome" data-route="#home">
         <i class="ti ti-home"></i>
         <span>My FK Space</span>
@@ -645,7 +670,7 @@
         <span class="soon-badge">soon</span>
       </div>
 
-      <p class="nav-section collapsible" id="navSectionHR" style="margin-top:22px;display:none">HR</p>
+      <p class="nav-section chip collapsible sec-hr" id="navSectionHR" style="margin-top:18px;display:none"><span class="sec-ico"><i class="ti ti-users"></i></span><span class="sec-lbl">HR</span></p>
       <div class="nav-item" id="navHrPeople" data-route="#hr/users" style="display:none" onclick="location.hash='#hr/users'">
         <i class="ti ti-users"></i>
         <span>People</span>
@@ -685,7 +710,7 @@
         <span>Payroll</span>
       </div>
 
-      <p class="nav-section collapsible" id="navSectionDay" style="margin-top:22px">DAY</p>
+      <p class="nav-section chip collapsible sec-day" id="navSectionDay" style="margin-top:18px"><span class="sec-ico"><i class="ti ti-clock"></i></span><span class="sec-lbl">DAY</span></p>
       <div class="nav-item" data-route="#my-growth" onclick="location.hash='#my-growth'">
         <i class="ti ti-trending-up"></i>
         <span>My Growth</span>
@@ -701,7 +726,7 @@
         <span class="count" id="chatUnreadCount" style="display:none">0</span>
       </div>
 
-      <p class="nav-section collapsible" id="navSectionSystem" style="margin-top:22px;display:none">SYSTEM</p>
+      <p class="nav-section chip collapsible sec-system" id="navSectionSystem" style="margin-top:18px;display:none"><span class="sec-ico"><i class="ti ti-settings"></i></span><span class="sec-lbl">SYSTEM</span></p>
       <div class="nav-item" id="navSysHolidays" data-route="#system/holidays" style="display:none" onclick="location.hash='#system/holidays'">
         <i class="ti ti-calendar"></i>
         <span>Holidays</span>
@@ -731,7 +756,7 @@
         <span>Backups</span>
       </div>
 
-      <p class="nav-section collapsible" id="navSectionYou" style="margin-top:22px">YOU</p>
+      <p class="nav-section chip collapsible sec-you" id="navSectionYou" style="margin-top:18px"><span class="sec-ico"><i class="ti ti-user"></i></span><span class="sec-lbl">YOU</span></p>
       <div class="nav-item" id="navYouOnboarding" style="display:none" onclick="goToMyOnboarding()">
         <i class="ti ti-clipboard-check"></i>
         <span>Your onboarding</span>
@@ -818,8 +843,10 @@
         <p class="greet-sub" id="greetSub">—</p>
       </div>
 
-      <div class="grid">
-        <div class="left-col">
+      <!-- ZONE 1: Your day (everyone) -->
+      <div class="home-zone">
+        <div class="zone-label"><span class="zt">Your day</span><span class="zline"></span></div>
+        <div class="masonry">
 
           <!-- My tasks (r0.10) — only shown if there are active tasks -->
           <div class="card" id="tasksCard" style="display:none">
@@ -930,9 +957,7 @@
             </div>
           </div>
 
-        </div>
 
-        <div class="right-col">
 
           <!-- Month/Performance card (placeholder until module data) -->
           <div class="card month-card" id="monthCard" style="display:none">
@@ -988,7 +1013,13 @@
             </div>
           </div>
 
-          <!-- Company/Team today (HR / owner / dept manager) — hidden by default, toggled by perms -->
+        </div>
+      </div>
+      <!-- ZONE 2: Managing (managers only) -->
+      <div class="home-zone" id="manageZone" style="display:none">
+        <div class="zone-label"><span class="zt">Managing</span><span class="zhint">managers only</span><span class="zline"></span></div>
+        <div class="masonry">
+          <!-- Company/Team today (HR / owner / dept manager) -->
           <div class="card att-overview" id="attOverviewCard" style="display:none">
             <div class="card-header">
               <div class="card-title"><i class="ti ti-users"></i> <span id="attOverviewTitle">Company today</span></div>
@@ -1029,8 +1060,6 @@
               <button type="button" onclick="sendTeamChat()" style="background:none;border:none;color:var(--amber);cursor:pointer;padding:0;font-size:15px;font-weight:500">Send</button>
             </form>
           </div>
-
-          <!-- Time off card moved to left column for balance -->
 
         </div>
       </div>
@@ -2578,17 +2607,20 @@ async function loadAttOverview() {
   const canCompany = perms.has('attendance.view.any');
   const canDept = perms.has('attendance.view.dept');
   const card = document.getElementById('attOverviewCard');
+  const zone = document.getElementById('manageZone');
 
   if (canCompany) {
     attOverviewMode = 'company';
-    document.getElementById('attOverviewTitle').textContent = 'Company today';
+    document.getElementById('attOverviewTitle').textContent = 'Who\u2019s in today';
   } else if (canDept) {
     attOverviewMode = 'dept';
-    document.getElementById('attOverviewTitle').textContent = 'My team today';
+    document.getElementById('attOverviewTitle').textContent = 'Who\u2019s in today';
   } else {
     card.style.display = 'none';
+    if (zone) zone.style.display = 'none';
     return;
   }
+  if (zone) zone.style.display = '';
   card.style.display = '';
 
   try {
