@@ -270,9 +270,9 @@ async function generateReviewSchedule(userId, opts) {
     if (reviewerUserId) {
       await db.query(
         `INSERT INTO tasks
-           (kind, related_user_id, related_profile_note_id, assignee_user_id,
+           (kind, source, related_user_id, related_profile_note_id, assignee_user_id,
             reason, title, body, opens_at, due_at, status)
-         VALUES ('review', $1, $2, $3, 'reviewer', $4,
+         VALUES ('review', 'cron', $1, $2, $3, 'reviewer', $4,
                  $5, $6, $7, 'pending')`,
         [userId, noteId, reviewerUserId, title,
          'Open the profile, fill in the review status and notes.',
@@ -282,9 +282,9 @@ async function generateReviewSchedule(userId, opts) {
     if (orchestratorUserId && orchestratorUserId !== reviewerUserId) {
       await db.query(
         `INSERT INTO tasks
-           (kind, related_user_id, related_profile_note_id, assignee_user_id,
+           (kind, source, related_user_id, related_profile_note_id, assignee_user_id,
             reason, title, body, opens_at, due_at, status)
-         VALUES ('review', $1, $2, $3, 'orchestrator', $4,
+         VALUES ('review', 'cron', $1, $2, $3, 'orchestrator', $4,
                  $5, $6, $7, 'pending')`,
         [userId, noteId, orchestratorUserId, title,
          'Make sure this review happens. Arrange with the reviewer.',

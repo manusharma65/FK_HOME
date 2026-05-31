@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>FK Home</title>
 <!-- FK Home r0.21 (HR-1.5 fix): anniversary leave model consistency + WFH pin in Company-today + in-shell profile link -->
+<!-- FK Home r0.22 (Ship 2a): universal task model + My Work view + home card -->
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
 <style>
@@ -717,10 +718,9 @@
         <i class="ti ti-trending-up"></i>
         <span>My Growth</span>
       </div>
-      <div class="nav-item soon" onclick="showSoonToast('My work')">
+      <div class="nav-item" data-route="#my-work" onclick="location.hash='#my-work'">
         <i class="ti ti-checkbox"></i>
         <span>My work</span>
-        <span class="soon-badge">soon</span>
       </div>
       <div class="nav-item" data-route="#chat" onclick="location.hash='#chat'">
         <i class="ti ti-message-2"></i>
@@ -883,14 +883,16 @@
           </div>
 
           <!-- My work (placeholder until Section 4) -->
-          <div class="card">
+          <div class="card" id="myWorkCard" onclick="location.hash='#my-work'" style="cursor:pointer">
             <div class="card-header">
               <div class="card-title"><i class="ti ti-checkbox"></i> My work</div>
-              <div class="card-meta">Coming soon</div>
+              <div class="card-meta" id="myWorkMeta">—</div>
             </div>
-            <div class="empty-state">
-              <div class="icon"><i class="ti ti-clipboard-list"></i></div>
-              <div class="label">Tasks will live here once the Amazon and Logistics modules land.</div>
+            <div id="myWorkCardBody">
+              <div class="empty-state">
+                <div class="icon"><i class="ti ti-clipboard-list"></i></div>
+                <div class="label">Loading your work…</div>
+              </div>
             </div>
           </div>
 
@@ -1074,7 +1076,7 @@
   <!-- ===== MOBILE BOTTOM NAV ===== -->
   <nav class="mobile-bottom-nav" id="mobNav">
     <div class="mob-item on"><i class="ti ti-home"></i><span class="label">Space</span></div>
-    <div class="mob-item" onclick="showSoonToast('My work')"><i class="ti ti-checkbox"></i><span class="label">My work</span></div>
+    <div class="mob-item" onclick="location.hash='#my-work'"><i class="ti ti-checkbox"></i><span class="label">My work</span></div>
     <div class="mob-item" onclick="location.hash='#chat'"><i class="ti ti-message-2"></i><span class="label">Team</span></div>
     <div class="mob-item" onclick="goToMyProfile()"><i class="ti ti-user"></i><span class="label">Profile</span></div>
     <div class="mob-item" onclick="openSidebar()"><i class="ti ti-menu-2"></i><span class="label">More</span></div>
@@ -1262,6 +1264,7 @@
 <script src="/modules/attendance.js"></script>
 <script src="/modules/chat.js"></script>
 <script src="/modules/my-growth.js"></script>
+<script src="/modules/my-work.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1591,47 +1594,34 @@ function formatMins(m) {
 // --- TEAM ---
 // ---------- r0.10: My tasks + My onboarding ----------
 async function loadMyTasks() {
+  // r0.22 (Ship 2a) — drives the new "My work" home card from the task summary.
+  // The full list lives in the My Work module (#my-work); this card is a glance.
   try {
-    const r = await fetch('/api/tasks/mine', { credentials: 'include' });
+    const r = await fetch('/api/tasks/summary', { credentials: 'include' });
     if (!r.ok) return;
-    const data = await r.json();
-    const tasks = data.tasks || [];
-    const card = document.getElementById('tasksCard');
-    const meta = document.getElementById('tasksMeta');
-    const body = document.getElementById('tasksBody');
-    if (tasks.length === 0) {
-      card.style.display = 'none';
+    const s = await r.json();
+    const meta = document.getElementById('myWorkMeta');
+    const body = document.getElementById('myWorkCardBody');
+    if (!meta || !body) return;
+    const toAction = Number(s.to_action || 0);
+    const inProg = Number(s.in_progress || 0);
+    const overdue = Number(s.overdue || 0);
+    meta.textContent = toAction + ' to action' + (inProg > 0 ? ' \u00b7 ' + inProg + ' in progress' : '');
+    if (toAction === 0 && inProg === 0) {
+      body.innerHTML = '<div class="empty-state"><div class="icon"><i class="ti ti-circle-check"></i></div>' +
+        '<div class="label">Nothing on your plate right now.</div></div>';
       return;
     }
-    card.style.display = '';
-    const overdueCnt = tasks.filter(t => t.status === 'overdue').length;
-    const dueCnt = tasks.filter(t => t.status === 'due').length;
-    meta.textContent =
-      (overdueCnt > 0 ? overdueCnt + ' overdue' : '') +
-      (overdueCnt > 0 && dueCnt > 0 ? ' \u00b7 ' : '') +
-      (dueCnt > 0 ? dueCnt + ' due' : '') +
-      (overdueCnt === 0 && dueCnt === 0 ? tasks.length + ' open' : '');
-    body.innerHTML = tasks.map(t => {
-      const statusStyle =
-        t.status === 'overdue' ? 'background:#FCEBEB;color:#A32D2D' :
-        t.status === 'due' ? 'background:#FAEEDA;color:#854F0B' :
-        'background:rgba(20,22,27,0.06);color:var(--muted)';
-      const dueDate = t.due_at ? new Date(t.due_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
-      const initials = t.related_initials || '?';
-      const colour = t.related_avatar_colour || '#888780';
-      return '<div onclick="location.href=\'/profile.html?id=' + t.related_user_id + '#reviews\'" ' +
-        'style="display:flex;gap:10px;align-items:center;padding:10px;border-radius:8px;cursor:pointer;border:0.5px solid var(--line);margin-bottom:8px">' +
-        '<div style="width:32px;height:32px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;flex-shrink:0">' +
-          escapeHtml(initials) + '</div>' +
-        '<div style="flex:1;min-width:0">' +
-          '<div style="font-size:14px;font-weight:500">' + escapeHtml(t.title) + '</div>' +
-          '<div style="font-size:12px;color:var(--muted)">' + escapeHtml(t.related_display_name || t.related_full_name || '') +
-            (t.reason === 'orchestrator' ? ' \u00b7 you organise' : ' \u00b7 you review') + '</div>' +
-        '</div>' +
-        '<span style="font-size:11px;padding:2px 8px;border-radius:99px;font-weight:500;' + statusStyle + ';white-space:nowrap">' +
-          t.status.toUpperCase() + ' \u00b7 ' + dueDate + '</span>' +
-      '</div>';
-    }).join('');
+    const line = (n, label, colour) => n > 0
+      ? '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:0.5px solid var(--line);border-radius:8px;margin-bottom:8px">' +
+        '<span style="font-size:20px;font-weight:600;color:' + colour + ';min-width:26px">' + n + '</span>' +
+        '<span style="font-size:14px;color:var(--ink)">' + label + '</span></div>'
+      : '';
+    body.innerHTML =
+      line(overdue, 'overdue', '#A32D2D') +
+      line(toAction - overdue > 0 ? toAction - overdue : 0, 'to action', '#854F0B') +
+      line(inProg, 'in progress', '#0F6E56') +
+      '<div style="font-size:13px;color:var(--muted);text-align:center;padding-top:4px">Tap to open My Work \u2192</div>';
   } catch (e) { console.error('[loadMyTasks]', e); }
 }
 
