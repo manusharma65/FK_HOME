@@ -125,7 +125,7 @@
   .nav-section.chip .sec-lbl { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }
   .nav-section.chip.collapsible { cursor: pointer; user-select: none; justify-content: flex-start; }
   .nav-section.chip.collapsible:hover { background: rgba(255,255,255,0.05); }
-  .nav-section.chip.collapsible::after { content: '\\203A'; margin-left: auto; transform: rotate(90deg); transition: transform 0.15s; color: #888780; font-size: 16px; }
+  .nav-section.chip.collapsible::after { content: '›'; margin-left: auto; transform: rotate(90deg); transition: transform 0.15s; color: #888780; font-size: 16px; }
   .nav-section.chip.collapsible.collapsed::after { transform: rotate(0deg); }
   /* section colour themes */
   .sec-workspace .sec-ico { background: rgba(239,159,39,0.18); color: #FAC775; } .sec-workspace .sec-lbl { color: #FAC775; }
@@ -141,12 +141,12 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 4px 10px; margin: 0 0 4px; border-radius: 6px;
   }
-  .nav-section.collapsible:hover { background: rgba(255,255,255,0.05); }
-  .nav-section.collapsible::after {
+  .nav-section.collapsible:not(.chip):hover { background: rgba(255,255,255,0.05); }
+  .nav-section.collapsible:not(.chip)::after {
     content: '▾'; font-size: 11px; transition: transform 0.15s ease;
     color: #5F5E5A;
   }
-  .nav-section.collapsible.collapsed::after { transform: rotate(-90deg); }
+  .nav-section.collapsible:not(.chip).collapsed::after { transform: rotate(-90deg); }
   .nav-item {
     padding: 11px 12px; display: flex; align-items: center; gap: 12px;
     margin-bottom: 3px; cursor: pointer; border-radius: var(--r-sm);
@@ -281,7 +281,7 @@
   .compose-bar span { font-size: 14px; color: #888780; }
 
   /* Who's on */
-  .people-list { display: flex; flex-direction: column; gap: 10px; }
+  .people-list { display: flex; flex-direction: column; gap: 10px; max-height: 340px; overflow-y: auto; padding-right: 4px; }
   .people-list.scrollable { max-height: 360px; overflow-y: auto; padding-right: 4px; }
   #peopleFilter {
     width: 100%; padding: 7px 10px; font-size: 15px;
@@ -843,6 +843,20 @@
         <p class="greet-sub" id="greetSub">—</p>
       </div>
 
+      <!-- Top alerts (full width, above the day) -->
+      <div class="home-zone" style="padding-top:4px">
+        <div class="idle-notice" id="idleNotice">
+          <i class="ti ti-mouse-2"></i>
+          <span class="txt" id="idleNoticeTxt">Your PC has been idle for 10+ minutes.</span>
+        </div>
+        <div class="late-strip" id="lateStrip">
+          <div class="l">
+            <i class="ti ti-clock-exclamation"></i>
+            <span><b>You were <span id="lateMinsTxt">—</span> late today.</b> Submit a reason?</span>
+          </div>
+          <button onclick="openRegulariseModal()">Regularise →</button>
+        </div>
+      </div>
       <!-- ZONE 1: Your day (everyone) -->
       <div class="home-zone">
         <div class="zone-label"><span class="zt">Your day</span><span class="zline"></span></div>
@@ -968,21 +982,6 @@
             <div class="empty-state" style="padding: 8px 4px">
               <div class="label">Monthly performance will show here once the Amazon module is live.</div>
             </div>
-          </div>
-
-          <!-- Idle notice (passive) -->
-          <div class="idle-notice" id="idleNotice">
-            <i class="ti ti-mouse-2"></i>
-            <span class="txt" id="idleNoticeTxt">Your PC has been idle for 10+ minutes.</span>
-          </div>
-
-          <!-- Late strip (only if late_minutes > 0) -->
-          <div class="late-strip" id="lateStrip">
-            <div class="l">
-              <i class="ti ti-clock-exclamation"></i>
-              <span><b>You were <span id="lateMinsTxt">—</span> late today.</b> Submit a reason?</span>
-            </div>
-            <button onclick="openRegulariseModal()">Regularise →</button>
           </div>
 
           <!-- Today card (new — HR-1) -->
