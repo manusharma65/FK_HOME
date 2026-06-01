@@ -58,39 +58,12 @@ const TASK_JOINS = `
   LEFT JOIN users rq ON rq.id = t.requester_user_id`;
 
 // ---------- department helpers ----------
-// Departments a user belongs to (ids).
-async function deptIdsFor(userId) {
-  const r = await db.query(
-    `SELECT department_id FROM user_department_memberships
-      WHERE user_id = $1 AND deleted_at IS NULL`, [userId]);
-  return r.rows.map(x => x.department_id);
-}
-// Departments a user RUNS (manager/lead).
+// Departments a user RUNS (manager/lead) — used by the Team Work view.
 async function deptsManagedBy(userId) {
   const r = await db.query(
     `SELECT department_id FROM user_department_memberships
       WHERE user_id = $1 AND role IN ('manager','lead') AND deleted_at IS NULL`, [userId]);
   return r.rows.map(x => x.department_id);
-}
-// Do the two users share any department?
-async function shareDept(aId, bId) {
-  const a = await deptIdsFor(aId);
-  if (a.length === 0) return false;
-  const r = await db.query(
-    `SELECT 1 FROM user_department_memberships
-      WHERE user_id = $1 AND department_id = ANY($2::int[]) AND deleted_at IS NULL LIMIT 1`,
-    [bId, a]);
-  return r.rows.length > 0;
-}
-// Does `actor` manage a dept that `target` is in?
-async function actorManagesTarget(actorId, targetId) {
-  const managed = await deptsManagedBy(actorId);
-  if (managed.length === 0) return false;
-  const r = await db.query(
-    `SELECT 1 FROM user_department_memberships
-      WHERE user_id = $1 AND department_id = ANY($2::int[]) AND deleted_at IS NULL LIMIT 1`,
-    [targetId, managed]);
-  return r.rows.length > 0;
 }
 
 function groupFor(t) {
@@ -177,13 +150,10 @@ router.get('/summary', async (req, res) => {
 });
 
 // ---------- GET /api/tasks/assignable ----------
-// People this user may put a task onto, split into:
-//   direct  — assignment/handoff lands immediately (self, own dept, depts I run)
-//   request — everyone else (cross-dept) → would become a request
-// Owner sees everyone as "direct".
+// Just the list of active people you can pick (everyone). No permission split —
+// the category dropdown decides assign-vs-request, not who you are.
 router.get('/assignable', async (req, res) => {
   try {
-    const isOwner = req.user.can('*');
     const everyone = await db.query(
       `SELECT u.id, u.display_name, u.full_name,
               (SELECT d.name FROM user_department_memberships m
@@ -193,36 +163,7 @@ router.get('/assignable', async (req, res) => {
          FROM users u
         WHERE u.deleted_at IS NULL AND u.employment_status = 'active' AND u.id <> $1
         ORDER BY u.display_name, u.full_name`, [req.user.id]);
-
-    if (isOwner) {
-      return res.json({ direct: everyone.rows, request: [], self_only: false });
-    }
-
-    const myDepts = await deptIdsFor(req.user.id);
-    const managed = await deptsManagedBy(req.user.id);
-    const directIds = new Set();
-    // people in depts I run = assignment; people in my own dept = handoff target
-    const reachable = (myDepts.length || managed.length)
-      ? await db.query(
-          `SELECT DISTINCT user_id FROM user_department_memberships
-            WHERE deleted_at IS NULL AND department_id = ANY($1::int[])`,
-          [Array.from(new Set([...myDepts, ...managed]))])
-      : { rows: [] };
-    for (const x of reachable.rows) directIds.add(x.user_id);
-
-    const direct = [], request = [];
-    for (const p of everyone.rows) {
-      if (directIds.has(p.id)) direct.push(p); else request.push(p);
-    }
-    // Regular agents (manage nothing) can't originate onto same-dept peers as a
-    // *new* task — but the frontend still needs them for OWN-task handoff, so we
-    // return them under "direct" only if the user manages a dept; else self-only.
-    const managesSomething = managed.length > 0;
-    res.json({
-      direct: managesSomething ? direct : [],
-      request: managesSomething ? request : everyone.rows,
-      self_only: !managesSomething,
-    });
+    res.json({ people: everyone.rows });
   } catch (e) {
     console.error('[tasks/assignable] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
@@ -239,17 +180,14 @@ router.get('/assignable', async (req, res) => {
 // If mode omitted: 'self' when no assignee, else defaults to 'request' (safe).
 router.post('/', async (req, res) => {
   const { title, body, category, assignee_user_id, due_at, meta } = req.body || {};
-  let { mode } = req.body || {};
   if (!title || !String(title).trim()) return res.status(400).json({ error: 'title required' });
   const me = req.user.id;
   const target = assignee_user_id ? parseInt(assignee_user_id, 10) : null;
-
-  if (!mode) mode = (!target || target === me) ? 'self' : 'request';
-  if (!['self','assign','request'].includes(mode)) return res.status(400).json({ error: 'bad mode' });
+  const isRequest = (category === 'request');   // "Request" is just an option in the category dropdown
 
   try {
-    // --- self ---
-    if (mode === 'self' || !target || target === me) {
+    // --- my own task (no person picked, or I picked myself) ---
+    if (!target || target === me) {
       const r = await db.query(
         `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id, due_at, meta, status, opens_at)
          VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$6,'open',NOW()) RETURNING id`,
@@ -260,43 +198,35 @@ router.post('/', async (req, res) => {
       return res.json({ ok:true, id:r.rows[0].id, mode:'self' });
     }
 
-    // --- assign (must be permitted) ---
-    if (mode === 'assign') {
-      const isOwner = req.user.can('*');
-      const manages = await actorManagesTarget(me, target);
-      const sameDept = await shareDept(me, target);
-      const iManageSomething = (await deptsManagedBy(me)).length > 0;
-      const allowed = isOwner || manages || (sameDept && iManageSomething);
-      if (!allowed) {
-        return res.status(403).json({ error: 'You cannot assign directly to this person. Send a request instead.' });
-      }
+    // --- a person is picked + category is "Request" → goes as a request (accept/reject) ---
+    if (isRequest) {
       const r = await db.query(
         `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id,
-                            assigned_by_user_id, due_at, meta, status, opens_at, reassign_history)
-         VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$6,$7,'open',NOW(),$8) RETURNING id`,
-        [String(title).trim(), body || null, category || null, target, me, due_at || null,
-         meta ? JSON.stringify(meta) : null,
-         JSON.stringify([{ at:new Date().toISOString(), by:me, to:target, act:'assigned' }])]);
-      await notifyEvent('task.assigned', { targetUserId: target, taskTitle: String(title).trim(),
+                            assigned_by_user_id, requester_user_id, request_status,
+                            due_at, meta, status, opens_at)
+         VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$5,'awaiting',$6,$7,'open',NOW()) RETURNING id`,
+        [String(title).trim(), body || null, 'request', target, me, due_at || null,
+         meta ? JSON.stringify(meta) : null]);
+      await notifyEvent('request.received', { targetUserId: target, taskTitle: String(title).trim(),
         byUserId: me, related_id: r.rows[0].id });
-      await logAudit({ req, module:'tasks', action:'task.assigned', target_type:'task',
+      await logAudit({ req, module:'tasks', action:'request.sent', target_type:'task',
         target_id:r.rows[0].id, after:{ title, to:target } });
-      return res.json({ ok:true, id:r.rows[0].id, mode:'assigned' });
+      return res.json({ ok:true, id:r.rows[0].id, mode:'request' });
     }
 
-    // --- request (anyone may request anyone) ---
+    // --- a person is picked + a normal category → assign straight to them ---
     const r = await db.query(
       `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id,
-                          assigned_by_user_id, requester_user_id, request_status,
-                          due_at, meta, status, opens_at)
-       VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$5,'awaiting',$6,$7,'open',NOW()) RETURNING id`,
+                          assigned_by_user_id, due_at, meta, status, opens_at, reassign_history)
+       VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$6,$7,'open',NOW(),$8) RETURNING id`,
       [String(title).trim(), body || null, category || null, target, me, due_at || null,
-       meta ? JSON.stringify(meta) : null]);
-    await notifyEvent('request.received', { targetUserId: target, taskTitle: String(title).trim(),
+       meta ? JSON.stringify(meta) : null,
+       JSON.stringify([{ at:new Date().toISOString(), by:me, to:target, act:'assigned' }])]);
+    await notifyEvent('task.assigned', { targetUserId: target, taskTitle: String(title).trim(),
       byUserId: me, related_id: r.rows[0].id });
-    await logAudit({ req, module:'tasks', action:'request.sent', target_type:'task',
+    await logAudit({ req, module:'tasks', action:'task.assigned', target_type:'task',
       target_id:r.rows[0].id, after:{ title, to:target } });
-    return res.json({ ok:true, id:r.rows[0].id, mode:'request' });
+    return res.json({ ok:true, id:r.rows[0].id, mode:'assigned' });
   } catch (e) {
     console.error('[tasks/create] failed:', e.message);
     res.status(500).json({ error: 'Failed to create task' });

@@ -87,12 +87,9 @@ window.fkModules['my-work'] = {
                 '<option value="cover">Helping someone / cover</option>' +
                 '<option value="project">Project / piece of work</option>' +
                 '<option value="other">Other</option>' +
+                '<option value="request">Request</option>' +
               '</select>' +
               '<select id="mwAssignee"><option value="">Myself</option></select>' +
-            '</div>' +
-            '<div class="mw-mode" id="mwMode">' +
-              '<label id="mwModeAssign"><input type="radio" name="mwmode" value="assign"><span><span class="mt">Assign</span><span class="md">Goes straight to them</span></span></label>' +
-              '<label id="mwModeRequest"><input type="radio" name="mwmode" value="request" checked><span><span class="mt">Request</span><span class="md">They accept or decline</span></span></label>' +
             '</div>' +
             '<div class="mw-frow" style="justify-content:flex-end">' +
               '<button id="mwCancel">Cancel</button>' +
@@ -124,7 +121,6 @@ window.fkModules['my-work'] = {
     const ICON_COLOUR = { event:'#0F6E56', recurring:'#854F0B', ad_hoc:'#993C1D',
                           recruitment:'#993C1D', review:'#534AB7', onboarding:'#534AB7', probation:'#534AB7' };
 
-    let directIds = new Set();
     let editingId = null;
 
     function actionsFor(t) {
@@ -200,50 +196,22 @@ window.fkModules['my-work'] = {
         const r = await fetch('/api/tasks/assignable', { credentials:'include' });
         if (!r.ok) return;
         const d = await r.json();
-        directIds = new Set((d.direct||[]).map(p=>p.id));
         const sel = $('mwAssignee');
         let html = '<option value="">Myself</option>';
-        const tag = (p,dir)=>'<option value="'+p.id+'" data-dir="'+dir+'">'+esc(p.display_name||p.full_name)+(p.dept_name?' ('+esc(p.dept_name)+')':'')+'</option>';
-        for (const p of (d.direct||[])) html += tag(p,1);
-        for (const p of (d.request||[])) html += tag(p,0);
+        for (const p of (d.people||[])) {
+          html += '<option value="'+p.id+'">'+esc(p.display_name||p.full_name)+(p.dept_name?' ('+esc(p.dept_name)+')':'')+'</option>';
+        }
         sel.innerHTML = html;
       } catch(e){ console.error('[assignable]',e); }
     }
 
-    function updateMode() {
-      const sel = $('mwAssignee');
-      const val = sel.value;
-      const modeRow = $('mwMode');
+    // Button label reflects what will happen: own task, a request, or assign.
+    function updateSaveLabel() {
       const save = $('mwSave');
-      if (!val) { // self
-        modeRow.classList.remove('on');
-        save.textContent = 'Add task';
-        return;
-      }
-      modeRow.classList.add('on');
-      const canAssign = directIds.has(parseInt(val,10));
-      const assignLabel = $('mwModeAssign');
-      const assignRadio = assignLabel.querySelector('input');
-      const requestRadio = $('mwModeRequest').querySelector('input');
-      if (canAssign) {
-        assignLabel.classList.remove('disabled');
-        assignRadio.disabled = false;
-      } else {
-        assignLabel.classList.remove('sel');
-        assignLabel.classList.add('disabled');
-        assignRadio.disabled = true;
-        assignRadio.checked = false;
-        requestRadio.checked = true;
-      }
-      syncModeSel();
-    }
-    function syncModeSel() {
-      const save = $('mwSave');
-      el.querySelectorAll('#mwMode label').forEach(l=>l.classList.remove('sel'));
-      const checked = el.querySelector('input[name="mwmode"]:checked');
-      if (!checked) { save.textContent='Add task'; return; }
-      checked.closest('label').classList.add('sel');
-      save.textContent = checked.value === 'assign' ? 'Assign task' : 'Send request';
+      const person = $('mwAssignee').value;
+      const cat = $('mwCategory').value;
+      if (!person) { save.textContent = 'Add task'; return; }      // myself
+      save.textContent = (cat === 'request') ? 'Send request' : 'Assign task';
     }
 
     async function loadDone() {
@@ -294,14 +262,13 @@ window.fkModules['my-work'] = {
     function resetForm() {
       editingId = null;
       $('mwTitle').value=''; $('mwCategory').value=''; $('mwAssignee').value='';
-      $('mwMode').classList.remove('on');
       $('mwSave').textContent='Add task';
       $('mwForm').querySelector('h4')?.remove();
     }
     $('mwAddBtn').addEventListener('click', ()=>{ resetForm(); $('mwForm').classList.add('on'); $('mwTitle').focus(); });
     $('mwCancel').addEventListener('click', ()=>{ $('mwForm').classList.remove('on'); resetForm(); });
-    $('mwAssignee').addEventListener('change', updateMode);
-    el.querySelectorAll('input[name="mwmode"]').forEach(radio=>radio.addEventListener('change', syncModeSel));
+    $('mwAssignee').addEventListener('change', updateSaveLabel);
+    $('mwCategory').addEventListener('change', updateSaveLabel);
 
     $('mwSave').addEventListener('click', async ()=>{
       const title=$('mwTitle').value.trim();
@@ -310,19 +277,14 @@ window.fkModules['my-work'] = {
       $('mwSave').disabled=true;
       try {
         if (editingId) {
-          const due=null;
           const r=await fetch('/api/tasks/'+editingId,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',
             body:JSON.stringify({ title, category })});
           if(!r.ok){ alert('Could not save'); } else { $('mwForm').classList.remove('on'); resetForm(); await load(); }
         } else {
           const assignee=$('mwAssignee').value||null;
-          let mode='self';
-          if (assignee) {
-            const checked=el.querySelector('input[name="mwmode"]:checked');
-            mode = checked ? checked.value : 'request';
-          }
+          // Server decides: no person = my own task; category 'request' = request; else assign.
           const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
-            body:JSON.stringify({ title, category, assignee_user_id:assignee, mode })});
+            body:JSON.stringify({ title, category, assignee_user_id:assignee })});
           if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Could not add task'); }
           else { $('mwForm').classList.remove('on'); resetForm(); await load(); }
         }
@@ -347,7 +309,7 @@ window.fkModules['my-work'] = {
         editingId=editBtn.getAttribute('data-edit');
         $('mwTitle').value=row.getAttribute('data-title')||'';
         $('mwCategory').value=row.getAttribute('data-cat')||'';
-        $('mwAssignee').value=''; $('mwMode').classList.remove('on');
+        $('mwAssignee').value='';
         $('mwSave').textContent='Save changes';
         $('mwForm').classList.add('on'); $('mwTitle').focus();
       } else if (cancelBtn) {
@@ -389,7 +351,7 @@ window.fkModules['my-work'] = {
     });
 
     await loadAssignable();
-    updateMode();
+    updateSaveLabel();
     await load();
   }
 };
