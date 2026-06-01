@@ -265,6 +265,13 @@ const TEMPLATES = {
     action_url: c => '/#my-work',
     related_type: 'task',
   },
+  'task.assignment_declined': {
+    title: c => 'A task you assigned was declined',
+    body:  c => c.taskTitle + (c.reason ? ' \u2014 ' + c.reason : '') + ' \u2014 back on your plate',
+    recipients: c => [c.targetUserId],
+    action_url: c => '/#my-work',
+    related_type: 'task',
+  },
 };
 
 // ---------- Raw notify ----------

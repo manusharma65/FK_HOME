@@ -6,6 +6,7 @@
 <title>FK Home</title>
 <!-- FK Home r0.21 (HR-1.5 fix): anniversary leave model consistency + WFH pin in Company-today + in-shell profile link -->
 <!-- FK Home r0.22 (Ship 2a): universal task model + My Work view + home card -->
+<!-- FK Home r0.23: explicit assign/request, edit/cancel/done-history, Team Work view, status-constraint fix -->
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
 <style>
@@ -722,6 +723,10 @@
         <i class="ti ti-checkbox"></i>
         <span>My work</span>
       </div>
+      <div class="nav-item" id="navTeamWork" data-route="#team-work" style="display:none" onclick="location.hash='#team-work'">
+        <i class="ti ti-users-group"></i>
+        <span>Team work</span>
+      </div>
       <div class="nav-item" data-route="#chat" onclick="location.hash='#chat'">
         <i class="ti ti-message-2"></i>
         <span>Team chat</span>
@@ -1265,6 +1270,7 @@
 <script src="/modules/chat.js"></script>
 <script src="/modules/my-growth.js"></script>
 <script src="/modules/my-work.js"></script>
+<script src="/modules/team-work.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1331,6 +1337,13 @@ function render() {
   if (deptSlugs.includes('amazon')) show('navAmazon');
   if (deptSlugs.includes('google')) show('navGoogle');
   if (deptSlugs.includes('logistics')) show('navLogistics');
+
+  // Team work — managers / leads / owner (anyone who can see a team's work)
+  if (can('*') || can('leaves.approve.any') || can('leaves.approve.dept')
+      || can('attendance.view.any') || can('attendance.view.dept')
+      || can('daily_report.review.any') || can('daily_report.review.dept')) {
+    show('navTeamWork');
+  }
 
   // HR section — show items based on permissions
   let anyHR = false;

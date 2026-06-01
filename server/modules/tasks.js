@@ -230,18 +230,26 @@ router.get('/assignable', async (req, res) => {
 });
 
 // ---------- POST /api/tasks ----------
-// Body: { title, body?, category?, assignee_user_id?, due_at?, meta? }
-// If assignee omitted or = self → personal task.
-// Else: auto-detect assignment (direct) vs request (cross-dept) by relationship.
+// Explicit mode (the user chooses), server validates the permission:
+//   Body: { title, body?, category?, assignee_user_id?, mode?, due_at?, meta? }
+//   mode = 'self'    → my own task (assignee ignored)
+//   mode = 'assign'  → direct to assignee_user_id (must be allowed: owner, or I
+//                      manage them, or same dept + I manage something)
+//   mode = 'request' → request to assignee_user_id (anyone may request anyone)
+// If mode omitted: 'self' when no assignee, else defaults to 'request' (safe).
 router.post('/', async (req, res) => {
   const { title, body, category, assignee_user_id, due_at, meta } = req.body || {};
+  let { mode } = req.body || {};
   if (!title || !String(title).trim()) return res.status(400).json({ error: 'title required' });
   const me = req.user.id;
-  const target = assignee_user_id ? parseInt(assignee_user_id, 10) : me;
+  const target = assignee_user_id ? parseInt(assignee_user_id, 10) : null;
+
+  if (!mode) mode = (!target || target === me) ? 'self' : 'request';
+  if (!['self','assign','request'].includes(mode)) return res.status(400).json({ error: 'bad mode' });
 
   try {
-    // --- self task ---
-    if (!target || target === me) {
+    // --- self ---
+    if (mode === 'self' || !target || target === me) {
       const r = await db.query(
         `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id, due_at, meta, status, opens_at)
          VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$6,'open',NOW()) RETURNING id`,
@@ -252,35 +260,31 @@ router.post('/', async (req, res) => {
       return res.json({ ok:true, id:r.rows[0].id, mode:'self' });
     }
 
-    // --- onto someone else: decide assignment vs request ---
-    const isOwner = req.user.can('*');
-    const sameDept = await shareDept(me, target);
-    const manages = await actorManagesTarget(me, target);
-
-    // Direct assignment allowed if: owner, OR I manage the target, OR same dept
-    // AND I manage something (managers-and-up originate; same-dept peers can't
-    // originate new tasks onto each other — that path is REQUEST).
-    const iManageSomething = (await deptsManagedBy(me)).length > 0;
-    const canAssignDirect = isOwner || manages || (sameDept && iManageSomething);
-
-    if (canAssignDirect) {
+    // --- assign (must be permitted) ---
+    if (mode === 'assign') {
+      const isOwner = req.user.can('*');
+      const manages = await actorManagesTarget(me, target);
+      const sameDept = await shareDept(me, target);
+      const iManageSomething = (await deptsManagedBy(me)).length > 0;
+      const allowed = isOwner || manages || (sameDept && iManageSomething);
+      if (!allowed) {
+        return res.status(403).json({ error: 'You cannot assign directly to this person. Send a request instead.' });
+      }
       const r = await db.query(
         `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id,
-                            assigned_by_user_id, due_at, meta, status, opens_at,
-                            reassign_history)
+                            assigned_by_user_id, due_at, meta, status, opens_at, reassign_history)
          VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$6,$7,'open',NOW(),$8) RETURNING id`,
         [String(title).trim(), body || null, category || null, target, me, due_at || null,
          meta ? JSON.stringify(meta) : null,
          JSON.stringify([{ at:new Date().toISOString(), by:me, to:target, act:'assigned' }])]);
-      await notifyEvent('task.assigned', {
-        targetUserId: target, taskTitle: String(title).trim(),
+      await notifyEvent('task.assigned', { targetUserId: target, taskTitle: String(title).trim(),
         byUserId: me, related_id: r.rows[0].id });
       await logAudit({ req, module:'tasks', action:'task.assigned', target_type:'task',
         target_id:r.rows[0].id, after:{ title, to:target } });
       return res.json({ ok:true, id:r.rows[0].id, mode:'assigned' });
     }
 
-    // --- otherwise it's a REQUEST (cross-dept / no authority) ---
+    // --- request (anyone may request anyone) ---
     const r = await db.query(
       `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id,
                           assigned_by_user_id, requester_user_id, request_status,
@@ -288,8 +292,7 @@ router.post('/', async (req, res) => {
        VALUES ('ad_hoc','manual',$1,$2,$3,$4,$5,$5,'awaiting',$6,$7,'open',NOW()) RETURNING id`,
       [String(title).trim(), body || null, category || null, target, me, due_at || null,
        meta ? JSON.stringify(meta) : null]);
-    await notifyEvent('request.received', {
-      targetUserId: target, taskTitle: String(title).trim(),
+    await notifyEvent('request.received', { targetUserId: target, taskTitle: String(title).trim(),
       byUserId: me, related_id: r.rows[0].id });
     await logAudit({ req, module:'tasks', action:'request.sent', target_type:'task',
       target_id:r.rows[0].id, after:{ title, to:target } });
@@ -297,6 +300,150 @@ router.post('/', async (req, res) => {
   } catch (e) {
     console.error('[tasks/create] failed:', e.message);
     res.status(500).json({ error: 'Failed to create task' });
+  }
+});
+
+// ---------- PATCH /api/tasks/:id ----------
+// Edit a task's free-text / category / due. Assignee, assigner, or owner.
+router.patch('/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  const { title, body, category, due_at } = req.body || {};
+  try {
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+    const canEdit = t.assignee_user_id === req.user.id || t.assigned_by_user_id === req.user.id
+      || t.requester_user_id === req.user.id || req.user.can('*');
+    if (!canEdit) return res.status(403).json({ error: 'Permission denied' });
+    if (title !== undefined && !String(title).trim()) return res.status(400).json({ error: 'title cannot be empty' });
+    await db.query(
+      `UPDATE tasks SET
+         title    = COALESCE($1, title),
+         body     = COALESCE($2, body),
+         category = COALESCE($3, category),
+         due_at   = COALESCE($4, due_at),
+         updated_at = NOW()
+       WHERE id=$5`,
+      [title !== undefined ? String(title).trim() : null, body ?? null, category ?? null, due_at ?? null, id]);
+    await logAudit({ req, module:'tasks', action:'task.edited', target_type:'task', target_id:id });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[tasks/edit] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/tasks/:id/cancel ----------
+// Cancel (not hard-delete): status='cancelled', kept for history.
+router.post('/:id/cancel', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  const { reason } = req.body || {};
+  try {
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+    const canCancel = t.assignee_user_id === req.user.id || t.assigned_by_user_id === req.user.id
+      || t.requester_user_id === req.user.id || req.user.can('*');
+    if (!canCancel) return res.status(403).json({ error: 'Permission denied' });
+    await db.query(
+      `UPDATE tasks SET status='cancelled', cancelled_at=NOW(), cancel_reason=$1, updated_at=NOW() WHERE id=$2`,
+      [reason || null, id]);
+    await logAudit({ req, module:'tasks', action:'task.cancelled', target_type:'task', target_id:id });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[tasks/cancel] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/tasks/:id/decline-assignment ----------
+// Assignee pushes back a DIRECT assignment (not a request) → bounces to assigner.
+router.post('/:id/decline-assignment', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  const { reason } = req.body || {};
+  try {
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+    if (t.assignee_user_id !== req.user.id) return res.status(403).json({ error: 'Not yours to decline' });
+    if (!t.assigned_by_user_id || t.assigned_by_user_id === req.user.id) {
+      return res.status(400).json({ error: 'This is not an assigned task' });
+    }
+    if (t.request_status === 'awaiting') return res.status(400).json({ error: 'Use the request decline for requests' });
+    const hist = Array.isArray(t.reassign_history) ? t.reassign_history : [];
+    hist.push({ at:new Date().toISOString(), by:req.user.id, to:t.assigned_by_user_id, act:'declined_assignment', reason:reason||null });
+    await db.query(
+      `UPDATE tasks SET assignee_user_id=$1, updated_at=NOW(), reassign_history=$2 WHERE id=$3`,
+      [t.assigned_by_user_id, JSON.stringify(hist), id]);
+    await notifyEvent('task.assignment_declined', {
+      targetUserId: t.assigned_by_user_id, taskTitle: t.title, byUserId: req.user.id, related_id: id, reason: reason||null });
+    await logAudit({ req, module:'tasks', action:'task.assignment_declined', target_type:'task', target_id:id });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[tasks/decline-assignment] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- GET /api/tasks/done ----------
+// Recently completed tasks I did (for the Done section / history).
+router.get('/done', async (req, res) => {
+  try {
+    const r = await db.query(
+      `SELECT ${TASK_SELECT}
+         FROM tasks t ${TASK_JOINS}
+        WHERE t.assignee_user_id = $1 AND t.status = 'done'
+          AND t.completed_at > NOW() - INTERVAL '14 days'
+        ORDER BY t.completed_at DESC LIMIT 50`, [req.user.id]);
+    res.json({ tasks: r.rows });
+  } catch (e) {
+    console.error('[tasks/done] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- GET /api/tasks/team ----------
+// Manager/lead view: tasks of people in the departments I run, + their status.
+// Owner sees everyone's active tasks.
+router.get('/team', async (req, res) => {
+  try {
+    const isOwner = req.user.can('*');
+    let memberIds = [];
+    if (isOwner) {
+      const all = await db.query(
+        `SELECT id FROM users WHERE deleted_at IS NULL AND employment_status='active' AND id <> $1`, [req.user.id]);
+      memberIds = all.rows.map(x => x.id);
+    } else {
+      const managed = await deptsManagedBy(req.user.id);
+      if (managed.length === 0) return res.json({ tasks: [], can_view: false });
+      const mem = await db.query(
+        `SELECT DISTINCT user_id FROM user_department_memberships
+          WHERE deleted_at IS NULL AND department_id = ANY($1::int[]) AND user_id <> $2`,
+        [managed, req.user.id]);
+      memberIds = mem.rows.map(x => x.user_id);
+    }
+    if (memberIds.length === 0) return res.json({ tasks: [], can_view: true });
+    const r = await db.query(
+      `SELECT t.id, t.kind, t.source, t.title, t.status, t.due_at, t.category,
+              t.request_status, t.assignee_user_id, t.assigned_by_user_id,
+              au.display_name AS assignee_name, au.full_name AS assignee_full_name,
+              au.initials AS assignee_initials, au.avatar_colour AS assignee_colour
+         FROM tasks t
+         JOIN users au ON au.id = t.assignee_user_id
+        WHERE t.assignee_user_id = ANY($1::int[])
+          AND t.status IN ('open','due','overdue','in_progress')
+          AND (t.request_status IS NULL OR t.request_status='accepted')
+          AND NOT (t.kind='recruitment' AND t.parent_task_id IS NULL)
+        ORDER BY au.display_name,
+                 CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END,
+                 t.due_at ASC NULLS LAST`, [memberIds]);
+    res.json({ tasks: r.rows, can_view: true });
+  } catch (e) {
+    console.error('[tasks/team] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
   }
 });
 

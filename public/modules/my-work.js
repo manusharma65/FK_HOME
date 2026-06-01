@@ -1,15 +1,17 @@
-// FK Home — My Work module (r0.22, Ship 2a)
+// FK Home — My Work module (r0.23, Ship 2a + lifecycle)
 // ----------------------------------------------------------------------------
-// The single full task view + the universal task creator with the auto-detecting
-// assign/request engine.
+// The single full task view + the universal creator with EXPLICIT mode choice.
+// When you pick a person you choose: Assign (direct) or Request (accept/decline).
+// "Assign" is disabled if you lack authority over them (managers-and-up only).
+//
 //   GET  /api/tasks/mine        -> { groups, incoming_requests, my_requests, total }
 //   GET  /api/tasks/assignable  -> { direct, request, self_only }
-//   POST /api/tasks             -> create (self / assign / request)
+//   GET  /api/tasks/done        -> { tasks }   (last 14 days)
+//   POST /api/tasks             -> { title, category, assignee_user_id, mode }
+//   PATCH /api/tasks/:id        -> edit title/category/due
+//   POST /api/tasks/:id/cancel  -> cancel (kept in history)
 //   POST /api/tasks/:id/action  -> start | complete
-//   POST /api/tasks/:id/accept  -> accept incoming request
-//   POST /api/tasks/:id/decline -> decline incoming request
-// The creator reacts to who you pick in "Assign to": self → Add task; someone you
-// can assign → Assign task (direct); someone cross-dept → Send request.
+//   POST /api/tasks/:id/accept | /decline | /decline-assignment
 // ----------------------------------------------------------------------------
 
 window.fkModules = window.fkModules || {};
@@ -25,7 +27,7 @@ window.fkModules['my-work'] = {
           '#mw-mod .mw-sub{font-size:13px;color:var(--muted)}' +
           '#mw-mod .mw-add{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border:0.5px solid var(--line);border-radius:8px;background:var(--surface);cursor:pointer;font-size:14px}' +
           '#mw-mod .mw-add:hover{background:var(--hover,#F1EFE8)}' +
-          '#mw-mod .mw-glabel{font-size:12px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:20px 0 8px}' +
+          '#mw-mod .mw-glabel{font-size:12px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:20px 0 8px;display:flex;align-items:center;justify-content:space-between}' +
           '#mw-mod .mw-row{display:flex;align-items:center;gap:12px;background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:8px}' +
           '#mw-mod .mw-row .ico{font-size:18px;flex:none}' +
           '#mw-mod .mw-row .mid{flex:1;min-width:0}' +
@@ -38,25 +40,35 @@ window.fkModules['my-work'] = {
           '#mw-mod .pill.review{background:#EEEDFE;color:#534AB7}' +
           '#mw-mod .pill.overdue{background:#FCEBEB;color:#A32D2D}' +
           '#mw-mod .pill.req{background:#FAEEDA;color:#854F0B}' +
+          '#mw-mod .pill.done{background:#ECECEA;color:#6B6B66}' +
           '#mw-mod .mw-act{font-size:12px;color:var(--muted);border:0.5px solid var(--line);background:var(--surface);border-radius:6px;padding:5px 10px;cursor:pointer;flex:none}' +
           '#mw-mod .mw-act:hover{background:var(--hover,#F1EFE8);color:var(--ink)}' +
           '#mw-mod .mw-act.go{background:#0F6E56;color:#fff;border-color:#0F6E56}' +
           '#mw-mod .mw-act.no{color:#A32D2D}' +
+          '#mw-mod .mw-ico-btn{font-size:15px;color:var(--soft);border:none;background:none;cursor:pointer;padding:4px;flex:none}' +
+          '#mw-mod .mw-ico-btn:hover{color:var(--ink)}' +
           '#mw-mod .mw-empty{text-align:center;color:var(--muted);padding:30px;font-size:14px}' +
           '#mw-mod .mw-note{font-size:12px;color:var(--soft);margin-top:14px;padding-top:12px;border-top:0.5px solid var(--line)}' +
           '#mw-mod .mw-form{background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px;display:none}' +
           '#mw-mod .mw-form.on{display:block}' +
           '#mw-mod .mw-form input,#mw-mod .mw-form select{width:100%;padding:8px 11px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;background:var(--bg,#fff);margin-bottom:8px}' +
           '#mw-mod .mw-frow{display:flex;gap:8px}' +
-          '#mw-mod .mw-hint{font-size:12px;padding:7px 11px;border-radius:8px;margin-bottom:8px;display:none}' +
-          '#mw-mod .mw-hint.assign{display:block;background:#E6F1FB;color:#185FA5}' +
-          '#mw-mod .mw-hint.request{display:block;background:#FAEEDA;color:#854F0B}' +
+          '#mw-mod .mw-mode{display:none;gap:8px;margin-bottom:8px}' +
+          '#mw-mod .mw-mode.on{display:flex}' +
+          '#mw-mod .mw-mode label{flex:1;border:0.5px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer;display:flex;gap:7px;align-items:flex-start}' +
+          '#mw-mod .mw-mode label.sel{border-color:var(--ink);background:var(--hover,#F1EFE8)}' +
+          '#mw-mod .mw-mode label.disabled{opacity:.45;cursor:not-allowed}' +
+          '#mw-mod .mw-mode .mt{font-weight:500;display:block}' +
+          '#mw-mod .mw-mode .md{color:var(--muted);font-size:11px}' +
           '#mw-mod .mw-form button{padding:8px 14px;border-radius:8px;border:0.5px solid var(--line);background:var(--surface);cursor:pointer;font-size:14px}' +
           '#mw-mod .mw-form .save{background:var(--ink);color:var(--bg,#fff);border-color:var(--ink)}' +
           '#mw-mod .reqbox{background:#FFFDF7;border:0.5px solid #FAC775;border-radius:8px;padding:12px 14px;margin-bottom:8px}' +
           '#mw-mod .reqbox .rt{font-size:14px;font-weight:500}' +
           '#mw-mod .reqbox .rm{font-size:12px;color:var(--muted);margin:2px 0 10px}' +
           '#mw-mod .reqbox .ra{display:flex;gap:8px}' +
+          '#mw-mod .mw-done-toggle{cursor:pointer;color:var(--soft);font-weight:400;text-transform:none;letter-spacing:0}' +
+          '#mw-mod #mwDoneList{display:none}' +
+          '#mw-mod #mwDoneList.on{display:block}' +
         '</style>' +
 
         '<div class="card">' +
@@ -66,7 +78,7 @@ window.fkModules['my-work'] = {
           '</div>' +
 
           '<div class="mw-form" id="mwForm">' +
-            '<input type="text" id="mwTitle" placeholder="What do you need done?" />' +
+            '<input type="text" id="mwTitle" placeholder="What needs doing?" />' +
             '<div class="mw-frow">' +
               '<select id="mwCategory">' +
                 '<option value="">Category\u2026</option>' +
@@ -78,7 +90,10 @@ window.fkModules['my-work'] = {
               '</select>' +
               '<select id="mwAssignee"><option value="">Myself</option></select>' +
             '</div>' +
-            '<div class="mw-hint" id="mwHint"></div>' +
+            '<div class="mw-mode" id="mwMode">' +
+              '<label id="mwModeAssign"><input type="radio" name="mwmode" value="assign"><span><span class="mt">Assign</span><span class="md">Goes straight to them</span></span></label>' +
+              '<label id="mwModeRequest"><input type="radio" name="mwmode" value="request" checked><span><span class="mt">Request</span><span class="md">They accept or decline</span></span></label>' +
+            '</div>' +
             '<div class="mw-frow" style="justify-content:flex-end">' +
               '<button id="mwCancel">Cancel</button>' +
               '<button class="save" id="mwSave">Add task</button>' +
@@ -89,7 +104,10 @@ window.fkModules['my-work'] = {
           '<div id="mwBody"><div class="mw-empty">Loading\u2026</div></div>' +
           '<div id="mwReqSent"></div>' +
 
-          '<div class="mw-note">Pick someone in another department and it becomes a request they can accept or decline. Recruitment openings live in the Recruitment view.</div>' +
+          '<div class="mw-glabel"><span>Done</span><span class="mw-done-toggle" id="mwDoneToggle">show recent \u25be</span></div>' +
+          '<div id="mwDoneList"></div>' +
+
+          '<div class="mw-note">Pick a person, then choose Assign or Request. Assign is only available for people you manage. Recruitment openings live in the Recruitment view.</div>' +
         '</div>' +
       '</div>';
   },
@@ -106,9 +124,25 @@ window.fkModules['my-work'] = {
     const ICON_COLOUR = { event:'#0F6E56', recurring:'#854F0B', ad_hoc:'#993C1D',
                           recruitment:'#993C1D', review:'#534AB7', onboarding:'#534AB7', probation:'#534AB7' };
 
-    // assignable lists, fetched once
-    let directIds = new Set();   // picking these = direct assignment
-    let selfOnly = true;
+    let directIds = new Set();
+    let editingId = null;
+
+    function actionsFor(t) {
+      // edit + cancel icons always; start/done by state; decline if assigned to me by someone else
+      let html = '';
+      if (t.status === 'in_progress') {
+        html += '<button class="mw-act" data-act="complete" data-id="'+t.id+'">Done</button>';
+      } else {
+        html += '<button class="mw-act" data-act="start" data-id="'+t.id+'">Start</button>';
+      }
+      // decline a direct assignment (someone else assigned it to me, not a request)
+      if (t.assigned_by_user_id && t.assigned_by_user_id !== t.assignee_user_id && !t.request_status) {
+        html += '<button class="mw-ico-btn" title="Not mine \u2014 send back" data-declineassign="'+t.id+'"><i class="ti ti-arrow-back-up"></i></button>';
+      }
+      html += '<button class="mw-ico-btn" title="Edit" data-edit="'+t.id+'"><i class="ti ti-pencil"></i></button>';
+      html += '<button class="mw-ico-btn" title="Cancel task" data-cancel="'+t.id+'"><i class="ti ti-x"></i></button>';
+      return html;
+    }
 
     function rowHtml(t) {
       const kind = t.kind || 'ad_hoc';
@@ -120,40 +154,43 @@ window.fkModules['my-work'] = {
       if (t.assigned_by_name && t.assigned_by_user_id !== t.assignee_user_id) {
         sub = 'Assigned by ' + esc(t.assigned_by_name) + (sub ? ' \u00b7 ' + sub : '');
       }
-      const act = (t.status === 'in_progress')
-        ? '<button class="mw-act" data-act="complete" data-id="' + t.id + '">Done</button>'
-        : '<button class="mw-act" data-act="start" data-id="' + t.id + '">Start</button>';
-      const pillHtml = isOverdue
-        ? '<span class="pill overdue">overdue</span>'
-        : '<span class="pill ' + pill[0] + '">' + pill[1] + '</span>';
-      return '<div class="mw-row">' +
-        '<i class="ti ' + icon + ' ico" style="color:' + colour + '"></i>' +
-        '<div class="mid"><div class="t1">' + esc(t.title) + '</div>' +
-          (sub ? '<div class="t2">' + sub + '</div>' : '') + '</div>' +
-        pillHtml + act + '</div>';
+      const pillHtml = isOverdue ? '<span class="pill overdue">overdue</span>'
+                                 : '<span class="pill '+pill[0]+'">'+pill[1]+'</span>';
+      return '<div class="mw-row" data-row="'+t.id+'" data-title="'+esc(t.title)+'" data-cat="'+esc(t.category||'')+'">' +
+        '<i class="ti '+icon+' ico" style="color:'+colour+'"></i>' +
+        '<div class="mid"><div class="t1">'+esc(t.title)+'</div>'+(sub?'<div class="t2">'+sub+'</div>':'')+'</div>' +
+        pillHtml + actionsFor(t) + '</div>';
     }
 
     function incomingHtml(t) {
       const from = t.assigned_by_name || t.requester_name || 'someone';
       return '<div class="reqbox">' +
-        '<div class="rt">' + esc(t.title) + '</div>' +
-        '<div class="rm">Request from ' + esc(from) + (t.category ? ' \u00b7 ' + esc(t.category) : '') + '</div>' +
+        '<div class="rt">'+esc(t.title)+'</div>' +
+        '<div class="rm">Request from '+esc(from)+(t.category?' \u00b7 '+esc(t.category):'')+'</div>' +
         '<div class="ra">' +
-          '<button class="mw-act go" data-req="accept" data-id="' + t.id + '">Accept</button>' +
-          '<button class="mw-act no" data-req="decline" data-id="' + t.id + '">Decline</button>' +
+          '<button class="mw-act go" data-req="accept" data-id="'+t.id+'">Accept</button>' +
+          '<button class="mw-act no" data-req="decline" data-id="'+t.id+'">Decline</button>' +
         '</div></div>';
     }
 
     function sentHtml(t) {
       const to = t.related_display_name || t.related_full_name || 'them';
       const state = t.request_status === 'declined'
-        ? '<span class="pill overdue">declined' + (t.decline_reason ? ' \u00b7 ' + esc(t.decline_reason) : '') + '</span>'
-        : '<span class="pill req">awaiting ' + esc(to) + '</span>';
+        ? '<span class="pill overdue">declined'+(t.decline_reason?' \u00b7 '+esc(t.decline_reason):'')+'</span>'
+        : '<span class="pill req">awaiting '+esc(to)+'</span>';
       return '<div class="mw-row">' +
         '<i class="ti ti-send ico" style="color:#854F0B"></i>' +
-        '<div class="mid"><div class="t1">' + esc(t.title) + '</div>' +
-          '<div class="t2">You requested this' + (t.request_status==='declined'?' \u2014 back on your plate':'') + '</div></div>' +
+        '<div class="mid"><div class="t1">'+esc(t.title)+'</div>' +
+          '<div class="t2">You requested this'+(t.request_status==='declined'?' \u2014 back on your plate':'')+'</div></div>' +
         state + '</div>';
+    }
+
+    function doneHtml(t) {
+      return '<div class="mw-row">' +
+        '<i class="ti ti-circle-check ico" style="color:#6B6B66"></i>' +
+        '<div class="mid"><div class="t1" style="color:var(--muted)">'+esc(t.title)+'</div></div>' +
+        '<span class="pill done">done</span>' +
+        '<button class="mw-act" data-act="reopen" data-id="'+t.id+'">Reopen</button></div>';
     }
 
     const GROUPS = [['needs_action','Needs action'],['recurring','Recurring today'],['in_progress','In progress']];
@@ -163,40 +200,61 @@ window.fkModules['my-work'] = {
         const r = await fetch('/api/tasks/assignable', { credentials:'include' });
         if (!r.ok) return;
         const d = await r.json();
-        selfOnly = !!d.self_only;
         directIds = new Set((d.direct||[]).map(p=>p.id));
         const sel = $('mwAssignee');
         let html = '<option value="">Myself</option>';
-        if (!selfOnly) {
-          for (const p of (d.direct||[])) {
-            html += '<option value="'+p.id+'" data-dir="1">'+esc(p.display_name||p.full_name)+(p.dept_name?' ('+esc(p.dept_name)+')':'')+'</option>';
-          }
-        }
-        for (const p of (d.request||[])) {
-          html += '<option value="'+p.id+'" data-dir="0">'+esc(p.display_name||p.full_name)+(p.dept_name?' ('+esc(p.dept_name)+')':'')+'</option>';
-        }
+        const tag = (p,dir)=>'<option value="'+p.id+'" data-dir="'+dir+'">'+esc(p.display_name||p.full_name)+(p.dept_name?' ('+esc(p.dept_name)+')':'')+'</option>';
+        for (const p of (d.direct||[])) html += tag(p,1);
+        for (const p of (d.request||[])) html += tag(p,0);
         sel.innerHTML = html;
       } catch(e){ console.error('[assignable]',e); }
     }
 
-    function updateHint() {
+    function updateMode() {
       const sel = $('mwAssignee');
       const val = sel.value;
-      const hint = $('mwHint');
+      const modeRow = $('mwMode');
       const save = $('mwSave');
-      if (!val) { hint.className='mw-hint'; save.textContent='Add task'; return; }
-      const opt = sel.options[sel.selectedIndex];
-      const isDirect = opt.getAttribute('data-dir') === '1';
-      const who = opt.textContent.replace(/\s*\(.*\)$/,'');
-      if (isDirect) {
-        hint.className='mw-hint assign';
-        hint.innerHTML='<i class="ti ti-arrow-right" style="vertical-align:-2px"></i> Goes straight to '+esc(who)+'\u2019s work';
-        save.textContent='Assign task';
-      } else {
-        hint.className='mw-hint request';
-        hint.innerHTML='<i class="ti ti-send" style="vertical-align:-2px"></i> Sent to '+esc(who)+' as a request \u2014 they can accept or decline. You\u2019ll be notified.';
-        save.textContent='Send request';
+      if (!val) { // self
+        modeRow.classList.remove('on');
+        save.textContent = 'Add task';
+        return;
       }
+      modeRow.classList.add('on');
+      const canAssign = directIds.has(parseInt(val,10));
+      const assignLabel = $('mwModeAssign');
+      const assignRadio = assignLabel.querySelector('input');
+      const requestRadio = $('mwModeRequest').querySelector('input');
+      if (canAssign) {
+        assignLabel.classList.remove('disabled');
+        assignRadio.disabled = false;
+      } else {
+        assignLabel.classList.remove('sel');
+        assignLabel.classList.add('disabled');
+        assignRadio.disabled = true;
+        assignRadio.checked = false;
+        requestRadio.checked = true;
+      }
+      syncModeSel();
+    }
+    function syncModeSel() {
+      const save = $('mwSave');
+      el.querySelectorAll('#mwMode label').forEach(l=>l.classList.remove('sel'));
+      const checked = el.querySelector('input[name="mwmode"]:checked');
+      if (!checked) { save.textContent='Add task'; return; }
+      checked.closest('label').classList.add('sel');
+      save.textContent = checked.value === 'assign' ? 'Assign task' : 'Send request';
+    }
+
+    async function loadDone() {
+      try {
+        const r = await fetch('/api/tasks/done', { credentials:'include' });
+        if (!r.ok) return;
+        const d = await r.json();
+        const list = d.tasks||[];
+        $('mwDoneList').innerHTML = list.length ? list.map(doneHtml).join('')
+          : '<div class="mw-empty" style="padding:14px">No completed tasks in the last 14 days.</div>';
+      } catch(e){ console.error('[done]',e); }
     }
 
     async function load() {
@@ -211,11 +269,9 @@ window.fkModules['my-work'] = {
         const inProg = (groups.in_progress||[]).length;
         $('mwSub').textContent = toAction+' to action \u00b7 '+inProg+' in progress'+(incoming.length?' \u00b7 '+incoming.length+' request'+(incoming.length>1?'s':''):'');
 
-        // incoming requests (top)
         $('mwReqIncoming').innerHTML = incoming.length
-          ? '<div class="mw-glabel">Requests for you</div>' + incoming.map(incomingHtml).join('') : '';
+          ? '<div class="mw-glabel"><span>Requests for you</span></div>' + incoming.map(incomingHtml).join('') : '';
 
-        // main groups
         const totalMain = (groups.needs_action||[]).length+(groups.recurring||[]).length+(groups.in_progress||[]).length;
         if (totalMain === 0 && incoming.length === 0) {
           $('mwBody').innerHTML='<div class="mw-empty">Nothing on your plate right now. Use \u201cAdd task\u201d to log work.</div>';
@@ -224,65 +280,116 @@ window.fkModules['my-work'] = {
           for (const [k,label] of GROUPS) {
             const rows=groups[k]||[];
             if(!rows.length) continue;
-            html+='<div class="mw-glabel">'+label+'</div>'+rows.map(rowHtml).join('');
+            html+='<div class="mw-glabel"><span>'+label+'</span></div>'+rows.map(rowHtml).join('');
           }
           $('mwBody').innerHTML=html;
         }
 
-        // sent requests (bottom)
         $('mwReqSent').innerHTML = sent.length
-          ? '<div class="mw-glabel">Your requests</div>' + sent.map(sentHtml).join('') : '';
+          ? '<div class="mw-glabel"><span>Your requests</span></div>' + sent.map(sentHtml).join('') : '';
       } catch(e){ console.error('[my-work load]',e); $('mwBody').innerHTML='<div class="mw-empty">Network error.</div>'; }
     }
 
-    // creator toggle + hint
-    $('mwAddBtn').addEventListener('click', ()=>{ $('mwForm').classList.add('on'); $('mwTitle').focus(); });
-    $('mwCancel').addEventListener('click', ()=>{ $('mwForm').classList.remove('on'); $('mwTitle').value=''; $('mwAssignee').value=''; updateHint(); });
-    $('mwAssignee').addEventListener('change', updateHint);
+    // ---- creator ----
+    function resetForm() {
+      editingId = null;
+      $('mwTitle').value=''; $('mwCategory').value=''; $('mwAssignee').value='';
+      $('mwMode').classList.remove('on');
+      $('mwSave').textContent='Add task';
+      $('mwForm').querySelector('h4')?.remove();
+    }
+    $('mwAddBtn').addEventListener('click', ()=>{ resetForm(); $('mwForm').classList.add('on'); $('mwTitle').focus(); });
+    $('mwCancel').addEventListener('click', ()=>{ $('mwForm').classList.remove('on'); resetForm(); });
+    $('mwAssignee').addEventListener('change', updateMode);
+    el.querySelectorAll('input[name="mwmode"]').forEach(radio=>radio.addEventListener('change', syncModeSel));
 
     $('mwSave').addEventListener('click', async ()=>{
       const title=$('mwTitle').value.trim();
       if(!title){ $('mwTitle').focus(); return; }
       const category=$('mwCategory').value||null;
-      const assignee=$('mwAssignee').value||null;
       $('mwSave').disabled=true;
       try {
-        const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
-          body:JSON.stringify({ title, category, assignee_user_id:assignee })});
-        if(!r.ok){ alert('Could not add task'); }
-        else { $('mwTitle').value=''; $('mwAssignee').value=''; updateHint(); $('mwForm').classList.remove('on'); await load(); }
+        if (editingId) {
+          const due=null;
+          const r=await fetch('/api/tasks/'+editingId,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',
+            body:JSON.stringify({ title, category })});
+          if(!r.ok){ alert('Could not save'); } else { $('mwForm').classList.remove('on'); resetForm(); await load(); }
+        } else {
+          const assignee=$('mwAssignee').value||null;
+          let mode='self';
+          if (assignee) {
+            const checked=el.querySelector('input[name="mwmode"]:checked');
+            mode = checked ? checked.value : 'request';
+          }
+          const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
+            body:JSON.stringify({ title, category, assignee_user_id:assignee, mode })});
+          if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Could not add task'); }
+          else { $('mwForm').classList.remove('on'); resetForm(); await load(); }
+        }
       } catch(e){ alert('Network error'); }
       $('mwSave').disabled=false;
     });
 
-    // task actions
-    $('mwBody').addEventListener('click', async (e)=>{
-      const btn=e.target.closest('.mw-act'); if(!btn) return;
-      const id=btn.getAttribute('data-id'); const act=btn.getAttribute('data-act');
-      btn.disabled=true;
-      try {
-        const r=await fetch('/api/tasks/'+id+'/action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({action:act})});
-        if(!r.ok){ alert('Action failed'); btn.disabled=false; return; }
-        await load();
-      } catch(e2){ alert('Network error'); btn.disabled=false; }
-    });
+    // ---- row actions (start/done/reopen/edit/cancel/decline-assignment) ----
+    async function rowAction(e) {
+      const startBtn=e.target.closest('[data-act]');
+      const editBtn=e.target.closest('[data-edit]');
+      const cancelBtn=e.target.closest('[data-cancel]');
+      const declineBtn=e.target.closest('[data-declineassign]');
+      if (startBtn) {
+        const id=startBtn.getAttribute('data-id'); const act=startBtn.getAttribute('data-act');
+        startBtn.disabled=true;
+        try { const r=await fetch('/api/tasks/'+id+'/action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({action:act})});
+          if(!r.ok){ alert('Action failed'); startBtn.disabled=false; return; } await load(); await loadDone();
+        } catch(e2){ alert('Network error'); startBtn.disabled=false; }
+      } else if (editBtn) {
+        const row=editBtn.closest('.mw-row');
+        editingId=editBtn.getAttribute('data-edit');
+        $('mwTitle').value=row.getAttribute('data-title')||'';
+        $('mwCategory').value=row.getAttribute('data-cat')||'';
+        $('mwAssignee').value=''; $('mwMode').classList.remove('on');
+        $('mwSave').textContent='Save changes';
+        $('mwForm').classList.add('on'); $('mwTitle').focus();
+      } else if (cancelBtn) {
+        const id=cancelBtn.getAttribute('data-cancel');
+        if(!confirm('Cancel this task? It will be removed from your list.')) return;
+        const reason=prompt('Reason (optional):')||'';
+        try { const r=await fetch('/api/tasks/'+id+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({reason})});
+          if(!r.ok){ alert('Could not cancel'); return; } await load();
+        } catch(e2){ alert('Network error'); }
+      } else if (declineBtn) {
+        const id=declineBtn.getAttribute('data-declineassign');
+        const reason=prompt('Send back to whoever assigned it. Reason (optional):')||'';
+        try { const r=await fetch('/api/tasks/'+id+'/decline-assignment',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({reason})});
+          if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Could not send back'); return; } await load();
+        } catch(e2){ alert('Network error'); }
+      }
+    }
+    $('mwBody').addEventListener('click', rowAction);
+    $('mwDoneList').addEventListener('click', rowAction);
 
-    // accept / decline incoming requests
+    // ---- accept / decline incoming requests ----
     $('mwReqIncoming').addEventListener('click', async (e)=>{
       const btn=e.target.closest('.mw-act'); if(!btn) return;
       const id=btn.getAttribute('data-id'); const req=btn.getAttribute('data-req');
       let body={};
-      if(req==='decline'){ const reason=prompt('Reason (optional):')||''; body={reason}; }
+      if(req==='decline'){ body={reason:prompt('Reason (optional):')||''}; }
       btn.disabled=true;
-      try {
-        const r=await fetch('/api/tasks/'+id+'/'+req,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)});
-        if(!r.ok){ alert(req+' failed'); btn.disabled=false; return; }
-        await load();
+      try { const r=await fetch('/api/tasks/'+id+'/'+req,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)});
+        if(!r.ok){ alert(req+' failed'); btn.disabled=false; return; } await load();
       } catch(e2){ alert('Network error'); btn.disabled=false; }
     });
 
+    // ---- done toggle ----
+    $('mwDoneToggle').addEventListener('click', async ()=>{
+      const list=$('mwDoneList');
+      const open=list.classList.toggle('on');
+      $('mwDoneToggle').textContent = open ? 'hide \u25b4' : 'show recent \u25be';
+      if (open) await loadDone();
+    });
+
     await loadAssignable();
-    updateHint();
+    updateMode();
     await load();
   }
 };
