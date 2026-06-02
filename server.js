@@ -40,6 +40,7 @@ const filesRoutes = require('./server/modules/files');
 const payrollRoutes = require('./server/modules/payroll');
 const profileRoutes = require('./server/modules/profile');
 const tasksRoutes = require('./server/modules/tasks');
+const recruitmentRoutes = require('./server/modules/recruitment');
 const leaveEngine = require('./server/modules/leave-engine');
 const backupEngine = require('./server/modules/backup');
 const lifecycle = require('./server/modules/lifecycle');
@@ -73,6 +74,7 @@ app.use('/api/attendance', attendanceRoutes);
 app.use('/api/files', filesRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/tasks', tasksRoutes);
+app.use('/api/recruitment', recruitmentRoutes);
 
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));

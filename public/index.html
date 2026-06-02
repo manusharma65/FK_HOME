@@ -9,6 +9,7 @@
 <!-- FK Home r0.23: explicit assign/request, edit/cancel/done-history, Team Work view, status-constraint fix -->
 <!-- FK Home r0.24: SIMPLE creator — "Request" is an option in the category dropdown; removed permission/greying machinery -->
 <!-- FK Home r0.25: HR shared queue — events auto-route to tasks by hr_area, cover mechanism, full-size buttons -->
+<!-- FK Home r0.26: Recruitment pipeline (Kanban: openings/candidates/stages/standby/reject) + My Work recruitment pointer -->
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
 <style>
@@ -681,6 +682,10 @@
         <i class="ti ti-inbox"></i>
         <span>HR Queue</span>
       </div>
+      <div class="nav-item" id="navRecruitment" data-route="#recruitment" style="display:none" onclick="location.hash='#recruitment'">
+        <i class="ti ti-user-search"></i>
+        <span>Recruitment</span>
+      </div>
       <div class="nav-item" id="navHrPeople" data-route="#hr/users" style="display:none" onclick="location.hash='#hr/users'">
         <i class="ti ti-users"></i>
         <span>People</span>
@@ -1277,6 +1282,7 @@
 <script src="/modules/my-growth.js"></script>
 <script src="/modules/my-work.js"></script>
 <script src="/modules/hr-queue.js"></script>
+<script src="/modules/recruitment.js"></script>
 <script src="/modules/team-work.js"></script>
 <script>
 // ===================================================================
@@ -1359,6 +1365,10 @@ function render() {
       || can('attendance.regularise.approve.any') || can('attendance.regularise.approve.dept')
       || can('profile.view.any')) {
     show('navHrQueue'); anyHR = true;
+  }
+  // Recruitment — HR team + owner
+  if (can('*') || can('profile.view.any') || can('admin.users.edit') || can('admin.users.view')) {
+    show('navRecruitment'); anyHR = true;
   }
   if (can('admin.users.view') || can('admin.users.edit')) {
     show('navHrPeople'); anyHR = true;

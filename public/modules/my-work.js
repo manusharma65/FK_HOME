@@ -97,6 +97,7 @@ window.fkModules['my-work'] = {
             '</div>' +
           '</div>' +
 
+          '<div id="mwRecPointer"></div>' +
           '<div id="mwReqIncoming"></div>' +
           '<div id="mwBody"><div class="mw-empty">Loading\u2026</div></div>' +
           '<div id="mwReqSent"></div>' +
@@ -255,7 +256,28 @@ window.fkModules['my-work'] = {
 
         $('mwReqSent').innerHTML = sent.length
           ? '<div class="mw-glabel"><span>Your requests</span></div>' + sent.map(sentHtml).join('') : '';
+
+        loadRecruitmentPointer();
       } catch(e){ console.error('[my-work load]',e); $('mwBody').innerHTML='<div class="mw-empty">Network error.</div>'; }
+    }
+
+    // HR home-base: a single pointer to recruitment so HR isn't checking a separate
+    // tab. Returns 403 for non-HR (we just show nothing). Keeps "one place" intact.
+    async function loadRecruitmentPointer() {
+      const mount = $('mwRecPointer'); if (!mount) return;
+      try {
+        const r = await fetch('/api/recruitment/pointer', { credentials:'include' });
+        if (!r.ok) { mount.innerHTML=''; return; }   // not HR, or error — show nothing
+        const d = await r.json();
+        const n = d.count || 0;
+        if (n === 0) { mount.innerHTML=''; return; }
+        mount.innerHTML =
+          '<div onclick="location.hash=\'#recruitment\'" style="cursor:pointer;display:flex;align-items:center;gap:10px;background:var(--surface);border:0.5px solid var(--line);border-radius:9px;padding:12px 15px;margin-bottom:14px">' +
+            '<i class="ti ti-user-search" style="font-size:18px;color:#185FA5"></i>' +
+            '<span style="flex:1;font-size:14px">Recruitment \u2014 <strong>' + n + '</strong> candidate' + (n>1?'s':'') + ' need action</span>' +
+            '<i class="ti ti-chevron-right" style="font-size:17px;color:var(--muted)"></i>' +
+          '</div>';
+      } catch(e){ mount.innerHTML=''; }
     }
 
     // ---- creator ----
