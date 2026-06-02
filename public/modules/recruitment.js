@@ -1,18 +1,11 @@
-// FK Home — Recruitment module (r0.26)
-// ----------------------------------------------------------------------------
-// Hiring pipeline. Landing = openings list. Open one = Kanban board (drag cards
-// between stage columns on desktop, with a backup "Move to" menu). Click a card
-// = candidate detail (notes, source, salary, actions). Tracking only.
-// Stages: sourced → screening → interview → offer → hired
-//         + standby (visible holding column) + rejected (tucked away, with reason)
-// Buttons are full-size with plain labels (no tiny icon-only controls).
-// ----------------------------------------------------------------------------
-
+// FK Home — Recruitment module (r0.27 frontend)
+// Openings list -> board -> rich candidate card. Per-round outcomes, stage
+// history, days-in-stage, CV/photo upload, reversible end (passed/withdrew),
+// archived exits, edit/close/reopen opening.
 window.fkModules = window.fkModules || {};
 
 window.fkModules['recruitment'] = {
   title: 'Recruitment',
-
   render() {
     return '<div id="rec-mod" class="fk-mod">' +
       '<style>' +
@@ -25,8 +18,9 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-btn{padding:10px 15px;font-size:14px;border-radius:8px;border:0.5px solid var(--line);background:var(--surface);cursor:pointer}' +
         '#rec-mod .rec-btn:hover{background:var(--hover,#F1EFE8)}' +
         '#rec-mod .rec-btn.primary{background:var(--ink);color:var(--bg,#fff);border-color:var(--ink)}' +
+        '#rec-mod .rec-btn.danger{color:#A32D2D}' +
         '#rec-mod .rec-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px}' +
-        '#rec-mod .rec-col{min-width:200px;width:200px;flex:none;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
+        '#rec-mod .rec-col{min-width:205px;width:205px;flex:none;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
         '#rec-mod .rec-col-head{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;display:flex;justify-content:space-between}' +
         '#rec-mod .rec-cand{background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:11px 12px;margin-bottom:8px;cursor:grab}' +
         '#rec-mod .rec-cand:hover{border-color:var(--ink)}' +
@@ -34,18 +28,29 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-col.drop-target{outline:2px dashed var(--ink);outline-offset:-2px}' +
         '#rec-mod .rec-cand-name{font-size:14px;font-weight:500}' +
         '#rec-mod .rec-cand-sub{font-size:11px;color:var(--muted);margin-top:2px}' +
+        '#rec-mod .rec-cand-age{font-size:10px;color:var(--soft);margin-top:4px}' +
         '#rec-mod .rec-standby{background:#FFF8EC}' +
-        '#rec-mod .rec-rejected-strip{margin-top:14px;border-top:0.5px solid var(--line);padding-top:12px}' +
-        '#rec-mod .rec-rej-row{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);padding:7px 0}' +
+        '#rec-mod .rec-ended-strip{margin-top:14px;border-top:0.5px solid var(--line);padding-top:12px}' +
+        '#rec-mod .rec-end-row{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);padding:8px 0;border-bottom:0.5px solid var(--line);gap:10px}' +
+        '#rec-mod .rec-end-row .reopen{font-size:12px;color:#185FA5;cursor:pointer;flex:none}' +
         '#rec-mod .rec-modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:1000}' +
-        '#rec-mod .rec-modal{background:var(--surface);border-radius:12px;padding:20px 22px;max-width:480px;width:92%;max-height:86vh;overflow-y:auto}' +
+        '#rec-mod .rec-modal{background:var(--surface);border-radius:12px;padding:20px 22px;max-width:520px;width:94%;max-height:88vh;overflow-y:auto}' +
         '#rec-mod .rec-field{margin-bottom:11px}' +
         '#rec-mod .rec-field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}' +
-        '#rec-mod .rec-field input,#rec-mod .rec-field select,#rec-mod .rec-field textarea{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit}' +
+        '#rec-mod .rec-field input,#rec-mod .rec-field select,#rec-mod .rec-field textarea{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit;box-sizing:border-box}' +
+        '#rec-mod .rec-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
+        '#rec-mod .rec-kv{font-size:13px}' +
+        '#rec-mod .rec-kv .k{font-size:11px;color:var(--muted)}' +
+        '#rec-mod .rec-sec{border-top:0.5px solid var(--line);padding-top:12px;margin-top:14px}' +
+        '#rec-mod .rec-sec-h{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}' +
+        '#rec-mod .rec-why{background:var(--bg2,#F4F2EC);border-radius:8px;padding:9px 12px;font-size:13px;margin:10px 0 4px}' +
         '#rec-mod .rec-note{font-size:13px;background:var(--bg2,#F4F2EC);border-radius:7px;padding:8px 10px;margin-bottom:6px}' +
         '#rec-mod .rec-note-meta{font-size:11px;color:var(--muted);margin-top:3px}' +
+        '#rec-mod .rec-file{display:flex;align-items:center;gap:9px;font-size:13px;padding:6px 0}' +
+        '#rec-mod .rec-file .del{margin-left:auto;font-size:12px;color:#A32D2D;cursor:pointer}' +
         '#rec-mod .rec-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}' +
         '#rec-mod .rec-empty{text-align:center;color:var(--muted);padding:30px;font-size:14px}' +
+        '#rec-mod .rec-pill{font-size:11px;background:var(--bg2,#F1EFE8);color:var(--muted);padding:4px 10px;border-radius:99px;flex:none}' +
       '</style>' +
       '<div id="recRoot"><div class="rec-empty">Loading\u2026</div></div>' +
       '<div id="recModalMount"></div>' +
@@ -55,103 +60,97 @@ window.fkModules['recruitment'] = {
   async mount(el) {
     const $ = (id) => el.querySelector('#' + id);
     function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-    const STAGE_LABEL = { sourced:'Sourced', screening:'Screening', interview:'Interview',
-                          offer:'Offer', hired:'Hired', standby:'Standby' };
-    const BOARD_STAGES = ['sourced','screening','interview','offer','standby','hired'];
-    let view = { mode:'list', openingId:null };
+    const STAGE_LABEL = { sourced:'Sourced', screening:'Screening', interview:'Interview', offer:'Offer', accepted:'Accepted', joined:'Joined', standby:'Standby' };
+    const BOARD_STAGES = ['sourced','screening','interview','offer','accepted','joined','standby'];
+    function daysAgo(iso){ if(!iso) return null; const d=Math.floor((Date.now()-new Date(iso).getTime())/86400000); return d; }
+    function ageLabel(iso){ const d=daysAgo(iso); if(d==null) return ''; if(d<=0) return 'today'; return d+(d===1?' day':' days'); }
 
     // ---------- openings list ----------
     async function loadList() {
-      view = { mode:'list', openingId:null };
       try {
         const r = await fetch('/api/recruitment/openings', { credentials:'include' });
         if (r.status === 403) { $('recRoot').innerHTML = '<div class="rec-empty">Recruitment is for the HR team.</div>'; return; }
-        const d = await r.json();
-        const ops = d.openings || [];
+        const d = await r.json(); const ops = d.openings || [];
         let html = '<div style="display:flex;justify-content:space-between;align-items:center">' +
           '<h2 style="margin:0">Recruitment</h2>' +
           '<button class="rec-btn primary" id="recNewOpening">+ New opening</button></div>' +
-          '<div class="rec-help">Each open position holds its candidates on a board. Drag a candidate between columns as they progress. ' +
-          'Click a candidate to add notes or record an outcome. <strong>Standby</strong> keeps a backup candidate; <strong>Rejected</strong> keeps a record with the reason.</div>';
-        if (ops.length === 0) {
-          html += '<div class="rec-empty">No open positions yet. Create one to start tracking candidates.</div>';
-        } else {
-          for (const o of ops) {
-            const sc = o.stage_counts || {};
-            let chips = '';
-            for (const st of ['screening','interview','offer']) {
-              if (sc[st]) chips += '<span class="rec-chip">' + sc[st] + ' ' + STAGE_LABEL[st].toLowerCase() + '</span>';
-            }
-            if (sc.standby) chips += '<span class="rec-chip">' + sc.standby + ' standby</span>';
-            if (sc.hired) chips += '<span class="rec-chip hired">' + sc.hired + ' hired</span>';
-            html += '<div class="rec-open-card" data-opening="' + o.id + '">' +
-              '<div style="display:flex;justify-content:space-between;align-items:center">' +
-                '<div><div style="font-size:15px;font-weight:500">' + esc(o.title) + '</div>' +
-                '<div class="rec-cand-sub">' + (o.dept_name ? esc(o.dept_name) + ' \u00b7 ' : '') + (o.active_count||0) + ' active candidate' + ((o.active_count==1)?'':'s') + (o.status!=='open'?' \u00b7 closed':'') + '</div></div>' +
-                '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--muted)"></i>' +
-              '</div>' +
-              (chips ? '<div class="rec-chips">' + chips + '</div>' : '') +
-            '</div>';
-          }
+          '<div class="rec-help">Each open position holds its candidates on a board. Drag a candidate between columns as they progress; you\u2019ll be asked how the round went. Click a candidate for full details, files and notes.</div>';
+        if (ops.length === 0) html += '<div class="rec-empty">No open positions yet. Create one to start tracking candidates.</div>';
+        else for (const o of ops) {
+          const sc = o.stage_counts || {}; let chips = '';
+          for (const st of ['screening','interview','offer']) if (sc[st]) chips += '<span class="rec-chip">' + sc[st] + ' ' + STAGE_LABEL[st].toLowerCase() + '</span>';
+          if (sc.standby) chips += '<span class="rec-chip">' + sc.standby + ' standby</span>';
+          if (sc.hired) chips += '<span class="rec-chip hired">' + sc.hired + ' hired</span>';
+          html += '<div class="rec-open-card" data-opening="' + o.id + '">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center">' +
+              '<div><div style="font-size:15px;font-weight:500">' + esc(o.title) + (o.status!=='open'?' <span style="font-size:12px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</div>' +
+              '<div class="rec-cand-sub">' + (o.dept_name ? esc(o.dept_name)+' \u00b7 ' : '') + (o.active_count||0) + ' active candidate' + ((o.active_count==1)?'':'s') + '</div></div>' +
+              '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--muted)"></i></div>' +
+            (chips ? '<div class="rec-chips">' + chips + '</div>' : '') + '</div>';
         }
         $('recRoot').innerHTML = html;
       } catch (e) { console.error('[rec list]', e); $('recRoot').innerHTML = '<div class="rec-empty">Could not load.</div>'; }
     }
 
-    // ---------- board for one opening ----------
+    // ---------- board ----------
     async function loadBoard(openingId) {
-      view = { mode:'board', openingId };
       try {
         const r = await fetch('/api/recruitment/openings/' + openingId, { credentials:'include' });
         const d = await r.json();
         if (!r.ok) { $('recRoot').innerHTML = '<div class="rec-empty">Could not load this opening.</div>'; return; }
-        const op = d.opening; const bs = d.byStage;
+        const op = d.opening, bs = d.byStage, ended = d.ended || [];
+        const isClosed = op.status && op.status !== 'open';
         let cols = '';
         for (const st of BOARD_STAGES) {
           const cands = bs[st] || [];
           cols += '<div class="rec-col" data-stage="' + st + '">' +
             '<div class="rec-col-head"><span>' + STAGE_LABEL[st] + '</span><span>' + cands.length + '</span></div>' +
-            cands.map(candCard).join('') +
-          '</div>';
+            cands.map(candCard).join('') + '</div>';
         }
-        const rejected = (bs.rejected || []).concat(bs.dropped || []);
-        let rejHtml = '';
-        if (rejected.length) {
-          rejHtml = '<div class="rec-rejected-strip"><div style="cursor:pointer;font-size:13px;font-weight:500" id="recRejToggle">Rejected (' + rejected.length + ') \u25b8</div>' +
-            '<div id="recRejList" style="display:none;margin-top:8px">' +
-            rejected.map(c => { const m=c.meta||{}; return '<div class="rec-rej-row"><span>' + esc(c.title) + '</span><span>' + esc(m.reject_reason||'no reason') + (m.reject_stage?' \u00b7 at '+esc(STAGE_LABEL[m.reject_stage]||m.reject_stage):'') + '</span></div>'; }).join('') +
+        let endedHtml = '';
+        if (ended.length) {
+          endedHtml = '<div class="rec-ended-strip"><div style="cursor:pointer;font-size:13px;font-weight:500" id="recEndToggle">Ended / archived (' + ended.length + ') \u25b8</div>' +
+            '<div id="recEndList" style="display:none;margin-top:8px">' +
+            ended.map(c => { const m=c.meta||{}; const e=m.ended||{}; const how=e.how==='withdrew'?'they withdrew':'we passed';
+              return '<div class="rec-end-row"><span>' + esc(c.title) + ' <span style="color:var(--soft)">\u2014 ' + how + (e.reason?': '+esc(e.reason):'') + '</span></span>' +
+                '<span class="reopen" data-reopen="' + c.id + '">Bring back</span></div>'; }).join('') +
             '</div></div>';
         }
         $('recRoot').innerHTML =
-          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;gap:12px">' +
             '<div><div style="font-size:13px;color:var(--muted);cursor:pointer" id="recBack">\u2190 All openings</div>' +
-            '<h2 style="margin:4px 0 0">' + esc(op.title) + '</h2></div>' +
-            '<button class="rec-btn primary" id="recAddCand">+ Add candidate</button>' +
-          '</div>' +
-          '<div class="rec-help">Drag a candidate to the next column as they progress. Click a candidate to open their details, add notes, or record an outcome.</div>' +
-          '<div class="rec-board">' + cols + '</div>' + rejHtml;
-        wireBoard(openingId);
+            '<h2 style="margin:4px 0 0">' + esc(op.title) + (isClosed?' <span style="font-size:13px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</h2></div>' +
+            '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+              '<button class="rec-btn" id="recEditOpening">Edit</button>' +
+              (isClosed ? '<button class="rec-btn" id="recReopenOpening">Reopen</button>' : '<button class="rec-btn" id="recCloseOpening">Close opening</button>') +
+              '<button class="rec-btn primary" id="recAddCand">+ Add candidate</button>' +
+            '</div></div>' +
+          '<div class="rec-help">Drag a candidate to the next column \u2014 you\u2019ll be asked how that round went, so it\u2019s on record. Click a candidate for full details. <strong>Close opening</strong> when filled or cancelled (kept, not deleted).</div>' +
+          '<div class="rec-board">' + cols + '</div>' + endedHtml;
+        wireBoard(openingId, op);
       } catch (e) { console.error('[rec board]', e); $('recRoot').innerHTML = '<div class="rec-empty">Could not load.</div>'; }
     }
 
     function candCard(c) {
       const m = c.meta || {};
-      const sub = [m.source, m.salary_expectation].filter(Boolean).join(' \u00b7 ');
-      const standbyNote = (m.stage === 'standby' && m.standby_note) ? '<div class="rec-cand-sub" style="font-style:italic">' + esc(m.standby_note) + '</div>' : '';
+      const sub = [m.current_company, m.experience_years ? m.experience_years+'yr' : null].filter(Boolean).join(' \u00b7 ');
+      const age = ageLabel(c.moved_at);
+      const standbyNote = (m.stage==='standby' && m.standby_note) ? '<div class="rec-cand-sub" style="font-style:italic">' + esc(m.standby_note) + '</div>' : '';
       return '<div class="rec-cand' + (m.stage==='standby'?' rec-standby':'') + '" draggable="true" data-cand="' + c.id + '">' +
         '<div class="rec-cand-name">' + esc(c.title) + '</div>' +
         (sub ? '<div class="rec-cand-sub">' + esc(sub) + '</div>' : '') + standbyNote +
+        (age ? '<div class="rec-cand-age">' + age + ' in ' + (STAGE_LABEL[m.stage]||m.stage||'stage').toLowerCase() + '</div>' : '') +
       '</div>';
     }
 
-    function wireBoard(openingId) {
+    function wireBoard(openingId, op) {
       $('recBack').onclick = loadList;
       $('recAddCand').onclick = () => openAddCandidate(openingId);
-      const rejT = $('recRejToggle');
-      if (rejT) rejT.onclick = () => { const l = $('recRejList'); l.style.display = l.style.display==='none'?'block':'none'; };
-
-      // drag and drop
+      const eb=$('recEditOpening'); if(eb) eb.onclick=()=>openEditOpening(op);
+      const cb=$('recCloseOpening'); if(cb) cb.onclick=()=>setOpeningStatus(openingId,'cancelled','Close this opening? Candidates are kept; it moves out of the active list.');
+      const rb=$('recReopenOpening'); if(rb) rb.onclick=()=>setOpeningStatus(openingId,'open',null);
+      const et=$('recEndToggle'); if(et) et.onclick=()=>{const l=$('recEndList'); l.style.display=l.style.display==='none'?'block':'none';};
+      el.querySelectorAll('[data-reopen]').forEach(x=>x.onclick=async()=>{ await fetch('/api/recruitment/candidates/'+x.getAttribute('data-reopen')+'/reopen',{method:'POST',credentials:'include'}); await loadBoard(openingId); });
       let dragId = null;
       el.querySelectorAll('.rec-cand').forEach(card => {
         card.addEventListener('dragstart', () => { dragId = card.getAttribute('data-cand'); card.classList.add('dragging'); });
@@ -159,130 +158,219 @@ window.fkModules['recruitment'] = {
         card.addEventListener('click', () => openCandidate(card.getAttribute('data-cand'), openingId));
       });
       el.querySelectorAll('.rec-col').forEach(col => {
-        col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drop-target'); });
-        col.addEventListener('dragleave', () => col.classList.remove('drop-target'));
-        col.addEventListener('drop', async (e) => {
+        col.addEventListener('dragover', e=>{ e.preventDefault(); col.classList.add('drop-target'); });
+        col.addEventListener('dragleave', ()=>col.classList.remove('drop-target'));
+        col.addEventListener('drop', async e=>{
           e.preventDefault(); col.classList.remove('drop-target');
-          const stage = col.getAttribute('data-stage');
-          if (!dragId) return;
-          if (stage === 'standby') { openStandby(dragId, openingId); return; }
-          if (stage === 'hired') { if (!confirm('Mark as hired? This flags them ready to onboard — you then create their employee record to start onboarding.')) return; }
-          await moveCandidate(dragId, stage, openingId);
+          const stage = col.getAttribute('data-stage'); if(!dragId) return;
+          if (stage==='standby') { openStandby(dragId, openingId); return; }
+          if (stage==='accepted') { openAccepted(dragId, openingId); return; }
+          if (stage==='joined') { openJoined(dragId, openingId); return; }
+          openOutcome(dragId, stage, openingId);   // ask how the round went
         });
       });
     }
 
+    async function setOpeningStatus(openingId, status, confirmMsg) {
+      if (confirmMsg && !confirm(confirmMsg)) return;
+      await fetch('/api/recruitment/openings/'+openingId, { method:'PATCH', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ status }) });
+      await loadBoard(openingId);
+    }
     async function moveCandidate(id, stage, openingId, extra) {
-      try {
-        const body = Object.assign({ stage }, extra || {});
-        const r = await fetch('/api/recruitment/candidates/' + id, { method:'PATCH', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify(body) });
-        if (!r.ok) { alert('Could not move candidate'); return; }
-        const d = await r.json();
-        if (d.ready_to_onboard) alert('Marked hired and ready to onboard. Create their employee record (Admin \u2192 People) to start onboarding.');
-        await loadBoard(openingId);
-      } catch (e) { alert('Network error'); }
+      const r = await fetch('/api/recruitment/candidates/'+id, { method:'PATCH', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify(Object.assign({ stage }, extra||{})) });
+      if (!r.ok) { alert('Could not move candidate'); return false; }
+      await loadBoard(openingId);
+      return true;
     }
 
     // ---------- modals ----------
-    function modal(html) {
-      $('recModalMount').innerHTML = '<div class="rec-modal-bg" id="recModalBg"><div class="rec-modal">' + html + '</div></div>';
-      $('recModalBg').addEventListener('click', (e) => { if (e.target.id==='recModalBg') closeModal(); });
-    }
-    function closeModal() { $('recModalMount').innerHTML = ''; }
+    function modal(html){ $('recModalMount').innerHTML='<div class="rec-modal-bg" id="recModalBg"><div class="rec-modal">'+html+'</div></div>'; $('recModalBg').addEventListener('click',e=>{ if(e.target.id==='recModalBg') closeModal(); }); }
+    function closeModal(){ $('recModalMount').innerHTML=''; }
 
     function openAddOpening() {
       modal('<h3 style="margin:0 0 14px">New opening</h3>' +
         '<div class="rec-field"><label>Role title</label><input id="recOpTitle" placeholder="e.g. Amazon PPC Agent" /></div>' +
         '<div class="rec-field"><label>Platform (optional)</label><input id="recOpPlatform" placeholder="Naukri / LinkedIn / Indeed" /></div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recOpCancel">Cancel</button><button class="rec-btn primary" id="recOpSave">Create opening</button></div>');
-      $('recOpCancel').onclick = closeModal;
-      $('recOpSave').onclick = async () => {
-        const title = $('recOpTitle').value.trim(); if (!title) { $('recOpTitle').focus(); return; }
-        const r = await fetch('/api/recruitment/openings', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ title, platform: $('recOpPlatform').value.trim()||null }) });
-        if (!r.ok) { alert('Could not create'); return; }
-        closeModal(); await loadList();
-      };
+      $('recOpCancel').onclick=closeModal;
+      $('recOpSave').onclick=async()=>{ const title=$('recOpTitle').value.trim(); if(!title){$('recOpTitle').focus();return;}
+        const r=await fetch('/api/recruitment/openings',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({title,platform:$('recOpPlatform').value.trim()||null})});
+        if(!r.ok){alert('Could not create');return;} closeModal(); await loadList(); };
     }
-
+    function openEditOpening(op) {
+      modal('<h3 style="margin:0 0 14px">Edit opening</h3>' +
+        '<div class="rec-field"><label>Role title</label><input id="recEoTitle" value="' + esc(op.title) + '" /></div>' +
+        '<div class="rec-actions"><button class="rec-btn" id="recEoCancel">Cancel</button><button class="rec-btn primary" id="recEoSave">Save</button></div>');
+      $('recEoCancel').onclick=closeModal;
+      $('recEoSave').onclick=async()=>{ const title=$('recEoTitle').value.trim(); if(!title){$('recEoTitle').focus();return;}
+        await fetch('/api/recruitment/openings/'+op.id,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({title})});
+        closeModal(); await loadBoard(op.id); };
+    }
     function openAddCandidate(openingId) {
       modal('<h3 style="margin:0 0 14px">Add candidate</h3>' +
         '<div class="rec-field"><label>Name</label><input id="recCName" placeholder="Candidate name" /></div>' +
         '<div class="rec-field"><label>Source</label><input id="recCSource" placeholder="Naukri / LinkedIn / referral" /></div>' +
-        '<div class="rec-field"><label>Phone</label><input id="recCPhone" /></div>' +
-        '<div class="rec-field"><label>Salary expectation</label><input id="recCSalary" placeholder="e.g. \u20b935k" /></div>' +
-        '<div class="rec-field"><label>Notice period</label><input id="recCNotice" placeholder="e.g. 30 days" /></div>' +
+        '<div class="rec-field"><label>Why shortlist? (experience, skills, fit)</label><textarea id="recCWhy" rows="2" placeholder="e.g. 3yr HR exp, payroll + onboarding, immediate joiner"></textarea></div>' +
+        '<div style="font-size:11px;color:var(--soft);margin-bottom:12px">Salary, notice, CV &amp; photo come later \u2014 add them on the card as you learn them.</div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recCCancel">Cancel</button><button class="rec-btn primary" id="recCSave">Add candidate</button></div>');
-      $('recCCancel').onclick = closeModal;
-      $('recCSave').onclick = async () => {
-        const name = $('recCName').value.trim(); if (!name) { $('recCName').focus(); return; }
-        const r = await fetch('/api/recruitment/openings/' + openingId + '/candidates', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include',
-          body: JSON.stringify({ name, source:$('recCSource').value.trim()||null, phone:$('recCPhone').value.trim()||null, salary_expectation:$('recCSalary').value.trim()||null, notice_period:$('recCNotice').value.trim()||null }) });
-        if (!r.ok) { alert('Could not add'); return; }
-        closeModal(); await loadBoard(openingId);
-      };
+      $('recCCancel').onclick=closeModal;
+      $('recCSave').onclick=async()=>{ const name=$('recCName').value.trim(); if(!name){$('recCName').focus();return;}
+        const r=await fetch('/api/recruitment/openings/'+openingId+'/candidates',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
+          body:JSON.stringify({name,source:$('recCSource').value.trim()||null,why_shortlist:$('recCWhy').value.trim()||null})});
+        if(!r.ok){alert('Could not add');return;} closeModal(); await loadBoard(openingId); };
     }
-
     function openStandby(id, openingId) {
       modal('<h3 style="margin:0 0 14px">Move to Standby</h3>' +
         '<div class="rec-field"><label>Why standby? (e.g. backup to Priya)</label><input id="recSbNote" placeholder="Short note so you remember" /></div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recSbCancel">Cancel</button><button class="rec-btn primary" id="recSbSave">Move to standby</button></div>');
-      $('recSbCancel').onclick = closeModal;
-      $('recSbSave').onclick = async () => { closeModal(); await moveCandidate(id, 'standby', openingId, { standby_note: $('recSbNote') ? '' : '' } ); };
-      // capture note value before close
-      $('recSbSave').onclick = async () => { const note = $('recSbNote').value.trim(); closeModal(); await moveCandidate(id, 'standby', openingId, { standby_note: note }); };
+      $('recSbCancel').onclick=closeModal;
+      $('recSbSave').onclick=async()=>{ const note=$('recSbNote').value.trim(); closeModal(); await moveCandidate(id,'standby',openingId,{standby_note:note}); };
+    }
+    function openAccepted(id, openingId) {
+      modal('<h3 style="margin:0 0 6px">Offer accepted</h3>' +
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">They\u2019ve said yes. Set the agreed joining date \u2014 nothing is created in the employee system yet; that happens when they actually join.</div>' +
+        '<div class="rec-field"><label>Agreed joining date</label><input type="date" id="recAccDate" /></div>' +
+        '<div class="rec-actions"><button class="rec-btn" id="recAccCancel">Cancel</button><button class="rec-btn primary" id="recAccSave">Move to accepted</button></div>');
+      $('recAccCancel').onclick=closeModal;
+      $('recAccSave').onclick=async()=>{ const jd=$('recAccDate').value||null; closeModal(); await moveCandidate(id,'accepted',openingId,{ joining_date: jd }); };
+    }
+    async function openJoined(id, openingId) {
+      // Load the candidate so we can show copyable details for the employee record.
+      const r = await fetch('/api/recruitment/openings/'+openingId,{credentials:'include'});
+      const d = await r.json(); let cand=null;
+      for (const st of Object.keys(d.byStage||{})) { const f=(d.byStage[st]||[]).find(x=>String(x.id)===String(id)); if(f) cand=f; }
+      if (!cand) { alert('Candidate not found'); return; }
+      const m = cand.meta||{};
+      const rows = [['Name',cand.title],['Email',m.email],['Phone',m.phone],['Agreed salary',m.expected_salary],['Joining date',m.joining_date],['Notice',m.notice_period]]
+        .filter(x=>x[1]).map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+esc(x[1])+'</div>').join('');
+      modal('<h3 style="margin:0 0 6px">They\u2019ve joined \u2014 create their employee record</h3>' +
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">This is the moment they become an employee. Open the People page and add them \u2014 their onboarding starts automatically once you set their hire date. Copy the details below into the form (edit anything that\u2019s changed).</div>' +
+        (rows ? '<div class="rec-grid" style="margin-bottom:12px">'+rows+'</div>' : '') +
+        '<div class="rec-field" style="font-size:11px;color:var(--soft)">Their CV is on the candidate card \u2014 re-upload it to their employee profile once created.</div>' +
+        '<div class="rec-actions"><button class="rec-btn" id="recJoinCancel">Not yet</button>' +
+          '<button class="rec-btn primary" id="recJoinGo">Mark joined &amp; open People \u2192</button></div>');
+      $('recJoinCancel').onclick=closeModal;
+      $('recJoinGo').onclick=async()=>{ const ok=await moveCandidate(id,'joined',openingId,{}); closeModal(); if(ok) location.hash='#hr/users'; };
+    }
+    function openOutcome(id, stage, openingId) {
+      modal('<h3 style="margin:0 0 6px">Move to ' + (STAGE_LABEL[stage]||stage) + '</h3>' +
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">How did this round go? (kept on the candidate\u2019s card)</div>' +
+        '<div class="rec-field"><textarea id="recOutText" rows="3" placeholder="e.g. Strong on payroll, confident communicator \u2014 worth advancing"></textarea></div>' +
+        '<div class="rec-actions"><button class="rec-btn" id="recOutSkip">Skip</button><button class="rec-btn primary" id="recOutSave">Move to ' + (STAGE_LABEL[stage]||stage) + '</button></div>');
+      $('recOutSkip').onclick=async()=>{ closeModal(); await moveCandidate(id,stage,openingId,{}); };
+      $('recOutSave').onclick=async()=>{ const outcome=$('recOutText').value.trim(); closeModal(); await moveCandidate(id,stage,openingId,{outcome}); };
     }
 
     async function openCandidate(id, openingId) {
       const r = await fetch('/api/recruitment/openings/' + openingId, { credentials:'include' });
-      const d = await r.json();
-      let cand = null;
-      for (const st of Object.keys(d.byStage||{})) { const f = (d.byStage[st]||[]).find(x=>String(x.id)===String(id)); if (f) cand = f; }
+      const d = await r.json(); let cand=null;
+      for (const st of Object.keys(d.byStage||{})) { const f=(d.byStage[st]||[]).find(x=>String(x.id)===String(id)); if(f) cand=f; }
+      if (!cand) (d.ended||[]).forEach(x=>{ if(String(x.id)===String(id)) cand=x; });
       if (!cand) { alert('Candidate not found'); return; }
       const m = cand.meta || {};
-      const notes = Array.isArray(m.notes) ? m.notes : [];
-      const fields = [['Source',m.source],['Phone',m.phone],['Salary expectation',m.salary_expectation],['Notice period',m.notice_period]]
-        .filter(x=>x[1]).map(x=>'<div class="rec-cand-sub" style="font-size:13px">' + x[0] + ': ' + esc(x[1]) + '</div>').join('');
-      const notesHtml = notes.length ? notes.map(n=>'<div class="rec-note">' + esc(n.text) + '<div class="rec-note-meta">' + esc(n.by_name||'') + ' \u00b7 ' + new Date(n.at).toLocaleDateString() + '</div></div>').join('') : '<div class="rec-cand-sub">No notes yet.</div>';
-      modal('<h3 style="margin:0 0 4px">' + esc(cand.title) + '</h3>' +
-        '<div style="margin-bottom:12px">' + fields + '</div>' +
-        '<div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Notes</div>' +
-        notesHtml +
-        '<div class="rec-field" style="margin-top:10px"><textarea id="recNoteText" rows="2" placeholder="Add a note (e.g. good communication, available immediately)"></textarea></div>' +
-        '<button class="rec-btn" id="recNoteSave" style="width:100%">Add note</button>' +
-        '<div class="rec-actions" style="margin-top:18px;border-top:0.5px solid var(--line);padding-top:14px">' +
+      const fields = [['Current company',m.current_company],['Experience',m.experience_years?m.experience_years+' years':null],
+        ['Current salary',m.current_salary],['Expected salary',m.expected_salary],['Notice period',m.notice_period],
+        ['Joining date',m.joining_date],
+        ['Phone',m.phone],['Email',m.email],['Source',m.source]].filter(x=>x[1]);
+      const kv = fields.map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+esc(x[1])+'</div>').join('');
+      const hist = Array.isArray(m.history)&&m.history.length ? m.history.map(h=>(STAGE_LABEL[h.stage]||h.stage)+' '+new Date(h.at).toLocaleDateString()).join(' \u2192 ') : '';
+      const outcomes = Array.isArray(m.outcomes)&&m.outcomes.length ? m.outcomes.map(o=>'<div class="rec-note"><span style="color:var(--muted)">'+(STAGE_LABEL[o.stage]||o.stage)+':</span> '+esc(o.text)+'<div class="rec-note-meta">'+esc(o.by_name||'')+' \u00b7 '+new Date(o.at).toLocaleDateString()+'</div></div>').join('') : '';
+      const notes = Array.isArray(m.notes)&&m.notes.length ? m.notes.map(n=>'<div class="rec-note">'+esc(n.text)+'<div class="rec-note-meta">'+esc(n.by_name||'')+' \u00b7 '+new Date(n.at).toLocaleDateString()+'</div></div>').join('') : '<div class="rec-cand-sub">No notes yet.</div>';
+      modal('<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+          '<h3 style="margin:0">' + esc(cand.title) + '</h3>' +
+          '<span class="rec-pill">' + (STAGE_LABEL[m.stage]||m.stage||'') + (cand.moved_at?' \u00b7 '+ageLabel(cand.moved_at):'') + '</span></div>' +
+        (m.why_shortlist ? '<div class="rec-why"><span style="color:var(--muted)">Why shortlisted:</span> ' + esc(m.why_shortlist) + '</div>' : '') +
+        (kv ? '<div class="rec-grid" style="margin-top:12px">' + kv + '</div>' : '') +
+        '<div class="rec-sec"><div class="rec-sec-h">Files (CV, photo)</div><div id="recFiles"><div class="rec-cand-sub">Loading\u2026</div></div>' +
+          '<label class="rec-btn" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer"><i class="ti ti-upload"></i> Upload CV or photo<input type="file" id="recFileInput" accept="application/pdf,image/png,image/jpeg" style="display:none"></label></div>' +
+        (hist ? '<div class="rec-sec"><div class="rec-sec-h">Stage history</div><div style="font-size:12.5px;color:var(--muted)">'+hist+'</div>'+outcomes+'</div>' : (outcomes?'<div class="rec-sec"><div class="rec-sec-h">Round outcomes</div>'+outcomes+'</div>':'')) +
+        '<div class="rec-sec"><div class="rec-sec-h">Notes</div>' + notes +
+          '<div class="rec-field" style="margin-top:10px"><textarea id="recNoteText" rows="2" placeholder="Add a note"></textarea></div>' +
+          '<button class="rec-btn" id="recNoteSave" style="width:100%">Add note</button></div>' +
+        '<div class="rec-actions" style="border-top:0.5px solid var(--line);padding-top:14px">' +
           '<button class="rec-btn" id="recCloseModal">Close</button>' +
-          '<button class="rec-btn" id="recReject" style="color:#A32D2D">Reject candidate</button>' +
+          '<button class="rec-btn" id="recEditCand">Edit details</button>' +
+          (m.ended ? '<button class="rec-btn" id="recReopenCand">Bring back</button>' : '<button class="rec-btn danger" id="recEndCand">End candidate\u2026</button>') +
         '</div>');
-      $('recCloseModal').onclick = closeModal;
-      $('recNoteSave').onclick = async () => {
-        const text = $('recNoteText').value.trim(); if (!text) return;
-        const rr = await fetch('/api/recruitment/candidates/' + id + '/note', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ text }) });
-        if (!rr.ok) { alert('Could not save note'); return; }
-        openCandidate(id, openingId);
-      };
-      $('recReject').onclick = () => openReject(id, openingId);
-    }
-
-    function openReject(id, openingId) {
-      modal('<h3 style="margin:0 0 14px">Reject candidate</h3>' +
-        '<div class="rec-field"><label>Reason (kept on record)</label><input id="recRejReason" placeholder="e.g. not enough PPC experience" /></div>' +
-        '<div class="rec-actions"><button class="rec-btn" id="recRejCancel">Cancel</button><button class="rec-btn primary" id="recRejSave" style="background:#A32D2D;border-color:#A32D2D">Reject</button></div>');
-      $('recRejCancel').onclick = () => openCandidate(id, openingId);
-      $('recRejSave').onclick = async () => {
-        const reason = $('recRejReason').value.trim();
-        const rr = await fetch('/api/recruitment/candidates/' + id + '/reject', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ reason }) });
-        if (!rr.ok) { alert('Could not reject'); return; }
-        closeModal(); await loadBoard(openingId);
+      $('recCloseModal').onclick=closeModal;
+      $('recEditCand').onclick=()=>openEditCandidate(cand, openingId);
+      const ec=$('recEndCand'); if(ec) ec.onclick=()=>openEndCandidate(id, openingId);
+      const rc=$('recReopenCand'); if(rc) rc.onclick=async()=>{ await fetch('/api/recruitment/candidates/'+id+'/reopen',{method:'POST',credentials:'include'}); closeModal(); await loadBoard(openingId); };
+      $('recNoteSave').onclick=async()=>{ const text=$('recNoteText').value.trim(); if(!text) return;
+        const rr=await fetch('/api/recruitment/candidates/'+id+'/note',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({text})});
+        if(!rr.ok){alert('Could not save note');return;} openCandidate(id,openingId); };
+      // files
+      loadFiles(id);
+      $('recFileInput').onchange = async (e) => {
+        const f = e.target.files[0]; if(!f) return;
+        const fd = new FormData(); fd.append('file', f);
+        const rr = await fetch('/api/recruitment/candidates/'+id+'/files',{method:'POST',credentials:'include',body:fd});
+        if(!rr.ok){ const j=await rr.json().catch(()=>({})); alert(j.error||'Upload failed'); return; }
+        loadFiles(id);
       };
     }
 
-    // root click delegation for list
+    async function loadFiles(id) {
+      try {
+        const r = await fetch('/api/recruitment/candidates/'+id+'/files',{credentials:'include'});
+        const d = await r.json(); const files = d.files||[];
+        const box = $('recFiles'); if(!box) return;
+        box.innerHTML = files.length ? files.map(f=>{
+          const isImg = (f.mime_type||'').startsWith('image/');
+          return '<div class="rec-file"><i class="ti '+(isImg?'ti-photo':'ti-file-text')+'" style="font-size:17px;color:#185FA5"></i>' +
+            '<a href="/api/recruitment/files/'+f.id+'" target="_blank" style="color:inherit;text-decoration:none">'+esc(f.filename)+'</a>' +
+            '<span class="del" data-delfile="'+f.id+'">Remove</span></div>';
+        }).join('') : '<div class="rec-cand-sub">No files yet.</div>';
+        box.querySelectorAll('[data-delfile]').forEach(x=>x.onclick=async()=>{ if(!confirm('Remove this file?'))return; await fetch('/api/recruitment/files/'+x.getAttribute('data-delfile'),{method:'DELETE',credentials:'include'}); loadFiles(id); });
+      } catch(e){ const box=$('recFiles'); if(box) box.innerHTML='<div class="rec-cand-sub">Could not load files.</div>'; }
+    }
+
+    function openEditCandidate(cand, openingId) {
+      const m = cand.meta || {};
+      const F = (id,label,val,ph)=>'<div class="rec-field"><label>'+label+'</label><input id="'+id+'" value="'+esc(val||'')+'" placeholder="'+(ph||'')+'"></div>';
+      modal('<h3 style="margin:0 0 14px">Edit candidate</h3>' +
+        F('ecName','Name',cand.title) +
+        '<div class="rec-grid">' +
+          F('ecCompany','Current company',m.current_company) +
+          F('ecExp','Experience (years)',m.experience_years) +
+          F('ecCur','Current salary',m.current_salary) +
+          F('ecExp2','Expected salary',m.expected_salary) +
+          F('ecNotice','Notice period',m.notice_period) +
+          F('ecJoin','Joining date',m.joining_date) +
+          F('ecPhone','Phone',m.phone) +
+        '</div>' +
+        F('ecEmail','Email',m.email) +
+        '<div class="rec-field"><label>Why shortlisted</label><textarea id="ecWhy" rows="2">'+esc(m.why_shortlist||'')+'</textarea></div>' +
+        '<div class="rec-actions"><button class="rec-btn" id="ecCancel">Cancel</button><button class="rec-btn primary" id="ecSave">Save</button></div>');
+      $('ecCancel').onclick=()=>openCandidate(cand.id, openingId);
+      $('ecSave').onclick=async()=>{
+        const body={ name:$('ecName').value.trim(), current_company:$('ecCompany').value.trim()||null,
+          experience_years:$('ecExp').value.trim()||null, current_salary:$('ecCur').value.trim()||null,
+          expected_salary:$('ecExp2').value.trim()||null, notice_period:$('ecNotice').value.trim()||null,
+          joining_date:$('ecJoin').value.trim()||null,
+          phone:$('ecPhone').value.trim()||null, email:$('ecEmail').value.trim()||null, why_shortlist:$('ecWhy').value.trim()||null };
+        const r=await fetch('/api/recruitment/candidates/'+cand.id,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)});
+        if(!r.ok){alert('Could not save');return;} openCandidate(cand.id, openingId);
+      };
+    }
+
+    function openEndCandidate(id, openingId) {
+      modal('<h3 style="margin:0 0 6px">End candidate</h3>' +
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">They\u2019re archived with the reason and can be brought back. Their files are kept 90 days then cleared.</div>' +
+        '<div class="rec-field"><label>What happened?</label><select id="recEndHow"><option value="passed">We passed on them</option><option value="withdrew">They withdrew / declined</option></select></div>' +
+        '<div class="rec-field"><label>Reason (kept on record)</label><input id="recEndReason" placeholder="e.g. not enough PPC experience / took another offer"></div>' +
+        '<div class="rec-actions"><button class="rec-btn" id="recEndCancel">Cancel</button><button class="rec-btn primary" id="recEndSave">End candidate</button></div>');
+      $('recEndCancel').onclick=()=>openCandidate(id, openingId);
+      $('recEndSave').onclick=async()=>{ const how=$('recEndHow').value, reason=$('recEndReason').value.trim();
+        const r=await fetch('/api/recruitment/candidates/'+id+'/end',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({how,reason})});
+        if(!r.ok){alert('Could not end');return;} closeModal(); await loadBoard(openingId); };
+    }
+
     $('recRoot').addEventListener('click', (e) => {
       const opCard = e.target.closest('[data-opening]');
-      if (opCard && view.mode === 'list') { loadBoard(parseInt(opCard.getAttribute('data-opening'),10)); return; }
+      if (opCard) { loadBoard(parseInt(opCard.getAttribute('data-opening'),10)); return; }
       if (e.target.id === 'recNewOpening') openAddOpening();
     });
-
     await loadList();
   }
 };
