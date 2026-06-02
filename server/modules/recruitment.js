@@ -28,9 +28,11 @@ router.use(requireAuth);
 const STAGES = ['sourced','screening','interview','offer','hired','standby','rejected','dropped'];
 const ACTIVE_STAGES = ['sourced','screening','interview','offer']; // "need action" for the pointer
 
-// Who can use recruitment: HR team + owner.
+// Who can use recruitment: anyone who can see all profiles (HR + owner + management),
+// matching how the working Profile/People pages gate HR access. Falls back to
+// hr-team group membership too, so an HR person without that broad perm still gets in.
 async function isHr(req) {
-  if (req.user.can('*')) return true;
+  if (req.user.can('profile.view.any')) return true;
   const m = await db.query(
     `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
       WHERE ug.user_id = $1 AND g.slug = 'hr-team' AND g.deleted_at IS NULL LIMIT 1`,

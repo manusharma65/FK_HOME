@@ -244,7 +244,7 @@ router.patch('/:id', async (req, res) => {
     if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const t = cur.rows[0];
     const canEdit = t.assignee_user_id === req.user.id || t.assigned_by_user_id === req.user.id
-      || t.requester_user_id === req.user.id || req.user.can('*');
+      || t.requester_user_id === req.user.id || req.user.can('profile.view.any');
     if (!canEdit) return res.status(403).json({ error: 'Permission denied' });
     if (title !== undefined && !String(title).trim()) return res.status(400).json({ error: 'title cannot be empty' });
     await db.query(
@@ -275,7 +275,7 @@ router.post('/:id/cancel', async (req, res) => {
     if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const t = cur.rows[0];
     const canCancel = t.assignee_user_id === req.user.id || t.assigned_by_user_id === req.user.id
-      || t.requester_user_id === req.user.id || req.user.can('*');
+      || t.requester_user_id === req.user.id || req.user.can('profile.view.any');
     if (!canCancel) return res.status(403).json({ error: 'Permission denied' });
     await db.query(
       `UPDATE tasks SET status='cancelled', cancelled_at=NOW(), cancel_reason=$1, updated_at=NOW() WHERE id=$2`,
@@ -340,7 +340,7 @@ router.get('/done', async (req, res) => {
 // Owner sees everyone's active tasks.
 router.get('/team', async (req, res) => {
   try {
-    const isOwner = req.user.can('*');
+    const isOwner = req.user.can('profile.view.any');
     let memberIds = [];
     if (isOwner) {
       const all = await db.query(
@@ -384,7 +384,7 @@ router.get('/team', async (req, res) => {
 router.get('/hr-queue', async (req, res) => {
   try {
     // Is the caller HR (or owner)?
-    const isOwner = req.user.can('*');
+    const isOwner = req.user.can('profile.view.any');
     let isHr = isOwner;
     if (!isHr) {
       const m = await db.query(
@@ -425,7 +425,7 @@ router.post('/:id/cover', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
   try {
-    const isOwner = req.user.can('*');
+    const isOwner = req.user.can('profile.view.any');
     let isHr = isOwner;
     if (!isHr) {
       const m = await db.query(
@@ -522,7 +522,7 @@ router.post('/:id/action', async (req, res) => {
     if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const t = cur.rows[0];
     const isAssignee = t.assignee_user_id === req.user.id;
-    const isOwner = req.user.can('*') || req.user.can('admin.audit.view');
+    const isOwner = req.user.can('profile.view.any') || req.user.can('admin.audit.view');
     if (!isAssignee && !isOwner) return res.status(403).json({ error: 'Permission denied' });
     // Can't action a request that's still awaiting acceptance.
     if (t.request_status === 'awaiting') return res.status(409).json({ error: 'Request not yet accepted' });
@@ -559,7 +559,7 @@ router.get('/:id', async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const t = r.rows[0];
     const ok = t.assignee_user_id === req.user.id || t.related_user_id === req.user.id
-      || t.requester_user_id === req.user.id || req.user.can('*') || req.user.can('admin.audit.view');
+      || t.requester_user_id === req.user.id || req.user.can('profile.view.any') || req.user.can('admin.audit.view');
     if (!ok) return res.status(403).json({ error: 'Permission denied' });
     res.json({ task: t });
   } catch (e) {
@@ -576,7 +576,7 @@ router.post('/:id/dismiss', async (req, res) => {
     const r = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const t = r.rows[0];
-    if (t.assignee_user_id !== req.user.id && !req.user.can('*')) {
+    if (t.assignee_user_id !== req.user.id && !req.user.can('profile.view.any')) {
       return res.status(403).json({ error: 'Permission denied' });
     }
     await db.query(
@@ -591,7 +591,7 @@ router.post('/:id/dismiss', async (req, res) => {
 
 // ---------- POST /api/tasks/admin/tick ----------
 router.post('/admin/tick', async (req, res) => {
-  if (!(req.user.can('admin.backfill.run') || req.user.can('*'))) {
+  if (!(req.user.can('admin.backfill.run') || req.user.can('profile.view.any'))) {
     return res.status(403).json({ error: 'Permission denied' });
   }
   try {
@@ -605,7 +605,7 @@ router.post('/admin/tick', async (req, res) => {
 
 // ---------- GET /api/tasks/admin/all ----------
 router.get('/admin/all', async (req, res) => {
-  if (!(req.user.can('admin.audit.view') || req.user.can('*'))) {
+  if (!(req.user.can('admin.audit.view') || req.user.can('profile.view.any'))) {
     return res.status(403).json({ error: 'Permission denied' });
   }
   try {
