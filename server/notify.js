@@ -368,44 +368,55 @@ async function getGroupMembers(groupSlug) {
 // ---------- notifyEvent: template-driven ----------
 async function notifyEvent(eventType, ctx) {
   const tpl = TEMPLATES[eventType];
-  if (!tpl) {
-    console.error('[notify] unknown event type: ' + eventType);
-    return;
-  }
-  try {
-    const c = ctx || {};
-    const title = tpl.title(c);
-    const body  = tpl.body ? tpl.body(c) : null;
-    const action_url = tpl.action_url ? tpl.action_url(c) : null;
-    const recipients = tpl.recipients(c);
+  // Send the notification (if there's a template + recipients). Wrapped so a
+  // missing template or zero recipients never skips the HR-task hook below.
+  if (tpl) {
+    try {
+      const c = ctx || {};
+      const title = tpl.title(c);
+      const body  = tpl.body ? tpl.body(c) : null;
+      const action_url = tpl.action_url ? tpl.action_url(c) : null;
+      const recipients = tpl.recipients(c);
 
-    let userIds;
-    if (typeof recipients === 'string' && recipients.indexOf('managers_of:') === 0) {
-      const actorId = parseInt(recipients.split(':')[1], 10);
-      userIds = await getEscalationRecipients(actorId);
-    } else if (typeof recipients === 'string' && recipients.indexOf('group:') === 0) {
-      // r0.14 — notify every active member of a permission group, e.g. 'group:hr-team'
-      const slug = recipients.split(':')[1];
-      userIds = await getGroupMembers(slug);
-    } else if (Array.isArray(recipients)) {
-      userIds = recipients.filter(x => Number.isFinite(x));
-    } else {
-      userIds = [];
+      let userIds;
+      if (typeof recipients === 'string' && recipients.indexOf('managers_of:') === 0) {
+        const actorId = parseInt(recipients.split(':')[1], 10);
+        userIds = await getEscalationRecipients(actorId);
+      } else if (typeof recipients === 'string' && recipients.indexOf('group:') === 0) {
+        const slug = recipients.split(':')[1];
+        userIds = await getGroupMembers(slug);
+      } else if (Array.isArray(recipients)) {
+        userIds = recipients.filter(x => Number.isFinite(x));
+      } else {
+        userIds = [];
+      }
+
+      if (userIds.length > 0) {
+        await notify({
+          userIds,
+          type: eventType,
+          title,
+          body,
+          action_url,
+          related_user_id: c.actorUserId || c.targetUserId || null,
+          related_type: tpl.related_type || null,
+          related_id: c.related_id || null,
+        });
+      }
+    } catch (err) {
+      console.error("[notify] notifyEvent('" + eventType + "') failed:", err.message);
     }
-    if (userIds.length === 0) return;
+  } else {
+    console.error('[notify] unknown event type: ' + eventType);
+  }
 
-    await notify({
-      userIds,
-      type: eventType,
-      title,
-      body,
-      action_url,
-      related_user_id: c.actorUserId || c.targetUserId || null,
-      related_type: tpl.related_type || null,
-      related_id: c.related_id || null,
-    });
+  // r0.25 — turn HR events into routed tasks in the shared HR queue.
+  // Always runs (independent of the notification above): self-contained + guarded.
+  try {
+    const { maybeCreateHrTask } = require('./hr-task-router');
+    await maybeCreateHrTask(eventType, ctx);
   } catch (err) {
-    console.error("[notify] notifyEvent('" + eventType + "') failed:", err.message);
+    console.error("[notify] hr-task-router hook failed for '" + eventType + "':", err.message);
   }
 }
 

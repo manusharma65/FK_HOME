@@ -377,6 +377,83 @@ router.get('/team', async (req, res) => {
   }
 });
 
+// ---------- GET /api/tasks/hr-queue ----------
+// The shared HR queue: all active HR tasks (routed by area), tagged with whose
+// they are, so Tanu & Deepanshi both see everything and can cover for each other.
+// Visible to hr-team members + owner.
+router.get('/hr-queue', async (req, res) => {
+  try {
+    // Is the caller HR (or owner)?
+    const isOwner = req.user.can('*');
+    let isHr = isOwner;
+    if (!isHr) {
+      const m = await db.query(
+        `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+          WHERE ug.user_id = $1 AND g.slug = 'hr-team' AND g.deleted_at IS NULL LIMIT 1`,
+        [req.user.id]);
+      isHr = m.rows.length > 0;
+    }
+    if (!isHr) return res.status(403).json({ error: 'HR only' });
+
+    const r = await db.query(
+      `SELECT t.id, t.kind, t.source, t.category, t.title, t.body, t.status,
+              t.due_at, t.opens_at, t.meta, t.assignee_user_id, t.related_user_id,
+              au.display_name AS assignee_name, au.full_name AS assignee_full_name,
+              au.initials AS assignee_initials, au.avatar_colour AS assignee_colour,
+              ru.display_name AS related_name, ru.full_name AS related_full_name
+         FROM tasks t
+         JOIN users au ON au.id = t.assignee_user_id
+    LEFT JOIN users ru ON ru.id = t.related_user_id
+        WHERE t.source = 'auto_event'
+          AND t.status IN ('open','due','overdue','in_progress')
+          AND (t.meta->>'hr_area') IS NOT NULL
+        ORDER BY
+          CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1
+                        WHEN 'in_progress' THEN 2 ELSE 3 END,
+          t.due_at ASC NULLS LAST, t.created_at ASC`);
+    res.json({ tasks: r.rows, me: req.user.id });
+  } catch (e) {
+    console.error('[tasks/hr-queue] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/tasks/:id/cover ----------
+// Take over a colleague's HR task (cover when they're off). Reassigns it to me,
+// records the cover in reassign_history. HR-team / owner only.
+router.post('/:id/cover', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const isOwner = req.user.can('*');
+    let isHr = isOwner;
+    if (!isHr) {
+      const m = await db.query(
+        `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+          WHERE ug.user_id = $1 AND g.slug = 'hr-team' AND g.deleted_at IS NULL LIMIT 1`,
+        [req.user.id]);
+      isHr = m.rows.length > 0;
+    }
+    if (!isHr) return res.status(403).json({ error: 'HR only' });
+
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+    if (t.assignee_user_id === req.user.id) return res.json({ ok: true }); // already mine
+    const hist = Array.isArray(t.reassign_history) ? t.reassign_history : [];
+    hist.push({ at: new Date().toISOString(), by: req.user.id, from: t.assignee_user_id, act: 'covered' });
+    await db.query(
+      `UPDATE tasks SET assignee_user_id=$1, reassign_history=$2, updated_at=NOW() WHERE id=$3`,
+      [req.user.id, JSON.stringify(hist), id]);
+    await logAudit({ req, module:'tasks', action:'task.covered', target_type:'task', target_id:id,
+      after:{ from: t.assignee_user_id, to: req.user.id } });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[tasks/cover] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
 // ---------- POST /api/tasks/:id/accept ----------
 router.post('/:id/accept', async (req, res) => {
   const id = parseInt(req.params.id, 10);

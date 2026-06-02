@@ -8,6 +8,7 @@
 <!-- FK Home r0.22 (Ship 2a): universal task model + My Work view + home card -->
 <!-- FK Home r0.23: explicit assign/request, edit/cancel/done-history, Team Work view, status-constraint fix -->
 <!-- FK Home r0.24: SIMPLE creator — "Request" is an option in the category dropdown; removed permission/greying machinery -->
+<!-- FK Home r0.25: HR shared queue — events auto-route to tasks by hr_area, cover mechanism, full-size buttons -->
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
 <style>
@@ -676,6 +677,10 @@
       </div>
 
       <p class="nav-section chip collapsible sec-hr" id="navSectionHR" style="margin-top:18px;display:none"><span class="sec-ico"><i class="ti ti-users"></i></span><span class="sec-lbl">HR</span></p>
+      <div class="nav-item" id="navHrQueue" data-route="#hr-queue" style="display:none" onclick="location.hash='#hr-queue'">
+        <i class="ti ti-inbox"></i>
+        <span>HR Queue</span>
+      </div>
       <div class="nav-item" id="navHrPeople" data-route="#hr/users" style="display:none" onclick="location.hash='#hr/users'">
         <i class="ti ti-users"></i>
         <span>People</span>
@@ -1271,6 +1276,7 @@
 <script src="/modules/chat.js"></script>
 <script src="/modules/my-growth.js"></script>
 <script src="/modules/my-work.js"></script>
+<script src="/modules/hr-queue.js"></script>
 <script src="/modules/team-work.js"></script>
 <script>
 // ===================================================================
@@ -1348,6 +1354,12 @@ function render() {
 
   // HR section — show items based on permissions
   let anyHR = false;
+  // HR Queue — the shared HR working queue (hr-team members + owner)
+  if (can('*') || can('leaves.approve.any') || can('leaves.approve.dept')
+      || can('attendance.regularise.approve.any') || can('attendance.regularise.approve.dept')
+      || can('profile.view.any')) {
+    show('navHrQueue'); anyHR = true;
+  }
   if (can('admin.users.view') || can('admin.users.edit')) {
     show('navHrPeople'); anyHR = true;
   }
