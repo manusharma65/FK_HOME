@@ -80,8 +80,8 @@ router.post('/openings', guard(async (req, res) => {
   if (!title || !String(title).trim()) return res.status(400).json({ error: 'Role title is required' });
   const meta = { platform: platform || null, hiring_manager_id: hiring_manager_id || null };
   const r = await db.query(
-    `INSERT INTO tasks (kind, source, title, category, status, department_id, assigned_by_user_id, opens_at, meta)
-     VALUES ('recruitment','manual',$1,'opening','open',$2,$3,NOW(),$4) RETURNING id`,
+    `INSERT INTO tasks (kind, source, title, category, status, department_id, assignee_user_id, assigned_by_user_id, opens_at, meta)
+     VALUES ('recruitment','manual',$1,'opening','open',$2,$3,$3,NOW(),$4) RETURNING id`,
     [String(title).trim(), department_id || null, req.user.id, JSON.stringify(meta)]);
   await logAudit({ req, module:'recruitment', action:'opening.created', target_type:'task', target_id:r.rows[0].id, after:{ title } });
   res.json({ ok:true, id:r.rows[0].id });
@@ -138,8 +138,8 @@ router.post('/openings/:id/candidates', guard(async (req, res) => {
     notes: [],
   };
   const r = await db.query(
-    `INSERT INTO tasks (kind, source, title, category, status, parent_task_id, department_id, assigned_by_user_id, opens_at, meta)
-     VALUES ('recruitment','manual',$1,'candidate','open',$2,$3,$4,NOW(),$5) RETURNING id`,
+    `INSERT INTO tasks (kind, source, title, category, status, parent_task_id, department_id, assignee_user_id, assigned_by_user_id, opens_at, meta)
+     VALUES ('recruitment','manual',$1,'candidate','open',$2,$3,$4,$4,NOW(),$5) RETURNING id`,
     [String(name).trim(), openingId, op.rows[0].department_id || null, req.user.id, JSON.stringify(meta)]);
   await logAudit({ req, module:'recruitment', action:'candidate.added', target_type:'task', target_id:r.rows[0].id, after:{ name, openingId } });
   res.json({ ok:true, id:r.rows[0].id });

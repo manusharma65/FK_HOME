@@ -82,7 +82,7 @@ router.get('/mine', async (req, res) => {
          FROM tasks t ${TASK_JOINS}
         WHERE t.assignee_user_id = $1
           AND t.status IN ('open','due','overdue','in_progress')
-          AND NOT (t.kind = 'recruitment' AND t.parent_task_id IS NULL)
+          AND t.kind <> 'recruitment'
           AND (t.request_status IS NULL OR t.request_status = 'accepted')
         ORDER BY CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1
                                WHEN 'in_progress' THEN 2 ELSE 3 END,
@@ -125,7 +125,7 @@ router.get('/summary', async (req, res) => {
       `SELECT
          COUNT(*) FILTER (WHERE status IN ('open','due','overdue')
                           AND (request_status IS NULL OR request_status='accepted')
-                          AND NOT (kind='recruitment' AND parent_task_id IS NULL)) AS to_action,
+                          AND kind <> 'recruitment') AS to_action,
          COUNT(*) FILTER (WHERE status='in_progress') AS in_progress,
          COUNT(*) FILTER (WHERE status='overdue'
                           AND (request_status IS NULL OR request_status='accepted')) AS overdue
@@ -366,7 +366,7 @@ router.get('/team', async (req, res) => {
         WHERE t.assignee_user_id = ANY($1::int[])
           AND t.status IN ('open','due','overdue','in_progress')
           AND (t.request_status IS NULL OR t.request_status='accepted')
-          AND NOT (t.kind='recruitment' AND t.parent_task_id IS NULL)
+          AND t.kind <> 'recruitment'
         ORDER BY au.display_name,
                  CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END,
                  t.due_at ASC NULLS LAST`, [memberIds]);
