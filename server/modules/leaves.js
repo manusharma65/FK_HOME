@@ -83,6 +83,24 @@ router.post('/request', async (req, res) => {
   if (totalDays <= 0) return res.status(400).json({ error: 'No working days in that range' });
 
   try {
+    // r0.31 — block overlapping requests. A pending or approved leave that
+    // intersects [start_date, end_date] means this is a duplicate/clashing ask.
+    const clash = await db.query(
+      `SELECT id, start_date, end_date, status FROM leave_requests
+        WHERE user_id = $1
+          AND status IN ('pending','approved')
+          AND start_date <= $3::date AND end_date >= $2::date
+        LIMIT 1`,
+      [req.user.id, start_date, end_date]);
+    if (clash.rows.length) {
+      const c = clash.rows[0];
+      return res.status(409).json({
+        error: 'You already have a ' + c.status + ' leave request that overlaps those dates ('
+          + String(c.start_date).slice(0,10) + ' → ' + String(c.end_date).slice(0,10)
+          + '). Cancel or edit that one first.'
+      });
+    }
+
     const r = await db.query(
       `INSERT INTO leave_requests
          (user_id, request_type, start_date, end_date, total_days, is_half_day, half_day_part, reason, status)
@@ -136,6 +154,16 @@ router.post('/:id/cancel', async (req, res) => {
       [id]
     );
     await recomputeBalance(lr.user_id);
+
+    // r0.31 — cancel the routed HR-queue task too (the ask is withdrawn).
+    try {
+      await db.query(
+        `UPDATE tasks SET status='cancelled', updated_at=NOW()
+          WHERE kind='event' AND category='leave'
+            AND (meta->>'event_related_id') = $1
+            AND status NOT IN ('done','cancelled')`,
+        [String(id)]);
+    } catch (e) { console.error('[leaves/cancel] close routed task failed:', e.message); }
 
     await logAudit({ req, module: 'leaves', action: 'request.cancelled', target_type: 'leave_request', target_id: id, before: lr });
     res.json({ ok: true });
@@ -297,6 +325,21 @@ router.post('/:id/decide', async (req, res) => {
        WHERE id = $4`,
       [decision, req.user.id, decision_note || null, id]
     );
+
+    // r0.31 — the leave decision is the single source of truth. Close the HR-queue
+    // task the router created for this leave (matched by event_related_id) so it
+    // doesn't linger as "open" after the leave is decided.
+    try {
+      await db.query(
+        `UPDATE tasks
+            SET status = 'done', completed_at = NOW(), completed_by_user_id = $1, updated_at = NOW()
+          WHERE kind = 'event' AND category = 'leave'
+            AND (meta->>'event_related_id') = $2
+            AND status NOT IN ('done','cancelled')`,
+        [req.user.id, String(id)]);
+    } catch (e) {
+      console.error('[leaves/decide] close routed task failed:', e.message);
+    }
 
     const year = new Date(lr.start_date).getFullYear();
     await recomputeBalance(lr.user_id);

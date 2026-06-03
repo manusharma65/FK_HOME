@@ -27,8 +27,8 @@ const { requireAuth, logAudit } = require('../auth');
 const router = express.Router();
 router.use(requireAuth);
 
-const STAGES = ['sourced','screening','interview','offer','accepted','joined','standby'];
-const ACTIVE_STAGES = ['sourced','screening','interview','offer','accepted'];
+const STAGES = ['sourced','screening','interview','interview_2','offer','accepted','joined','standby'];
+const ACTIVE_STAGES = ['sourced','screening','interview','interview_2','offer','accepted'];
 const CARD_FIELDS = ['source','why_shortlist','current_company','experience_years',
                      'current_salary','expected_salary','notice_period','phone','email','joining_date'];
 

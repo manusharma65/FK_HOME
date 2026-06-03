@@ -60,8 +60,8 @@ window.fkModules['recruitment'] = {
   async mount(el) {
     const $ = (id) => el.querySelector('#' + id);
     function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-    const STAGE_LABEL = { sourced:'Sourced', screening:'Screening', interview:'Interview', offer:'Offer', accepted:'Accepted', joined:'Joined', standby:'Standby' };
-    const BOARD_STAGES = ['sourced','screening','interview','offer','accepted','joined','standby'];
+    const STAGE_LABEL = { sourced:'Sourced', screening:'Screening', interview:'Interview 1', interview_2:'Interview 2', offer:'Offer', accepted:'Accepted', joined:'Joined', standby:'Standby' };
+    const BOARD_STAGES = ['sourced','screening','interview','interview_2','offer','accepted','joined','standby'];
     function daysAgo(iso){ if(!iso) return null; const d=Math.floor((Date.now()-new Date(iso).getTime())/86400000); return d; }
     function ageLabel(iso){ const d=daysAgo(iso); if(d==null) return ''; if(d<=0) return 'today'; return d+(d===1?' day':' days'); }
 
@@ -252,8 +252,23 @@ window.fkModules['recruitment'] = {
       $('recJoinCancel').onclick=closeModal;
       $('recJoinGo').onclick=async()=>{ const ok=await moveCandidate(id,'joined',openingId,{}); closeModal(); if(ok) location.hash='#hr/users'; };
     }
-    function openOutcome(id, stage, openingId) {
+    async function openOutcome(id, stage, openingId) {
+      // Carry forward: show the most recent prior round outcome for context.
+      let priorHtml = '';
+      try {
+        const r = await fetch('/api/recruitment/openings/' + openingId, { credentials:'include' });
+        if (r.ok) {
+          const d = await r.json(); let cand = null;
+          for (const st of Object.keys(d.byStage||{})) { const f=(d.byStage[st]||[]).find(x=>String(x.id)===String(id)); if(f) cand=f; }
+          const outs = (cand && cand.meta && Array.isArray(cand.meta.outcomes)) ? cand.meta.outcomes : [];
+          if (outs.length) {
+            const last = outs[outs.length-1];
+            priorHtml = '<div class="rec-why" style="margin-bottom:12px"><div style="font-size:12px;color:var(--muted);margin-bottom:3px">Last round (' + (STAGE_LABEL[last.stage]||last.stage) + ')</div>' + esc(last.text) + '</div>';
+          }
+        }
+      } catch (e) {}
       modal('<h3 style="margin:0 0 6px">Move to ' + (STAGE_LABEL[stage]||stage) + '</h3>' +
+        priorHtml +
         '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">How did this round go? (kept on the candidate\u2019s card)</div>' +
         '<div class="rec-field"><textarea id="recOutText" rows="3" placeholder="e.g. Strong on payroll, confident communicator \u2014 worth advancing"></textarea></div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recOutSkip">Skip</button><button class="rec-btn primary" id="recOutSave">Move to ' + (STAGE_LABEL[stage]||stage) + '</button></div>');

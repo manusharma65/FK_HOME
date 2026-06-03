@@ -1045,11 +1045,11 @@
             </div>
             <div class="off-label">Expected in today</div>
             <div class="kpi-row">
-              <div class="kpi"><div class="v" id="kpiOnTime">—</div><div class="l">On time</div></div>
-              <div class="kpi late"><div class="v" id="kpiLate">—</div><div class="l">Late</div></div>
-              <div class="kpi notin"><div class="v" id="kpiNotIn">—</div><div class="l">Not yet in</div></div>
-              <div class="kpi"><div class="v" id="kpiLeave">—</div><div class="l">Leave</div></div>
-              <div class="kpi"><div class="v" id="kpiSick">—</div><div class="l">Sick</div></div>
+              <div class="kpi" style="cursor:pointer" onclick="openPeopleModalFiltered('on_time')"><div class="v" id="kpiOnTime">—</div><div class="l">On time</div></div>
+              <div class="kpi late" style="cursor:pointer" onclick="openPeopleModalFiltered('late')"><div class="v" id="kpiLate">—</div><div class="l">Late</div></div>
+              <div class="kpi notin" style="cursor:pointer" onclick="openPeopleModalFiltered('not_yet_in')"><div class="v" id="kpiNotIn">—</div><div class="l">Not yet in</div></div>
+              <div class="kpi" style="cursor:pointer" onclick="openPeopleModalFiltered('on_leave')"><div class="v" id="kpiLeave">—</div><div class="l">Leave</div></div>
+              <div class="kpi" style="cursor:pointer" onclick="openPeopleModalFiltered('off_sick')"><div class="v" id="kpiSick">—</div><div class="l">Sick</div></div>
             </div>
             <div class="off-label">Not expected — off today</div>
             <div class="kpi-row off">
@@ -2793,6 +2793,11 @@ function openPeopleModal() {
 }
 function filterPeopleModal(s) {
   attOverviewFilter = s;
+  openPeopleModal();
+}
+// r0.31 — dashboard KPI drill-in: click a stat tile to open the list filtered to it.
+function openPeopleModalFiltered(status) {
+  attOverviewFilter = status || 'all';
   openPeopleModal();
 }
 function renderPeopleTable() {
