@@ -656,10 +656,17 @@
         <span>Running late?</span>
       </button>
 
-      <p class="nav-section chip collapsible sec-workspace" id="navSectionWorkspace"><span class="sec-ico"><i class="ti ti-layout-grid"></i></span><span class="sec-lbl">WORKSPACE</span></p>
       <div class="nav-item on" id="navHome" data-route="#home">
         <i class="ti ti-home"></i>
         <span>My FK Space</span>
+      </div>
+      <div class="nav-item" data-route="#my-work" onclick="location.hash='#my-work'">
+        <i class="ti ti-checkbox"></i>
+        <span>My work</span>
+      </div>
+      <div class="nav-item" id="navTeamWork" data-route="#team-work" style="display:none" onclick="location.hash='#team-work'">
+        <i class="ti ti-users-group"></i>
+        <span>Team work</span>
       </div>
       <div class="nav-item" id="navAmazon" style="display:none" data-route="#amazon">
         <i class="ti ti-brand-amazon"></i>
@@ -730,14 +737,6 @@
         <i class="ti ti-trending-up"></i>
         <span>My Growth</span>
       </div>
-      <div class="nav-item" data-route="#my-work" onclick="location.hash='#my-work'">
-        <i class="ti ti-checkbox"></i>
-        <span>My work</span>
-      </div>
-      <div class="nav-item" id="navTeamWork" data-route="#team-work" style="display:none" onclick="location.hash='#team-work'">
-        <i class="ti ti-users-group"></i>
-        <span>Team work</span>
-      </div>
       <div class="nav-item" data-route="#chat" onclick="location.hash='#chat'">
         <i class="ti ti-message-2"></i>
         <span>Team chat</span>
@@ -774,7 +773,7 @@
         <span>Backups</span>
       </div>
 
-      <p class="nav-section chip collapsible sec-you" id="navSectionYou" style="margin-top:18px"><span class="sec-ico"><i class="ti ti-user"></i></span><span class="sec-lbl">YOU</span></p>
+      <p class="nav-section chip collapsible sec-you" id="navSectionYou" style="margin-top:18px"><span class="sec-ico"><i class="ti ti-user"></i></span><span class="sec-lbl">ABOUT ME</span></p>
       <div class="nav-item" id="navYouOnboarding" style="display:none" onclick="goToMyOnboarding()">
         <i class="ti ti-clipboard-check"></i>
         <span>Your onboarding</span>
@@ -784,7 +783,7 @@
         <i class="ti ti-user"></i>
         <span>My profile</span>
       </div>
-      <div class="nav-item" onclick="openLeaveModal()">
+      <div class="nav-item" data-route="#leaves-time" onclick="location.hash='#leaves-time'">
         <i class="ti ti-beach"></i>
         <span>Leaves &amp; time</span>
       </div>
@@ -1280,6 +1279,7 @@
 <script src="/modules/attendance.js"></script>
 <script src="/modules/chat.js"></script>
 <script src="/modules/my-growth.js"></script>
+<script src="/modules/leaves-time.js"></script>
 <script src="/modules/my-work.js"></script>
 <script src="/modules/hr-queue.js"></script>
 <script src="/modules/recruitment.js"></script>
@@ -1311,6 +1311,7 @@ async function init() {
     dash = await r.json();
     me = dash.user;
     window.fkUser = me;  // r0.9 — used by goToMyProfile() and other links
+    maybeOfficeAutoActive();  // r0.30 — flip to active on an office device
     render();
     fetchPeople();
     fetchNotifications();
@@ -1457,7 +1458,6 @@ function render() {
     try { saved = localStorage.getItem(storageKey); } catch (e) {}
     if (saved === '1') applyCollapsed(true);
   }
-  setupCollapsibleSection('navSectionWorkspace');
   setupCollapsibleSection('navSectionHR');
   setupCollapsibleSection('navSectionDay');
   setupCollapsibleSection('navSectionSystem');
@@ -1539,6 +1539,12 @@ function applyStatusPill(s) {
   if (s.status === 'idle') pill.classList.add('idle');
   if (s.status === 'running_late') pill.classList.add('late');
   if (s.status === 'off_sick') pill.classList.add('sick');
+  // r0.30 — when the user goes idle/offline, pause any running task timer so it
+  // doesn't keep counting while they're away. Fires once per idle transition.
+  if ((s.status === 'idle' || s.status === 'offline') && window._fkLastStatus !== s.status) {
+    fetch('/api/tasks/idle-stop', { method:'POST', credentials:'include' }).catch(()=>{});
+  }
+  window._fkLastStatus = s.status;
 }
 
 function subGreeting() {
@@ -1699,7 +1705,7 @@ async function loadMyOnboarding() {
       '<div style="font-size:14px;color:var(--muted);margin-bottom:10px">' +
         incomplete.length + ' item' + (incomplete.length === 1 ? '' : 's') + ' to complete.' +
       '</div>' +
-      '<button class="btn-primary" style="width:100%" onclick="location.href=\'/profile.html?id=' + window.fkUser.id + '#onboarding\'">Open my onboarding</button>';
+      '<button class="btn-primary" style="width:100%" onclick="goToMyOnboarding()">Open my onboarding</button>';
   } catch (e) { console.error('[loadMyOnboarding]', e); }
 }
 
@@ -1888,7 +1894,53 @@ function closeModal(id) {
 }
 
 // --- STATUS ---
+// r0.30 — On an office (non-mobile) device, mark the user active automatically.
+// Mobile logins record arrival but can't set 'active'; arriving at the desk flips
+// it. Only flips from a passive arrival state, never overrides a deliberate
+// status (in_meeting/heads_down/off_sick/wfh/on_break).
+async function maybeOfficeAutoActive() {
+  try {
+    if (isMobileDevice()) return;
+    const cur = (me && me.status) || (dash && dash.status && dash.status.status);
+    const passive = ['active', 'idle', 'offline', null, undefined, ''];
+    if (!passive.includes(cur)) return; // deliberate status — leave alone
+    // Tell the server we're active now (clock-in already happened via heartbeat).
+    await fetch('/api/me/status', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ status:'active' }) });
+    // Friendly one-time banner per day so it doesn't nag.
+    const key = 'fkArrivalBanner_' + new Date().toISOString().slice(0,10);
+    if (!localStorage.getItem(key)) {
+      try { localStorage.setItem(key, '1'); } catch(e){}
+      showArrivalBanner();
+    }
+  } catch (e) { /* non-blocking */ }
+}
+function showArrivalBanner() {
+  const at = new Intl.DateTimeFormat('en-GB', { hour:'2-digit', minute:'2-digit', hour12:false }).format(new Date());
+  const b = document.createElement('div');
+  b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:3000;background:#0F6E56;color:#fff;padding:11px 18px;border-radius:10px;font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;align-items:center;gap:9px';
+  b.innerHTML = '<i class="ti ti-circle-check" style="font-size:17px"></i> Welcome in \u2014 you\u2019re now active. Arrival logged.';
+  document.body.appendChild(b);
+  setTimeout(() => { b.style.transition='opacity .4s'; b.style.opacity='0'; setTimeout(()=>b.remove(), 400); }, 4000);
+}
+function isMobileDevice() {
+  // Coarse pointer + narrow viewport = phone/tablet. Used to keep clock-in
+  // honest: on mobile you can log in (which records arrival) but can't set
+  // yourself 'active' remotely — that flips automatically on an office device.
+  return window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(pointer: coarse)').matches);
+}
 function openStatusModal() {
+  // On mobile, status is view-only — you can't mark yourself active from a phone.
+  if (isMobileDevice()) {
+    const wrap = document.getElementById('statusOptions');
+    if (wrap) {
+      wrap.innerHTML = '<div style="padding:14px 4px;font-size:14px;color:var(--muted);line-height:1.5">'
+        + 'You\u2019re signed in on mobile, so your arrival is logged \u2014 but status is set from your office device. '
+        + 'When you log in at your desk, you\u2019ll be marked <b>active</b> automatically.</div>'
+        + '<button class="btn-secondary" style="width:100%;padding:11px;font-size:14px;margin-top:6px" onclick="closeModal(\'statusModal\')">Got it</button>';
+    }
+    openModal('statusModal');
+    return;
+  }
   // r0.14 - new status set. Dropped 'On break' and 'Running late' from here
   // (running late has its own flow). Added In meeting + WFH.
   const opts = [
@@ -2046,11 +2098,8 @@ function goToMyProfile() {
 }
 
 function goToMyOnboarding() {
-  if (window.fkUser && window.fkUser.id) {
-    location.href = '/profile.html?id=' + window.fkUser.id + '#onboarding';
-  } else {
-    location.href = '/profile.html';
-  }
+  // Profile is a module now; #profile/me opens it (Onboarding is the first drawer).
+  location.hash = '#profile/me';
 }
 
 // r0.13 — Mobile sidebar open/close

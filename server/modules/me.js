@@ -425,10 +425,79 @@ router.post('/heartbeat', async (req, res) => {
          END`,
       [req.user.id]
     );
+    // r0.30 — login = clock-in. On the first heartbeat of the day, record
+    // first_login + late_minutes + flip the day's status, so the calendar
+    // (reads attendance_day) and the late count agree. Cheap no-op after the
+    // first write because first_login is already set.
+    try { await recordClockIn(req.user.id); } catch (e) { console.error('[clock-in]', e.message); }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Heartbeat failed' });
   }
 });
+
+// Record the clock-in for today on the user's first activity. Idempotent: only
+// writes first_login/late_minutes/status if first_login is not yet set, and only
+// for days the user was expected to work (status 'pending'/'working'/late) — never
+// overrides on_leave/off_sick/off_holiday/off_pattern/off_cs_rota.
+async function recordClockIn(userId) {
+  const today = londonToday();
+  const ad = await db.query(
+    `SELECT id, status, first_login, shift_start_local FROM attendance_day
+      WHERE user_id = $1 AND for_date = $2`, [userId, today]);
+  let row = ad.rows[0];
+  // If the day row doesn't exist yet (cron hasn't seeded), create a 'pending' one
+  // with the shift start from policy so we can compute lateness.
+  if (!row) {
+    const pol = await db.query(
+      `SELECT sp.start_time FROM shift_policies sp
+         JOIN departments d ON d.slug = sp.department_slug
+         JOIN user_department_memberships m ON m.department_id = d.id
+        WHERE m.user_id = $1 AND m.deleted_at IS NULL
+        ORDER BY m.is_primary DESC LIMIT 1`, [userId]);
+    const shiftStart = pol.rows[0] ? pol.rows[0].start_time : null;
+    const ins = await db.query(
+      `INSERT INTO attendance_day (user_id, for_date, status, shift_start_local)
+       VALUES ($1, $2, 'pending', $3)
+       ON CONFLICT (user_id, for_date) DO UPDATE SET updated_at = NOW()
+       RETURNING id, status, first_login, shift_start_local`,
+      [userId, today, shiftStart]);
+    row = ins.rows[0];
+  }
+  // Already clocked in today, or the day is an off/leave/sick day — leave it.
+  if (row.first_login) return;
+  const offStatuses = ['on_leave','off_sick','off_holiday','off_pattern','off_cs_rota'];
+  if (offStatuses.includes(row.status)) return;
+
+  // Compute lateness vs shift start (London wall-clock).
+  const now = nowLondonHHMM();
+  let lateMinutes = 0;
+  let newStatus = 'working';
+  if (row.shift_start_local) {
+    lateMinutes = Math.max(0, minutesBetweenHHMM(now, String(row.shift_start_local).slice(0,5)));
+    // grace is applied by the lateness pipeline elsewhere; store raw minutes,
+    // mark 'late' only if past start.
+    if (lateMinutes > 0) newStatus = 'late';
+  }
+  await db.query(
+    `UPDATE attendance_day
+        SET first_login = NOW(),
+            late_minutes = $1,
+            status = CASE WHEN status = 'pending' THEN $2 ELSE status END,
+            updated_at = NOW()
+      WHERE id = $3`,
+    [lateMinutes, newStatus, row.id]);
+}
+
+// London HH:MM now.
+function nowLondonHHMM() {
+  return new Intl.DateTimeFormat('en-GB', { timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', hour12:false }).format(new Date());
+}
+// minutes that `hhmm` is after `startHHMM` (0 if before/equal).
+function minutesBetweenHHMM(hhmm, startHHMM) {
+  const [h1,m1] = hhmm.split(':').map(Number);
+  const [h2,m2] = startHHMM.split(':').map(Number);
+  return (h1*60+m1) - (h2*60+m2);
+}
 
 module.exports = router;

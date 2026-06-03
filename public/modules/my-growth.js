@@ -1,11 +1,14 @@
-// FK Home — My Growth module (r0.20, Ship D)
+// FK Home — My Growth module (r0.30, Ship 3 / Option B)
 // ----------------------------------------------------------------------------
-// Faithful migration of my-growth.html. Personal stats: optional person
-// switcher (managers/HR can view others), 3 tabs — Attendance (30-day summary
-// + table), Leaves (balance tiles + this year), Lateness (+ regularisations).
+// The development / performance page. NOT where you file leave or read raw
+// records — that's "Leaves & time". My Growth is the judgement layer:
+//   - Conduct this period (counts read from attendance: late / unauthorised /
+//     idle flags / leaves taken) — display only, feeds the future scorecard.
+//   - My reviews (from the profile reviews drawer).
+//   - Performance & scoring placeholder (arrives when scoring migrates).
+// Person switcher kept: managers/HR review someone else's conduct here.
 //   /api/auth/me, /api/team/search, /api/attendance/me/week,
-//   /api/attendance/me/lateness, /api/leaves/mine   (all accept ?user_id=)
-// All lookups scoped to module root (el).
+//   /api/leaves/mine, /api/profile/<id>/drawer/reviews
 // ----------------------------------------------------------------------------
 
 window.fkModules = window.fkModules || {};
@@ -20,95 +23,72 @@ window.fkModules['my-growth'] = {
           '#mg-mod .switcher{display:none;margin-bottom:14px}' +
           '#mg-mod .switcher.on{display:block}' +
           '#mg-mod .switcher select{padding:8px 11px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;background:var(--surface)}' +
-          '#mg-mod .tabs{display:flex;gap:6px;border-bottom:0.5px solid var(--line);margin-bottom:18px}' +
-          '#mg-mod .tab{padding:8px 14px;color:var(--muted);font-size:14px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}' +
-          '#mg-mod .tab.on{color:var(--ink);font-weight:500;border-bottom-color:var(--ink)}' +
-          '#mg-mod .summary-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:18px}' +
-          '@media (max-width:720px){#mg-mod .summary-grid{grid-template-columns:repeat(3,1fr)}}' +
-          '#mg-mod .summary-tile{background:#EAF6F0;border-radius:10px;padding:13px 14px}' +
-          '#mg-mod .summary-tile.late{background:#FBF1E0}' +
-          '#mg-mod .summary-tile.danger{background:#FBEAEA}' +
-          '#mg-mod .summary-tile.green{background:#EAF3DE}' +
-          '#mg-mod .summary-tile .v{font-size:24px;font-weight:600;line-height:1;color:var(--ink)}' +
-          '#mg-mod .summary-tile .l{font-size:12px;color:var(--muted);margin-top:5px}' +
-          '#mg-mod .pill{display:inline-flex;font-size:12px;font-weight:500;padding:3px 10px;border-radius:99px;background:#F1EFE8;color:var(--muted)}' +
-          '#mg-mod .pill.green{background:var(--green-soft,#EAF3DE);color:var(--green,#3B6D11)}' +
-          '#mg-mod .pill.amber{background:var(--amber-soft,#FAEEDA);color:#9A5B1F}' +
-          '#mg-mod .pill.red{background:var(--red-soft,#FCEBEB);color:var(--red,#A32D2D)}' +
-          '#mg-mod .pill.muted{background:#F1EFE8;color:var(--muted)}' +
-          '#mg-mod .empty{text-align:center;color:var(--muted);padding:22px}' +
+          '#mg-mod .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:22px}' +
+          '#mg-mod .stat{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:13px 15px}' +
+          '#mg-mod .stat .v{font-size:24px;font-weight:600;line-height:1.1}' +
+          '#mg-mod .stat .l{font-size:12px;color:var(--muted);margin-top:4px}' +
+          '#mg-mod .sec-lbl{font-size:12px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}' +
+          '#mg-mod .conduct{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:15px;margin-bottom:6px}' +
+          '#mg-mod .conduct-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:14px}' +
+          '#mg-mod .conduct-grid .c .v{font-size:26px;font-weight:600;line-height:1}' +
+          '#mg-mod .conduct-grid .c .l{font-size:13px;color:var(--muted);margin-top:3px}' +
+          '#mg-mod .conduct-note{font-size:12px;color:var(--soft);margin-bottom:24px}' +
+          '#mg-mod .conduct-note a{color:var(--blue,#185FA5);text-decoration:none;cursor:pointer}' +
+          '#mg-mod .panel{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:24px}' +
+          '#mg-mod .row{display:flex;justify-content:space-between;align-items:center;padding:12px 15px;border-bottom:0.5px solid var(--line)}' +
+          '#mg-mod .row:last-child{border-bottom:none}' +
+          '#mg-mod .row .t1{font-size:14px}' +
+          '#mg-mod .row .t2{font-size:12px;color:var(--muted);margin-top:2px}' +
+          '#mg-mod .pill{display:inline-flex;font-size:12px;font-weight:500;padding:4px 11px;border-radius:99px;background:#F1EFE8;color:var(--muted)}' +
+          '#mg-mod .pill.green{background:#EAF3DE;color:#3B6D11}' +
+          '#mg-mod .pill.amber{background:#FAEEDA;color:#9A5B1F}' +
+          '#mg-mod .pill.blue{background:#E5EEF8;color:#185FA5}' +
+          '#mg-mod .scoring{background:var(--bg2,#F4F2EC);border:1px dashed var(--line);border-radius:10px;padding:20px;text-align:center}' +
+          '#mg-mod .scoring .t{font-size:14px;font-weight:500;margin-top:6px}' +
+          '#mg-mod .scoring .s{font-size:13px;color:var(--muted);margin-top:3px;max-width:460px;margin-left:auto;margin-right:auto}' +
+          '#mg-mod .empty{text-align:center;color:var(--muted);padding:18px;font-size:14px}' +
         '</style>' +
 
-        '<div class="card">' +
-          '<div class="card-head">' +
-            '<div><h2 style="margin:0" id="mgTitle">My Growth</h2><span class="meta" id="mgSub">—</span></div>' +
-            '<div class="switcher" id="mgSwitcher"><select id="mgUserSelect"></select></div>' +
-          '</div>' +
-
-          '<div class="tabs">' +
-            '<div class="tab on" id="mgTabAttendance" data-tab="attendance">Attendance</div>' +
-            '<div class="tab" id="mgTabLeaves" data-tab="leaves">Leaves</div>' +
-            '<div class="tab" id="mgTabLateness" data-tab="lateness">Lateness</div>' +
-          '</div>' +
-
-          // Attendance pane
-          '<div id="mgPaneAttendance">' +
-            '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px"><span style="font-size:13px;color:var(--muted)">Last 30 days</span><span class="meta" id="mgAttMeta">—</span></div>' +
-            '<div class="summary-grid">' +
-              '<div class="summary-tile"><div class="v" id="mgSumOnTime">—</div><div class="l">On time</div></div>' +
-              '<div class="summary-tile late"><div class="v" id="mgSumLate">—</div><div class="l">Late</div></div>' +
-              '<div class="summary-tile danger"><div class="v" id="mgSumNotIn">—</div><div class="l">No-show</div></div>' +
-              '<div class="summary-tile"><div class="v" id="mgSumLeave">—</div><div class="l">On leave</div></div>' +
-              '<div class="summary-tile"><div class="v" id="mgSumSick">—</div><div class="l">Sick</div></div>' +
-              '<div class="summary-tile"><div class="v" id="mgSumOff">—</div><div class="l">Off</div></div>' +
-            '</div>' +
-            '<table><thead><tr><th>Date</th><th>Status</th><th>In</th><th>Out</th><th>Active</th><th>Late</th><th>Weekend pay</th></tr></thead>' +
-            '<tbody id="mgAttBody"><tr class="loading-row"><td colspan="7">Loading…</td></tr></tbody></table>' +
-          '</div>' +
-
-          // Leaves pane
-          '<div id="mgPaneLeaves" style="display:none">' +
-            '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px"><span style="font-size:13px;color:var(--muted)">Leaves this year</span><span class="meta" id="mgLeaveMeta">—</span></div>' +
-            '<div class="summary-grid" style="grid-template-columns:repeat(5,1fr)">' +
-              '<div class="summary-tile"><div class="v" id="mgLeaveAccrued">—</div><div class="l">Accrued</div></div>' +
-              '<div class="summary-tile"><div class="v" id="mgLeaveUsed">—</div><div class="l">Used</div></div>' +
-              '<div class="summary-tile late"><div class="v" id="mgLeavePending">—</div><div class="l">Pending</div></div>' +
-              '<div class="summary-tile" id="mgLeaveAdjustTile" style="display:none"><div class="v" id="mgLeaveAdjust">—</div><div class="l">Adjustment</div></div>' +
-              '<div class="summary-tile green"><div class="v" id="mgLeaveRemaining">—</div><div class="l">Remaining</div></div>' +
-            '</div>' +
-            '<div id="mgLeaveAdjustNote" style="display:none;padding:8px 0;font-size:12px;color:var(--muted)">Adjustment note: <span id="mgLeaveAdjustNoteText">—</span></div>' +
-            '<table><thead><tr><th>Type</th><th>Dates</th><th>Days</th><th>Status</th><th>Reason</th></tr></thead>' +
-            '<tbody id="mgLeaveBody"><tr class="loading-row"><td colspan="5">Loading…</td></tr></tbody></table>' +
-          '</div>' +
-
-          // Lateness pane
-          '<div id="mgPaneLateness" style="display:none">' +
-            '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px"><span style="font-size:13px;color:var(--muted)">Lateness · last 30 days</span><span class="meta" id="mgLateMeta">—</span></div>' +
-            '<table><thead><tr><th>Date</th><th>Shift start</th><th>Clocked in</th><th>Late by</th></tr></thead>' +
-            '<tbody id="mgLateBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody></table>' +
-            '<div style="display:flex;justify-content:space-between;align-items:baseline;margin:18px 0 12px"><span style="font-size:13px;color:var(--muted)">Regularisation requests</span><span class="meta" id="mgRegMeta">—</span></div>' +
-            '<table><thead><tr><th>Date</th><th>Reason</th><th>Requested</th><th>Status</th></tr></thead>' +
-            '<tbody id="mgRegBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody></table>' +
-          '</div>' +
+        '<div class="card-head" style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">' +
+          '<div><h2 style="margin:0 0 2px" id="mgTitle">My Growth</h2><span class="lt-sub" style="font-size:13px;color:var(--muted)" id="mgSub">How you\u2019re doing, and how you\u2019re developing.</span></div>' +
+          '<div class="switcher" id="mgSwitcher"><select id="mgUserSelect"></select></div>' +
         '</div>' +
+
+        // Top stats
+        '<div class="stat-grid">' +
+          '<div class="stat"><div class="v" id="mgScore">\u2014</div><div class="l">This month\u2019s score</div></div>' +
+          '<div class="stat"><div class="v" id="mgReviewsDone">\u2014</div><div class="l">Reviews done</div></div>' +
+          '<div class="stat"><div class="v" id="mgNextReview">\u2014</div><div class="l">Next review</div></div>' +
+        '</div>' +
+
+        // Conduct this period
+        '<p class="sec-lbl">Conduct \u00b7 this period</p>' +
+        '<div class="conduct"><div class="conduct-grid" id="mgConduct"><span class="l">Loading\u2026</span></div></div>' +
+        '<div class="conduct-note">Counts what the system already recorded. Think a late mark or absence is wrong? ' +
+          '<a id="mgFixLink">Request a correction in Leaves &amp; time \u2192</a></div>' +
+
+        // My reviews
+        '<p class="sec-lbl">My reviews</p>' +
+        '<div class="panel" id="mgReviews"><div class="empty">Loading\u2026</div></div>' +
+
+        // Scoring placeholder
+        '<div class="scoring">' +
+          '<i class="ti ti-chart-bar" style="font-size:22px;color:var(--soft)"></i>' +
+          '<div class="t">Performance &amp; scoring</div>' +
+          '<div class="s">Your monthly score and the pillars behind it \u2014 work, conduct, and role-specific outcomes \u2014 will appear here when scoring goes live. The conduct counts above feed into it.</div>' +
+        '</div>' +
+
       '</div>';
   },
 
   async mount(el) {
     const $ = (id) => el.querySelector('#' + id);
-    function escapeHtml(s) { if (s == null) return ''; return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
-    function formatMins(m) { if (m == null) return '—'; m = Math.floor(m); if (m < 60) return m + 'm'; const h = Math.floor(m / 60), r = m % 60; return r === 0 ? h + 'h' : h + 'h ' + r + 'm'; }
-    function formatDays(n) { if (n == null) return '—'; const num = Number(n); return Number.isInteger(num) ? String(num) : num.toFixed(1); }
-    function dateOnly(v) { if (!v) return '—'; if (typeof v === 'string') return v.slice(0, 10); try { return new Date(v).toISOString().slice(0, 10); } catch (e) { return String(v); } }
-    function timeOnly(v) { if (!v) return '—'; if (typeof v === 'string' && /^\d{2}:\d{2}/.test(v)) return v.slice(0, 5); try { return new Date(v).toTimeString().slice(0, 5); } catch (e) { return '—'; } }
-    function statusPill(s) {
-      const map = { on_time: ['green', 'On time'], late: ['amber', 'Late'], very_late: ['red', 'Very late'], not_yet_in: ['red', 'No-show'], on_leave: ['muted', 'On leave'], off_sick: ['muted', 'Sick'], off_pattern: ['muted', 'Off (pattern)'], off_cs_rota: ['muted', 'Off (rota)'], off_holiday: ['muted', 'Off (holiday)'], worked_voluntary: ['green', 'Worked extra'], pending: ['muted', '—'] };
-      const v = map[s] || ['muted', s || '—']; return '<span class="pill ' + v[0] + '">' + v[1] + '</span>';
-    }
-    function leavePill(s) { const map = { pending: ['amber', 'Pending'], approved: ['green', 'Approved'], denied: ['red', 'Denied'], rejected: ['red', 'Rejected'], cancelled: ['muted', 'Cancelled'] }; const v = map[s] || ['muted', s || '—']; return '<span class="pill ' + v[0] + '">' + v[1] + '</span>'; }
-    function regPill(s) { const map = { pending: ['amber', 'Pending'], approved: ['green', 'Approved'], denied: ['red', 'Denied'] }; const v = map[s] || ['muted', s || '—']; return '<span class="pill ' + v[0] + '">' + v[1] + '</span>'; }
+    function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function dOnly(v){ if(!v) return '\u2014'; if(typeof v==='string') return v.slice(0,10); try{return new Date(v).toISOString().slice(0,10);}catch(e){return String(v);} }
 
     let me_ = null, viewingUserId = null, viewingName = null;
+
+    $('mgFixLink').addEventListener('click', () => { location.hash = '#leaves-time'; });
 
     async function init() {
       try {
@@ -126,8 +106,10 @@ window.fkModules['my-growth'] = {
 
     function updateTitle() {
       const isSelf = viewingUserId === me_.id;
-      $('mgTitle').textContent = isSelf ? 'My Growth' : viewingName + "'s growth";
-      $('mgSub').textContent = isSelf ? 'Your attendance, leaves and lateness history.' : 'Viewing as ' + (me_.display_name || me_.full_name) + '.';
+      $('mgTitle').textContent = isSelf ? 'My Growth' : viewingName + "\u2019s growth";
+      $('mgSub').textContent = isSelf ? 'How you\u2019re doing, and how you\u2019re developing.' : 'Viewing as ' + (me_.display_name || me_.full_name) + '.';
+      // The "request a correction" note only makes sense for your own page.
+      $('mgFixLink').parentElement.style.display = isSelf ? '' : 'none';
     }
 
     async function loadSwitcher() {
@@ -142,14 +124,14 @@ window.fkModules['my-growth'] = {
           users = users.filter(u => (u.departments || []).some(d => myDeptSlugs.has(d.slug)));
         }
         const sel = $('mgUserSelect');
-        const meOpt = '<option value="' + me_.id + '" selected>' + escapeHtml(me_.display_name || me_.full_name) + ' (you)</option>';
-        const otherOpts = users.map(u => '<option value="' + u.id + '">' + escapeHtml(u.name) + '</option>').join('');
+        const meOpt = '<option value="' + me_.id + '" selected>' + esc(me_.display_name || me_.full_name) + ' (you)</option>';
+        const otherOpts = users.map(u => '<option value="' + u.id + '">' + esc(u.name) + '</option>').join('');
         sel.innerHTML = meOpt + otherOpts;
         if (users.length > 0 || perms.includes('attendance.view.any')) $('mgSwitcher').classList.add('on');
       } catch (e) {}
     }
 
-    $('mgUserSelect') && el.addEventListener('change', (e) => {
+    el.addEventListener('change', (e) => {
       if (e.target.id !== 'mgUserSelect') return;
       const sel = e.target;
       viewingUserId = parseInt(sel.value, 10);
@@ -158,102 +140,61 @@ window.fkModules['my-growth'] = {
       reloadAll();
     });
 
-    function showTab(id) {
-      el.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.getAttribute('data-tab') === id));
-      $('mgPaneAttendance').style.display = id === 'attendance' ? '' : 'none';
-      $('mgPaneLeaves').style.display = id === 'leaves' ? '' : 'none';
-      $('mgPaneLateness').style.display = id === 'lateness' ? '' : 'none';
-    }
-    el.querySelector('.tabs').addEventListener('click', (e) => {
-      const t = e.target.closest('.tab'); if (t) showTab(t.getAttribute('data-tab'));
-    });
+    function reloadAll() { loadConduct(); loadReviews(); }
 
-    function reloadAll() { loadAttendance(); loadLeaves(); loadLateness(); }
-
-    async function loadAttendance() {
-      const body = $('mgAttBody');
-      body.innerHTML = '<tr class="loading-row"><td colspan="7">Loading…</td></tr>';
+    async function loadConduct() {
+      const grid = $('mgConduct');
       try {
         const params = new URLSearchParams({ days: '30' });
         if (viewingUserId !== me_.id) params.set('user_id', viewingUserId);
-        const r = await fetch('/api/attendance/me/week?' + params.toString(), { credentials: 'include' });
-        if (!r.ok) { body.innerHTML = '<tr><td colspan="7" class="empty">Cannot load attendance.</td></tr>'; return; }
-        const data = await r.json();
-        const rows = data.days || [];
-        $('mgAttMeta').textContent = rows.length + ' days';
-        const counts = { on_time: 0, late: 0, not_yet_in: 0, on_leave: 0, off_sick: 0, off: 0 };
-        for (const d of rows) { if (counts[d.status] !== undefined) counts[d.status]++; else if (d.status && d.status.startsWith('off_')) counts.off++; }
-        $('mgSumOnTime').textContent = counts.on_time; $('mgSumLate').textContent = counts.late; $('mgSumNotIn').textContent = counts.not_yet_in;
-        $('mgSumLeave').textContent = counts.on_leave; $('mgSumSick').textContent = counts.off_sick; $('mgSumOff').textContent = counts.off;
-        if (rows.length === 0) { body.innerHTML = '<tr><td colspan="7" class="empty">No attendance records yet.</td></tr>'; return; }
-        body.innerHTML = rows.map(d => {
-          const ds = String(d.for_date).slice(0, 10);
-          const dow = new Date(ds + 'T12:00:00').getDay();
-          const isWeekend = dow === 0 || dow === 6;
-          let payCell = '<span style="color:var(--soft)">—</span>';
-          if (isWeekend) {
-            if (d.weekend_pay_status === 'paid') payCell = '<span class="pill green">Paid</span>';
-            else if (d.weekend_pay_status === 'unpaid') payCell = '<span class="pill red">Unpaid</span>';
-            else payCell = '<span class="pill muted">Pending</span>';
-          } else if (d.status === 'off_sick') {
-            const h = d.sick_notified_hours;
-            if (h != null && h < 4) payCell = '<span class="pill red">Unpaid</span>';
-            else if (h != null) payCell = '<span class="pill green">Paid</span>';
+        const [attRes, lvRes] = await Promise.all([
+          fetch('/api/attendance/me/week?' + params.toString(), { credentials: 'include' }),
+          fetch((viewingUserId !== me_.id) ? ('/api/leaves/mine?user_id=' + viewingUserId) : '/api/leaves/mine', { credentials: 'include' })
+        ]);
+        let late = 0, noShow = 0, onTime = 0;
+        if (attRes.ok) {
+          const data = await attRes.json();
+          for (const d of (data.days || [])) {
+            if (d.status === 'late' || d.status === 'very_late' || (d.late_minutes > 0)) late++;
+            else if (d.status === 'not_yet_in') noShow++;
+            else if (d.status === 'on_time' || d.status === 'worked_voluntary') onTime++;
           }
-          return '<tr><td>' + dateOnly(d.for_date) + '</td><td>' + statusPill(d.status) + '</td><td>' + timeOnly(d.first_login) + '</td><td>' + timeOnly(d.last_logout) + '</td><td>' + formatMins(d.active_minutes) + '</td><td>' + (d.late_minutes > 0 ? d.late_minutes + 'm' : '—') + '</td><td>' + payCell + '</td></tr>';
-        }).join('');
-      } catch (e) { body.innerHTML = '<tr><td colspan="7" class="empty">Network error.</td></tr>'; }
-    }
-
-    async function loadLeaves() {
-      const body = $('mgLeaveBody');
-      body.innerHTML = '<tr class="loading-row"><td colspan="5">Loading…</td></tr>';
-      try {
-        const url = (viewingUserId !== me_.id) ? ('/api/leaves/mine?user_id=' + viewingUserId) : '/api/leaves/mine';
-        const r = await fetch(url, { credentials: 'include' });
-        if (!r.ok) { body.innerHTML = '<tr><td colspan="5" class="empty">Cannot load leaves.</td></tr>'; return; }
-        const data = await r.json();
-        const rows = data.requests || data.leaves || [];
-        const balance = data.balance || {};
-        $('mgLeaveAccrued').textContent = formatDays((balance.annual || 0) + (balance.carryover || 0));
-        $('mgLeaveRemaining').textContent = formatDays(balance.remaining);
-        $('mgLeaveUsed').textContent = formatDays(balance.used);
-        $('mgLeavePending').textContent = formatDays(balance.pending);
-        const adj = Number(balance.adjustment || 0);
-        if (adj !== 0) {
-          $('mgLeaveAdjustTile').style.display = '';
-          const sign = adj > 0 ? '+' : '', colour = adj > 0 ? 'var(--green)' : 'var(--red)';
-          $('mgLeaveAdjust').innerHTML = '<span style="color:' + colour + '">' + sign + formatDays(adj) + '</span>';
-          if (balance.adjustment_note) { $('mgLeaveAdjustNote').style.display = ''; $('mgLeaveAdjustNoteText').textContent = balance.adjustment_note; }
         }
-        $('mgLeaveMeta').textContent = rows.length + (rows.length === 1 ? ' request' : ' requests');
-        if (rows.length === 0) { body.innerHTML = '<tr><td colspan="5" class="empty">No leave requests this year.</td></tr>'; return; }
-        body.innerHTML = rows.map(l =>
-          '<tr><td>' + (l.leave_type || l.type || '—') + '</td><td>' + dateOnly(l.start_date) + ' → ' + dateOnly(l.end_date) + '</td><td>' + (l.days || '—') + '</td><td>' + leavePill(l.status) + '</td><td style="color:var(--muted)">' + (escapeHtml(l.reason) || '—') + '</td></tr>'
-        ).join('');
-      } catch (e) { body.innerHTML = '<tr><td colspan="5" class="empty">Network error.</td></tr>'; }
+        let leavesTaken = 0;
+        if (lvRes.ok) { const ld = await lvRes.json(); const b = ld.balance || {}; leavesTaken = Number(b.used || 0); }
+        grid.innerHTML =
+          '<div class="c"><div class="v" style="color:#3B6D11">' + onTime + '</div><div class="l">on time</div></div>' +
+          '<div class="c"><div class="v" style="color:#9A5B1F">' + late + '</div><div class="l">days late</div></div>' +
+          '<div class="c"><div class="v" style="color:#A32D2D">' + noShow + '</div><div class="l">unauthorised</div></div>' +
+          '<div class="c"><div class="v" style="color:#185FA5">' + (Number.isInteger(leavesTaken) ? leavesTaken : leavesTaken.toFixed(1)) + '</div><div class="l">leaves taken</div></div>';
+      } catch (e) { grid.innerHTML = '<span class="l">Could not load conduct.</span>'; }
     }
 
-    async function loadLateness() {
-      const lateBody = $('mgLateBody'), regBody = $('mgRegBody');
-      lateBody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
-      regBody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
+    async function loadReviews() {
+      const panel = $('mgReviews');
       try {
-        const params = new URLSearchParams({ days: '30' });
-        if (viewingUserId !== me_.id) params.set('user_id', viewingUserId);
-        const r = await fetch('/api/attendance/me/lateness?' + params.toString(), { credentials: 'include' });
-        if (!r.ok) { lateBody.innerHTML = '<tr><td colspan="4" class="empty">Cannot load lateness.</td></tr>'; regBody.innerHTML = '<tr><td colspan="4" class="empty">Cannot load.</td></tr>'; return; }
+        const r = await fetch('/api/profile/' + viewingUserId + '/drawer/reviews', { credentials: 'include' });
+        if (!r.ok) { panel.innerHTML = '<div class="empty">Cannot load reviews.</div>'; $('mgReviewsDone').textContent = '0'; return; }
         const data = await r.json();
-        const lates = data.lates || [], regs = data.regularisations || [];
-        $('mgLateMeta').textContent = lates.length + ' late arrivals';
-        $('mgRegMeta').textContent = regs.length + ' requests';
-        lateBody.innerHTML = lates.length === 0
-          ? '<tr><td colspan="4" class="empty">No late arrivals in the last 30 days.</td></tr>'
-          : lates.map(l => '<tr><td>' + dateOnly(l.for_date) + '</td><td>' + (l.shift_start_local || '—').slice(0, 5) + '</td><td>' + timeOnly(l.first_login) + '</td><td><span class="pill amber">' + l.late_minutes + 'm</span></td></tr>').join('');
-        regBody.innerHTML = regs.length === 0
-          ? '<tr><td colspan="4" class="empty">No regularisation requests.</td></tr>'
-          : regs.map(rr => '<tr><td>' + dateOnly(rr.for_date) + '</td><td>' + escapeHtml(rr.reason || '—') + '</td><td style="font-size:14px;color:var(--muted)">' + ((rr.requested_first_login ? 'In: ' + (rr.requested_first_login || '').slice(0, 5) : '') + (rr.requested_first_login && rr.requested_last_logout ? ' · ' : '') + (rr.requested_last_logout ? 'Out: ' + (rr.requested_last_logout || '').slice(0, 5) : '') + (!rr.requested_first_login && !rr.requested_last_logout ? '—' : '')) + '</td><td>' + regPill(rr.status) + '</td></tr>').join('');
-      } catch (e) { lateBody.innerHTML = '<tr><td colspan="4" class="empty">Network error.</td></tr>'; }
+        const reviews = data.reviews || data.items || data.rows || [];
+        const done = reviews.filter(rv => rv.status === 'done' || rv.completed_at || rv.outcome).length;
+        $('mgReviewsDone').textContent = String(done);
+        // next review: first with a future due / not done
+        const next = reviews.find(rv => !(rv.status === 'done' || rv.completed_at));
+        $('mgNextReview').textContent = next ? (next.review_type || next.type || 'Scheduled') : 'None due';
+        $('mgNextReview').style.fontSize = '16px';
+        if (reviews.length === 0) { panel.innerHTML = '<div class="empty">No reviews yet.</div>'; return; }
+        function rvPill(rv){
+          if (rv.outcome === 'pass' || rv.status === 'passed') return '<span class="pill green">Passed</span>';
+          if (rv.status === 'done' || rv.completed_at) return '<span class="pill green">Done</span>';
+          return '<span class="pill blue">Scheduled</span>';
+        }
+        panel.innerHTML = reviews.map(rv =>
+          '<div class="row"><div><div class="t1">' + esc(rv.review_type || rv.type || rv.title || 'Review') + '</div>' +
+          '<div class="t2">' + dOnly(rv.review_date || rv.due_at || rv.created_at) + (rv.reviewer_name ? ' \u00b7 by ' + esc(rv.reviewer_name) : '') + '</div></div>' +
+          rvPill(rv) + '</div>'
+        ).join('');
+      } catch (e) { panel.innerHTML = '<div class="empty">Network error.</div>'; }
     }
 
     await init();
