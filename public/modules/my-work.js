@@ -69,6 +69,39 @@ window.fkModules['my-work'] = {
           '#mw-mod .mw-done-toggle{cursor:pointer;color:var(--soft);font-weight:400;text-transform:none;letter-spacing:0}' +
           '#mw-mod #mwDoneList{display:none}' +
           '#mw-mod #mwDoneList.on{display:block}' +
+          '#mw-mod .mwc-bg{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}' +
+          '#mw-mod .mwc{background:var(--surface);border-radius:14px;max-width:560px;width:100%;max-height:90vh;overflow-y:auto;overflow-x:hidden}' +
+          '#mw-mod .mwc-head{padding:15px 19px;color:#fff;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}' +
+          '#mw-mod .mwc-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:500;opacity:.92;display:flex;align-items:center;gap:6px}' +
+          '#mw-mod .mwc-title{font-size:18px;font-weight:500;margin-top:4px}' +
+          '#mw-mod .mwc-status{font-size:12px;background:rgba(255,255,255,.9);color:#333;padding:5px 12px;border-radius:99px;flex:none;font-weight:500}' +
+          '#mw-mod .mwc-body{padding:16px 19px}' +
+          '#mw-mod .mwc-meta{font-size:13px;color:var(--muted);margin-bottom:14px}' +
+          '#mw-mod .mwc-label{font-size:13px;font-weight:500;margin-bottom:6px;display:flex;align-items:center;gap:7px}' +
+          '#mw-mod .mwc-hint{font-size:12px;color:var(--soft);font-weight:400}' +
+          '#mw-mod .mwc-textarea{width:100%;box-sizing:border-box;border:0.5px solid var(--line);border-radius:8px;padding:10px 12px;font-size:14px;font-family:inherit;margin-bottom:14px;resize:vertical}' +
+          '#mw-mod .mwc-tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}' +
+          '#mw-mod .mwc-tile{background:var(--bg2,#F4F2EC);border-radius:10px;padding:11px 13px}' +
+          '#mw-mod .mwc-tile-k{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px}' +
+          '#mw-mod .mwc-time-row{display:flex;align-items:center;gap:10px;margin-top:5px}' +
+          '#mw-mod .mwc-time{font-size:20px;font-weight:500}' +
+          '#mw-mod .mwc-timer-btn{font-size:12px;padding:5px 11px;border:0.5px solid var(--line);border-radius:7px;background:var(--surface);cursor:pointer}' +
+          '#mw-mod .mwc-timer-btn:hover{background:var(--hover,#F1EFE8)}' +
+          '#mw-mod .mwc-amend{margin-top:7px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;flex-wrap:wrap}' +
+          '#mw-mod .mwc-amend input{width:64px;padding:5px 8px;border:0.5px solid var(--line);border-radius:6px;font-size:13px}' +
+          '#mw-mod .mwc-edithint{font-size:11px;color:var(--soft);font-style:italic;width:100%}' +
+          '#mw-mod .mwc-pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}' +
+          '#mw-mod .mwc-pill{font-size:12px;padding:6px 11px;border-radius:99px;cursor:pointer;font-weight:500}' +
+          '#mw-mod .mwc-files-box{background:var(--bg2,#F4F2EC);border-radius:10px;padding:12px 14px;margin-bottom:16px}' +
+          '#mw-mod .mwc-file{display:flex;align-items:center;gap:9px;font-size:13px;background:var(--surface);border-radius:7px;padding:8px 11px;margin-bottom:8px}' +
+          '#mw-mod .mwc-link{color:#185FA5;cursor:pointer}' +
+          '#mw-mod .mwc-del{color:#A32D2D;cursor:pointer}' +
+          '#mw-mod .mwc-upload{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;box-sizing:border-box;padding:9px;border:0.5px solid var(--line);border-radius:7px;background:var(--surface);cursor:pointer;font-size:13px}' +
+          '#mw-mod .mwc-upload:hover{background:var(--hover,#F1EFE8)}' +
+          '#mw-mod .mwc-actions{display:flex;gap:9px;flex-wrap:wrap}' +
+          '#mw-mod .mwc-btn{padding:11px 18px;font-size:14px;border:0.5px solid var(--line);border-radius:8px;background:var(--surface);cursor:pointer}' +
+          '#mw-mod .mwc-btn:hover{background:var(--hover,#F1EFE8)}' +
+          '#mw-mod .mwc-btn.done{background:#0F6E56;color:#fff;border-color:#0F6E56;font-weight:500}' +
         '</style>' +
 
         '<div class="card">' +
@@ -102,11 +135,12 @@ window.fkModules['my-work'] = {
           '<div id="mwBody"><div class="mw-empty">Loading\u2026</div></div>' +
           '<div id="mwReqSent"></div>' +
 
-          '<div class="mw-glabel"><span>Done</span><span class="mw-done-toggle" id="mwDoneToggle">show recent \u25be</span></div>' +
+          '<div class="mw-glabel"><span>Completed</span><span class="mw-done-toggle" id="mwDoneToggle">show recent \u25be</span></div>' +
           '<div id="mwDoneList"></div>' +
 
           '<div class="mw-note">Pick a person, then choose Assign or Request. Assign is only available for people you manage. Recruitment openings live in the Recruitment view.</div>' +
         '</div>' +
+        '<div id="mwCardMount"></div>' +
       '</div>';
   },
 
@@ -125,19 +159,15 @@ window.fkModules['my-work'] = {
     let editingId = null;
 
     function actionsFor(t) {
-      // edit + cancel icons always; start/done by state; decline if assigned to me by someone else
+      // Quick Start/Done on the row, plus a proper Open button for the full card
+      // (edit, cancel, timer, what-I-did, files all live in the card now).
       let html = '';
       if (t.status === 'in_progress') {
-        html += '<button class="mw-act" data-act="complete" data-id="'+t.id+'">Done</button>';
+        html += '<button class="mw-act go" data-act="complete" data-id="'+t.id+'">Done</button>';
       } else {
-        html += '<button class="mw-act" data-act="start" data-id="'+t.id+'">Start</button>';
+        html += '<button class="mw-act go" data-act="start" data-id="'+t.id+'">Start</button>';
       }
-      // decline a direct assignment (someone else assigned it to me, not a request)
-      if (t.assigned_by_user_id && t.assigned_by_user_id !== t.assignee_user_id && !t.request_status) {
-        html += '<button class="mw-ico-btn" title="Not mine \u2014 send back" data-declineassign="'+t.id+'"><i class="ti ti-arrow-back-up"></i></button>';
-      }
-      html += '<button class="mw-ico-btn" title="Edit" data-edit="'+t.id+'"><i class="ti ti-pencil"></i></button>';
-      html += '<button class="mw-ico-btn" title="Cancel task" data-cancel="'+t.id+'"><i class="ti ti-x"></i></button>';
+      html += '<button class="mw-act" data-open="'+t.id+'">Open</button>';
       return html;
     }
 
@@ -183,11 +213,17 @@ window.fkModules['my-work'] = {
     }
 
     function doneHtml(t) {
+      const cancelled = t.status === 'cancelled';
+      const title = cancelled
+        ? '<div class="t1" style="color:var(--muted);text-decoration:line-through">'+esc(t.title)+'</div>'
+          + (t.cancel_reason ? '<div class="t2">Cancelled \u00b7 '+esc(t.cancel_reason)+'</div>' : '<div class="t2">Cancelled</div>')
+        : '<div class="t1" style="color:var(--muted)">'+esc(t.title)+'</div>';
       return '<div class="mw-row">' +
-        '<i class="ti ti-circle-check ico" style="color:#6B6B66"></i>' +
-        '<div class="mid"><div class="t1" style="color:var(--muted)">'+esc(t.title)+'</div></div>' +
-        '<span class="pill done">done</span>' +
-        '<button class="mw-act" data-act="reopen" data-id="'+t.id+'">Reopen</button></div>';
+        '<i class="ti '+(cancelled?'ti-circle-x':'ti-circle-check')+' ico" style="color:#6B6B66"></i>' +
+        '<div class="mid">'+title+'</div>' +
+        '<span class="pill done">'+(cancelled?'cancelled':'done')+'</span>' +
+        (cancelled ? '' : '<button class="mw-act" data-act="reopen" data-id="'+t.id+'">Reopen</button>') +
+        '<button class="mw-act" data-open="'+t.id+'">Open</button></div>';
     }
 
     const GROUPS = [['needs_action','Needs action'],['recurring','Recurring today'],['in_progress','In progress']];
@@ -316,9 +352,14 @@ window.fkModules['my-work'] = {
 
     // ---- row actions (start/done/reopen/edit/cancel/decline-assignment) ----
     async function rowAction(e) {
+      const openBtn=e.target.closest('[data-open]');
+      const rowEl=e.target.closest('[data-row]');
       const startBtn=e.target.closest('[data-act]');
       const editBtn=e.target.closest('[data-edit]');
       const cancelBtn=e.target.closest('[data-cancel]');
+      if (openBtn) { openCard(openBtn.getAttribute('data-open')); return; }
+      // clicking the row body (not a button) also opens the card
+      if (rowEl && !startBtn && !e.target.closest('button')) { openCard(rowEl.getAttribute('data-row')); return; }
       const declineBtn=e.target.closest('[data-declineassign]');
       if (startBtn) {
         const id=startBtn.getAttribute('data-id'); const act=startBtn.getAttribute('data-act');
@@ -372,8 +413,141 @@ window.fkModules['my-work'] = {
       if (open) await loadDone();
     });
 
+    // ============================ THE TASK CARD ============================
+    const OUTCOMES = [['done','Done','#0F6E56','#E1F5EE'],['partly','Partly done','#854F0B','#FAEEDA'],
+                      ['blocked','Blocked','#A32D2D','#FCEBEB'],['couldnt',"Couldn't do",'#5F5E5A','#ECECEA']];
+    const CAT_COLOUR = { meeting:'#185FA5', admin:'#534AB7', cover:'#0F6E56', project:'#993C1D',
+                         request:'#854F0B', other:'#5F5E5A', '':'#185FA5' };
+    const KIND_ICON = { event:'ti-calendar-event', recurring:'ti-checkbox', ad_hoc:'ti-clipboard-text',
+                        review:'ti-star', onboarding:'ti-checklist', probation:'ti-clock' };
+    let cardTimer = null;       // setInterval handle for the live clock
+    let cardState = null;       // { id, timing_since, base_seconds }
+
+    function fmtMins(secs){ const m=Math.round(secs/60); return m+' min'; }
+    function liveSeconds(){ if(!cardState) return 0; let s=cardState.base_seconds||0; if(cardState.timing_since) s+=Math.max(0,(Date.now()-new Date(cardState.timing_since).getTime())/1000); return s; }
+
+    async function openCard(id) {
+      const r = await fetch('/api/tasks/'+id+'/card', { credentials:'include' });
+      if (!r.ok) { alert('Could not open task'); return; }
+      const d = await r.json(); const t = d.task; const w = d.work || {};
+      const cat = t.category || ''; const headColour = CAT_COLOUR[cat] || '#185FA5';
+      const kindIcon = KIND_ICON[t.kind] || 'ti-clipboard-text';
+      cardState = { id, timing_since: w.timing_since || null, base_seconds: w.timer_seconds || 0 };
+
+      const outcomePills = OUTCOMES.map(o =>
+        '<span class="mwc-pill" data-outcome="'+o[0]+'" style="background:'+o[3]+';color:'+o[2]+';'+(w.outcome===o[0]?'outline:2px solid '+o[2]+';outline-offset:1px;':'opacity:.6;')+'">'+o[1]+'</span>').join('');
+
+      const filesHtml = (d.files||[]).map(f => {
+        const isImg=(f.mime_type||'').startsWith('image/');
+        return '<div class="mwc-file"><i class="ti '+(isImg?'ti-photo':'ti-file-text')+'" style="font-size:18px;color:#185FA5"></i>' +
+          '<a href="/api/tasks/file/'+f.id+'" target="_blank" style="color:inherit;text-decoration:none">'+esc(f.filename)+'</a>' +
+          '<span style="margin-left:auto;display:flex;gap:12px"><span class="mwc-link" data-replacefile="'+f.id+'">Replace</span><span class="mwc-del" data-delfile="'+f.id+'">Delete</span></span></div>';
+      }).join('');
+
+      const ctx = t.related_name ? '<a href="#" id="mwcCtx" style="color:#fff;text-decoration:underline;opacity:.95">Open '+esc(t.related_name)+'\u2019s profile</a>' : '';
+      const assignedLine = (t.assigned_by_name && t.assigned_by_user_id!==t.assignee_user_id) ? 'from '+esc(t.assigned_by_name)+' \u00b7 ' : '';
+
+      const m = $('mwCardMount');
+      m.innerHTML =
+        '<div class="mwc-bg" id="mwcBg"><div class="mwc">' +
+          '<div class="mwc-head" style="background:'+headColour+'">' +
+            '<div><div class="mwc-kicker"><i class="ti '+kindIcon+'"></i> '+esc((cat||t.kind||'task').replace("_"," "))+'</div>' +
+              '<div class="mwc-title">'+esc(t.title)+'</div></div>' +
+            '<span class="mwc-status">'+(t.status==='in_progress'?'In progress':(t.status==='done'?'Done':'To do'))+'</span>' +
+          '</div>' +
+          '<div class="mwc-body">' +
+            '<div class="mwc-meta">'+assignedLine+(t.created_at?new Date(t.created_at).toLocaleDateString():'')+ (ctx?' \u00b7 '+ctx:'') +'</div>' +
+
+            '<div class="mwc-label"><i class="ti ti-pencil" style="color:'+headColour+'"></i> What did you do? <span class="mwc-hint">\u2014 flows into your daily report</span></div>' +
+            '<textarea id="mwcDid" class="mwc-textarea" rows="3" placeholder="e.g. Created login, sent welcome email, collected ID + bank details">'+esc(w.did||'')+'</textarea>' +
+
+            '<div class="mwc-tiles">' +
+              '<div class="mwc-tile">' +
+                '<div class="mwc-tile-k"><i class="ti ti-clock"></i> Time spent</div>' +
+                '<div class="mwc-time-row"><span id="mwcTime" class="mwc-time">'+fmtMins(liveSeconds())+'</span>' +
+                  '<button class="mwc-timer-btn" id="mwcTimerBtn">'+(cardState.timing_since?'Pause':'Start timer')+'</button></div>' +
+                '<div class="mwc-amend"><input id="mwcLogged" type="number" min="0" placeholder="adjust" value="'+(w.logged_minutes!=null?w.logged_minutes:'')+'" /> min' +
+                  (w.time_edited_by_name && w.logged_minutes!=null && w.logged_minutes!==Math.round((w.timer_seconds||0)/60)
+                    ? '<span class="mwc-edithint">timer saw '+Math.round((w.timer_seconds||0)/60)+' \u00b7 edited by '+esc(w.time_edited_by_name)+'</span>' : '') +
+                '</div>' +
+              '</div>' +
+              '<div class="mwc-tile">' +
+                '<div class="mwc-tile-k"><i class="ti ti-flag"></i> Outcome</div>' +
+                '<div class="mwc-pills">'+outcomePills+'</div>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="mwc-files-box">' +
+              '<div class="mwc-tile-k" style="margin-bottom:8px"><i class="ti ti-paperclip"></i> Files \u2014 contract, ID, anything</div>' +
+              '<div id="mwcFiles">'+(filesHtml||'<div class="mwc-hint">No files yet.</div>')+'</div>' +
+              '<label class="mwc-upload"><i class="ti ti-upload"></i> Upload a file<input type="file" id="mwcFileInput" accept="application/pdf,image/png,image/jpeg" style="display:none"></label>' +
+            '</div>' +
+
+            '<div class="mwc-actions">' +
+              '<button class="mwc-btn done" id="mwcDone"><i class="ti ti-circle-check"></i> Mark done</button>' +
+              '<button class="mwc-btn" id="mwcSave">Save progress</button>' +
+              '<button class="mwc-btn" id="mwcCancelTask" style="color:#A32D2D">Cancel task</button>' +
+              '<button class="mwc-btn" id="mwcClose">Close</button>' +
+            '</div>' +
+          '</div>' +
+        '</div></div>';
+
+      // live clock
+      function tick(){ const el=$('mwcTime'); if(el) el.textContent=fmtMins(liveSeconds()); }
+      if (cardTimer) clearInterval(cardTimer);
+      if (cardState.timing_since) cardTimer = setInterval(tick, 1000);
+
+      let chosenOutcome = w.outcome || null;
+      m.querySelectorAll('[data-outcome]').forEach(p=>p.onclick=()=>{
+        chosenOutcome=p.getAttribute('data-outcome');
+        m.querySelectorAll('[data-outcome]').forEach(x=>{ const on=x.getAttribute('data-outcome')===chosenOutcome;
+          x.style.opacity=on?'1':'.6'; x.style.outline=on?('2px solid '+x.style.color):'none'; x.style.outlineOffset='1px'; });
+      });
+
+      $('mwcTimerBtn').onclick = async ()=>{
+        const running = !!cardState.timing_since;
+        const act = running ? 'stop' : 'start';
+        const rr = await fetch('/api/tasks/'+id+'/timer',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({act})});
+        if(!rr.ok){ alert('Timer failed'); return; }
+        const jd = await rr.json();
+        if (act==='start'){ cardState.timing_since=jd.timing_since; cardState.base_seconds=jd.timer_seconds||cardState.base_seconds; $('mwcTimerBtn').textContent='Pause'; if(cardTimer)clearInterval(cardTimer); cardTimer=setInterval(tick,1000); }
+        else { cardState.timing_since=null; cardState.base_seconds=jd.timer_seconds||0; $('mwcTimerBtn').textContent='Start timer'; if(cardTimer)clearInterval(cardTimer); tick(); }
+      };
+
+      async function saveWork(complete){
+        const body={ did:$('mwcDid').value, outcome:chosenOutcome||undefined };
+        const lg=$('mwcLogged').value.trim(); if(lg!=='') body.logged_minutes=Number(lg);
+        if(complete) body.complete=true;
+        const rr=await fetch('/api/tasks/'+id+'/work',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)});
+        if(!rr.ok){ alert('Could not save'); return false; }
+        return true;
+      }
+      $('mwcSave').onclick=async()=>{ if(await saveWork(false)){ closeCard(); await load(); } };
+      $('mwcDone').onclick=async()=>{ if(await saveWork(true)){ closeCard(); await load(); await loadDone(); } };
+      $('mwcClose').onclick=closeCard;
+      $('mwcBg').addEventListener('click',e=>{ if(e.target.id==='mwcBg') closeCard(); });
+      $('mwcCancelTask').onclick=async()=>{ const reason=prompt('Cancel this task? Add a reason (kept on record):'); if(reason===null) return;
+        const rr=await fetch('/api/tasks/'+id+'/cancel',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({reason})});
+        if(!rr.ok){ alert('Could not cancel'); return; } closeCard(); await load(); };
+      const ctxA=$('mwcCtx'); if(ctxA) ctxA.onclick=(e)=>{ e.preventDefault(); closeCard(); location.hash='#hr/users'; };
+
+      // files
+      $('mwcFileInput').onchange=async(e)=>{ const f=e.target.files[0]; if(!f) return;
+        const fd=new FormData(); fd.append('file',f);
+        const rr=await fetch('/api/tasks/'+id+'/file',{method:'POST',credentials:'include',body:fd});
+        if(!rr.ok){ const j=await rr.json().catch(()=>({})); alert(j.error||'Upload failed'); return; }
+        openCard(id); };
+      m.querySelectorAll('[data-delfile]').forEach(x=>x.onclick=async()=>{ if(!confirm('Delete this file?'))return;
+        await fetch('/api/tasks/file/'+x.getAttribute('data-delfile'),{method:'DELETE',credentials:'include'}); openCard(id); });
+      m.querySelectorAll('[data-replacefile]').forEach(x=>x.onclick=()=>$('mwcFileInput').click());
+    }
+    function closeCard(){ if(cardTimer){clearInterval(cardTimer);cardTimer=null;} cardState=null; $('mwCardMount').innerHTML=''; }
+
     await loadAssignable();
     updateSaveLabel();
     await load();
+    await loadDone();
+    $('mwDoneList').classList.add('on');
+    $('mwDoneToggle').textContent = 'hide \u25b4';
   }
 };

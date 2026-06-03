@@ -45,7 +45,7 @@ BEGIN
   ALTER TABLE files ADD CONSTRAINT files_drawer_chk CHECK (drawer IN (
     'personal','employment','salary','appraisals','reviews',
     'payroll','insurance','performance','onboarding',
-    'candidate'
+    'candidate','task'
   ));
 END $$;
 

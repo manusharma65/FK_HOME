@@ -319,15 +319,17 @@ router.post('/:id/decline-assignment', async (req, res) => {
 });
 
 // ---------- GET /api/tasks/done ----------
-// Recently completed tasks I did (for the Done section / history).
+// Recently completed OR cancelled tasks I did (for the Completed section / history).
+// Cancelled ones are kept here too so "where did it go?" has an answer.
 router.get('/done', async (req, res) => {
   try {
     const r = await db.query(
-      `SELECT ${TASK_SELECT}
+      `SELECT ${TASK_SELECT}, t.cancelled_at, t.cancel_reason, t.completed_at
          FROM tasks t ${TASK_JOINS}
-        WHERE t.assignee_user_id = $1 AND t.status = 'done'
-          AND t.completed_at > NOW() - INTERVAL '14 days'
-        ORDER BY t.completed_at DESC LIMIT 50`, [req.user.id]);
+        WHERE t.assignee_user_id = $1
+          AND t.status IN ('done','cancelled')
+          AND COALESCE(t.completed_at, t.cancelled_at) > NOW() - INTERVAL '14 days'
+        ORDER BY COALESCE(t.completed_at, t.cancelled_at) DESC LIMIT 50`, [req.user.id]);
     res.json({ tasks: r.rows });
   } catch (e) {
     console.error('[tasks/done] failed:', e.message);
@@ -624,6 +626,251 @@ router.get('/admin/all', async (req, res) => {
     console.error('[tasks/admin/all] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
+});
+
+// ============================================================================
+//  TASK CARD — work record + timer (r0.28)
+// ----------------------------------------------------------------------------
+// The card stores its working data in tasks.meta (no schema change):
+//   meta.work = {
+//     did:        free text "what I did"
+//     outcome:    'done'|'partly'|'blocked'|'couldnt'
+//     timer_seconds: number  — accumulated by the timer (never overwritten by user)
+//     logged_minutes: number — the human's final figure (may differ → shows hint)
+//     time_edited_by, time_edited_at — who amended, when (audit hint on the card)
+//     sessions:   [{ start, stop, secs, reason:'manual'|'idle'|'switch'|'done' }]
+//     timing_since: ISO | null — set when running, cleared when stopped
+//   }
+// Files attach via the files table (task_id), drawer='task' — reuse r0.27 path.
+// ----------------------------------------------------------------------------
+
+function workOf(t) {
+  const m = (t && t.meta) ? t.meta : {};
+  return m.work && typeof m.work === 'object' ? m.work : {};
+}
+async function canTouchTask(t, user) {
+  return t.assignee_user_id === user.id || t.assigned_by_user_id === user.id
+    || t.requester_user_id === user.id || user.can('profile.view.any') || user.can('admin.audit.view');
+}
+
+// GET /api/tasks/:id/card — full card payload (task + work + files)
+router.get('/:id/card', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const r = await db.query(
+      `SELECT t.*, ru.display_name AS related_name, ru.full_name AS related_full_name,
+              ab.display_name AS assigned_by_name
+         FROM tasks t
+    LEFT JOIN users ru ON ru.id = t.related_user_id
+    LEFT JOIN users ab ON ab.id = t.assigned_by_user_id
+        WHERE t.id=$1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = r.rows[0];
+    if (!(await canTouchTask(t, req.user))) return res.status(403).json({ error: 'Permission denied' });
+    let files = [];
+    try {
+      const f = await db.query(
+        `SELECT id, filename, mime_type, size_bytes, uploaded_at
+           FROM files WHERE task_id=$1 AND deleted_at IS NULL ORDER BY uploaded_at DESC`, [id]);
+      files = f.rows;
+    } catch (e) { /* files table may not have task_id yet on older DBs */ }
+    res.json({ task: t, work: workOf(t), files });
+  } catch (e) {
+    console.error('[tasks/card] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// POST /api/tasks/:id/timer  body:{ act:'start'|'stop', reason? }
+// Server is the clock authority: start stamps timing_since; stop adds the elapsed
+// to timer_seconds as a session. Auto-stops (idle/switch) call this with reason.
+router.post('/:id/timer', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  const { act, reason } = req.body || {};
+  if (!['start','stop'].includes(act)) return res.status(400).json({ error: 'act must be start or stop' });
+  try {
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+    if (!(await canTouchTask(t, req.user))) return res.status(403).json({ error: 'Permission denied' });
+    const meta = t.meta && typeof t.meta === 'object' ? t.meta : {};
+    const work = meta.work && typeof meta.work === 'object' ? meta.work : {};
+    if (!Array.isArray(work.sessions)) work.sessions = [];
+    if (typeof work.timer_seconds !== 'number') work.timer_seconds = 0;
+
+    if (act === 'start') {
+      // Stop any OTHER task this user is timing (one active timer — the "switch" rule).
+      await stopOtherTimers(req.user.id, id);
+      if (!work.timing_since) work.timing_since = new Date().toISOString();
+      // Starting also moves the task into progress.
+      meta.work = work;
+      await db.query(`UPDATE tasks SET status=CASE WHEN status IN ('open','due','overdue') THEN 'in_progress' ELSE status END, meta=$1, updated_at=NOW() WHERE id=$2`,
+        [JSON.stringify(meta), id]);
+      return res.json({ ok:true, timing_since: work.timing_since, timer_seconds: work.timer_seconds });
+    }
+    // stop
+    if (work.timing_since) {
+      const secs = Math.max(0, Math.round((Date.now() - new Date(work.timing_since).getTime())/1000));
+      work.sessions.push({ start: work.timing_since, stop: new Date().toISOString(), secs, reason: reason || 'manual' });
+      work.timer_seconds += secs;
+      work.timing_since = null;
+    }
+    meta.work = work;
+    await db.query(`UPDATE tasks SET meta=$1, updated_at=NOW() WHERE id=$2`, [JSON.stringify(meta), id]);
+    res.json({ ok:true, timer_seconds: work.timer_seconds });
+  } catch (e) {
+    console.error('[tasks/timer] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Stop timers running on any OTHER task for this user (one-active-timer rule + idle sweep helper).
+async function stopOtherTimers(userId, exceptId) {
+  const running = await db.query(
+    `SELECT id, meta FROM tasks
+      WHERE assignee_user_id=$1 AND (meta->'work'->>'timing_since') IS NOT NULL AND id <> $2`,
+    [userId, exceptId || 0]);
+  for (const row of running.rows) {
+    const meta = row.meta || {}; const work = meta.work || {};
+    if (!work.timing_since) continue;
+    const secs = Math.max(0, Math.round((Date.now() - new Date(work.timing_since).getTime())/1000));
+    if (!Array.isArray(work.sessions)) work.sessions = [];
+    work.sessions.push({ start: work.timing_since, stop: new Date().toISOString(), secs, reason: 'switch' });
+    work.timer_seconds = (work.timer_seconds || 0) + secs;
+    work.timing_since = null;
+    meta.work = work;
+    await db.query(`UPDATE tasks SET meta=$1, updated_at=NOW() WHERE id=$2`, [JSON.stringify(meta), row.id]);
+  }
+}
+
+// POST /api/tasks/:id/work  body:{ did?, outcome?, logged_minutes?, complete?:bool }
+// Saves the card's work fields. If logged_minutes differs from the timer total,
+// records who edited it (the visible audit hint). complete=true marks done.
+router.post('/:id/work', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
+  const { did, outcome, logged_minutes, complete } = req.body || {};
+  if (outcome && !['done','partly','blocked','couldnt'].includes(outcome)) {
+    return res.status(400).json({ error: 'bad outcome' });
+  }
+  try {
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+    if (!(await canTouchTask(t, req.user))) return res.status(403).json({ error: 'Permission denied' });
+    const meta = t.meta && typeof t.meta === 'object' ? t.meta : {};
+    const work = meta.work && typeof meta.work === 'object' ? meta.work : {};
+    if (!Array.isArray(work.sessions)) work.sessions = [];
+    if (typeof work.timer_seconds !== 'number') work.timer_seconds = 0;
+
+    // If still timing, fold the open session in first so the total is current.
+    if (work.timing_since) {
+      const secs = Math.max(0, Math.round((Date.now() - new Date(work.timing_since).getTime())/1000));
+      work.sessions.push({ start: work.timing_since, stop: new Date().toISOString(), secs, reason: complete ? 'done' : 'manual' });
+      work.timer_seconds += secs;
+      work.timing_since = null;
+    }
+    if (did != null) work.did = String(did);
+    if (outcome != null) work.outcome = outcome;
+
+    const timerMins = Math.round(work.timer_seconds / 60);
+    if (logged_minutes != null && Number.isFinite(Number(logged_minutes))) {
+      const lm = Math.round(Number(logged_minutes));
+      work.logged_minutes = lm;
+      if (lm !== timerMins) { work.time_edited_by = req.user.id; work.time_edited_at = new Date().toISOString(); work.time_edited_by_name = whoNameSafe(req); }
+    } else if (work.logged_minutes == null) {
+      work.logged_minutes = timerMins; // default to what the timer saw
+    }
+    meta.work = work;
+
+    if (complete) {
+      // mirror the existing complete side-effect for reviews
+      if (t.kind === 'review' && t.related_profile_note_id) {
+        try { await lifecycle.completeReview(t.related_profile_note_id, req.user.id); } catch(e){}
+      }
+      await db.query(
+        `UPDATE tasks SET meta=$1, status='done', completed_at=NOW(), completed_by_user_id=$2, updated_at=NOW() WHERE id=$3`,
+        [JSON.stringify(meta), req.user.id, id]);
+    } else {
+      await db.query(`UPDATE tasks SET meta=$1, updated_at=NOW() WHERE id=$2`, [JSON.stringify(meta), id]);
+    }
+    await logAudit({ req, module:'tasks', action: complete ? 'task.completed' : 'task.work_saved', target_type:'task', target_id:id,
+      after:{ outcome: work.outcome, logged_minutes: work.logged_minutes, timer_minutes: timerMins } });
+    res.json({ ok:true, work });
+  } catch (e) {
+    console.error('[tasks/work] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+function whoNameSafe(req){ return req.user.display_name || req.user.full_name || 'Someone'; }
+
+// POST /api/tasks/idle-stop — called by the client when it detects the user went
+// idle (reuses the same 10-min notion). Stops ALL running timers for this user.
+router.post('/idle-stop', async (req, res) => {
+  try { await stopOtherTimers(req.user.id, 0); res.json({ ok:true }); }
+  catch (e) { res.status(500).json({ error:'Failed' }); }
+});
+
+// ---------- task files (reuse files table, task_id + drawer='task') ----------
+const multer = require('multer');
+const taskUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (!['application/pdf','image/png','image/jpeg'].includes(file.mimetype)) return cb(new Error('Use a PDF, PNG or JPG.'));
+    cb(null, true);
+  },
+});
+router.post('/:id/file', (req, res) => {
+  taskUpload.single('file')(req, res, async (err) => {
+    try {
+      if (err) return res.status(400).json({ error: (err && err.message) || 'Upload failed' });
+      if (!req.file) return res.status(400).json({ error: 'No file received' });
+      const id = parseInt(req.params.id, 10);
+      const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+      if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+      if (!(await canTouchTask(cur.rows[0], req.user))) return res.status(403).json({ error: 'Permission denied' });
+      const ins = await db.query(
+        `INSERT INTO files (task_id, drawer, filename, mime_type, size_bytes, content, uploaded_by_user_id)
+         VALUES ($1,'task',$2,$3,$4,$5,$6) RETURNING id, filename, mime_type, size_bytes, uploaded_at`,
+        [id, req.file.originalname, req.file.mimetype, req.file.size, req.file.buffer, req.user.id]);
+      await logAudit({ req, module:'tasks', action:'task.file.uploaded', target_type:'file', target_id:ins.rows[0].id, after:{ task:id, filename:req.file.originalname } });
+      res.json({ ok:true, file: ins.rows[0] });
+    } catch (e) { console.error('[tasks/file upload] failed:', e.message); res.status(500).json({ error: 'Upload failed' }); }
+  });
+});
+router.get('/file/:fileId', async (req, res) => {
+  const fid = parseInt(req.params.fileId, 10);
+  if (!Number.isFinite(fid)) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const r = await db.query(`SELECT f.*, t.assignee_user_id, t.assigned_by_user_id, t.requester_user_id
+       FROM files f JOIN tasks t ON t.id = f.task_id WHERE f.id=$1 AND f.task_id IS NOT NULL`, [fid]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const row = r.rows[0];
+    if (!(await canTouchTask(row, req.user))) return res.status(403).json({ error: 'Permission denied' });
+    if (row.deleted_at) return res.status(410).json({ error: 'File deleted' });
+    res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+    res.setHeader('Content-Length', row.size_bytes);
+    const inlineOk = ['application/pdf','image/png','image/jpeg'].includes(row.mime_type);
+    res.setHeader('Content-Disposition', `${inlineOk?'inline':'attachment'}; filename="${encodeURIComponent(row.filename)}"`);
+    res.send(row.content);
+  } catch (e) { console.error('[tasks/file get] failed:', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+router.delete('/file/:fileId', async (req, res) => {
+  const fid = parseInt(req.params.fileId, 10);
+  if (!Number.isFinite(fid)) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const r = await db.query(`SELECT f.*, t.assignee_user_id, t.assigned_by_user_id, t.requester_user_id
+       FROM files f JOIN tasks t ON t.id = f.task_id WHERE f.id=$1 AND f.task_id IS NOT NULL`, [fid]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (!(await canTouchTask(r.rows[0], req.user))) return res.status(403).json({ error: 'Permission denied' });
+    if (r.rows[0].deleted_at) return res.status(400).json({ error: 'Already deleted' });
+    await db.query(`UPDATE files SET deleted_at=NOW(), deleted_by_user_id=$1 WHERE id=$2`, [req.user.id, fid]);
+    res.json({ ok:true });
+  } catch (e) { console.error('[tasks/file delete] failed:', e.message); res.status(500).json({ error: 'Failed' }); }
 });
 
 module.exports = router;
