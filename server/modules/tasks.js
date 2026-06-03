@@ -408,7 +408,6 @@ router.get('/hr-queue', async (req, res) => {
     LEFT JOIN users ru ON ru.id = t.related_user_id
         WHERE t.source = 'auto_event'
           AND t.status IN ('open','due','overdue','in_progress')
-          AND (t.meta->>'hr_area') IS NOT NULL
         ORDER BY
           CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1
                         WHEN 'in_progress' THEN 2 ELSE 3 END,

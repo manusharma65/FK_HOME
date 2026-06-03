@@ -2307,6 +2307,8 @@ async function sendTeamChat() {
 
 // --- NOTIFICATIONS ---
 let notifOpen = false;
+let _lastNotifId = parseInt(localStorage.getItem('fkLastNotifId') || '0', 10) || 0;
+let _notifFirstLoad = true;
 async function fetchNotifications() {
   try {
     const r = await fetch('/api/notifications?limit=15', { credentials: 'include' });
@@ -2316,8 +2318,36 @@ async function fetchNotifications() {
     }
     const data = await r.json();
     renderNotifications(data.notifications, data.unread_count);
+    maybePopNotifications(data.notifications || []);
   } catch (err) {
     console.error('[fetchNotifications] error:', err);
+  }
+}
+// Browser popup (opt-in, no sound) for genuinely new unread notifications.
+function maybePopNotifications(items) {
+  let maxId = _lastNotifId;
+  const fresh = [];
+  for (const n of items) {
+    if (n.id > _lastNotifId && !n.is_read) fresh.push(n);
+    if (n.id > maxId) maxId = n.id;
+  }
+  // Don't pop the whole backlog on the very first load of the session.
+  if (!_notifFirstLoad && fresh.length && 'Notification' in window && Notification.permission === 'granted') {
+    const show = fresh.slice(0, 3);
+    for (const n of show) {
+      try {
+        const bn = new Notification(n.title || 'FK Home', { body: n.body || '', tag: 'fk-' + n.id, silent: true });
+        bn.onclick = () => { window.focus(); handleNotifClick(n.id, n.action_url || ''); bn.close(); };
+      } catch (e) {}
+    }
+  }
+  _notifFirstLoad = false;
+  if (maxId !== _lastNotifId) { _lastNotifId = maxId; try { localStorage.setItem('fkLastNotifId', String(maxId)); } catch(e){} }
+}
+// Ask once for browser-notification permission (no nag — only if never decided).
+function ensureNotifPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (e) {}
   }
 }
 function renderNotifications(items, unreadCount) {
@@ -2360,43 +2390,35 @@ function toggleNotifications() {
   const dd = document.getElementById('notifDropdown');
   notifOpen = !notifOpen;
   dd.classList.toggle('on', notifOpen);
-  if (notifOpen) fetchNotifications();
+  if (notifOpen) { fetchNotifications(); ensureNotifPermission(); }
 }
 async function handleNotifClick(id, url) {
+  // Mark this notification read (auto-clear from the unread pile on handle).
   try {
     await fetch(`/api/notifications/${id}/read`, { method: 'POST', credentials: 'include' });
   } catch (e) {}
+  toggleNotifications();
   if (url) {
-    // Chronic idle: open the review modal on this page rather than navigating
+    // Chronic idle opens a modal on whatever page you're on, not a route.
     if (url === '#chronic-idle' || url.endsWith('#chronic-idle')) {
-      toggleNotifications();
       openChronicIdleModal();
       fetchNotifications();
       return;
     }
-    // Chat notifications: action_url is "/#chat/<channelId>" — open chat.html on that channel
-    const chatMatch = url.match(/^\/?#chat\/(\d+)$/);
-    if (chatMatch) {
-      location.hash = `#chat/${chatMatch[1]}`;
-      return;
+    // Safety net for any OLD notifications still in the DB pointing at the
+    // decommissioned standalone pages — translate to the module route.
+    let hash = url;
+    if (url.startsWith('/') || /\.html/i.test(url)) {
+      if (/leaves/i.test(url))            { const m=url.match(/(?:id=|leaves\/)(\d+)/i); hash = m ? '#hr/leaves/'+m[1] : '#hr/leaves'; }
+      else if (/regularis/i.test(url))     hash = '#hr/regularisations';
+      else if (/reports/i.test(url))       hash = '#hr/reports';
+      else if (/my-growth/i.test(url))     hash = '#my-growth';
+      else if (/chat/i.test(url))          { const m=url.match(/(?:channel=|chat\/)(\d+)/i); hash = m ? '#chat/'+m[1] : '#chat'; }
+      else if (/profile\.html/i.test(url)) { const m=url.match(/id=(\d+)/i); hash = m ? '#profile/'+m[1] : '#my-work'; }
+      else                                 hash = '#home';
     }
-    // r0.19 (Ship C) — leave notifications used to point at /admin.html#leaves
-    // (full page jump). Route them to the in-shell Leaves module instead. If the
-    // url carries a request id (e.g. .../leaves/42 or #leaves?id=42), focus it.
-    if (/(?:^|\/|#)(?:admin\.html#)?leaves\b/i.test(url) || /hr\/leaves/i.test(url)) {
-      const idMatch = url.match(/(?:id=|leaves\/)(\d+)/i);
-      location.hash = idMatch ? ('#hr/leaves/' + idMatch[1]) : '#hr/leaves';
-      toggleNotifications();
-      fetchNotifications();
-      return;
-    }
-    if (url.startsWith('/')) {
-      location.href = url;
-    } else {
-      location.hash = url;
-    }
+    location.hash = hash;
   }
-  toggleNotifications();
   fetchNotifications();
 }
 async function markAllNotifsRead() {

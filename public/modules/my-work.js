@@ -70,12 +70,12 @@ window.fkModules['my-work'] = {
           '#mw-mod #mwDoneList{display:none}' +
           '#mw-mod #mwDoneList.on{display:block}' +
           '#mw-mod .mwc-bg{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}' +
-          '#mw-mod .mwc{background:var(--surface);border-radius:14px;max-width:560px;width:100%;max-height:90vh;overflow-y:auto;overflow-x:hidden}' +
-          '#mw-mod .mwc-head{padding:15px 19px;color:#fff;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}' +
-          '#mw-mod .mwc-kicker{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:500;opacity:.92;display:flex;align-items:center;gap:6px}' +
-          '#mw-mod .mwc-title{font-size:18px;font-weight:500;margin-top:4px}' +
-          '#mw-mod .mwc-status{font-size:12px;background:rgba(255,255,255,.9);color:#333;padding:5px 12px;border-radius:99px;flex:none;font-weight:500}' +
-          '#mw-mod .mwc-body{padding:16px 19px}' +
+          '#mw-mod .mwc{background:var(--surface);border-radius:14px;max-width:800px;width:100%;max-height:92vh;overflow-y:auto;overflow-x:hidden}' +
+          '#mw-mod .mwc-head{padding:20px 26px;color:#fff;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}' +
+          '#mw-mod .mwc-kicker{font-size:12px;text-transform:uppercase;letter-spacing:.05em;font-weight:500;opacity:.92;display:flex;align-items:center;gap:6px}' +
+          '#mw-mod .mwc-title{font-size:22px;font-weight:500;margin-top:5px}' +
+          '#mw-mod .mwc-status{font-size:13px;background:rgba(255,255,255,.92);color:#333;padding:6px 14px;border-radius:99px;flex:none;font-weight:500}' +
+          '#mw-mod .mwc-body{padding:22px 26px}' +
           '#mw-mod .mwc-meta{font-size:13px;color:var(--muted);margin-bottom:14px}' +
           '#mw-mod .mwc-label{font-size:13px;font-weight:500;margin-bottom:6px;display:flex;align-items:center;gap:7px}' +
           '#mw-mod .mwc-hint{font-size:12px;color:var(--soft);font-weight:400}' +
@@ -417,7 +417,7 @@ window.fkModules['my-work'] = {
     const OUTCOMES = [['done','Done','#0F6E56','#E1F5EE'],['partly','Partly done','#854F0B','#FAEEDA'],
                       ['blocked','Blocked','#A32D2D','#FCEBEB'],['couldnt',"Couldn't do",'#5F5E5A','#ECECEA']];
     const CAT_COLOUR = { meeting:'#185FA5', admin:'#534AB7', cover:'#0F6E56', project:'#993C1D',
-                         request:'#854F0B', other:'#5F5E5A', '':'#185FA5' };
+                         request:'#854F0B', other:'#185FA5', '':'#185FA5' };
     const KIND_ICON = { event:'ti-calendar-event', recurring:'ti-checkbox', ad_hoc:'ti-clipboard-text',
                         review:'ti-star', onboarding:'ti-checklist', probation:'ti-clock' };
     let cardTimer = null;       // setInterval handle for the live clock
@@ -435,7 +435,7 @@ window.fkModules['my-work'] = {
       cardState = { id, timing_since: w.timing_since || null, base_seconds: w.timer_seconds || 0 };
 
       const outcomePills = OUTCOMES.map(o =>
-        '<span class="mwc-pill" data-outcome="'+o[0]+'" style="background:'+o[3]+';color:'+o[2]+';'+(w.outcome===o[0]?'outline:2px solid '+o[2]+';outline-offset:1px;':'opacity:.6;')+'">'+o[1]+'</span>').join('');
+        '<span class="mwc-pill" data-outcome="'+o[0]+'" style="background:'+o[3]+';color:'+o[2]+';'+(w.outcome===o[0]?'outline:2px solid '+o[2]+';outline-offset:1px;font-weight:600;':'')+'">'+o[1]+'</span>').join('');
 
       const filesHtml = (d.files||[]).map(f => {
         const isImg=(f.mime_type||'').startsWith('image/');
@@ -444,8 +444,8 @@ window.fkModules['my-work'] = {
           '<span style="margin-left:auto;display:flex;gap:12px"><span class="mwc-link" data-replacefile="'+f.id+'">Replace</span><span class="mwc-del" data-delfile="'+f.id+'">Delete</span></span></div>';
       }).join('');
 
-      const ctx = t.related_name ? '<a href="#" id="mwcCtx" style="color:#fff;text-decoration:underline;opacity:.95">Open '+esc(t.related_name)+'\u2019s profile</a>' : '';
-      const assignedLine = (t.assigned_by_name && t.assigned_by_user_id!==t.assignee_user_id) ? 'from '+esc(t.assigned_by_name)+' \u00b7 ' : '';
+      const ctx = t.related_name ? ' \u00b7 <a href="#" id="mwcCtx" style="color:#185FA5;text-decoration:none">about '+esc(t.related_name)+' \u2192</a>' : '';
+      const assignedLine = (t.assigned_by_name && t.assigned_by_user_id!==t.assignee_user_id) ? 'Assigned by '+esc(t.assigned_by_name)+' \u00b7 ' : '';
 
       const m = $('mwCardMount');
       m.innerHTML =
@@ -456,7 +456,7 @@ window.fkModules['my-work'] = {
             '<span class="mwc-status">'+(t.status==='in_progress'?'In progress':(t.status==='done'?'Done':'To do'))+'</span>' +
           '</div>' +
           '<div class="mwc-body">' +
-            '<div class="mwc-meta">'+assignedLine+(t.created_at?new Date(t.created_at).toLocaleDateString():'')+ (ctx?' \u00b7 '+ctx:'') +'</div>' +
+            '<div class="mwc-meta">'+assignedLine+(t.created_at?new Date(t.created_at).toLocaleDateString():'')+ ctx +'</div>' +
 
             '<div class="mwc-label"><i class="ti ti-pencil" style="color:'+headColour+'"></i> What did you do? <span class="mwc-hint">\u2014 flows into your daily report</span></div>' +
             '<textarea id="mwcDid" class="mwc-textarea" rows="3" placeholder="e.g. Created login, sent welcome email, collected ID + bank details">'+esc(w.did||'')+'</textarea>' +
@@ -486,6 +486,7 @@ window.fkModules['my-work'] = {
             '<div class="mwc-actions">' +
               '<button class="mwc-btn done" id="mwcDone"><i class="ti ti-circle-check"></i> Mark done</button>' +
               '<button class="mwc-btn" id="mwcSave">Save progress</button>' +
+              '<button class="mwc-btn" id="mwcBlocked">Mark blocked</button>' +
               '<button class="mwc-btn" id="mwcCancelTask" style="color:#A32D2D">Cancel task</button>' +
               '<button class="mwc-btn" id="mwcClose">Close</button>' +
             '</div>' +
@@ -501,7 +502,7 @@ window.fkModules['my-work'] = {
       m.querySelectorAll('[data-outcome]').forEach(p=>p.onclick=()=>{
         chosenOutcome=p.getAttribute('data-outcome');
         m.querySelectorAll('[data-outcome]').forEach(x=>{ const on=x.getAttribute('data-outcome')===chosenOutcome;
-          x.style.opacity=on?'1':'.6'; x.style.outline=on?('2px solid '+x.style.color):'none'; x.style.outlineOffset='1px'; });
+          x.style.outline=on?('2px solid '+x.style.color):'none'; x.style.outlineOffset='1px'; x.style.fontWeight=on?'600':'500'; });
       });
 
       $('mwcTimerBtn').onclick = async ()=>{
@@ -523,6 +524,7 @@ window.fkModules['my-work'] = {
         return true;
       }
       $('mwcSave').onclick=async()=>{ if(await saveWork(false)){ closeCard(); await load(); } };
+      const blk=$('mwcBlocked'); if(blk) blk.onclick=async()=>{ chosenOutcome='blocked'; if(await saveWork(false)){ closeCard(); await load(); } };
       $('mwcDone').onclick=async()=>{ if(await saveWork(true)){ closeCard(); await load(); await loadDone(); } };
       $('mwcClose').onclick=closeCard;
       $('mwcBg').addEventListener('click',e=>{ if(e.target.id==='mwcBg') closeCard(); });
