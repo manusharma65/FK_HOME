@@ -472,12 +472,14 @@ async function recordClockIn(userId) {
   // Compute lateness vs shift start (London wall-clock).
   const now = nowLondonHHMM();
   let lateMinutes = 0;
-  let newStatus = 'working';
+  let newStatus = 'on_time';
   if (row.shift_start_local) {
     lateMinutes = Math.max(0, minutesBetweenHHMM(now, String(row.shift_start_local).slice(0,5)));
     // grace is applied by the lateness pipeline elsewhere; store raw minutes,
-    // mark 'late' only if past start.
-    if (lateMinutes > 0) newStatus = 'late';
+    // mark late only if past start. Must use values the attendance_day status
+    // CHECK allows ('on_time'/'late'/'very_late') — never 'working'.
+    if (lateMinutes > 30) newStatus = 'very_late';
+    else if (lateMinutes > 0) newStatus = 'late';
   }
   await db.query(
     `UPDATE attendance_day

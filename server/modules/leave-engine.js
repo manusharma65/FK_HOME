@@ -91,6 +91,7 @@ function toIsoDate(v) {
 function lastAnniversary(hireDate, today) {
   const h = new Date(hireDate + 'T00:00:00Z');
   const t = new Date(today + 'T00:00:00Z');
+  if (isNaN(h.getTime()) || isNaN(t.getTime())) return null;
   let year = t.getUTCFullYear();
   let anniv = new Date(Date.UTC(year, h.getUTCMonth(), h.getUTCDate()));
   if (anniv > t) {

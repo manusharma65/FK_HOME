@@ -44,10 +44,11 @@ function formatDays(n) {
 // (since the last hire-anniversary), not the calendar year.
 async function recomputeBalance(userId) {
   const today = leaveEngine.nowLondonDate ? leaveEngine.nowLondonDate() : new Date().toISOString().slice(0, 10);
-  const u = await db.query(`SELECT hire_date FROM users WHERE id = $1`, [userId]);
-  const hire = u.rows[0] && u.rows[0].hire_date ? String(u.rows[0].hire_date).slice(0, 10) : null;
+  const u = await db.query(`SELECT to_char(hire_date, 'YYYY-MM-DD') AS hire_date FROM users WHERE id = $1`, [userId]);
+  const hire = u.rows[0] && u.rows[0].hire_date ? u.rows[0].hire_date : null;
   if (!hire) return; // no hire_date → engine owns nothing to recompute
   const anniv = leaveEngine.lastAnniversary(hire, today);
+  if (!anniv) return; // invalid date → nothing to recompute (don't crash)
 
   const r = await db.query(
     `SELECT
@@ -342,24 +343,32 @@ router.post('/:id/decide', async (req, res) => {
     }
 
     const year = new Date(lr.start_date).getFullYear();
-    await recomputeBalance(lr.user_id);
+    const startStr = new Date(lr.start_date).toISOString().slice(0, 10);
+    const endStr = new Date(lr.end_date).toISOString().slice(0, 10);
+
+    // Balance recompute is a derivative cache update — never let it fail the
+    // decision (which is already committed above).
+    try { await recomputeBalance(lr.user_id); }
+    catch (e) { console.error('[leaves/decide] recomputeBalance failed:', e.message); }
 
     // Log to accrual ledger so the take is visible in audit history.
     if (decision === 'approved') {
-      await db.query(
-        `INSERT INTO leave_accrual_log
-           (user_id, year, event_date, event_type, days_delta, note, actor_user_id)
-         VALUES ($1, $2, $3, 'leave_taken', $4, $5, $6)`,
-        [lr.user_id, year, String(lr.start_date).slice(0, 10),
-         -Number(lr.total_days), `Leave request #${id} approved by ${req.user.full_name}`,
-         req.user.id]
-      );
+      try {
+        await db.query(
+          `INSERT INTO leave_accrual_log
+             (user_id, year, event_date, event_type, days_delta, note, actor_user_id)
+           VALUES ($1, $2, $3, 'leave_taken', $4, $5, $6)`,
+          [lr.user_id, year, startStr,
+           -Number(lr.total_days), `Leave request #${id} approved by ${req.user.full_name}`,
+           req.user.id]
+        );
+      } catch (e) {
+        console.error('[leaves/decide] accrual-log insert failed:', e.message);
+      }
       // r0.15 (HR-1.5) — recompute weekend pay for every Mon–Sun week
       // overlapping this leave, in case it pushes the week below 5 days.
       try {
-        const fromStr = String(lr.start_date).slice(0, 10);
-        const toStr = String(lr.end_date).slice(0, 10);
-        const r = await leaveEngine.recomputeWeekendPayForRange(lr.user_id, fromStr, toStr);
+        const r = await leaveEngine.recomputeWeekendPayForRange(lr.user_id, startStr, endStr);
         console.log(`[leaves/decide] weekend pay recomputed for user ${lr.user_id} weeks=${r.weeks || 0}`);
       } catch (e) {
         console.error('[leaves/decide] weekend recompute failed:', e.message);
