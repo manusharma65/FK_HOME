@@ -77,10 +77,23 @@ window.fkModules = window.fkModules || {};
       }
     }
     if (!mod) {
-      // Unknown module — fall back to home so the user never gets a blank shell.
-      console.warn('[loader] no module registered for', key, '— falling back to home');
-      location.hash = '#home';
-      showHome();
+      // A registered module is missing — almost always because its JS file
+      // failed to load (404 / served as HTML). DON'T silently bounce to home;
+      // that hides the problem. Show a clear, visible message instead.
+      console.warn('[loader] no module registered for', key, '— file likely failed to load');
+      const hv = homeView(); if (hv) hv.style.display = 'none';
+      const mv = moduleView();
+      if (mv) {
+        mv.style.display = '';
+        mv.innerHTML =
+          '<div class="card" style="padding:24px;text-align:center">' +
+          '<div style="color:var(--red);font-weight:500;margin-bottom:6px">This section could not load.</div>' +
+          '<div style="color:var(--muted);font-size:14px">Try a hard refresh (Cmd/Ctrl + Shift + R). If it keeps happening, the section needs redeploying.</div>' +
+          '<button class="btn" style="margin-top:14px" onclick="location.hash=\'#home\'">Back to Home</button>' +
+          '</div>';
+      }
+      const tt = topbarTitle(); if (tt) tt.textContent = 'FK Home';
+      current = { key, mod: null };
       return;
     }
 

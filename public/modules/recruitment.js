@@ -20,7 +20,7 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-btn.primary{background:var(--ink);color:var(--bg,#fff);border-color:var(--ink)}' +
         '#rec-mod .rec-btn.danger{color:#A32D2D}' +
         '#rec-mod .rec-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px}' +
-        '#rec-mod .rec-col{min-width:205px;width:205px;flex:none;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
+        '#rec-mod .rec-col{flex:1 1 0;min-width:120px;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
         '#rec-mod .rec-col-head{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;display:flex;justify-content:space-between}' +
         '#rec-mod .rec-cand{background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:11px 12px;margin-bottom:8px;cursor:grab}' +
         '#rec-mod .rec-cand:hover{border-color:var(--ink)}' +

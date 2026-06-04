@@ -114,14 +114,16 @@ router.post('/users', requirePermission('admin.users.create'), async (req, res) 
       [newUser.id]
     );
 
-    // Initial leave balance for current year
+    // Initial leave balance for current year.
+    // New hires start at 0 — the accrual engine (leave-engine.js) credits
+    // 1 day/month for the first 6 months, 1.5/month after, on each monthly
+    // anniversary of their hire date. Granting a flat figure here would
+    // double-count on top of accrual.
     const year = new Date().getFullYear();
-    const pol = await db.query(`SELECT annual_days FROM leave_policies WHERE year = $1 AND policy_name = 'standard'`, [year]);
-    const entitled = pol.rows[0]?.annual_days || 25;
     await db.query(
-      `INSERT INTO leave_balances (user_id, year, entitled_days) VALUES ($1,$2,$3)
+      `INSERT INTO leave_balances (user_id, year, entitled_days) VALUES ($1,$2,0)
        ON CONFLICT (user_id, year) DO NOTHING`,
-      [newUser.id, year, entitled]
+      [newUser.id, year]
     );
 
     // Auto-add to channels: All-hands + their primary department channel

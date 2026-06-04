@@ -117,7 +117,7 @@ window.fkModules['hr/insights'] = {
               endLbl = end;
             }
           }
-          return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.href=\'/profile.html?id=' + p.id + '\'">' +
+          return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.hash=\'#profile/' + p.id + '\'">' +
             '<td style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
               '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500">' + esc(p.initials || '') + '</span>' +
               '<span>' + esc(p.display_name || p.full_name) + '</span>' +
@@ -125,7 +125,7 @@ window.fkModules['hr/insights'] = {
             '<td style="padding:8px 10px"><span class="chip ' + s.cls + '">' + esc(s.label) + '</span></td>' +
             '<td style="padding:8px 10px;color:var(--muted)">' + fmtDate(p.hire_date) + '</td>' +
             '<td style="padding:8px 10px">' + endLbl + '</td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.href=\'/profile.html?id=' + p.id + '\'">View</button></td>' +
+            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.hash=\'#profile/' + p.id + '\'">View</button></td>' +
           '</tr>';
         }).join('');
       }
@@ -150,7 +150,7 @@ window.fkModules['hr/insights'] = {
             '</div></td>' +
             '<td style="padding:8px 10px"><span style="color:var(--muted);font-size:13px">' + esc(relatedName) + '</span></td>' +
             '<td style="padding:8px 10px"><span style="color:var(--red);font-weight:500">' + days + ' day' + (days === 1 ? '' : 's') + '</span></td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="location.href=\'/profile.html?id=' + t.related_user_id + '#reviews\'">Open</button></td>' +
+            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="location.hash=\'#profile/' + t.related_user_id + '/reviews\'">Open</button></td>' +
           '</tr>';
         }).join('');
       }
@@ -164,7 +164,7 @@ window.fkModules['hr/insights'] = {
         onbBody.innerHTML = d.onboarding.map(o => {
           const colour = o.avatar_colour || '#888780';
           const pct = o.total_items > 0 ? Math.round(o.done_items * 100 / o.total_items) : 0;
-          return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.href=\'/profile.html?id=' + o.id + '#onboarding\'">' +
+          return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.hash=\'#profile/' + o.id + '/onboarding\'">' +
             '<td style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
               '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500">' + esc(o.initials || '') + '</span>' +
               '<span>' + esc(o.display_name || o.full_name) + '</span>' +
@@ -176,7 +176,7 @@ window.fkModules['hr/insights'] = {
               '</div>' +
               '<span style="font-size:12px;color:var(--muted)">' + o.done_items + '/' + o.total_items + '</span>' +
             '</div></td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.href=\'/profile.html?id=' + o.id + '#onboarding\'">Open</button></td>' +
+            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.hash=\'#profile/' + o.id + '/onboarding\'">Open</button></td>' +
           '</tr>';
         }).join('');
       }
