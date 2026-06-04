@@ -39,6 +39,7 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}' +
         '#rec-mod .rec-field input,#rec-mod .rec-field select,#rec-mod .rec-field textarea{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit;box-sizing:border-box}' +
         '#rec-mod .rec-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
+        '#rec-mod .rec-avatar{width:46px;height:46px;border-radius:50%;background:var(--bg2,#E6F1FB);color:#185FA5;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:15px;flex:none}' +
         '#rec-mod .rec-kv{font-size:13px}' +
         '#rec-mod .rec-kv .k{font-size:11px;color:var(--muted)}' +
         '#rec-mod .rec-sec{border-top:0.5px solid var(--line);padding-top:12px;margin-top:14px}' +
@@ -283,19 +284,27 @@ window.fkModules['recruitment'] = {
       if (!cand) (d.ended||[]).forEach(x=>{ if(String(x.id)===String(id)) cand=x; });
       if (!cand) { alert('Candidate not found'); return; }
       const m = cand.meta || {};
-      const fields = [['Current company',m.current_company],['Experience',m.experience_years?m.experience_years+' years':null],
+      const allFields = [['Current company',m.current_company],['Experience',m.experience_years?m.experience_years+' years':null],
         ['Current salary',m.current_salary],['Expected salary',m.expected_salary],['Notice period',m.notice_period],
-        ['Joining date',m.joining_date],
-        ['Phone',m.phone],['Email',m.email],['Source',m.source]].filter(x=>x[1]);
-      const kv = fields.map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+esc(x[1])+'</div>').join('');
+        ['Phone',m.phone],['Email',m.email]];
+      // Show EVERY field — filled ones show the value, empty ones invite filling
+      // (so the card never looks bare and it's obvious what's still to add).
+      const kv = allFields.map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+
+        (x[1] ? esc(x[1]) : '<span class="rec-add" data-editopen="1" style="color:var(--soft);font-style:italic;cursor:pointer">add</span>')+'</div>').join('');
+      const initials = (cand.title||'?').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
+      const roleLine = [d.opening && d.opening.title, m.source].filter(Boolean).join(' \u00b7 ');
       const hist = Array.isArray(m.history)&&m.history.length ? m.history.map(h=>(STAGE_LABEL[h.stage]||h.stage)+' '+new Date(h.at).toLocaleDateString()).join(' \u2192 ') : '';
       const outcomes = Array.isArray(m.outcomes)&&m.outcomes.length ? m.outcomes.map(o=>'<div class="rec-note"><span style="color:var(--muted)">'+(STAGE_LABEL[o.stage]||o.stage)+':</span> '+esc(o.text)+'<div class="rec-note-meta">'+esc(o.by_name||'')+' \u00b7 '+new Date(o.at).toLocaleDateString()+'</div></div>').join('') : '';
       const notes = Array.isArray(m.notes)&&m.notes.length ? m.notes.map(n=>'<div class="rec-note">'+esc(n.text)+'<div class="rec-note-meta">'+esc(n.by_name||'')+' \u00b7 '+new Date(n.at).toLocaleDateString()+'</div></div>').join('') : '<div class="rec-cand-sub">No notes yet.</div>';
-      modal('<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
-          '<h3 style="margin:0">' + esc(cand.title) + '</h3>' +
-          '<span class="rec-pill">' + (STAGE_LABEL[m.stage]||m.stage||'') + (cand.moved_at?' \u00b7 '+ageLabel(cand.moved_at):'') + '</span></div>' +
+      modal('<div style="display:flex;gap:13px;align-items:flex-start;margin-bottom:4px">' +
+          '<div class="rec-avatar">'+esc(initials)+'</div>' +
+          '<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+            '<div><div style="font-size:17px;font-weight:500">'+esc(cand.title)+'</div>' +
+            (roleLine?'<div class="rec-cand-sub">'+esc(roleLine)+'</div>':'')+'</div>' +
+            '<span class="rec-pill">' + (STAGE_LABEL[m.stage]||m.stage||'') + (cand.moved_at?' \u00b7 '+ageLabel(cand.moved_at):'') + '</span>' +
+          '</div></div></div>' +
         (m.why_shortlist ? '<div class="rec-why"><span style="color:var(--muted)">Why shortlisted:</span> ' + esc(m.why_shortlist) + '</div>' : '') +
-        (kv ? '<div class="rec-grid" style="margin-top:12px">' + kv + '</div>' : '') +
+        '<div class="rec-grid" style="margin-top:12px">' + kv + '</div>' +
         '<div class="rec-sec"><div class="rec-sec-h">Files (CV, photo)</div><div id="recFiles"><div class="rec-cand-sub">Loading\u2026</div></div>' +
           '<label class="rec-btn" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer"><i class="ti ti-upload"></i> Upload CV or photo<input type="file" id="recFileInput" accept="application/pdf,image/png,image/jpeg" style="display:none"></label></div>' +
         (hist ? '<div class="rec-sec"><div class="rec-sec-h">Stage history</div><div style="font-size:12.5px;color:var(--muted)">'+hist+'</div>'+outcomes+'</div>' : (outcomes?'<div class="rec-sec"><div class="rec-sec-h">Round outcomes</div>'+outcomes+'</div>':'')) +
@@ -309,6 +318,7 @@ window.fkModules['recruitment'] = {
         '</div>');
       $('recCloseModal').onclick=closeModal;
       $('recEditCand').onclick=()=>openEditCandidate(cand, openingId);
+      el.querySelectorAll('[data-editopen]').forEach(a=>a.onclick=()=>openEditCandidate(cand, openingId));
       const ec=$('recEndCand'); if(ec) ec.onclick=()=>openEndCandidate(id, openingId);
       const rc=$('recReopenCand'); if(rc) rc.onclick=async()=>{ await fetch('/api/recruitment/candidates/'+id+'/reopen',{method:'POST',credentials:'include'}); closeModal(); await loadBoard(openingId); };
       $('recNoteSave').onclick=async()=>{ const text=$('recNoteText').value.trim(); if(!text) return;
