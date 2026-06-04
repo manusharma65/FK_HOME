@@ -35,6 +35,16 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-end-row .reopen{font-size:12px;color:#185FA5;cursor:pointer;flex:none}' +
         '#rec-mod .rec-modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:1000}' +
         '#rec-mod .rec-modal{background:var(--surface);border-radius:12px;padding:20px 22px;max-width:520px;width:94%;max-height:88vh;overflow-y:auto}' +
+        '#rec-mod .rec-modal-bare{background:var(--surface);border-radius:12px;padding:0;max-width:600px;width:94%;max-height:90vh;overflow:hidden auto}' +
+        '#rec-mod .rec-chead{background:#185FA5;color:#fff;padding:20px 24px}' +
+        '#rec-mod .rec-chead .kick{font-size:12px;text-transform:uppercase;letter-spacing:.05em;opacity:.92;display:flex;align-items:center;gap:6px}' +
+        '#rec-mod .rec-chead .nm{font-size:23px;font-weight:500;margin-top:5px}' +
+        '#rec-mod .rec-chead .src{font-size:13px;opacity:.92;margin-top:7px}' +
+        '#rec-mod .rec-chead .cpill{font-size:13px;background:rgba(255,255,255,.92);color:#0C447C;padding:6px 14px;border-radius:99px;font-weight:500;flex:none}' +
+        '#rec-mod .rec-cbody{padding:22px 24px}' +
+        '#rec-mod .rec-empty-line{background:var(--bg2,#F4F2EC);border-radius:8px;padding:14px;text-align:center;font-size:13px;color:var(--soft)}' +
+        '#rec-mod .rec-panel{background:var(--bg2,#F4F2EC);border-radius:8px;padding:13px 15px}' +
+        '#rec-mod .rec-sec-h2{font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px;margin-bottom:8px}' +
         '#rec-mod .rec-field{margin-bottom:11px}' +
         '#rec-mod .rec-field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}' +
         '#rec-mod .rec-field input,#rec-mod .rec-field select,#rec-mod .rec-field textarea{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit;box-sizing:border-box}' +
@@ -186,6 +196,7 @@ window.fkModules['recruitment'] = {
 
     // ---------- modals ----------
     function modal(html){ $('recModalMount').innerHTML='<div class="rec-modal-bg" id="recModalBg"><div class="rec-modal">'+html+'</div></div>'; $('recModalBg').addEventListener('click',e=>{ if(e.target.id==='recModalBg') closeModal(); }); }
+    function modalBare(html){ $('recModalMount').innerHTML='<div class="rec-modal-bg" id="recModalBg"><div class="rec-modal-bare">'+html+'</div></div>'; $('recModalBg').addEventListener('click',e=>{ if(e.target.id==='recModalBg') closeModal(); }); }
     function closeModal(){ $('recModalMount').innerHTML=''; }
 
     function openAddOpening() {
@@ -287,38 +298,48 @@ window.fkModules['recruitment'] = {
       const allFields = [['Current company',m.current_company],['Experience',m.experience_years?m.experience_years+' years':null],
         ['Current salary',m.current_salary],['Expected salary',m.expected_salary],['Notice period',m.notice_period],
         ['Phone',m.phone],['Email',m.email]];
-      // Show EVERY field — filled ones show the value, empty ones invite filling
-      // (so the card never looks bare and it's obvious what's still to add).
-      const kv = allFields.map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+
-        (x[1] ? esc(x[1]) : '<span class="rec-add" data-editopen="1" style="color:var(--soft);font-style:italic;cursor:pointer">add</span>')+'</div>').join('');
-      const initials = (cand.title||'?').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
-      const roleLine = [d.opening && d.opening.title, m.source].filter(Boolean).join(' \u00b7 ');
-      const hist = Array.isArray(m.history)&&m.history.length ? m.history.map(h=>(STAGE_LABEL[h.stage]||h.stage)+' '+new Date(h.at).toLocaleDateString()).join(' \u2192 ') : '';
+      const hasAny = allFields.some(x=>x[1]);
+      const kv = allFields.filter(x=>x[1]).map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+esc(x[1])+'</div>').join('');
+      const detailsBody = hasAny
+        ? '<div class="rec-grid">' + kv + '</div>'
+        : '<div class="rec-empty-line">No company, salary, notice or contact yet \u2014 add them as you learn them.</div>';
+      const kick = [d.opening && d.opening.title].filter(Boolean).join(' \u00b7 ') || 'Candidate';
+      const stagePill = (STAGE_LABEL[m.stage]||m.stage||'') + (cand.moved_at?' \u00b7 '+ageLabel(cand.moved_at):'');
+      const hist = Array.isArray(m.history)&&m.history.length ? m.history.map(h=>(STAGE_LABEL[h.stage]||h.stage)+' '+new Date(h.at).toLocaleDateString()).join(' \u2192 ') : 'Sourced \u00b7 '+(cand.created_at?new Date(cand.created_at).toLocaleDateString():'');
       const outcomes = Array.isArray(m.outcomes)&&m.outcomes.length ? m.outcomes.map(o=>'<div class="rec-note"><span style="color:var(--muted)">'+(STAGE_LABEL[o.stage]||o.stage)+':</span> '+esc(o.text)+'<div class="rec-note-meta">'+esc(o.by_name||'')+' \u00b7 '+new Date(o.at).toLocaleDateString()+'</div></div>').join('') : '';
       const notes = Array.isArray(m.notes)&&m.notes.length ? m.notes.map(n=>'<div class="rec-note">'+esc(n.text)+'<div class="rec-note-meta">'+esc(n.by_name||'')+' \u00b7 '+new Date(n.at).toLocaleDateString()+'</div></div>').join('') : '<div class="rec-cand-sub">No notes yet.</div>';
-      modal('<div style="display:flex;gap:13px;align-items:flex-start;margin-bottom:4px">' +
-          '<div class="rec-avatar">'+esc(initials)+'</div>' +
-          '<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
-            '<div><div style="font-size:17px;font-weight:500">'+esc(cand.title)+'</div>' +
-            (roleLine?'<div class="rec-cand-sub">'+esc(roleLine)+'</div>':'')+'</div>' +
-            '<span class="rec-pill">' + (STAGE_LABEL[m.stage]||m.stage||'') + (cand.moved_at?' \u00b7 '+ageLabel(cand.moved_at):'') + '</span>' +
-          '</div></div></div>' +
-        (m.why_shortlist ? '<div class="rec-why"><span style="color:var(--muted)">Why shortlisted:</span> ' + esc(m.why_shortlist) + '</div>' : '') +
-        '<div class="rec-grid" style="margin-top:12px">' + kv + '</div>' +
-        '<div class="rec-sec"><div class="rec-sec-h">Files (CV, photo)</div><div id="recFiles"><div class="rec-cand-sub">Loading\u2026</div></div>' +
-          '<label class="rec-btn" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer"><i class="ti ti-upload"></i> Upload CV or photo<input type="file" id="recFileInput" accept="application/pdf,image/png,image/jpeg" style="display:none"></label></div>' +
-        (hist ? '<div class="rec-sec"><div class="rec-sec-h">Stage history</div><div style="font-size:12.5px;color:var(--muted)">'+hist+'</div>'+outcomes+'</div>' : (outcomes?'<div class="rec-sec"><div class="rec-sec-h">Round outcomes</div>'+outcomes+'</div>':'')) +
-        '<div class="rec-sec"><div class="rec-sec-h">Notes</div>' + notes +
-          '<div class="rec-field" style="margin-top:10px"><textarea id="recNoteText" rows="2" placeholder="Add a note"></textarea></div>' +
-          '<button class="rec-btn" id="recNoteSave" style="width:100%">Add note</button></div>' +
-        '<div class="rec-actions" style="border-top:0.5px solid var(--line);padding-top:14px">' +
-          '<button class="rec-btn" id="recCloseModal">Close</button>' +
-          '<button class="rec-btn" id="recEditCand">Edit details</button>' +
-          (m.ended ? '<button class="rec-btn" id="recReopenCand">Bring back</button>' : '<button class="rec-btn danger" id="recEndCand">End candidate\u2026</button>') +
+      modalBare(
+        '<div class="rec-chead">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
+            '<div><div class="kick"><i class="ti ti-user-search"></i> '+esc(kick)+'</div>' +
+              '<div class="nm">'+esc(cand.title)+'</div></div>' +
+            '<span class="cpill">'+esc(stagePill)+'</span>' +
+          '</div>' +
+          (m.source ? '<div class="src">From '+esc(m.source)+'</div>' : '') +
+        '</div>' +
+        '<div class="rec-cbody">' +
+          (m.why_shortlist ? '<div class="rec-why" style="margin-bottom:18px"><span style="color:var(--muted)">Why shortlisted:</span> ' + esc(m.why_shortlist) + '</div>' : '') +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+            '<div class="rec-sec-h2"><i class="ti ti-id" style="color:#185FA5"></i> Details</div>' +
+            '<button class="rec-btn" id="recAddDetails" style="font-size:13px;padding:6px 13px"><i class="ti ti-plus"></i> Add details</button></div>' +
+          detailsBody +
+          '<div class="rec-panel" style="margin-top:18px"><div class="rec-sec-h2"><i class="ti ti-paperclip"></i> Files \u2014 CV, photo</div>' +
+            '<div id="recFiles"><div class="rec-cand-sub">Loading\u2026</div></div>' +
+            '<label class="rec-btn" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:10px;cursor:pointer;width:100%;box-sizing:border-box"><i class="ti ti-upload"></i> Upload CV or photo<input type="file" id="recFileInput" accept="application/pdf,image/png,image/jpeg" style="display:none"></label></div>' +
+          '<div class="rec-sec-h2" style="margin-top:18px"><i class="ti ti-history"></i> Stage history</div>' +
+            '<div style="font-size:13px;color:var(--muted)">'+hist+'</div>'+outcomes +
+          '<div class="rec-sec-h2" style="margin-top:18px"><i class="ti ti-note"></i> Notes</div>' + notes +
+            '<div class="rec-field" style="margin-top:10px"><textarea id="recNoteText" rows="2" placeholder="Add a note"></textarea></div>' +
+            '<button class="rec-btn" id="recNoteSave" style="width:100%">Add note</button>' +
+          '<div class="rec-actions" style="border-top:0.5px solid var(--line);padding-top:16px;margin-top:18px">' +
+            '<button class="rec-btn" id="recEditCand">Edit details</button>' +
+            '<button class="rec-btn" id="recCloseModal">Close</button>' +
+            (m.ended ? '<button class="rec-btn" id="recReopenCand">Bring back</button>' : '<button class="rec-btn danger" id="recEndCand">End candidate\u2026</button>') +
+          '</div>' +
         '</div>');
       $('recCloseModal').onclick=closeModal;
       $('recEditCand').onclick=()=>openEditCandidate(cand, openingId);
-      el.querySelectorAll('[data-editopen]').forEach(a=>a.onclick=()=>openEditCandidate(cand, openingId));
+      $('recAddDetails').onclick=()=>openEditCandidate(cand, openingId);
       const ec=$('recEndCand'); if(ec) ec.onclick=()=>openEndCandidate(id, openingId);
       const rc=$('recReopenCand'); if(rc) rc.onclick=async()=>{ await fetch('/api/recruitment/candidates/'+id+'/reopen',{method:'POST',credentials:'include'}); closeModal(); await loadBoard(openingId); };
       $('recNoteSave').onclick=async()=>{ const text=$('recNoteText').value.trim(); if(!text) return;
