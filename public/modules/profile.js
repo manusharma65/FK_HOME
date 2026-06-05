@@ -109,13 +109,47 @@ window.fkModules['profile'] = {
         '#prof-mod .att-tile{background:var(--bg);border-radius:8px;padding:10px 12px}' +
         '#prof-mod .att-tile .num{font-size:18px;font-weight:500}' +
         '#prof-mod .att-tile .lbl{font-size:11px;color:var(--muted);margin-top:2px}' +
+        // Profile photo control
+        '#prof-mod .prof-photo-wrap{position:relative;width:64px;height:64px;flex:none}' +
+        '#prof-mod .prof-photo-wrap .avatar-lg{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;overflow:hidden;background-size:cover;background-position:center}' +
+        '#prof-mod .prof-photo-btn{position:absolute;right:-2px;bottom:-2px;width:24px;height:24px;border-radius:50%;border:1.5px solid var(--surface);background:var(--amber);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
+        '#prof-mod .prof-photo-btn i{font-size:13px}' +
+        // Header tiles
+        '#prof-mod .prof-tiles{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}' +
+        '#prof-mod .prof-tile{background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}' +
+        '#prof-mod .prof-tile .t-lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}' +
+        '#prof-mod .prof-tile .t-val{font-size:17px;font-weight:500;margin-top:3px;display:flex;align-items:center;gap:7px}' +
+        '#prof-mod .prof-bar{height:6px;border-radius:99px;background:var(--line);margin-top:7px;overflow:hidden}' +
+        '#prof-mod .prof-bar > i{display:block;height:100%;background:var(--amber);border-radius:99px}' +
+        // Detail edit forms — full-size fields + buttons (no tiny inline controls)
+        '#prof-mod .det-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 18px}' +
+        '#prof-mod .det-field{display:flex;flex-direction:column;gap:5px}' +
+        '#prof-mod .det-field.full{grid-column:1/-1}' +
+        '#prof-mod .det-field label{font-size:12px;color:var(--muted);font-weight:500}' +
+        '#prof-mod .det-field input,#prof-mod .det-field select,#prof-mod .det-field textarea{width:100%;padding:10px 12px;border:0.5px solid var(--line);border-radius:8px;background:var(--surface);font-size:14px;color:var(--ink);font-family:inherit}' +
+        '#prof-mod .det-field input:disabled{background:var(--bg);color:var(--muted)}' +
+        '#prof-mod .det-actions{display:flex;gap:10px;margin-top:14px}' +
+        '#prof-mod .det-btn{padding:10px 16px;border-radius:8px;border:0.5px solid var(--line);background:var(--surface);font-size:14px;cursor:pointer;color:var(--ink);font-weight:500}' +
+        '#prof-mod .det-btn.primary{background:var(--amber);color:#fff;border-color:var(--amber)}' +
+        '#prof-mod .det-btn:hover{filter:brightness(0.97)}' +
+        '#prof-mod .det-pending{background:var(--amber-soft);color:var(--amber-deep);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:12px;display:flex;align-items:center;gap:8px}' +
+        '#prof-mod .complete-item{display:flex;align-items:center;gap:10px;padding:9px 0;font-size:14px;border-bottom:0.5px solid var(--line)}' +
+        '#prof-mod .complete-item:last-child{border-bottom:0}' +
+        '#prof-mod .complete-item i.ok{color:var(--green)}' +
+        '#prof-mod .complete-item i.no{color:var(--muted)}' +
+        '#prof-mod .complete-item .go{margin-left:auto;color:var(--amber-deep);cursor:pointer;font-size:13px}' +
       '</style>' +
       '<div id="prof-mod">' +
         '<div class="header-card" id="profHeader">' +
-          '<div class="avatar-lg" id="profAvatar">—</div>' +
+          '<div class="prof-photo-wrap" id="profPhotoWrap">' +
+            '<div class="avatar-lg" id="profAvatar">—</div>' +
+            '<button class="prof-photo-btn" id="profPhotoBtn" title="Change photo" style="display:none"><i class="ti ti-camera"></i></button>' +
+            '<input type="file" id="profPhotoInput" accept="image/png,image/jpeg,image/webp" style="display:none">' +
+          '</div>' +
           '<div class="header-info">' +
             '<h1 id="profName">Loading…</h1>' +
             '<div class="header-meta" id="profMeta"></div>' +
+            '<div class="prof-tiles" id="profTiles"></div>' +
           '</div>' +
           '<div style="display:flex;flex-direction:column;gap:10px;align-items:flex-end">' +
             '<div id="profStatusPill"></div>' +
@@ -184,15 +218,36 @@ window.fkModules['profile'] = {
       return true;
     }
 
+    function tenureText(hireIso) {
+      if (!hireIso) return '—';
+      const h = new Date(hireIso);
+      if (isNaN(h.getTime())) return '—';
+      const now = new Date();
+      let months = (now.getFullYear() - h.getFullYear()) * 12 + (now.getMonth() - h.getMonth());
+      if (now.getDate() < h.getDate()) months--;
+      if (months < 0) months = 0;
+      const y = Math.floor(months / 12), m = months % 12;
+      if (y === 0) return m + (m === 1 ? ' month' : ' months');
+      if (m === 0) return y + (y === 1 ? ' year' : ' years');
+      return y + 'y ' + m + 'm';
+    }
+
     function renderHeader() {
       const u = overview.user;
       const colour = u.avatar_colour || '#888780';
       const avatar = document.getElementById('profAvatar');
-      avatar.style.background = colour;
-      avatar.style.color = '#FFFFFF';
-      avatar.textContent = u.initials || (u.full_name || '?')[0];
+      if (u.has_photo) {
+        avatar.style.background = "var(--bg) url('/api/profile/" + profileUserId + "/photo?t=" + Date.now() + "') center/cover";
+        avatar.textContent = '';
+      } else {
+        avatar.style.background = colour;
+        avatar.style.color = '#FFFFFF';
+        avatar.textContent = u.initials || (u.full_name || '?')[0];
+      }
       document.getElementById('profName').textContent = u.display_name || u.full_name || '—';
+
       const metaParts = [];
+      if (u.emp_id) metaParts.push('<i class="ti ti-id"></i> ' + esc(u.emp_id));
       if (u.departments && u.departments.length) {
         metaParts.push('<i class="ti ti-building"></i> ' + u.departments.map(d => esc(d.name)).join(', '));
       }
@@ -202,67 +257,95 @@ window.fkModules['profile'] = {
         metaParts.push('<span style="color:var(--red)">No longer at FK Sports</span>');
       }
       document.getElementById('profMeta').innerHTML = metaParts.map(p => '<span>' + p + '</span>').join('');
-      // Header status pill
+
+      // Tiles: Tenure · Profile completeness · Status
+      const c = overview.completeness || { percent: 0 };
+      const statusLabel = u.status === 'active' ? 'Active' : u.status === 'idle' ? 'Idle' : u.status === 'offline' ? 'Offline' : '—';
+      const statusColour = u.status === 'active' ? 'var(--green)' : u.status === 'idle' ? 'var(--amber-deep)' : 'var(--muted)';
+      document.getElementById('profTiles').innerHTML =
+        '<div class="prof-tile"><div class="t-lbl">Tenure</div><div class="t-val">' + tenureText(u.hire_date) + '</div></div>' +
+        '<div class="prof-tile"><div class="t-lbl">Profile complete</div><div class="t-val">' + (c.percent || 0) + '%</div>' +
+          '<div class="prof-bar"><i style="width:' + (c.percent || 0) + '%"></i></div></div>' +
+        '<div class="prof-tile"><div class="t-lbl">Status</div><div class="t-val" style="color:' + statusColour + '">' + statusLabel + '</div></div>';
+
+      // Status pill (kept, top-right)
       const sp = document.getElementById('profStatusPill');
       if (u.status === 'active') sp.innerHTML = '<span class="pill">Active</span>';
       else if (u.status === 'idle') sp.innerHTML = '<span class="pill idle">Idle</span>';
       else if (u.status === 'offline') sp.innerHTML = '<span class="pill off">Offline</span>';
       else sp.innerHTML = '';
+
+      // Photo upload (self or HR)
+      const canEditPhoto = viewer.is_self || viewer.can_edit_any;
+      const pBtn = document.getElementById('profPhotoBtn');
+      const pInput = document.getElementById('profPhotoInput');
+      if (canEditPhoto && pBtn && !pBtn.dataset.wired) {
+        pBtn.style.display = 'flex';
+        pBtn.dataset.wired = '1';
+        pBtn.addEventListener('click', () => pInput.click());
+        pInput.addEventListener('change', async () => {
+          const f = pInput.files && pInput.files[0];
+          if (!f) return;
+          const fd = new FormData();
+          fd.append('file', f);
+          pBtn.disabled = true;
+          try {
+            const r = await fetch('/api/profile/' + profileUserId + '/photo', { method: 'POST', credentials: 'include', body: fd });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) { alert(d.error || 'Upload failed'); }
+            else { await loadOverview(); }
+          } catch (e) { alert('Upload failed'); }
+          pBtn.disabled = false;
+          pInput.value = '';
+        });
+      }
+    }
+
+    // Map legacy drawer keys (used by notification deep-links) → new sections.
+    function mapLegacySection(key) {
+      const m = { personal: 'details', salary: 'pay', payroll: 'pay', insurance: 'pay',
+                  reviews: 'about', attendance: 'time', employment: 'employment',
+                  onboarding: 'onboarding', about: 'about', details: 'details', pay: 'pay', time: 'time' };
+      return m[key] || null;
     }
 
     function renderDrawerNav() {
       const nav = document.getElementById('profDrawerNav');
       const counts = overview.counts || {};
-      const ICONS = {
-        personal: 'ti-user',
-        employment: 'ti-briefcase',
-        salary: 'ti-coin',
-        reviews: 'ti-clipboard-check',
-        payroll: 'ti-file-text',
-        insurance: 'ti-shield',
-        onboarding: 'ti-checklist',
-        attendance: 'ti-calendar', // r0.16 NEW
-      };
-      const LABELS = {
-        personal: 'Personal',
-        employment: 'Employment',
-        salary: 'Salary',
-        reviews: 'Reviews',
-        payroll: 'Payroll',
-        insurance: 'Insurance',
-        onboarding: 'Onboarding',
-        attendance: 'Attendance',
-      };
-      // r0.16 — Attendance is added to the local drawer list for all visible profiles
-      // even if backend doesn't return it (it's not a "file drawer" but a virtual one).
-      const drawers = [...(overview.drawers || [])];
-      if (!drawers.includes('attendance')) drawers.push('attendance');
+      const dset = new Set(overview.drawers || []);
+      const hasEmployment = dset.has('employment');
+      const hasPay = dset.has('salary') || dset.has('payroll') || dset.has('insurance') || viewer.can_view_salary;
+      const hasOnboarding = dset.has('onboarding');
+      const payCount = (counts.salary || 0) + (counts.payroll || 0) + (counts.insurance || 0);
 
-      nav.innerHTML = drawers.map(d => {
-        const count = counts[d];
+      // Fixed order. About me → My details → Employment → Pay → Time → Onboarding.
+      const SECTIONS = [
+        { key: 'about',      icon: 'ti-user-circle', label: 'About me',   show: true },
+        { key: 'details',    icon: 'ti-id',          label: 'My details', show: true },
+        { key: 'employment', icon: 'ti-briefcase',   label: 'Employment', show: hasEmployment, count: counts.employment },
+        { key: 'pay',        icon: 'ti-coin',        label: 'Pay',        show: hasPay, count: payCount },
+        { key: 'time',       icon: 'ti-calendar',    label: 'Time',       show: true },
+        { key: 'onboarding', icon: 'ti-checklist',   label: 'Onboarding', show: hasOnboarding },
+      ].filter(s => s.show);
+
+      nav.innerHTML = SECTIONS.map(s => {
         let countHtml = '';
-        if (d === 'onboarding' && counts.__onboarding_total != null) {
+        if (s.key === 'onboarding' && counts.__onboarding_total != null) {
           countHtml = '<span class="count">' + (counts.__onboarding_completed || 0) + '/' + counts.__onboarding_total + '</span>';
-        } else if (count != null && count > 0) {
-          countHtml = '<span class="count">' + count + '</span>';
+        } else if (s.count != null && s.count > 0) {
+          countHtml = '<span class="count">' + s.count + '</span>';
         }
-        return '<div class="drawer-tab" data-drawer="' + d + '">' +
-          '<i class="ti ' + (ICONS[d] || 'ti-file') + '"></i>' +
-          '<span>' + (LABELS[d] || d) + '</span>' +
-          countHtml +
-          '</div>';
+        return '<div class="drawer-tab" data-drawer="' + s.key + '">' +
+          '<i class="ti ' + s.icon + '"></i><span>' + s.label + '</span>' + countHtml + '</div>';
       }).join('');
       nav.querySelectorAll('.drawer-tab').forEach(el => {
-        el.addEventListener('click', () => {
-          loadDrawer(el.dataset.drawer);
-        });
+        el.addEventListener('click', () => loadDrawer(el.dataset.drawer));
       });
-      // Default to first drawer (or initialDrawer if specified via route param)
-      if (initialDrawer && drawers.includes(initialDrawer)) {
-        loadDrawer(initialDrawer);
-      } else if (drawers.length) {
-        loadDrawer(drawers[0]);
-      }
+
+      const keys = SECTIONS.map(s => s.key);
+      const wanted = initialDrawer ? mapLegacySection(initialDrawer) : null;
+      if (wanted && keys.includes(wanted)) loadDrawer(wanted);
+      else loadDrawer('about');
     }
 
     // --- Drawer load + render -----------------------------------------
@@ -278,35 +361,22 @@ window.fkModules['profile'] = {
       body.innerHTML = '<div style="color:var(--muted);padding:20px 0">Loading…</div>';
 
       const TITLES = {
-        personal: ['Personal', 'Contact and emergency info.'],
+        about: ['About me', 'Your snapshot and what is left to complete.'],
+        details: ['My details', 'Contact, emergency, pay and tax details.'],
         employment: ['Employment', 'Contract and role documents.'],
-        salary: ['Salary', 'Current salary and history.'],
-        reviews: ['Reviews', 'Performance reviews and outcomes.'],
-        payroll: ['Payroll', 'Payslips and tax docs.'],
-        insurance: ['Insurance', 'Health and other policies.'],
+        pay: ['Pay', 'Salary, payslips and where you are paid.'],
+        time: ['Time', 'Monthly attendance calendar.'],
         onboarding: ['Onboarding', 'Joining checklist and signed docs.'],
-        attendance: ['Attendance', 'Monthly attendance calendar.'],
       };
       titleEl.textContent = (TITLES[drawer] || [drawer])[0];
       subEl.textContent = (TITLES[drawer] || ['', ''])[1];
 
       try {
-        if (drawer === 'attendance') {
-          await renderAttendanceDrawer();
-          return;
-        }
-        if (drawer === 'reviews') {
-          // Reviews drawer fetches via the standard drawer endpoint
-          const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer, { credentials: 'include' });
-          if (!r.ok) {
-            body.innerHTML = '<div style="color:var(--red)">Failed to load</div>';
-            return;
-          }
-          const data = await r.json();
-          renderReviewsDrawer(data);
-          return;
-        }
-        // Generic drawer = files + (kind-specific extras)
+        if (drawer === 'about') { renderAboutSection(); return; }
+        if (drawer === 'details') { renderMyDetails(); return; }
+        if (drawer === 'time') { await renderAttendanceDrawer(); return; }
+        if (drawer === 'pay') { await renderPaySection(); return; }
+        // employment + onboarding = file drawers
         const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer, { credentials: 'include' });
         if (!r.ok) {
           body.innerHTML = '<div style="color:var(--red)">Failed to load</div>';
@@ -871,6 +941,281 @@ window.fkModules['profile'] = {
         console.error('[attendance]', e);
         grid.innerHTML = '<div style="grid-column:span 7;color:var(--red);text-align:center;padding:14px">Failed to load</div>';
       }
+    }
+
+    // ====================================================================
+    // r0.33 — redesigned sections: About me, My details, Pay
+    // ====================================================================
+    const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+    let detailsEditing = null; // which group is currently in edit mode
+
+    function canEditThis() { return viewer.is_self || viewer.can_edit_any; }
+    function canSeePrivate() { return viewer.is_self || viewer.can_view_salary || viewer.can_edit_any; }
+
+    // Re-fetch overview (for tiles/completeness/values) without leaving the section.
+    async function refreshHeaderAndDetails() {
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/overview', { credentials: 'include' });
+        if (r.ok) { overview = await r.json(); viewer = overview.viewer; renderHeader(); }
+      } catch (e) { /* keep showing what we have */ }
+      renderMyDetails();
+    }
+
+    // ---- About me -------------------------------------------------------
+    function renderAboutSection() {
+      const body = document.getElementById('profPanelBody');
+      const u = overview.user;
+      const c = overview.completeness || {};
+      let html = '';
+
+      if (canSeePrivate()) {
+        const items = [
+          { ok: c.has_photo, label: 'Profile photo', go: 'photo' },
+          { ok: c.has_bank, label: 'Bank details', go: 'details' },
+          { ok: c.has_pan, label: 'PAN', go: 'details' },
+          { ok: c.has_emergency, label: 'Emergency contact', go: 'details' },
+        ];
+        const left = items.filter(i => !i.ok).length;
+        html += '<div class="info-block">' +
+          '<div class="info-block-title">Profile completeness — ' + (c.percent || 0) + '%</div>' +
+          (left === 0 ? '<div style="font-size:13px;color:var(--green);margin-bottom:6px">All set. Nothing left to add.</div>'
+                      : '<div style="font-size:13px;color:var(--muted);margin-bottom:6px">' + left + ' thing' + (left === 1 ? '' : 's') + ' left to add.</div>') +
+          items.map(i =>
+            '<div class="complete-item">' +
+              '<i class="ti ' + (i.ok ? 'ti-circle-check ok' : 'ti-circle no') + '" style="font-size:18px"></i>' +
+              '<span>' + i.label + '</span>' +
+              (!i.ok && canEditThis() ? '<span class="go" data-go="' + i.go + '">Add</span>' : '') +
+            '</div>'
+          ).join('') +
+        '</div>';
+      }
+
+      // Snapshot
+      html += '<div class="info-block">' +
+        '<div class="info-block-title">Snapshot</div>' +
+        (u.emp_id ? '<div class="info-row"><span class="info-label">Emp ID</span> ' + esc(u.emp_id) + '</div>' : '') +
+        (u.email ? '<div class="info-row"><span class="info-label">Work email</span> ' + esc(u.email) + '</div>' : '') +
+        (u.phone ? '<div class="info-row"><span class="info-label">Phone</span> ' + esc(u.phone) + '</div>' : '') +
+        (u.departments && u.departments.length ? '<div class="info-row"><span class="info-label">Department</span> ' + esc(u.departments.map(d => d.name).join(', ')) + '</div>' : '') +
+        (u.hire_date ? '<div class="info-row"><span class="info-label">Joined</span> ' + fmtDate(u.hire_date) + '</div>' : '') +
+      '</div>';
+
+      body.innerHTML = html;
+      body.querySelectorAll('.go[data-go]').forEach(el => {
+        el.addEventListener('click', () => {
+          if (el.dataset.go === 'photo') { const b = document.getElementById('profPhotoBtn'); if (b) b.click(); }
+          else loadDrawer('details');
+        });
+      });
+    }
+
+    // ---- My details -----------------------------------------------------
+    function fieldRead(label, val) {
+      return '<div class="info-row"><span class="info-label">' + label + '</span> ' + (val ? esc(val) : '<span style="color:var(--muted)">Not set</span>') + '</div>';
+    }
+    function inputHtml(f, val) {
+      const v = val == null ? '' : String(val);
+      if (f.type === 'textarea') return '<textarea rows="2" data-k="' + f.k + '">' + esc(v) + '</textarea>';
+      if (f.type === 'select') {
+        return '<select data-k="' + f.k + '"><option value="">—</option>' +
+          f.options.map(o => '<option value="' + o + '"' + (o === v ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>';
+      }
+      return '<input type="' + (f.type || 'text') + '" data-k="' + f.k + '" value="' + escAttr(v) + '"' + (f.ro ? ' disabled' : '') + '>';
+    }
+    function groupBlock(key, title, fields, sensitive) {
+      const u = overview.user;
+      const editing = detailsEditing === key;
+      const editable = canEditThis();
+      let inner = '';
+      if (editing) {
+        inner = '<div class="det-grid">' +
+          fields.map(f => '<div class="det-field' + (f.full ? ' full' : '') + '">' +
+            '<label>' + f.label + (f.ro ? ' (read-only)' : '') + '</label>' + inputHtml(f, u[f.k]) + '</div>').join('') +
+          '</div>' +
+          '<div class="det-actions">' +
+            '<button class="det-btn primary" data-save="' + key + '"' + (sensitive ? ' data-sensitive="1"' : '') + '>' + (sensitive ? 'Request change' : 'Save') + '</button>' +
+            '<button class="det-btn" data-cancel="1">Cancel</button>' +
+          '</div>' +
+          (sensitive ? '<div style="font-size:12px;color:var(--muted);margin-top:10px">For your protection, bank and tax changes are checked by HR before they take effect.</div>' : '');
+      } else {
+        inner = fields.map(f => {
+          let v = u[f.k];
+          if (f.type === 'date' && v) v = fmtDate(v);
+          return fieldRead(f.label, v);
+        }).join('');
+      }
+      return '<div class="info-block">' +
+        '<div class="info-block-title" style="display:flex;align-items:center">' + title +
+          (editable && !editing ? '<span class="go" style="margin-left:auto" data-edit="' + key + '">Edit</span>' : '') +
+        '</div>' + inner + '</div>';
+    }
+
+    function renderMyDetails() {
+      const body = document.getElementById('profPanelBody');
+      const u = overview.user;
+      const showDob = canSeePrivate();
+      const showPay = canSeePrivate();
+
+      const contactFields = [
+        { k: 'email', label: 'Work email', ro: true },
+        { k: 'personal_email', label: 'Personal email', type: 'email' },
+        { k: 'phone', label: 'Phone' },
+        { k: 'personal_address', label: 'Home address', type: 'textarea', full: true },
+      ];
+      const personalFields = [];
+      if (showDob) personalFields.push({ k: 'date_of_birth', label: 'Date of birth', type: 'date' });
+      personalFields.push({ k: 'blood_group', label: 'Blood group', type: 'select', options: BLOOD_GROUPS });
+      const emergencyFields = [{ k: 'emergency_contact', label: 'Name, relationship and phone', type: 'textarea', full: true }];
+      const payFields = [
+        { k: 'bank_account_holder', label: 'Account holder name' },
+        { k: 'bank_name', label: 'Bank name' },
+        { k: 'bank_account_number', label: 'Account number' },
+        { k: 'bank_ifsc', label: 'IFSC code' },
+        { k: 'pan', label: 'PAN' },
+      ];
+
+      let html = '';
+      const pend = overview.pending_changes || [];
+      if (pend.length && showPay) {
+        html += '<div class="det-pending"><i class="ti ti-clock"></i> A bank/tax change is waiting for HR approval. It will not take effect until approved.</div>';
+      }
+      html += groupBlock('contact', 'Contact', contactFields, false);
+      html += groupBlock('personal', 'Personal', personalFields, false);
+      html += groupBlock('emergency', 'Emergency contact', emergencyFields, false);
+      if (showPay) html += groupBlock('paytax', 'Pay &amp; tax', payFields, true);
+
+      body.innerHTML = html;
+
+      body.querySelectorAll('[data-edit]').forEach(el => el.addEventListener('click', () => { detailsEditing = el.dataset.edit; renderMyDetails(); }));
+      body.querySelectorAll('[data-cancel]').forEach(el => el.addEventListener('click', () => { detailsEditing = null; renderMyDetails(); }));
+      body.querySelectorAll('[data-save]').forEach(el => el.addEventListener('click', () => saveGroup(el.dataset.save, el.dataset.sensitive === '1', el)));
+    }
+
+    function collectGroupValues() {
+      const body = document.getElementById('profPanelBody');
+      const out = {};
+      body.querySelectorAll('[data-k]').forEach(inp => { if (!inp.disabled) out[inp.dataset.k] = inp.value; });
+      return out;
+    }
+
+    async function saveGroup(key, sensitive, btn) {
+      const vals = collectGroupValues();
+      btn.disabled = true;
+      try {
+        if (sensitive) {
+          // Only send sensitive fields that actually changed from the current value.
+          const changes = {};
+          for (const k of Object.keys(vals)) {
+            const curr = overview.user[k] == null ? '' : String(overview.user[k]);
+            if (vals[k] !== curr) changes[k] = vals[k];
+          }
+          if (Object.keys(changes).length === 0) { detailsEditing = null; renderMyDetails(); return; }
+          const r = await fetch('/api/profile/' + profileUserId + '/detail-change', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ changes }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { alert(d.error || 'Could not submit'); btn.disabled = false; return; }
+          detailsEditing = null;
+          await refreshHeaderAndDetails();
+        } else {
+          const r = await fetch('/api/profile/' + profileUserId + '/personal', {
+            method: 'PUT', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(vals),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { alert(d.error || 'Could not save'); btn.disabled = false; return; }
+          detailsEditing = null;
+          await refreshHeaderAndDetails();
+        }
+      } catch (e) {
+        alert('Could not save');
+        btn.disabled = false;
+      }
+    }
+
+    // ---- Pay (salary + bank masked + payslips + insurance) --------------
+    function maskBank(num) {
+      if (!num) return '';
+      const s = String(num);
+      return s.length <= 4 ? s : '•••• ' + s.slice(-4);
+    }
+    function payFileGroupHtml(title, drawerKey, files) {
+      const canUpload = viewer.can_upload_any;
+      let h = '<div class="info-block"><div class="info-block-title">' + title + '</div>';
+      if (files && files.length) h += files.map(f => fileRowHtml(f, drawerKey)).join('');
+      else h += '<div style="font-size:13px;color:var(--muted)">No documents.</div>';
+      if (canUpload) {
+        h += '<div class="upload-area" style="margin-top:10px">' +
+          '<input type="file" id="payUp_' + drawerKey + '" accept=".pdf,.png,application/pdf,image/png" />' +
+          '<label for="payUp_' + drawerKey + '"><i class="ti ti-upload"></i> Upload (PDF or PNG)</label></div>';
+      }
+      return h + '</div>';
+    }
+    function wirePayUpload(drawerKey) {
+      const inp = document.getElementById('payUp_' + drawerKey);
+      if (!inp) return;
+      inp.addEventListener('change', async () => {
+        if (!inp.files.length) return;
+        const fd = new FormData();
+        fd.append('file', inp.files[0]);
+        fd.append('user_id', String(profileUserId));
+        fd.append('drawer', drawerKey);
+        const r = await fetch('/api/files/upload', { method: 'POST', credentials: 'include', body: fd });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); alert('Upload failed: ' + (e.error || r.status)); return; }
+        loadDrawer('pay');
+      });
+    }
+
+    async function renderPaySection() {
+      const body = document.getElementById('profPanelBody');
+      const u = overview.user;
+      const wants = ['payroll', 'insurance'];
+      if (viewer.can_view_salary) wants.unshift('salary');
+      let data = {};
+      try {
+        const results = await Promise.all(wants.map(d =>
+          fetch('/api/profile/' + profileUserId + '/drawer/' + d, { credentials: 'include' })
+            .then(r => r.ok ? r.json() : {}).catch(() => ({}))
+        ));
+        wants.forEach((d, i) => { data[d] = results[i] || {}; });
+      } catch (e) { data = {}; }
+
+      let html = '';
+      // Salary card
+      if (viewer.can_view_salary && data.salary && data.salary.salary) {
+        const s = data.salary.salary;
+        const curr = s.currency || '£';
+        html += '<div class="info-block"><div class="info-block-title">Current salary</div>' +
+          '<div class="info-row"><span class="info-label">Monthly CTC</span> ' + esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-GB') : '—') + '</div>' +
+          (s.effective_from ? '<div class="info-row"><span class="info-label">Effective from</span> ' + fmtDate(s.effective_from) + '</div>' : '') +
+        '</div>';
+      }
+      // Bank (masked, read-only — editable home is My details)
+      if (canSeePrivate()) {
+        const anyBank = u.bank_account_number || u.bank_ifsc || u.bank_name || u.bank_account_holder;
+        html += '<div class="info-block"><div class="info-block-title" style="display:flex;align-items:center">Where you are paid' +
+          '<span class="go" style="margin-left:auto" data-go-details="1">Edit in My details</span></div>' +
+          (anyBank ?
+            fieldRead('Account holder', u.bank_account_holder) +
+            fieldRead('Bank', u.bank_name) +
+            fieldRead('Account number', maskBank(u.bank_account_number)) +
+            fieldRead('IFSC', u.bank_ifsc)
+            : '<div style="font-size:13px;color:var(--muted)">No bank details yet. Add them in My details.</div>') +
+        '</div>';
+      }
+      // Payslips + insurance files
+      html += payFileGroupHtml('Payslips and tax', 'payroll', (data.payroll && data.payroll.files) || []);
+      html += payFileGroupHtml('Insurance', 'insurance', (data.insurance && data.insurance.files) || []);
+
+      body.innerHTML = html;
+      wireFileRowHandlers();
+      wirePayUpload('payroll');
+      wirePayUpload('insurance');
+      const goD = body.querySelector('[data-go-details]');
+      if (goD) goD.addEventListener('click', () => loadDrawer('details'));
     }
 
     // --- Kick off ------------------------------------------------------

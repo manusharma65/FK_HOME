@@ -78,6 +78,7 @@ window.fkModules = window.fkModules || {};
           '<div class="ap-tabs">' +
             '<button class="ap-tab active" id="apTabLeave"><i class="ti ti-beach"></i> Leave <span class="ap-badge" id="apCountLeave">0</span></button>' +
             '<button class="ap-tab" id="apTabCorr"><i class="ti ti-edit"></i> Corrections <span class="ap-badge" id="apCountCorr">0</span></button>' +
+            '<button class="ap-tab" id="apTabDetail"><i class="ti ti-id"></i> Detail changes <span class="ap-badge" id="apCountDetail">0</span></button>' +
           '</div>' +
 
           '<div id="apPanelLeave" class="card">' +
@@ -107,6 +108,20 @@ window.fkModules = window.fkModules || {};
               '<tbody id="regBody"><tr class="loading-row"><td colspan="5">Loading\u2026</td></tr></tbody>' +
             '</table>' +
           '</div>' +
+
+          '<div id="apPanelDetail" class="card" style="display:none">' +
+            '<div class="card-head">' +
+              '<div>' +
+                '<h2 style="margin:0">Pending bank / tax changes</h2>' +
+                '<span class="meta">Someone asked to change pay or tax details. Approving applies it; the person is notified either way.</span>' +
+              '</div>' +
+              '<span class="meta" id="dcMeta">\u2014</span>' +
+            '</div>' +
+            '<table>' +
+              '<thead><tr><th>Who</th><th>Change</th><th>Requested by</th><th></th></tr></thead>' +
+              '<tbody id="dcBody"><tr class="loading-row"><td colspan="4">Loading\u2026</td></tr></tbody>' +
+            '</table>' +
+          '</div>' +
         '</div>';
     },
 
@@ -119,14 +134,16 @@ window.fkModules = window.fkModules || {};
 
       // ---- Tabs -------------------------------------------------------------
       function setTab(tab) {
-        const leave = tab === 'leave';
-        $('apPanelLeave').style.display = leave ? '' : 'none';
-        $('apPanelCorr').style.display = leave ? 'none' : '';
-        $('apTabLeave').classList.toggle('active', leave);
-        $('apTabCorr').classList.toggle('active', !leave);
+        $('apPanelLeave').style.display = tab === 'leave' ? '' : 'none';
+        $('apPanelCorr').style.display = tab === 'corr' ? '' : 'none';
+        $('apPanelDetail').style.display = tab === 'detail' ? '' : 'none';
+        $('apTabLeave').classList.toggle('active', tab === 'leave');
+        $('apTabCorr').classList.toggle('active', tab === 'corr');
+        $('apTabDetail').classList.toggle('active', tab === 'detail');
       }
       $('apTabLeave').addEventListener('click', () => setTab('leave'));
       $('apTabCorr').addEventListener('click', () => setTab('corr'));
+      $('apTabDetail').addEventListener('click', () => setTab('detail'));
 
       // ---- Leave queue ------------------------------------------------------
       let requests_ = [];
@@ -215,7 +232,11 @@ window.fkModules = window.fkModules || {};
 
       async function decideLeave(id, decision) {
         let note = '';
-        if (decision === 'rejected') note = prompt('Reason for rejection (optional, but recommended):') || '';
+        if (decision === 'rejected') {
+          const entered = prompt('Reason for rejection (optional, but recommended):');
+          if (entered === null) return; // cancelled — do not reject
+          note = entered;
+        }
         try {
           const r = await fetch('/api/leaves/' + id + '/decide', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
@@ -270,11 +291,11 @@ window.fkModules = window.fkModules || {};
         }
       }
 
-      async function decideCorr(id, decision) {
+      async function decideCorr(id, decision, note) {
         try {
           const r = await fetch('/api/attendance/regularise/' + id + '/decide', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-            body: JSON.stringify({ decision })
+            body: JSON.stringify({ decision, note: note || null })
           });
           if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Action failed'); return; }
           loadCorr();
@@ -283,12 +304,84 @@ window.fkModules = window.fkModules || {};
 
       $('regBody').addEventListener('click', (e) => {
         const b = e.target.closest('[data-decide]');
-        if (b) decideCorr(parseInt(b.getAttribute('data-decide'), 10), b.getAttribute('data-action'));
+        if (!b) return;
+        const id = parseInt(b.getAttribute('data-decide'), 10);
+        const action = b.getAttribute('data-action');
+        if (action === 'deny') {
+          const entered = prompt('Reason for denying (optional, but recommended):');
+          if (entered === null) return; // cancelled — do not deny
+          decideCorr(id, 'deny', entered);
+        } else {
+          decideCorr(id, action);
+        }
+      });
+
+      // ---- Detail changes queue (bank / tax) -------------------------------
+      const DC_LABELS = {
+        bank_account_holder: 'Account holder', bank_name: 'Bank',
+        bank_account_number: 'Account number', bank_ifsc: 'IFSC', pan: 'PAN',
+      };
+      async function loadDetail() {
+        const tbody = $('dcBody');
+        tbody.innerHTML = '<tr class="loading-row"><td colspan="4">Loading\u2026</td></tr>';
+        try {
+          const r = await fetch('/api/profile/detail-changes/pending', { credentials: 'include' });
+          if (!r.ok) throw new Error('load failed');
+          const data = await r.json();
+          const rows = data.requests || [];
+          $('dcMeta').textContent = rows.length + ' pending';
+          $('apCountDetail').textContent = rows.length;
+          if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:22px">All clear \u2014 no pending changes.</td></tr>';
+            return;
+          }
+          tbody.innerHTML = rows.map(row => {
+            const chg = Object.keys(row.changes || {}).map(k => {
+              const lbl = DC_LABELS[k] || k;
+              const oldv = (row.current && row.current[k]) ? escapeHtml(String(row.current[k])) : '<span style="color:var(--muted)">empty</span>';
+              const newv = escapeHtml(String(row.changes[k]));
+              return '<div>' + lbl + ': ' + oldv + ' \u2192 <strong>' + newv + '</strong></div>';
+            }).join('');
+            return '<tr>' +
+              '<td style="font-weight:500">' + escapeHtml(row.user_name || '') + '</td>' +
+              '<td>' + chg + '</td>' +
+              '<td style="color:var(--muted)">' + escapeHtml(row.requested_by_name || '') + '</td>' +
+              '<td class="action-col">' +
+                '<button class="ap-btn ap-btn-danger" data-dc="' + row.id + '" data-action="reject">Deny</button>' +
+                '<button class="ap-btn ap-btn-primary" data-dc="' + row.id + '" data-action="approve">Approve</button>' +
+              '</td>' +
+            '</tr>';
+          }).join('');
+        } catch (err) {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--red);padding:22px">Failed to load.</td></tr>';
+        }
+      }
+
+      async function decideDetail(id, decision) {
+        let note = null;
+        if (decision === 'reject') {
+          const entered = prompt('Reason for denying (optional, but recommended):');
+          if (entered === null) return; // cancelled — do not deny
+          note = entered;
+        }
+        try {
+          const r = await fetch('/api/profile/detail-change/' + id + '/decide', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+            body: JSON.stringify({ decision, note })
+          });
+          if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Action failed'); return; }
+          loadDetail();
+        } catch (e) { alert('Network error'); }
+      }
+
+      $('dcBody').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-dc]');
+        if (b) decideDetail(parseInt(b.getAttribute('data-dc'), 10), b.getAttribute('data-action'));
       });
 
       // ---- Boot -------------------------------------------------------------
       setTab(startTab);
-      await Promise.all([loadLeave(), loadCorr()]);
+      await Promise.all([loadLeave(), loadCorr(), loadDetail()]);
     }
   };
 

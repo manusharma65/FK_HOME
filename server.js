@@ -265,6 +265,8 @@ async function start() {
     console.log('[boot] seed verified');
     // r0.15 (HR-1.5) — one-time leave-balance backfill. Self-guards via system_state.
     await leaveEngine.runBackfillIfNeeded();
+    // r0.33 — assign FK### Emp IDs to any staff without one. Idempotent.
+    await require('./server/modules/emp-id').runEmpIdBackfillIfNeeded();
     app.listen(PORT, () => {
       console.log(`[boot] FK Home r0.16.3 listening on port ${PORT}`);
       startCronJobs();

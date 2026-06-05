@@ -10,6 +10,7 @@ const { notify, notifyEvent } = require('../notify');
 const leaveEngine = require('./leave-engine');
 const backupEngine = require('./backup');
 const lifecycle = require('./lifecycle');
+const { nextEmpId } = require('./emp-id');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -74,11 +75,12 @@ router.post('/users', requirePermission('admin.users.create'), async (req, res) 
     const dn = display_name || full_name.split(/\s+/)[0];
     const initials = full_name.split(/\s+/).map(p => p[0]).slice(0, 2).join('').toUpperCase();
     const avatarColour = pickAvatarColour(initials);
+    const empId = await nextEmpId();
 
     const u = await db.query(
-      `INSERT INTO users (email, password_hash, full_name, display_name, initials, avatar_colour, must_change_password)
-       VALUES ($1,$2,$3,$4,$5,$6,TRUE) RETURNING *`,
-      [email.trim().toLowerCase(), hash, full_name.trim(), dn, initials, avatarColour]
+      `INSERT INTO users (email, password_hash, full_name, display_name, initials, avatar_colour, emp_id, must_change_password)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE) RETURNING *`,
+      [email.trim().toLowerCase(), hash, full_name.trim(), dn, initials, avatarColour, empId]
     );
     const newUser = u.rows[0];
 

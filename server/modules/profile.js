@@ -11,13 +11,40 @@
 //   DELETE /api/profile/:userId/notes/:noteId           — remove
 
 const express = require('express');
+const multer = require('multer');
 const { db } = require('../db');
 const { requireAuth, logAudit } = require('../auth');
-const { notifyEvent } = require('../notify');
+const { notifyEvent, notify } = require('../notify');
 const lifecycle = require('./lifecycle');
 
 const router = express.Router();
 router.use(requireAuth);
+
+// Profile photo upload — images only, 5MB, single file, in-memory (→ bytea).
+const PHOTO_MAX_BYTES = 5 * 1024 * 1024;
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: PHOTO_MAX_BYTES, files: 1 },
+});
+
+// Sensitive fields that go through request-and-approve (never direct overwrite).
+const SENSITIVE_FIELDS = new Set([
+  'bank_account_holder', 'bank_name', 'bank_account_number', 'bank_ifsc', 'pan',
+]);
+
+// Who can approve detail changes / see sensitive pay+tax fields: HR + owner.
+async function hrApproverIds() {
+  const r = await db.query(
+    `SELECT DISTINCT u.id
+       FROM users u
+       JOIN user_groups ug ON ug.user_id = u.id
+       JOIN group_permissions gp ON gp.group_id = ug.group_id
+       JOIN permissions p ON p.id = gp.permission_id
+      WHERE p.slug = 'profile.view.any'
+        AND u.deleted_at IS NULL AND u.employment_status = 'active'`
+  );
+  return r.rows.map(x => x.id);
+}
 
 const ALLOWED_DRAWERS = new Set([
   'onboarding','reviews','employment','salary',
@@ -87,6 +114,10 @@ router.get('/:userId/overview', async (req, res) => {
               u.employment_type, u.work_pattern, u.probation_end_date,
               u.probation_status, u.left_date,
               u.notice_period_days, u.emergency_contact,
+              u.emp_id, u.personal_email, u.blood_group,
+              u.bank_account_holder, u.bank_name, u.bank_account_number,
+              u.bank_ifsc, u.pan,
+              EXISTS(SELECT 1 FROM user_photos ph WHERE ph.user_id = u.id) AS has_photo,
               s.status, s.status_note,
               (SELECT json_agg(json_build_object('slug', d.slug, 'name', d.name, 'role', m.role))
                  FROM user_department_memberships m
@@ -104,13 +135,44 @@ router.get('/:userId/overview', async (req, res) => {
 
     const drawers = await visibleDrawers(req.user, userId);
 
+    const isSelf = req.user.id === userId;
+    const isHr = req.user.can('profile.view.any');
+
     // r0.12 — Redact date_of_birth for viewers who shouldn't see it.
-    // Visible to: the user themselves, anyone with profile.view.any (HR + owner).
-    const canSeeDob =
-      req.user.id === userId ||
-      req.user.can('profile.view.any');
+    const canSeeDob = isSelf || isHr;
     if (!canSeeDob) {
       u.rows[0].date_of_birth = null;
+    }
+
+    const row0 = u.rows[0];
+
+    // Profile completeness (booleans only — never leaks values). The four
+    // fields that actually matter for pay + the badge.
+    const completeness = {
+      has_photo: !!row0.has_photo,
+      has_bank: !!(row0.bank_account_number && row0.bank_ifsc),
+      has_pan: !!row0.pan,
+      has_emergency: !!row0.emergency_contact,
+    };
+    completeness.percent = Math.round(
+      (['has_photo', 'has_bank', 'has_pan', 'has_emergency'].filter(k => completeness[k]).length / 4) * 100
+    );
+
+    // Sensitive pay+tax fields: only self + HR see them; mask for everyone else.
+    const canSeePay = isSelf || isHr || req.user.can('profile.salary.view');
+    if (!canSeePay) {
+      for (const f of ['bank_account_holder', 'bank_name', 'bank_account_number', 'bank_ifsc', 'pan']) row0[f] = null;
+    }
+
+    // Pending sensitive-detail change requests (self + HR can see them).
+    let pendingChanges = [];
+    if (canSeePay) {
+      const pc = await db.query(
+        `SELECT id, changes, requested_at FROM detail_change_requests
+          WHERE user_id = $1 AND status = 'pending' ORDER BY requested_at DESC`,
+        [userId]
+      );
+      pendingChanges = pc.rows;
     }
 
     // Drawer fill summary.
@@ -147,6 +209,8 @@ router.get('/:userId/overview', async (req, res) => {
       user: u.rows[0],
       drawers,
       counts,
+      completeness,
+      pending_changes: pendingChanges,
       viewer: {
         user_id: req.user.id,
         can_edit_any: req.user.can('profile.edit.any'),
@@ -809,7 +873,7 @@ router.put('/:userId/personal', async (req, res) => {
   const canAny = req.user.can('profile.edit.any');
   if (!isSelf && !canAny) return res.status(403).json({ error: 'Permission denied' });
 
-  const { phone, emergency_contact, personal_address, date_of_birth } = req.body || {};
+  const { phone, emergency_contact, personal_address, date_of_birth, personal_email, blood_group } = req.body || {};
   // Light validation. Allow null/empty (clearing a field).
   if (phone != null && typeof phone !== 'string') return res.status(400).json({ error: 'phone must be string' });
   if (emergency_contact != null && typeof emergency_contact !== 'string') return res.status(400).json({ error: 'emergency_contact must be string' });
@@ -823,7 +887,7 @@ router.put('/:userId/personal', async (req, res) => {
 
   try {
     const before = await db.query(
-      `SELECT phone, emergency_contact, personal_address, date_of_birth FROM users WHERE id = $1`, [userId]
+      `SELECT phone, emergency_contact, personal_address, date_of_birth, personal_email, blood_group FROM users WHERE id = $1`, [userId]
     );
     if (before.rows.length === 0) return res.status(404).json({ error: 'User not found' });
 
@@ -833,13 +897,17 @@ router.put('/:userId/personal', async (req, res) => {
          emergency_contact = COALESCE($2, emergency_contact),
          personal_address = COALESCE($3, personal_address),
          date_of_birth = COALESCE($4::date, date_of_birth),
+         personal_email = COALESCE($5, personal_email),
+         blood_group = COALESCE($6, blood_group),
          updated_at = NOW()
-       WHERE id = $5`,
+       WHERE id = $7`,
       [
         phone === '' ? null : cap(phone),
         emergency_contact === '' ? null : cap(emergency_contact),
         personal_address === '' ? null : cap(personal_address),
         date_of_birth === '' ? null : (date_of_birth || null),
+        personal_email === '' ? null : cap(personal_email),
+        blood_group === '' ? null : cap(blood_group),
         userId,
       ]
     );
@@ -854,6 +922,211 @@ router.put('/:userId/personal', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('[profile/personal] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+// ---------- helpers for sensitive changes ----------
+function canEditProfile(viewer, targetUserId) {
+  return viewer.id === targetUserId || viewer.can('profile.edit.any');
+}
+async function applySensitiveChanges(userId, changes) {
+  const cols = Object.keys(changes || {}).filter(k => SENSITIVE_FIELDS.has(k));
+  if (cols.length === 0) return;
+  const sets = cols.map((c, i) => c + ' = $' + (i + 1));
+  const params = cols.map(c => (changes[c] == null ? null : String(changes[c]).slice(0, 200)));
+  params.push(userId);
+  await db.query(
+    'UPDATE users SET ' + sets.join(', ') + ', updated_at = NOW() WHERE id = $' + (cols.length + 1),
+    params
+  );
+}
+
+// ---------- GET /api/profile/:userId/photo ----------
+router.get('/:userId/photo', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad userId' });
+  if (!(await canViewProfile(req.user, userId))) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const r = await db.query('SELECT bytes, mime FROM user_photos WHERE user_id = $1', [userId]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'No photo' });
+    res.set('Content-Type', r.rows[0].mime || 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=60');
+    res.send(r.rows[0].bytes);
+  } catch (e) {
+    console.error('[profile/photo get] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/photo ----------
+router.post('/:userId/photo', (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad userId' });
+  if (!canEditProfile(req.user, userId)) return res.status(403).json({ error: 'Permission denied' });
+  photoUpload.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Image must be under 5MB' : 'Upload failed' });
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    if (!/^image\/(png|jpe?g|webp)$/.test(req.file.mimetype)) {
+      return res.status(400).json({ error: 'Photo must be a PNG, JPG or WebP image' });
+    }
+    try {
+      await db.query(
+        `INSERT INTO user_photos (user_id, bytes, mime, updated_at) VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET bytes = EXCLUDED.bytes, mime = EXCLUDED.mime, updated_at = NOW()`,
+        [userId, req.file.buffer, req.file.mimetype]
+      );
+      await logAudit({ req, module: 'profile', action: 'photo.updated', target_type: 'user', target_id: userId });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[profile/photo post] failed:', e.message);
+      res.status(500).json({ error: 'Failed' });
+    }
+  });
+});
+
+// ---------- DELETE /api/profile/:userId/photo ----------
+router.delete('/:userId/photo', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad userId' });
+  if (!canEditProfile(req.user, userId)) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    await db.query('DELETE FROM user_photos WHERE user_id = $1', [userId]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[profile/photo delete] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/detail-change ----------
+// Request a change to sensitive fields (bank, PAN). Creates a PENDING request;
+// the live value is NOT touched until HR approves.
+router.post('/:userId/detail-change', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad userId' });
+  if (!canEditProfile(req.user, userId)) return res.status(403).json({ error: 'Permission denied' });
+
+  const raw = (req.body && req.body.changes) || {};
+  const changes = {};
+  for (const k of Object.keys(raw)) {
+    if (SENSITIVE_FIELDS.has(k)) changes[k] = (raw[k] == null ? null : String(raw[k]).slice(0, 200));
+  }
+  if (Object.keys(changes).length === 0) return res.status(400).json({ error: 'No valid fields to change' });
+
+  try {
+    const ins = await db.query(
+      `INSERT INTO detail_change_requests (user_id, changes, requested_by_user_id)
+       VALUES ($1, $2::jsonb, $3) RETURNING id`,
+      [userId, JSON.stringify(changes), req.user.id]
+    );
+    const reqId = ins.rows[0].id;
+    await logAudit({ req, module: 'profile', action: 'detail_change.requested',
+      target_type: 'user', target_id: userId, after: { request_id: reqId, fields: Object.keys(changes) } });
+
+    const who = await db.query('SELECT COALESCE(display_name, full_name) AS n FROM users WHERE id = $1', [userId]);
+    const name = who.rows[0] ? who.rows[0].n : 'an employee';
+    const hr = await hrApproverIds();
+    await notify({
+      userIds: hr, type: 'detail_change.requested',
+      title: 'Bank/tax change to approve',
+      body: 'A pay or tax detail change was requested for ' + name + '.',
+      action_url: '#hr/approvals', related_user_id: userId, related_type: 'detail_change_request', related_id: reqId,
+    });
+    await notify({
+      userIds: [userId], type: 'detail_change.requested',
+      title: 'Your pay/tax details change was requested',
+      body: 'If this was not you, tell HR straight away. It will not take effect until HR approves it.',
+      action_url: '#profile/me', related_type: 'detail_change_request', related_id: reqId,
+    });
+    res.json({ ok: true, id: reqId });
+  } catch (e) {
+    console.error('[profile/detail-change] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- GET /api/profile/detail-changes/pending ----------
+// HR view for the Approvals "Detail changes" tab.
+router.get('/detail-changes/pending', async (req, res) => {
+  if (!req.user.can('profile.view.any')) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const r = await db.query(
+      `SELECT dcr.id, dcr.user_id, dcr.changes, dcr.requested_at,
+              COALESCE(u.display_name, u.full_name) AS user_name, u.initials AS user_initials,
+              u.avatar_colour AS user_avatar_colour,
+              u.bank_account_holder, u.bank_name, u.bank_account_number, u.bank_ifsc, u.pan,
+              COALESCE(rb.display_name, rb.full_name) AS requested_by_name
+         FROM detail_change_requests dcr
+         JOIN users u ON u.id = dcr.user_id
+         LEFT JOIN users rb ON rb.id = dcr.requested_by_user_id
+        WHERE dcr.status = 'pending'
+        ORDER BY dcr.requested_at ASC`
+    );
+    const rows = r.rows.map(row => {
+      const current = {};
+      for (const k of Object.keys(row.changes || {})) current[k] = row[k] != null ? row[k] : null;
+      return {
+        id: row.id, user_id: row.user_id, user_name: row.user_name,
+        user_initials: row.user_initials, user_avatar_colour: row.user_avatar_colour,
+        requested_by_name: row.requested_by_name, requested_at: row.requested_at,
+        changes: row.changes, current,
+      };
+    });
+    res.json({ requests: rows });
+  } catch (e) {
+    console.error('[profile/detail-changes pending] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/detail-change/:id/decide ----------
+router.post('/detail-change/:id/decide', async (req, res) => {
+  if (!req.user.can('profile.view.any')) return res.status(403).json({ error: 'Permission denied' });
+  const id = parseInt(req.params.id, 10);
+  const { decision, note } = req.body || {};
+  if (decision !== 'approve' && decision !== 'reject') return res.status(400).json({ error: 'decision must be approve or reject' });
+  try {
+    const r = await db.query('SELECT * FROM detail_change_requests WHERE id = $1', [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const dcr = r.rows[0];
+    if (dcr.status !== 'pending') return res.status(400).json({ error: 'Only pending requests can be decided' });
+
+    if (decision === 'approve') {
+      await applySensitiveChanges(dcr.user_id, dcr.changes);
+    }
+    await db.query(
+      `UPDATE detail_change_requests SET status = $1, decided_by_user_id = $2, decided_at = NOW(), decided_note = $3 WHERE id = $4`,
+      [decision === 'approve' ? 'approved' : 'rejected', req.user.id, note || null, id]
+    );
+    await logAudit({ req, module: 'profile', action: 'detail_change.' + decision,
+      target_type: 'detail_change_request', target_id: id, after: { fields: Object.keys(dcr.changes || {}) } });
+
+    await notify({
+      userIds: [dcr.user_id], type: 'detail_change.decided',
+      title: decision === 'approve' ? 'Your pay/tax details were updated' : 'Your pay/tax change was not approved',
+      body: decision === 'approve' ? 'HR approved your change.' : ('HR did not approve the change.' + (note ? ' ' + note : '')),
+      action_url: '#profile/me', related_type: 'detail_change_request', related_id: id,
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[profile/detail-change decide] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/emp-id ---------- (HR only)
+router.post('/:userId/emp-id', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad userId' });
+  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+  const emp_id = req.body && req.body.emp_id != null ? String(req.body.emp_id).trim().slice(0, 40) : '';
+  if (!emp_id) return res.status(400).json({ error: 'Emp ID required' });
+  try {
+    await db.query('UPDATE users SET emp_id = $1, updated_at = NOW() WHERE id = $2', [emp_id, userId]);
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'That Emp ID is already in use' });
+    console.error('[profile/emp-id] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
 });
