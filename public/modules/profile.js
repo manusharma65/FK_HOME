@@ -237,6 +237,25 @@ window.fkModules['profile'] = {
         '#prof-mod .ob-add h3{font-size:16px;font-weight:600;margin:0 0 12px}' +
         '#prof-mod .ob-add label{font-size:14px;color:var(--muted);display:block;margin-top:10px}' +
         '#prof-mod .ob-add input,#prof-mod .ob-add textarea{width:100%;padding:11px 13px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;font-family:inherit;margin-top:6px;color:var(--ink);background:var(--surface)}' +
+        '#profSetup .welcome-banner{position:relative;border-radius:16px;padding:24px 26px;margin-bottom:14px;color:#fff;overflow:hidden;background:linear-gradient(120deg,#C5612A,#EF9F27)}' +
+        '#profSetup .welcome-banner .deco{position:absolute;right:-30px;top:-30px;width:160px;height:160px;border-radius:50%;background:rgba(255,255,255,0.12)}' +
+        '#profSetup .welcome-banner .deco2{position:absolute;right:60px;bottom:-50px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,0.10)}' +
+        '#profSetup .welcome-banner h2{margin:0 0 8px;font-size:24px;font-weight:700;position:relative}' +
+        '#profSetup .welcome-banner p{margin:0;font-size:15px;line-height:1.55;max-width:680px;position:relative;opacity:.96}' +
+        '#profSetup .welcome-banner .sig{margin-top:12px;font-size:14px;opacity:.9;position:relative}' +
+        '#profSetup .setup{background:var(--surface);border:0.5px solid var(--line);border-radius:14px;padding:20px 24px;margin-bottom:14px}' +
+        '#profSetup .setup-top{display:flex;align-items:center;gap:12px;margin-bottom:14px}' +
+        '#profSetup .setup-top .ic{width:40px;height:40px;border-radius:11px;background:var(--amber-soft);color:var(--amber-deep);display:flex;align-items:center;justify-content:center;font-size:22px;flex:none}' +
+        '#profSetup .setup-top h3{margin:0;font-size:18px;font-weight:600}' +
+        '#profSetup .setup-top .sub{font-size:14px;color:var(--muted);margin-top:2px}' +
+        '#profSetup .setup-top .count{margin-left:auto;font-size:14px;color:var(--muted);font-weight:500;white-space:nowrap}' +
+        '#profSetup .setup .ob-pbar{margin-bottom:6px}' +
+        '#profSetup .setup .ob-grp-head{border-top:0.5px solid var(--line);margin-top:8px;padding-top:14px}' +
+        '#profSetup .setup .ob-grp-head.first{border-top:none;margin-top:4px;padding-top:8px}' +
+        '#profSetup .setup-done{display:flex;align-items:center;gap:12px;background:var(--green-soft);border:0.5px solid var(--line);border-radius:12px;padding:14px 18px;margin-bottom:14px}' +
+        '#profSetup .setup-done i{font-size:22px;color:var(--green)}' +
+        '#profSetup .setup-done .txt{font-weight:600;color:var(--green)}' +
+        '#profSetup .setup-done .vd{margin-left:auto;font-size:14px;color:var(--green);font-weight:600;cursor:pointer}' +
       '</style>' +
       '<div id="prof-mod">' +
         '<div class="header-card" id="profHeader">' +
@@ -255,6 +274,7 @@ window.fkModules['profile'] = {
             '<div class="header-actions" id="profActions"></div>' +
           '</div>' +
         '</div>' +
+        '<div id="profSetup"></div>' +
         '<div class="sectabs" id="profSecTabs"></div>' +
         '<h2 class="sec-title" id="profPanelTitle">—</h2>' +
         '<p class="sec-sub" id="profPanelSub">—</p>' +
@@ -310,6 +330,7 @@ window.fkModules['profile'] = {
       viewer = overview.viewer;
       renderHeader();
       renderDrawerNav();
+      refreshSetup();
       return true;
     }
 
@@ -359,7 +380,7 @@ window.fkModules['profile'] = {
       const statusColour = u.status === 'active' ? 'var(--green)' : u.status === 'idle' ? 'var(--amber-deep)' : 'var(--muted)';
       document.getElementById('profTiles').innerHTML =
         '<div class="prof-tile"><div class="t-lbl">Tenure</div><div class="t-val">' + tenureText(u.hire_date) + '</div></div>' +
-        '<div class="prof-tile"><div class="t-lbl">Profile complete</div><div class="t-val">' + (c.percent || 0) + '%</div>' +
+        '<div class="prof-tile" id="profTileComplete"><div class="t-lbl">Profile complete</div><div class="t-val">' + (c.percent || 0) + '%</div>' +
           '<div class="prof-bar"><i style="width:' + (c.percent || 0) + '%"></i></div></div>' +
         '<div class="prof-tile"><div class="t-lbl">Status</div><div class="t-val" style="color:' + statusColour + '">' + statusLabel + '</div></div>';
 
@@ -432,23 +453,18 @@ window.fkModules['profile'] = {
       const hasOnboarding = dset.has('onboarding');
       const payCount = (counts.salary || 0) + (counts.payroll || 0) + (counts.insurance || 0);
 
-      // Fixed order. About me → My details → Employment → Pay → Time → Onboarding.
+      // Fixed order. Onboarding is NOT a tab — it lives in the setup strip above.
       const SECTIONS = [
         { key: 'about',      icon: 'ti-user-circle', label: 'About me',   show: true },
         { key: 'details',    icon: 'ti-id',          label: 'My details', show: true },
         { key: 'employment', icon: 'ti-briefcase',   label: 'Employment', show: hasEmployment, count: counts.employment },
         { key: 'pay',        icon: 'ti-coin',        label: 'Pay',        show: hasPay, count: payCount },
         { key: 'time',       icon: 'ti-calendar',    label: 'Time',       show: true },
-        { key: 'onboarding', icon: 'ti-checklist',   label: 'Onboarding', show: hasOnboarding },
       ].filter(s => s.show);
 
       nav.innerHTML = SECTIONS.map(s => {
         let countHtml = '';
-        if (s.key === 'onboarding' && counts.__onboarding_total != null) {
-          countHtml = '<span class="count">' + (counts.__onboarding_completed || 0) + '/' + counts.__onboarding_total + '</span>';
-        } else if (s.count != null && s.count > 0) {
-          countHtml = '<span class="count">' + s.count + '</span>';
-        }
+        if (s.count != null && s.count > 0) countHtml = '<span class="count">' + s.count + '</span>';
         return '<button class="sectab" data-drawer="' + s.key + '">' +
           '<i class="ti ' + s.icon + '"></i><span>' + s.label + '</span>' + countHtml + '</button>';
       }).join('');
@@ -458,7 +474,12 @@ window.fkModules['profile'] = {
 
       const keys = SECTIONS.map(s => s.key);
       const wanted = initialDrawer ? mapLegacySection(initialDrawer) : null;
-      if (wanted && keys.includes(wanted)) loadDrawer(wanted);
+      // Deep-link to onboarding → expand the setup strip rather than a tab.
+      if (initialDrawer === 'onboarding' || wanted === 'onboarding') {
+        loadDrawer('about');
+        setupExpanded = true;
+        setTimeout(() => { const s = document.getElementById('profSetup'); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 150);
+      } else if (wanted && keys.includes(wanted)) loadDrawer(wanted);
       else loadDrawer('about');
     }
 
@@ -490,12 +511,6 @@ window.fkModules['profile'] = {
         if (drawer === 'details') { renderMyDetails(); return; }
         if (drawer === 'time') { await renderAttendanceDrawer(); return; }
         if (drawer === 'pay') { await renderPaySection(); return; }
-        if (drawer === 'onboarding') {
-          const r = await fetch('/api/profile/' + profileUserId + '/drawer/onboarding', { credentials: 'include' });
-          const data = r.ok ? await r.json() : { notes: [], files: [] };
-          renderOnboardingSection(data);
-          return;
-        }
         // employment = file drawer
         const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer, { credentials: 'include' });
         if (!r.ok) {
@@ -1068,6 +1083,7 @@ window.fkModules['profile'] = {
     // ====================================================================
     const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
     let detailsEditing = null; // which group is currently in edit mode
+    let setupExpanded = false; // setup strip: expanded record view when complete
 
     function canEditThis() { return viewer.is_self || viewer.can_edit_any; }
     function canSeePrivate() { return viewer.is_self || viewer.can_view_salary || viewer.can_edit_any; }
@@ -1364,7 +1380,7 @@ window.fkModules['profile'] = {
           body: JSON.stringify({ action, reason: reason || null }),
         });
         if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
-        loadDrawer('onboarding');
+        refreshSetup();
       } catch (e) { alert('Failed'); }
     }
 
@@ -1395,7 +1411,7 @@ window.fkModules['profile'] = {
           body: JSON.stringify({ kind: 'onboarding', title, body: body || null }),
         });
         if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
-        loadDrawer('onboarding');
+        refreshSetup();
       } catch (e) { alert('Failed'); }
     }
 
@@ -1404,7 +1420,7 @@ window.fkModules['profile'] = {
       try {
         const r = await fetch('/api/profile/' + profileUserId + '/notes/' + id, { method: 'DELETE', credentials: 'include' });
         if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
-        loadDrawer('onboarding');
+        refreshSetup();
       } catch (e) { alert('Failed'); }
     }
 
@@ -1416,12 +1432,36 @@ window.fkModules['profile'] = {
       return '<div class="ob-ico todo"></div>';
     }
 
-    function renderOnboardingSection(data) {
-      const body = document.getElementById('profPanelBody');
-      const notes = (data.notes || []).slice().sort((a, b) => ((a.ob_sort || 9999) - (b.ob_sort || 9999)) || (a.id - b.id));
+    function daysSince(iso) {
+      if (!iso) return null;
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return null;
+      return Math.floor((Date.now() - d.getTime()) / 86400000);
+    }
+
+    async function refreshSetup() {
+      const b = document.getElementById('profSetup');
+      if (!b) return;
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/drawer/onboarding', { credentials: 'include' });
+        const data = r.ok ? await r.json() : { notes: [] };
+        renderSetupStrip(data);
+      } catch (e) { b.innerHTML = ''; }
+    }
+
+    function renderSetupStrip(data) {
+      const body = document.getElementById('profSetup');
+      if (!body) return;
       const isSelf = viewer.is_self;
       const isHr = viewer.can_edit_any || viewer.can_edit_dept;
       const canAct = isSelf || isHr;
+      const tile = document.getElementById('profTileComplete');
+
+      // Onboarding / setup is private — only the person and HR see it.
+      if (!canAct) { body.innerHTML = ''; if (tile) tile.style.display = ''; return; }
+
+      const notes = (data.notes || []).slice().sort((a, b) => ((a.ob_sort || 9999) - (b.ob_sort || 9999)) || (a.id - b.id));
+      if (notes.length === 0) { body.innerHTML = ''; if (tile) tile.style.display = ''; return; }
 
       const obStatusOf = (n) => n.ob_status || (n.is_completed ? 'verified' : 'to_do');
       const isDone = (n) => { const s = obStatusOf(n); return s === 'verified' || s === 'na'; };
@@ -1429,27 +1469,52 @@ window.fkModules['profile'] = {
       const done = notes.filter(isDone).length;
       const pct = total ? Math.round(done * 100 / total) : 0;
 
+      // Completion is gated on REQUIRED items (optional left over won't block).
+      const reqNotes = notes.filter(n => n.ob_required === true);
+      const allRequiredDone = reqNotes.length > 0 ? reqNotes.every(isDone) : (done === total);
+
+      // Tile hides while the checklist is on screen (incomplete, or expanded record).
+      const showingChecklist = !allRequiredDone || setupExpanded;
+      if (tile) tile.style.display = showingChecklist ? 'none' : '';
+
+      // Complete → slim collapsed bar (unless the user expanded the record).
+      if (allRequiredDone && !setupExpanded) {
+        body.innerHTML = '<div class="setup-done"><i class="ti ti-circle-check"></i>' +
+          '<span class="txt">Setup complete</span>' +
+          '<span class="vd" id="setupView">View joining documents \u2192</span></div>';
+        const v = document.getElementById('setupView');
+        if (v) v.addEventListener('click', () => { setupExpanded = true; refreshSetup(); });
+        return;
+      }
+
       let html = '';
 
-      // Welcome / progress strip
-      if (isSelf) {
-        html += '<div class="ob-welcome">' +
-          '<h3>Welcome to FK Sports, ' + esc(obFirstName()) + '! \uD83D\uDC4B</h3>' +
-          '<p>Let\u2019s get you set up \u2014 about 10 minutes. Finish these and you\u2019re fully on the system and on payroll.</p>' +
-          '<div class="ob-pcount"><span>' + done + ' of ' + total + ' done</span><span>' + pct + '%</span></div>' +
-          '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div></div>' +
-          '<div class="ob-privacy"><i class="ti ti-lock"></i> Your documents are private \u2014 only HR can see them. Stuck on anything? Message HR and we\u2019ll help.</div>';
-      } else {
-        html += '<div class="ob-welcome"><h3>' + esc(overview.user.display_name || overview.user.full_name || 'Onboarding') + '</h3>' +
-          '<div class="ob-pcount"><span>' + done + ' of ' + total + ' done</span><span>' + pct + '%</span></div>' +
-          '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div></div>';
+      // Welcome banner — self only, first 3 days.
+      if (isSelf && !allRequiredDone) {
+        const d = daysSince(overview.user.hire_date);
+        if (d != null && d <= 2) {
+          html += '<div class="welcome-banner"><div class="deco"></div><div class="deco2"></div>' +
+            '<h2>Welcome aboard, ' + esc(obFirstName()) + '! \uD83C\uDF89</h2>' +
+            '<p>We\u2019re genuinely glad to have you on the FK Sports team. Take your time finding your feet over the first few days \u2014 your manager and HR are here for anything you need, so never hesitate to ask.</p>' +
+            '<div class="sig">\u2014 The FK Sports team</div></div>';
+        }
       }
 
-      if (total === 0) {
-        html += '<div class="ob-grp"><div style="padding:24px 0;text-align:center;color:var(--muted)">No onboarding items.</div></div>';
+      const headTitle = allRequiredDone ? 'Your joining documents' : (isSelf ? 'Let\u2019s get you set up' : esc(overview.user.display_name || overview.user.full_name || 'Onboarding'));
+      const headSub = allRequiredDone ? 'Your onboarding record.' : 'About 10 minutes \u2014 finish these and you\u2019re fully on the system and on payroll.';
+      const collapseLink = (allRequiredDone && setupExpanded) ? ' <span class="vd" id="setupCollapse" style="cursor:pointer;color:var(--amber-deep);margin-left:10px">Hide</span>' : '';
+
+      html += '<div class="setup">' +
+        '<div class="setup-top"><div class="ic"><i class="ti ti-rocket"></i></div>' +
+          '<div><h3>' + headTitle + '</h3><div class="sub">' + headSub + '</div></div>' +
+          '<div class="count">' + done + ' of ' + total + ' done \u00b7 ' + pct + '%' + collapseLink + '</div></div>' +
+        '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div>';
+
+      if (isSelf && !allRequiredDone) {
+        html += '<div class="ob-privacy"><i class="ti ti-lock"></i> Your documents are private \u2014 only HR can see them. Stuck on anything? Message HR and we\u2019ll help.</div>';
       }
 
-      // Group items by ob_group, in first-seen order
+      // Groups (headers + items inside the one card)
       const groups = [];
       const byGroup = {};
       for (const n of notes) {
@@ -1457,9 +1522,8 @@ window.fkModules['profile'] = {
         if (!byGroup[g]) { byGroup[g] = []; groups.push(g); }
         byGroup[g].push(n);
       }
-
       groups.forEach((g, gi) => {
-        html += '<div class="ob-grp"><div class="ob-grp-head"><span class="n">' + (gi + 1) + '</span> ' + esc(g) + '</div>';
+        html += '<div class="ob-grp-head' + (gi === 0 ? ' first' : '') + '"><span class="n">' + (gi + 1) + '</span> ' + esc(g) + '</div>';
         for (const n of byGroup[g]) {
           const s = obStatusOf(n);
           const linked = !!n.ob_field;
@@ -1495,12 +1559,10 @@ window.fkModules['profile'] = {
             }
           }
 
-          // attached files
           let files = '';
           if (n.attached_files && n.attached_files.length) {
             files = n.attached_files.map(f => '<a class="ob-filechip" href="/api/files/' + f.id + '" target="_blank"><i class="ti ti-file-text"></i> ' + esc(f.filename) + '</a>').join(' ');
           }
-
           const tag = n.ob_required ? '<span class="ob-req">REQUIRED</span>' : (n.ob_required === false ? '<span class="ob-opt">OPTIONAL</span>' : '');
           html += '<div class="ob-item">' +
             obIcon(s) +
@@ -1516,10 +1578,8 @@ window.fkModules['profile'] = {
             '<div class="ob-right">' + chip + actions + '</div>' +
           '</div>';
         }
-        html += '</div>';
       });
 
-      // HR: add a custom item
       if (isHr) {
         html += '<div class="ob-add"><h3>Add an onboarding item</h3>' +
           '<label>Title</label><input type="text" id="obNewTitle" placeholder="e.g. Sign IT security policy">' +
@@ -1527,9 +1587,12 @@ window.fkModules['profile'] = {
           '<div style="margin-top:14px"><button class="ob-btn primary" data-ob-additem>Add item</button></div></div>';
       }
 
+      html += '</div>'; // .setup
       body.innerHTML = html;
 
-      // Wire
+      const cb = document.getElementById('setupCollapse');
+      if (cb) cb.addEventListener('click', () => { setupExpanded = false; refreshSetup(); });
+
       body.querySelectorAll('[data-ob-go]').forEach(el => el.addEventListener('click', () => {
         if (el.dataset.obGo === 'photo') { const b = document.getElementById('profPhotoBtn'); if (b) b.click(); }
         else loadDrawer('details');

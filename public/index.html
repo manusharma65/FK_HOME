@@ -881,7 +881,7 @@
           <!-- Your onboarding (r0.10) — only shown to user with incomplete onboarding -->
           <div class="card" id="onboardingCard" style="display:none">
             <div class="card-header">
-              <div class="card-title"><i class="ti ti-checklist"></i> Your onboarding</div>
+              <div class="card-title"><i class="ti ti-rocket"></i> Finish your setup</div>
               <span class="card-meta" id="onboardingMeta">—</span>
             </div>
             <div id="onboardingBody"></div>
@@ -1664,8 +1664,13 @@ async function loadMyOnboarding() {
     const card = document.getElementById('onboardingCard');
     const meta = document.getElementById('onboardingMeta');
     const body = document.getElementById('onboardingBody');
-    const incomplete = notes.filter(n => !n.is_completed);
-    if (incomplete.length === 0 || notes.length === 0) {
+    const isDoneOb = (n) => { const s = n.ob_status || (n.is_completed ? 'verified' : 'to_do'); return s === 'verified' || s === 'na'; };
+    const reqNotes = notes.filter(n => n.ob_required === true);
+    const incompleteRequired = reqNotes.filter(n => !isDoneOb(n));
+    const incomplete = notes.filter(n => !isDoneOb(n));
+    // Nudge only while REQUIRED items are outstanding (optional leftovers don't nag).
+    const stillToDo = reqNotes.length > 0 ? incompleteRequired.length : incomplete.length;
+    if (stillToDo === 0 || notes.length === 0) {
       card.style.display = 'none';
       return;
     }
@@ -1689,9 +1694,9 @@ async function loadMyOnboarding() {
         '<div style="height:100%;width:' + pct + '%;background:#3B6D11"></div>' +
       '</div>' +
       '<div style="font-size:14px;color:var(--muted);margin-bottom:10px">' +
-        incomplete.length + ' item' + (incomplete.length === 1 ? '' : 's') + ' to complete.' +
+        stillToDo + ' thing' + (stillToDo === 1 ? '' : 's') + ' left to finish your setup.' +
       '</div>' +
-      '<button class="btn-primary" style="width:100%" onclick="goToMyOnboarding()">Open my onboarding</button>';
+      '<button class="btn-primary" style="width:100%" onclick="goToMyOnboarding()">Finish your setup \u2192</button>';
   } catch (e) { console.error('[loadMyOnboarding]', e); }
 }
 
@@ -2084,8 +2089,8 @@ function goToMyProfile() {
 }
 
 function goToMyOnboarding() {
-  // Profile is a module now; #profile/me opens it (Onboarding is the first drawer).
-  location.hash = '#profile/me';
+  // Onboarding lives in the setup strip on the profile now; this expands it.
+  location.hash = '#profile/me/onboarding';
 }
 
 // r0.13 — Mobile sidebar open/close
