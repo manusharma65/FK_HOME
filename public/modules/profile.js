@@ -1790,6 +1790,28 @@ window.fkModules['profile'] = {
       });
     }
 
+    async function cancelOffboarding(isLeft) {
+      const u = overview.user;
+      const nm = u.display_name || u.full_name || 'this person';
+      const msg = isLeft
+        ? 'Reinstate ' + nm + ' to active and remove the exit record?'
+        : 'Cancel this offboarding and keep ' + nm + '? The exit checklist will be removed.';
+      if (!confirm(msg)) return;
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/offboarding/cancel', { method: 'POST', credentials: 'include' });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        await loadOverview();
+      } catch (e) { alert('Failed'); }
+    }
+
+    async function regenerateExit() {
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/offboarding/regenerate', { method: 'POST', credentials: 'include' });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        refreshSetup();
+      } catch (e) { alert('Failed'); }
+    }
+
     async function addExitNote(id, txt) {
       try {
         const r = await fetch('/api/profile/' + profileUserId + '/notes/' + id, {
@@ -1900,6 +1922,22 @@ window.fkModules['profile'] = {
               : '<div class="fnf-badge"><i class="ti ti-alert-triangle"></i> Full &amp; Final due within <b>2 working days</b> of the last day</div>') +
         '</div>';
 
+      // Self-heal: offboarding started but no checklist items exist.
+      if (total === 0) {
+        html += '<div class="setup"><div style="text-align:center;padding:22px 16px">' +
+          '<div style="font-size:16px;font-weight:600;margin-bottom:6px">No exit checklist yet</div>' +
+          '<div style="font-size:14px;color:var(--muted);max-width:420px;margin:0 auto 16px">This offboarding has no items. Generate the standard exit checklist to continue.</div>' +
+          '<button class="det-btn primary" id="exGen"><i class="ti ti-rotate-clockwise"></i> Generate exit checklist</button>' +
+          '<div style="margin-top:14px"><button class="edit-link" id="exCancel0" style="color:var(--red)">Cancel offboarding instead</button></div>' +
+          '</div></div>';
+        body.innerHTML = html;
+        const g = document.getElementById('exGen');
+        if (g) g.addEventListener('click', regenerateExit);
+        const c0 = document.getElementById('exCancel0');
+        if (c0) c0.addEventListener('click', () => cancelOffboarding(left));
+        return;
+      }
+
       html += '<div class="setup"><div class="setup-top"><div class="ic slate"><i class="ti ti-clipboard-list"></i></div>' +
         '<div><h3>Exit clearances</h3><div class="sub">Run these in parallel so Full &amp; Final lands inside the 2-day window.</div></div>' +
         '<div class="count">' + done + ' of ' + total + ' done \u00b7 ' + pct + '%</div></div>' +
@@ -1967,7 +2005,14 @@ window.fkModules['profile'] = {
       });
 
       html += '</div>'; // .setup
+      html += '<div style="margin-top:14px;display:flex;justify-content:center">' +
+        '<button class="det-btn" id="exCancel" style="color:var(--red);border-color:var(--red-soft)">' +
+        '<i class="ti ti-arrow-back-up"></i> ' + (left ? 'Reinstate employee (cancel exit)' : 'Cancel offboarding \u2014 they\u2019re staying') +
+        '</button></div>';
       body.innerHTML = html;
+
+      const exC = document.getElementById('exCancel');
+      if (exC) exC.addEventListener('click', () => cancelOffboarding(left));
 
       body.querySelectorAll('[data-ex-act]').forEach(el => el.addEventListener('click', () => {
         const act = el.dataset.exAct, id = el.dataset.id;

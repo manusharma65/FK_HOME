@@ -1236,18 +1236,20 @@ router.post('/:userId/offboarding/start', async (req, res) => {
     if (ex.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     if (ex.rows[0].employment_status === 'left') return res.status(400).json({ error: 'User has already left' });
 
-    await db.query(
-      `UPDATE users SET last_working_day=$2, notice_date=COALESCE($3, CURRENT_DATE),
-         exit_reason=$4, updated_at=NOW() WHERE id=$1`,
-      [userId, last_working_day, nd, (reason || '').slice(0, 500) || null]
-    );
-
+    // Build the exit checklist FIRST. If this fails we must NOT leave a half-started
+    // offboarding (last_working_day set but no items), which renders as "0 of 0".
     const depts = await db.query(
       `SELECT d.name FROM user_department_memberships m
          JOIN departments d ON d.id = m.department_id
         WHERE m.user_id = $1 AND m.deleted_at IS NULL`, [userId]
     );
     await offboardingTpl.applyOffboardingTemplate(userId, req.user.id, depts.rows.map(r => r.name));
+
+    await db.query(
+      `UPDATE users SET last_working_day=$2, notice_date=COALESCE($3, CURRENT_DATE),
+         exit_reason=$4, updated_at=NOW() WHERE id=$1`,
+      [userId, last_working_day, nd, (reason || '').slice(0, 500) || null]
+    );
 
     const hr = await hrApproverIds();
     const who = await db.query(`SELECT COALESCE(display_name,full_name) AS n FROM users WHERE id=$1`, [userId]);
@@ -1264,7 +1266,67 @@ router.post('/:userId/offboarding/start', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('[offboarding start] failed:', e.message);
-    res.status(500).json({ error: 'Failed' });
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/offboarding/regenerate ----------
+// Self-heal: (re)build the exit checklist if items are missing. Idempotent —
+// inserts only when the user has no offboarding items yet.
+router.post('/:userId/offboarding/regenerate', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad id' });
+  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const depts = await db.query(
+      `SELECT d.name FROM user_department_memberships m
+         JOIN departments d ON d.id = m.department_id
+        WHERE m.user_id = $1 AND m.deleted_at IS NULL`, [userId]
+    );
+    await offboardingTpl.applyOffboardingTemplate(userId, req.user.id, depts.rows.map(r => r.name));
+    await logAudit({ req, module: 'profile', action: 'offboarding.regenerate', target_type: 'user', target_id: userId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[offboarding regenerate] failed:', e.message);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/offboarding/cancel ----------
+// Employee decides to stay (any stage). Removes the exit checklist (attached
+// files cascade), clears the exit fields, and reinstates to active if they had
+// already been marked left. Note: tasks cancelled by an earlier "mark left"
+// are not resurrected.
+router.post('/:userId/offboarding/cancel', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad id' });
+  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const before = await db.query(`SELECT employment_status, last_working_day FROM users WHERE id=$1 AND deleted_at IS NULL`, [userId]);
+    if (before.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    await db.query(`DELETE FROM profile_notes WHERE user_id=$1 AND kind='offboarding'`, [userId]);
+    await db.query(
+      `UPDATE users SET last_working_day=NULL, notice_date=NULL, exit_reason=NULL,
+         employment_status = CASE WHEN employment_status='left' THEN 'active' ELSE employment_status END,
+         left_date = CASE WHEN employment_status='left' THEN NULL ELSE left_date END,
+         updated_at=NOW() WHERE id=$1`, [userId]
+    );
+
+    const hr = await hrApproverIds();
+    const who = await db.query(`SELECT COALESCE(display_name,full_name) AS n FROM users WHERE id=$1`, [userId]);
+    const name = who.rows[0] ? who.rows[0].n : 'An employee';
+    await notify({ userIds: hr, type: 'offboarding.cancelled', title: 'Offboarding cancelled',
+      body: name + ' is staying — the exit was cancelled and their access retained.',
+      action_url: '#profile/' + userId, related_user_id: userId, related_type: 'user', related_id: userId });
+    await notify({ userIds: [userId], type: 'offboarding.cancelled', title: 'Your exit has been cancelled',
+      body: 'Good news — your offboarding has been called off.',
+      action_url: '#profile/' + userId, related_type: 'user', related_id: userId });
+    await logAudit({ req, module: 'profile', action: 'offboarding.cancel', target_type: 'user', target_id: userId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[offboarding cancel] failed:', e.message);
+    res.status(500).json({ error: e.message || 'Failed' });
   }
 });
 
