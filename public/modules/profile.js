@@ -138,6 +138,59 @@ window.fkModules['profile'] = {
         '#prof-mod .complete-item i.ok{color:var(--green)}' +
         '#prof-mod .complete-item i.no{color:var(--muted)}' +
         '#prof-mod .complete-item .go{margin-left:auto;color:var(--amber-deep);cursor:pointer;font-size:13px}' +
+        '#prof-mod .header-card{padding:26px 28px;gap:24px;border-radius:14px}' +
+        '#prof-mod .prof-photo-wrap{width:84px;height:84px}' +
+        '#prof-mod .prof-photo-wrap .avatar-lg{width:84px;height:84px;font-size:32px;font-weight:600}' +
+        '#prof-mod .prof-photo-btn{width:30px;height:30px}' +
+        '#prof-mod .prof-photo-btn i{font-size:16px}' +
+        '#prof-mod .header-info h1{font-size:30px;font-weight:600;letter-spacing:-0.4px}' +
+        '#prof-mod .header-meta{font-size:16px;gap:16px}' +
+        '#prof-mod .header-meta i{font-size:18px}' +
+        '#prof-mod .prof-tiles{gap:14px;margin-top:18px}' +
+        '#prof-mod .prof-tile{padding:14px 18px;min-width:175px;border-radius:12px}' +
+        '#prof-mod .prof-tile .t-lbl{font-size:13px;font-weight:600;letter-spacing:0.6px}' +
+        '#prof-mod .prof-tile .t-val{font-size:28px;font-weight:600;margin-top:6px}' +
+        '#prof-mod .prof-bar{height:8px;margin-top:10px}' +
+        '#prof-mod .pill{font-size:15px;padding:5px 14px}' +
+        '#prof-mod .sectabs{display:flex;gap:4px;border-bottom:0.5px solid var(--line);margin:0 4px 24px;flex-wrap:wrap}' +
+        '#prof-mod .sectab{display:flex;align-items:center;gap:10px;padding:15px 22px;font-size:16px;font-weight:500;color:var(--muted);border:none;background:none;border-bottom:2.5px solid transparent;cursor:pointer;font-family:inherit}' +
+        '#prof-mod .sectab i{font-size:20px}' +
+        '#prof-mod .sectab.on{color:var(--amber-deep);border-bottom-color:var(--amber)}' +
+        '#prof-mod .sectab:hover{color:var(--ink)}' +
+        '#prof-mod .sectab .count{margin-left:2px;background:var(--amber-soft);color:var(--amber-deep);font-size:12px;font-weight:600;padding:1px 8px;border-radius:99px}' +
+        '#prof-mod .sec-title,#prof-mod #profPanelTitle{font-size:24px;font-weight:600;margin:0 0 4px}' +
+        '#prof-mod .sec-sub,#prof-mod #profPanelSub{font-size:16px;color:var(--muted);margin:0 0 22px}' +
+        '#prof-mod .two-col{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px}' +
+        '#prof-mod .card{background:var(--surface);border:0.5px solid var(--line);border-radius:14px;padding:22px 24px}' +
+        '#prof-mod .card-title{font-size:17px;font-weight:600;color:var(--ink);margin-bottom:18px;display:flex;align-items:center}' +
+        '#prof-mod .complete-head{font-size:34px;font-weight:600;margin-bottom:4px}' +
+        '#prof-mod .complete-sub{font-size:15px;color:var(--muted);margin-bottom:16px}' +
+        '#prof-mod .complete-item{display:flex;align-items:center;gap:13px;padding:14px 0;font-size:17px;border-bottom:0.5px solid var(--line)}' +
+        '#prof-mod .complete-item:last-child{border-bottom:0}' +
+        '#prof-mod .complete-item i{font-size:22px}' +
+        '#prof-mod .complete-item i.ok{color:var(--green)}' +
+        '#prof-mod .complete-item i.no{color:var(--muted)}' +
+        '#prof-mod .add-btn{margin-left:auto;padding:9px 18px;border-radius:9px;border:0.5px solid var(--amber);background:var(--surface);color:var(--amber-deep);font-size:15px;font-weight:500;cursor:pointer}' +
+        '#prof-mod .field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px 30px}' +
+        '#prof-mod .fld .fl{font-size:14px;color:var(--muted);margin-bottom:5px}' +
+        '#prof-mod .fld .fv{font-size:18px;color:var(--ink);word-break:break-word}' +
+        '#prof-mod .fld .fv.empty{color:var(--muted)}' +
+        '#prof-mod .edit-link{margin-left:auto;padding:9px 18px;border-radius:9px;border:0.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;font-weight:500;cursor:pointer}' +
+        '#prof-mod .det-field{display:flex;flex-direction:column;gap:6px}' +
+        '#prof-mod .det-field label{font-size:14px;color:var(--muted);font-weight:500}' +
+        '#prof-mod .det-field input,#prof-mod .det-field select,#prof-mod .det-field textarea{width:100%;padding:12px 14px;border:0.5px solid var(--line);border-radius:9px;background:var(--surface);font-size:16px;color:var(--ink);font-family:inherit}' +
+        '#prof-mod .det-field input:disabled{background:var(--bg);color:var(--muted)}' +
+        '#prof-mod .det-actions{display:flex;gap:12px;margin-top:18px}' +
+        '#prof-mod .det-btn{padding:12px 22px;border-radius:9px;border:0.5px solid var(--line);background:var(--surface);font-size:16px;font-weight:500;cursor:pointer;color:var(--ink)}' +
+        '#prof-mod .det-btn.primary{background:var(--amber);color:#fff;border-color:var(--amber)}' +
+        '#prof-mod .det-pending{background:var(--amber-soft);color:var(--amber-deep);border-radius:10px;padding:14px 18px;font-size:16px;margin-bottom:18px;display:flex;align-items:center;gap:10px}' +
+        '#prof-mod .hint{font-size:14px;color:var(--muted);margin-top:14px}' +
+        '#prof-mod .stack{display:flex;flex-direction:column;gap:18px}' +
+        '#prof-mod .info-block{background:var(--surface);border:0.5px solid var(--line);border-radius:14px;padding:22px 24px;margin-bottom:18px}' +
+        '#prof-mod .info-block-title{font-size:17px;font-weight:600;color:var(--ink);margin-bottom:16px;text-transform:none;letter-spacing:0}' +
+        '#prof-mod .info-row{font-size:16px;margin-bottom:10px}' +
+        '#prof-mod .info-label{font-size:16px;min-width:160px}' +
+        '#prof-mod .file-name{font-size:16px}' +
       '</style>' +
       '<div id="prof-mod">' +
         '<div class="header-card" id="profHeader">' +
@@ -156,14 +209,10 @@ window.fkModules['profile'] = {
             '<div class="header-actions" id="profActions"></div>' +
           '</div>' +
         '</div>' +
-        '<div class="profile-grid">' +
-          '<nav class="drawer-nav" id="profDrawerNav"></nav>' +
-          '<div class="panel" id="profPanel">' +
-            '<h2 id="profPanelTitle">—</h2>' +
-            '<p class="sub" id="profPanelSub">—</p>' +
-            '<div id="profPanelBody">Loading…</div>' +
-          '</div>' +
-        '</div>' +
+        '<div class="sectabs" id="profSecTabs"></div>' +
+        '<h2 class="sec-title" id="profPanelTitle">—</h2>' +
+        '<p class="sec-sub" id="profPanelSub">—</p>' +
+        '<div id="profPanelBody">Loading…</div>' +
       '</div>';
   },
 
@@ -310,7 +359,7 @@ window.fkModules['profile'] = {
     }
 
     function renderDrawerNav() {
-      const nav = document.getElementById('profDrawerNav');
+      const nav = document.getElementById('profSecTabs');
       const counts = overview.counts || {};
       const dset = new Set(overview.drawers || []);
       const hasEmployment = dset.has('employment');
@@ -335,10 +384,10 @@ window.fkModules['profile'] = {
         } else if (s.count != null && s.count > 0) {
           countHtml = '<span class="count">' + s.count + '</span>';
         }
-        return '<div class="drawer-tab" data-drawer="' + s.key + '">' +
-          '<i class="ti ' + s.icon + '"></i><span>' + s.label + '</span>' + countHtml + '</div>';
+        return '<button class="sectab" data-drawer="' + s.key + '">' +
+          '<i class="ti ' + s.icon + '"></i><span>' + s.label + '</span>' + countHtml + '</button>';
       }).join('');
-      nav.querySelectorAll('.drawer-tab').forEach(el => {
+      nav.querySelectorAll('.sectab').forEach(el => {
         el.addEventListener('click', () => loadDrawer(el.dataset.drawer));
       });
 
@@ -352,7 +401,7 @@ window.fkModules['profile'] = {
     async function loadDrawer(drawer) {
       currentDrawer = drawer;
       // Mark active tab
-      document.querySelectorAll('#profDrawerNav .drawer-tab').forEach(el => {
+      document.querySelectorAll('#profSecTabs .sectab').forEach(el => {
         el.classList.toggle('on', el.dataset.drawer === drawer);
       });
       const titleEl = document.getElementById('profPanelTitle');
@@ -962,12 +1011,15 @@ window.fkModules['profile'] = {
     }
 
     // ---- About me -------------------------------------------------------
+    // ---- About me -------------------------------------------------------
     function renderAboutSection() {
       const body = document.getElementById('profPanelBody');
       const u = overview.user;
       const c = overview.completeness || {};
-      let html = '';
+      const dept = (u.departments && u.departments.length) ? u.departments.map(d => d.name).join(', ') : '';
+      const dob = (canSeePrivate() && u.date_of_birth) ? fmtDate(u.date_of_birth) : '';
 
+      let completeCard = '';
       if (canSeePrivate()) {
         const items = [
           { ok: c.has_photo, label: 'Profile photo', go: 'photo' },
@@ -976,32 +1028,29 @@ window.fkModules['profile'] = {
           { ok: c.has_emergency, label: 'Emergency contact', go: 'details' },
         ];
         const left = items.filter(i => !i.ok).length;
-        html += '<div class="info-block">' +
-          '<div class="info-block-title">Profile completeness — ' + (c.percent || 0) + '%</div>' +
-          (left === 0 ? '<div style="font-size:13px;color:var(--green);margin-bottom:6px">All set. Nothing left to add.</div>'
-                      : '<div style="font-size:13px;color:var(--muted);margin-bottom:6px">' + left + ' thing' + (left === 1 ? '' : 's') + ' left to add.</div>') +
-          items.map(i =>
-            '<div class="complete-item">' +
-              '<i class="ti ' + (i.ok ? 'ti-circle-check ok' : 'ti-circle no') + '" style="font-size:18px"></i>' +
-              '<span>' + i.label + '</span>' +
-              (!i.ok && canEditThis() ? '<span class="go" data-go="' + i.go + '">Add</span>' : '') +
-            '</div>'
-          ).join('') +
+        completeCard = '<div class="card">' +
+          '<div class="card-title">Profile completeness</div>' +
+          '<div class="complete-head">' + (c.percent || 0) + '%</div>' +
+          '<div class="complete-sub">' + (left === 0 ? 'All set. Nothing left to add.' : left + ' thing' + (left === 1 ? '' : 's') + ' left to add.') + '</div>' +
+          '<div class="prof-bar" style="margin-bottom:6px"><i style="width:' + (c.percent || 0) + '%"></i></div>' +
+          items.map(i => '<div class="complete-item">' +
+            '<i class="ti ' + (i.ok ? 'ti-circle-check ok' : 'ti-circle no') + '"></i><span>' + i.label + '</span>' +
+            (!i.ok && canEditThis() ? '<button class="add-btn" data-go="' + i.go + '">Add</button>' : '') +
+          '</div>').join('') +
         '</div>';
       }
 
-      // Snapshot
-      html += '<div class="info-block">' +
-        '<div class="info-block-title">Snapshot</div>' +
-        (u.emp_id ? '<div class="info-row"><span class="info-label">Emp ID</span> ' + esc(u.emp_id) + '</div>' : '') +
-        (u.email ? '<div class="info-row"><span class="info-label">Work email</span> ' + esc(u.email) + '</div>' : '') +
-        (u.phone ? '<div class="info-row"><span class="info-label">Phone</span> ' + esc(u.phone) + '</div>' : '') +
-        (u.departments && u.departments.length ? '<div class="info-row"><span class="info-label">Department</span> ' + esc(u.departments.map(d => d.name).join(', ')) + '</div>' : '') +
-        (u.hire_date ? '<div class="info-row"><span class="info-label">Joined</span> ' + fmtDate(u.hire_date) + '</div>' : '') +
-      '</div>';
+      const snap = [
+        ['Emp ID', u.emp_id], ['Work email', u.email], ['Personal email', u.personal_email],
+        ['Phone', u.phone], ['Department', dept], ['Joined', u.hire_date ? fmtDate(u.hire_date) : ''],
+        ['Date of birth', dob], ['Blood group', u.blood_group],
+      ];
+      const snapCard = '<div class="card"><div class="card-title">Snapshot</div><div class="field-grid">' +
+        snap.map(p => '<div class="fld"><div class="fl">' + p[0] + '</div><div class="fv' + (p[1] ? '' : ' empty') + '">' + (p[1] ? esc(p[1]) : 'Not set') + '</div></div>').join('') +
+        '</div></div>';
 
-      body.innerHTML = html;
-      body.querySelectorAll('.go[data-go]').forEach(el => {
+      body.innerHTML = '<div class="two-col">' + completeCard + snapCard + '</div>';
+      body.querySelectorAll('.add-btn[data-go]').forEach(el => {
         el.addEventListener('click', () => {
           if (el.dataset.go === 'photo') { const b = document.getElementById('profPhotoBtn'); if (b) b.click(); }
           else loadDrawer('details');
@@ -1011,7 +1060,7 @@ window.fkModules['profile'] = {
 
     // ---- My details -----------------------------------------------------
     function fieldRead(label, val) {
-      return '<div class="info-row"><span class="info-label">' + label + '</span> ' + (val ? esc(val) : '<span style="color:var(--muted)">Not set</span>') + '</div>';
+      return '<div class="fld"><div class="fl">' + label + '</div><div class="fv' + (val ? '' : ' empty') + '">' + (val ? esc(val) : 'Not set') + '</div></div>';
     }
     function inputHtml(f, val) {
       const v = val == null ? '' : String(val);
@@ -1026,35 +1075,33 @@ window.fkModules['profile'] = {
       const u = overview.user;
       const editing = detailsEditing === key;
       const editable = canEditThis();
-      let inner = '';
+      let inner;
       if (editing) {
-        inner = '<div class="det-grid">' +
-          fields.map(f => '<div class="det-field' + (f.full ? ' full' : '') + '">' +
+        inner = '<div class="field-grid">' +
+          fields.map(f => '<div class="det-field' + (f.full ? '" style="grid-column:1/-1' : '') + '">' +
             '<label>' + f.label + (f.ro ? ' (read-only)' : '') + '</label>' + inputHtml(f, u[f.k]) + '</div>').join('') +
           '</div>' +
           '<div class="det-actions">' +
             '<button class="det-btn primary" data-save="' + key + '"' + (sensitive ? ' data-sensitive="1"' : '') + '>' + (sensitive ? 'Request change' : 'Save') + '</button>' +
             '<button class="det-btn" data-cancel="1">Cancel</button>' +
           '</div>' +
-          (sensitive ? '<div style="font-size:12px;color:var(--muted);margin-top:10px">For your protection, bank and tax changes are checked by HR before they take effect.</div>' : '');
+          (sensitive ? '<div class="hint">For your protection, bank and tax changes are checked by HR before they take effect.</div>' : '');
       } else {
-        inner = fields.map(f => {
+        inner = '<div class="field-grid">' + fields.map(f => {
           let v = u[f.k];
           if (f.type === 'date' && v) v = fmtDate(v);
           return fieldRead(f.label, v);
-        }).join('');
+        }).join('') + '</div>';
       }
-      return '<div class="info-block">' +
-        '<div class="info-block-title" style="display:flex;align-items:center">' + title +
-          (editable && !editing ? '<span class="go" style="margin-left:auto" data-edit="' + key + '">Edit</span>' : '') +
+      return '<div class="card">' +
+        '<div class="card-title">' + title +
+          (editable && !editing ? '<button class="edit-link" data-edit="' + key + '">Edit</button>' : '') +
         '</div>' + inner + '</div>';
     }
 
     function renderMyDetails() {
       const body = document.getElementById('profPanelBody');
-      const u = overview.user;
-      const showDob = canSeePrivate();
-      const showPay = canSeePrivate();
+      const showPriv = canSeePrivate();
 
       const contactFields = [
         { k: 'email', label: 'Work email', ro: true },
@@ -1063,7 +1110,7 @@ window.fkModules['profile'] = {
         { k: 'personal_address', label: 'Home address', type: 'textarea', full: true },
       ];
       const personalFields = [];
-      if (showDob) personalFields.push({ k: 'date_of_birth', label: 'Date of birth', type: 'date' });
+      if (showPriv) personalFields.push({ k: 'date_of_birth', label: 'Date of birth', type: 'date' });
       personalFields.push({ k: 'blood_group', label: 'Blood group', type: 'select', options: BLOOD_GROUPS });
       const emergencyFields = [{ k: 'emergency_contact', label: 'Name, relationship and phone', type: 'textarea', full: true }];
       const payFields = [
@@ -1076,16 +1123,17 @@ window.fkModules['profile'] = {
 
       let html = '';
       const pend = overview.pending_changes || [];
-      if (pend.length && showPay) {
+      if (pend.length && showPriv) {
         html += '<div class="det-pending"><i class="ti ti-clock"></i> A bank/tax change is waiting for HR approval. It will not take effect until approved.</div>';
       }
+      html += '<div class="stack">';
       html += groupBlock('contact', 'Contact', contactFields, false);
       html += groupBlock('personal', 'Personal', personalFields, false);
       html += groupBlock('emergency', 'Emergency contact', emergencyFields, false);
-      if (showPay) html += groupBlock('paytax', 'Pay &amp; tax', payFields, true);
+      if (showPriv) html += groupBlock('paytax', 'Pay &amp; tax', payFields, true);
+      html += '</div>';
 
       body.innerHTML = html;
-
       body.querySelectorAll('[data-edit]').forEach(el => el.addEventListener('click', () => { detailsEditing = el.dataset.edit; renderMyDetails(); }));
       body.querySelectorAll('[data-cancel]').forEach(el => el.addEventListener('click', () => { detailsEditing = null; renderMyDetails(); }));
       body.querySelectorAll('[data-save]').forEach(el => el.addEventListener('click', () => saveGroup(el.dataset.save, el.dataset.sensitive === '1', el)));
@@ -1103,7 +1151,6 @@ window.fkModules['profile'] = {
       btn.disabled = true;
       try {
         if (sensitive) {
-          // Only send sensitive fields that actually changed from the current value.
           const changes = {};
           for (const k of Object.keys(vals)) {
             const curr = overview.user[k] == null ? '' : String(overview.user[k]);
@@ -1112,8 +1159,7 @@ window.fkModules['profile'] = {
           if (Object.keys(changes).length === 0) { detailsEditing = null; renderMyDetails(); return; }
           const r = await fetch('/api/profile/' + profileUserId + '/detail-change', {
             method: 'POST', credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ changes }),
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }),
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) { alert(d.error || 'Could not submit'); btn.disabled = false; return; }
@@ -1122,8 +1168,7 @@ window.fkModules['profile'] = {
         } else {
           const r = await fetch('/api/profile/' + profileUserId + '/personal', {
             method: 'PUT', credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(vals),
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(vals),
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) { alert(d.error || 'Could not save'); btn.disabled = false; return; }
@@ -1136,7 +1181,7 @@ window.fkModules['profile'] = {
       }
     }
 
-    // ---- Pay (salary + bank masked + payslips + insurance) --------------
+    // ---- Pay ------------------------------------------------------------
     function maskBank(num) {
       if (!num) return '';
       const s = String(num);
@@ -1144,11 +1189,11 @@ window.fkModules['profile'] = {
     }
     function payFileGroupHtml(title, drawerKey, files) {
       const canUpload = viewer.can_upload_any;
-      let h = '<div class="info-block"><div class="info-block-title">' + title + '</div>';
+      let h = '<div class="card"><div class="card-title">' + title + '</div>';
       if (files && files.length) h += files.map(f => fileRowHtml(f, drawerKey)).join('');
-      else h += '<div style="font-size:13px;color:var(--muted)">No documents.</div>';
+      else h += '<div class="fld"><div class="fv empty">No documents.</div></div>';
       if (canUpload) {
-        h += '<div class="upload-area" style="margin-top:10px">' +
+        h += '<div class="upload-area" style="margin-top:12px">' +
           '<input type="file" id="payUp_' + drawerKey + '" accept=".pdf,.png,application/pdf,image/png" />' +
           '<label for="payUp_' + drawerKey + '"><i class="ti ti-upload"></i> Upload (PDF or PNG)</label></div>';
       }
@@ -1183,32 +1228,32 @@ window.fkModules['profile'] = {
         wants.forEach((d, i) => { data[d] = results[i] || {}; });
       } catch (e) { data = {}; }
 
-      let html = '';
-      // Salary card
+      let html = '<div class="stack">';
       if (viewer.can_view_salary && data.salary && data.salary.salary) {
         const s = data.salary.salary;
         const curr = s.currency || '£';
-        html += '<div class="info-block"><div class="info-block-title">Current salary</div>' +
-          '<div class="info-row"><span class="info-label">Monthly CTC</span> ' + esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-GB') : '—') + '</div>' +
-          (s.effective_from ? '<div class="info-row"><span class="info-label">Effective from</span> ' + fmtDate(s.effective_from) + '</div>' : '') +
-        '</div>';
+        html += '<div class="card"><div class="card-title">Current salary</div><div class="field-grid">' +
+          fieldRead('Monthly CTC', esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-GB') : '—')) +
+          (s.effective_from ? fieldRead('Effective from', fmtDate(s.effective_from)) : '') +
+        '</div></div>';
       }
-      // Bank (masked, read-only — editable home is My details)
       if (canSeePrivate()) {
         const anyBank = u.bank_account_number || u.bank_ifsc || u.bank_name || u.bank_account_holder;
-        html += '<div class="info-block"><div class="info-block-title" style="display:flex;align-items:center">Where you are paid' +
-          '<span class="go" style="margin-left:auto" data-go-details="1">Edit in My details</span></div>' +
+        html += '<div class="card"><div class="card-title">Where you are paid' +
+          '<button class="edit-link" data-go-details="1">Edit in My details</button></div>' +
           (anyBank ?
-            fieldRead('Account holder', u.bank_account_holder) +
-            fieldRead('Bank', u.bank_name) +
-            fieldRead('Account number', maskBank(u.bank_account_number)) +
-            fieldRead('IFSC', u.bank_ifsc)
-            : '<div style="font-size:13px;color:var(--muted)">No bank details yet. Add them in My details.</div>') +
+            '<div class="field-grid">' +
+              fieldRead('Account holder', u.bank_account_holder) +
+              fieldRead('Bank', u.bank_name) +
+              fieldRead('Account number', maskBank(u.bank_account_number)) +
+              fieldRead('IFSC', u.bank_ifsc) +
+            '</div>'
+            : '<div class="fld"><div class="fv empty">No bank details yet. Add them in My details.</div></div>') +
         '</div>';
       }
-      // Payslips + insurance files
       html += payFileGroupHtml('Payslips and tax', 'payroll', (data.payroll && data.payroll.files) || []);
       html += payFileGroupHtml('Insurance', 'insurance', (data.insurance && data.insurance.files) || []);
+      html += '</div>';
 
       body.innerHTML = html;
       wireFileRowHandlers();
