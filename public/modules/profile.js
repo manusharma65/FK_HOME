@@ -260,6 +260,41 @@ window.fkModules['profile'] = {
         '#profSetup .setup-done i{font-size:22px;color:var(--green)}' +
         '#profSetup .setup-done .txt{font-weight:600;color:var(--green)}' +
         '#profSetup .setup-done .vd{margin-left:auto;font-size:14px;color:var(--green);font-weight:600;cursor:pointer}' +
+        // ----- Offboarding: HR tracker + leaver panel -----
+        '#profSetup .exit-head{position:relative;border-radius:16px;padding:22px 24px;margin-bottom:14px;color:#fff;overflow:hidden;background:linear-gradient(120deg,#3A4250,#5A6473)}' +
+        '#profSetup .exit-head .deco{position:absolute;right:-30px;top:-40px;width:170px;height:170px;border-radius:50%;background:rgba(255,255,255,0.07)}' +
+        '#profSetup .exit-head h2{margin:0;font-size:21px;font-weight:700;position:relative;display:flex;align-items:center;gap:9px}' +
+        '#profSetup .exit-head .emeta{position:relative;display:flex;gap:18px;flex-wrap:wrap;font-size:14px;opacity:.95;margin-top:8px}' +
+        '#profSetup .exit-head .emeta b{font-weight:600}' +
+        '#profSetup .fnf-badge{position:relative;display:inline-flex;align-items:center;gap:7px;margin-top:14px;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);border-radius:99px;padding:6px 13px;font-size:13px;font-weight:500}' +
+        '#profSetup .setup-top .ic.slate{background:var(--slate-soft,#EEF1F5);color:var(--slate,#475569)}' +
+        '#profSetup .own{font-size:11px;font-weight:700;letter-spacing:.3px;padding:2px 7px;border-radius:5px}' +
+        '#profSetup .own.it{background:rgba(40,90,180,0.10);color:#2D5BAF}' +
+        '#profSetup .own.finance{background:var(--amber-soft);color:var(--amber-deep)}' +
+        '#profSetup .own.manager{background:#EEF1F5;color:#475569}' +
+        '#profSetup .own.hr{background:var(--green-soft);color:var(--green)}' +
+        '#profSetup .own.leaver{background:rgba(20,22,27,0.06);color:var(--muted)}' +
+        '#profSetup .fnf-card{background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:12px 16px;margin:4px 0 12px}' +
+        '#profSetup .fnf-line{display:flex;justify-content:space-between;font-size:14px;padding:7px 0;border-bottom:0.5px solid var(--line)}' +
+        '#profSetup .fnf-line:last-child{border-bottom:none}#profSetup .fnf-line .v{font-weight:600}' +
+        '#profSetup .flag{font-size:12px;padding:2px 8px;border-radius:5px;font-weight:600;background:var(--amber-soft);color:var(--amber-deep)}' +
+        '#profSetup .flag.ok{background:var(--green-soft);color:var(--green)}' +
+        '#profSetup .lv-head{position:relative;border-radius:16px;padding:24px 26px;margin-bottom:14px;color:#fff;overflow:hidden;background:linear-gradient(120deg,#3B6D11,#5E8B2A)}' +
+        '#profSetup .lv-head .deco{position:absolute;right:-30px;top:-30px;width:160px;height:160px;border-radius:50%;background:rgba(255,255,255,0.10)}' +
+        '#profSetup .lv-head h2{margin:0 0 8px;font-size:22px;font-weight:700;position:relative}' +
+        '#profSetup .lv-head p{margin:0;font-size:15px;line-height:1.55;max-width:640px;position:relative;opacity:.96}' +
+        '#profSetup .lv-card{background:var(--surface);border:0.5px solid var(--line);border-radius:14px;padding:20px 24px;margin-bottom:14px}' +
+        '#profSetup .lv-card h3{margin:0 0 12px;font-size:17px;font-weight:600;display:flex;align-items:center;gap:9px}' +
+        '#profSetup .lv-item{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:0.5px solid var(--line)}' +
+        '#profSetup .lv-item:first-of-type{border-top:none}' +
+        '#profSetup .doc{display:flex;align-items:center;gap:12px;padding:13px 0;border-top:0.5px solid var(--line)}' +
+        '#profSetup .doc:first-of-type{border-top:none}#profSetup .doc i.f{font-size:22px;color:var(--slate,#475569)}' +
+        '#profSetup .doc .dn{flex:1}#profSetup .doc .dn .t{font-size:15px;font-weight:600}#profSetup .doc .dn .s{font-size:13px;color:var(--muted)}' +
+        '#profSetup .doc .dl{padding:8px 15px;border-radius:9px;font-size:14px;font-weight:500;border:0.5px solid var(--line);background:var(--surface);cursor:pointer;color:var(--ink);text-decoration:none;display:inline-flex;align-items:center;gap:6px}' +
+        '#profSetup .doc .dl.ready{background:var(--green);color:#fff;border-color:var(--green)}' +
+        '#profSetup .doc .dl.wait{color:var(--muted);cursor:default}' +
+        '#profSetup .exit-note{font-size:13px;color:var(--muted);background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:12px 15px;display:flex;gap:9px;align-items:flex-start}' +
+        '#profSetup .exit-note i{color:var(--slate,#475569);font-size:17px;margin-top:1px}' +
       '</style>' +
       '<div id="prof-mod">' +
         '<div class="header-card" id="profHeader">' +
@@ -405,13 +440,19 @@ window.fkModules['profile'] = {
       const acts = document.getElementById('profActions');
       if (acts) {
         const inProg = ['in_probation', 'probation_pass_expected', 'extended'].includes(u.probation_status);
+        let btns = '';
         if (viewer.can_manage_probation && inProg) {
-          acts.innerHTML = '<button class="det-btn" id="profManageProb"><i class="ti ti-user-check"></i> Manage probation</button>';
-          const mp = document.getElementById('profManageProb');
-          if (mp) mp.addEventListener('click', manageProbation);
-        } else {
-          acts.innerHTML = '';
+          btns += '<button class="det-btn" id="profManageProb"><i class="ti ti-user-check"></i> Manage probation</button>';
         }
+        // Start offboarding (HR) — active employee, not already leaving/left.
+        if (viewer.can_edit_any && u.employment_status === 'active' && !u.last_working_day) {
+          btns += '<button class="det-btn" id="profStartExit"><i class="ti ti-door-exit"></i> Start offboarding</button>';
+        }
+        acts.innerHTML = btns;
+        const mp = document.getElementById('profManageProb');
+        if (mp) mp.addEventListener('click', manageProbation);
+        const se = document.getElementById('profStartExit');
+        if (se) se.addEventListener('click', startOffboarding);
       }
 
       // Photo upload (self or HR)
@@ -1447,7 +1488,15 @@ window.fkModules['profile'] = {
     async function refreshSetup() {
       const b = document.getElementById('profSetup');
       if (!b) return;
+      const u = overview && overview.user;
       try {
+        // Offboarding (active, or a record after they've left) supersedes onboarding.
+        if (u && u.last_working_day) {
+          const r = await fetch('/api/profile/' + profileUserId + '/drawer/offboarding', { credentials: 'include' });
+          const data = r.ok ? await r.json() : { notes: [] };
+          renderExitStrip(data);
+          return;
+        }
         const r = await fetch('/api/profile/' + profileUserId + '/drawer/onboarding', { credentials: 'include' });
         const data = r.ok ? await r.json() : { notes: [] };
         renderSetupStrip(data);
@@ -1626,6 +1675,205 @@ window.fkModules['profile'] = {
       body.querySelectorAll('[data-ob-del]').forEach(el => el.addEventListener('click', () => deleteOnboardingItem(el.dataset.obDel)));
       const addBtn = body.querySelector('[data-ob-additem]');
       if (addBtn) addBtn.addEventListener('click', addOnboardingItem);
+    }
+
+    // ---- Offboarding (exit) -------------------------------------------
+    function exitGratuity(hireIso, lastIso) {
+      if (!hireIso) return { eligible: false, text: 'Tenure unknown' };
+      const h = new Date(hireIso); const l = lastIso ? new Date(lastIso) : new Date();
+      if (isNaN(h.getTime())) return { eligible: false, text: 'Tenure unknown' };
+      const years = (l.getTime() - h.getTime()) / (365.25 * 86400000);
+      return years >= 5
+        ? { eligible: true, text: 'Eligible (5+ years)' }
+        : { eligible: false, text: 'Not yet \u2014 needs 5 years' };
+    }
+    function ownerChipHtml(owner) {
+      const map = { it: 'IT', finance: 'FINANCE', manager: 'MANAGER', hr: 'HR', leaver: 'YOU' };
+      if (!owner) return '';
+      return '<span class="own ' + owner + '">' + (map[owner] || owner.toUpperCase()) + '</span>';
+    }
+
+    async function startOffboarding() {
+      const lwd = prompt('Last working day (YYYY-MM-DD):');
+      if (!lwd) return;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(lwd)) { alert('Use YYYY-MM-DD'); return; }
+      const reason = prompt('Reason for leaving (optional — internal):') || '';
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/offboarding/start', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ last_working_day: lwd, reason }),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        await loadOverview();
+      } catch (e) { alert('Failed'); }
+    }
+
+    async function doExitAction(id, action) {
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/offboarding/' + id + '/action', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ action }),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        if (action === 'mark_left') await loadOverview(); else refreshSetup();
+      } catch (e) { alert('Failed'); }
+    }
+
+    async function uploadExitFile(id, autoDone) {
+      const inp = document.getElementById('exFile_' + id);
+      if (!inp || !inp.files || !inp.files.length) return;
+      const f = inp.files[0];
+      if (f.size > 15 * 1024 * 1024) { alert('File too large (max 15 MB).'); inp.value = ''; return; }
+      const fd = new FormData();
+      fd.append('file', f); fd.append('user_id', String(profileUserId));
+      fd.append('drawer', 'offboarding'); fd.append('profile_note_id', String(id));
+      try {
+        const r = await fetch('/api/files/upload', { method: 'POST', credentials: 'include', body: fd });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Upload failed'); return; }
+        if (autoDone) await doExitAction(id, 'done'); else refreshSetup();
+      } catch (e) { alert('Upload failed'); }
+    }
+
+    function renderExitStrip(data) {
+      const body = document.getElementById('profSetup');
+      if (!body) return;
+      const u = overview.user;
+      const isSelf = viewer.is_self;
+      const isHr = viewer.can_edit_any || viewer.can_edit_dept;
+      if (!isSelf && !isHr) { body.innerHTML = ''; return; }
+      const tile = document.getElementById('profTileComplete');
+      if (tile) tile.style.display = 'none';
+
+      const notes = (data.notes || []).slice().sort((a, b) => ((a.ob_sort || 9999) - (b.ob_sort || 9999)) || (a.id - b.id));
+      const isDone = (n) => n.ob_status === 'verified' || n.is_completed;
+      const filesOf = (n) => (n.attached_files && n.attached_files.length) ? n.attached_files : [];
+
+      // ===== LEAVER PANEL (the person, when they're not HR) =====
+      if (isSelf && !isHr) {
+        let h = '<div class="lv-head"><div class="deco"></div>' +
+          '<h2>Your last working day is ' + esc(fmtDate(u.last_working_day)) + '</h2>' +
+          '<p>Thank you for everything you\u2019ve put into FK Sports, ' + esc(obFirstName()) + '. Here\u2019s what\u2019s left to wrap up, and your documents will appear below as they\u2019re ready. We wish you all the best for what\u2019s next.</p></div>';
+
+        const wrap = notes.filter(n => n.ob_leaver && n.ob_group !== 'Documents to issue');
+        if (wrap.length) {
+          h += '<div class="lv-card"><h3><i class="ti ti-checklist" style="color:var(--slate,#475569)"></i> A few things to wrap up</h3>';
+          for (const n of wrap) {
+            const done = isDone(n);
+            h += '<div class="lv-item"><i class="ti ' + (done ? 'ti-circle-check' : 'ti-circle') + '" style="font-size:20px;color:' + (done ? 'var(--green)' : 'var(--muted)') + '"></i>' +
+              '<div style="flex:1"><div style="font-weight:600">' + esc(n.title) + '</div>' +
+              (n.body ? '<div style="font-size:13px;color:var(--muted)">' + esc(n.body) + '</div>' : '') + '</div></div>';
+          }
+          h += '</div>';
+        }
+
+        const docs = notes.filter(n => n.ob_leaver && n.ob_group === 'Documents to issue');
+        const fnfNote = notes.find(n => n.ob_group === 'Full & Final settlement');
+        if (fnfNote && filesOf(fnfNote).length) docs.push(fnfNote); // share FnF statement once uploaded
+        h += '<div class="lv-card"><h3><i class="ti ti-file-certificate" style="color:var(--slate,#475569)"></i> Your documents</h3>';
+        if (docs.length === 0) h += '<div style="color:var(--muted);font-size:14px;padding:6px 0">Your documents will appear here once HR issues them.</div>';
+        for (const n of docs) {
+          const fs = filesOf(n);
+          if (fs.length) {
+            h += '<div class="doc"><i class="ti ti-file-type-pdf f"></i><div class="dn"><div class="t">' + esc(n.title) + '</div><div class="s">Ready to download</div></div>' +
+              '<a class="dl ready" href="/api/files/' + fs[0].id + '?download=1"><i class="ti ti-download"></i> Download</a></div>';
+          } else {
+            h += '<div class="doc"><i class="ti ti-file-type-pdf f"></i><div class="dn"><div class="t">' + esc(n.title) + '</div><div class="s">Available once issued by HR</div></div>' +
+              '<span class="dl wait">Not ready</span></div>';
+          }
+        }
+        h += '</div>';
+        h += '<div class="exit-note"><i class="ti ti-info-circle"></i> Your documents stay here during your notice period, and HR will also email copies once your full &amp; final settlement is done.</div>';
+        body.innerHTML = h;
+        return;
+      }
+
+      // ===== HR / MANAGER TRACKER =====
+      const total = notes.length;
+      const done = notes.filter(isDone).length;
+      const pct = total ? Math.round(done * 100 / total) : 0;
+      const dept = (u.departments && u.departments.length) ? u.departments.map(d => d.name).join(', ') : '';
+      const left = u.employment_status === 'left';
+
+      let html = '<div class="exit-head"><div class="deco"></div>' +
+        '<h2><i class="ti ti-door-exit"></i> Offboarding \u2014 ' + esc(u.display_name || u.full_name || '') + '</h2>' +
+        '<div class="emeta">' +
+          (u.emp_id ? '<span>' + esc(u.emp_id) + (dept ? ' \u00b7 ' + esc(dept) : '') + '</span>' : (dept ? '<span>' + esc(dept) + '</span>' : '')) +
+          (u.notice_date ? '<span>Notice given <b>' + esc(fmtDate(u.notice_date)) + '</b></span>' : '') +
+          '<span>Last working day <b>' + esc(fmtDate(u.last_working_day)) + '</b></span>' +
+          '<span>Tenure <b>' + tenureText(u.hire_date) + '</b></span>' +
+        '</div>' +
+        (left ? '<div class="fnf-badge"><i class="ti ti-check"></i> Employee has left</div>'
+              : '<div class="fnf-badge"><i class="ti ti-alert-triangle"></i> Full &amp; Final due within <b>2 working days</b> of the last day</div>') +
+        '</div>';
+
+      html += '<div class="setup"><div class="setup-top"><div class="ic slate"><i class="ti ti-clipboard-list"></i></div>' +
+        '<div><h3>Exit clearances</h3><div class="sub">Run these in parallel so Full &amp; Final lands inside the 2-day window.</div></div>' +
+        '<div class="count">' + done + ' of ' + total + ' done \u00b7 ' + pct + '%</div></div>' +
+        '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div>';
+
+      const groups = []; const byGroup = {};
+      for (const n of notes) { const g = n.ob_group || 'Other'; if (!byGroup[g]) { byGroup[g] = []; groups.push(g); } byGroup[g].push(n); }
+
+      groups.forEach((g, gi) => {
+        html += '<div class="ob-grp-head' + (gi === 0 ? ' first' : '') + '"><span class="n">' + (gi + 1) + '</span> ' + esc(g) + '</div>';
+
+        // Full & Final group: surfacing card first
+        if (g === 'Full & Final settlement') {
+          const grat = exitGratuity(u.hire_date, u.last_working_day);
+          html += '<div class="fnf-card">' +
+            '<div class="fnf-line"><span>Tenure</span><span class="v">' + tenureText(u.hire_date) + '</span></div>' +
+            '<div class="fnf-line"><span>Gratuity eligibility</span><span class="v"><span class="flag' + (grat.eligible ? ' ok' : '') + '">' + grat.text + '</span></span></div>' +
+            '<div class="fnf-line"><span>Leave encashment</span><span class="v" style="font-weight:400;color:var(--muted)">confirm final balance in Leaves</span></div>' +
+          '</div>';
+        }
+
+        for (const n of byGroup[g]) {
+          const done2 = isDone(n);
+          const isDoc = g === 'Documents to issue';
+          const isFnf = g === 'Full & Final settlement';
+          const isLeftBtn = n.ob_sort === 120 || /mark as left/i.test(n.title);
+          const ico = done2 ? '<div class="ob-ico ver"><i class="ti ti-check"></i></div>' : '<div class="ob-ico todo"></div>';
+          const chip = done2 ? '<span class="ob-chip ver">Done</span>' : '<span class="ob-chip todo">To do</span>';
+
+          let actions = '';
+          if (done2) {
+            actions = '<button class="ob-btn" data-ex-act="reopen" data-id="' + n.id + '">Reopen</button>';
+          } else if (isLeftBtn) {
+            actions = '<button class="ob-btn primary" data-ex-act="mark_left" data-id="' + n.id + '">Mark left</button>';
+          } else if (isDoc) {
+            actions = '<button class="ob-btn primary" data-ex-upload="' + n.id + '" data-auto="1">Upload</button>';
+          } else if (isFnf) {
+            actions = '<button class="ob-btn" data-ex-upload="' + n.id + '" data-auto="0">Upload doc</button>' +
+                      '<button class="ob-btn primary" data-ex-act="done" data-id="' + n.id + '">Mark done</button>';
+          } else {
+            actions = '<button class="ob-btn primary" data-ex-act="done" data-id="' + n.id + '">Mark done</button>';
+          }
+
+          const fs = filesOf(n);
+          const fileChips = fs.length ? '<div>' + fs.map(f => '<a class="ob-filechip" href="/api/files/' + f.id + '" target="_blank"><i class="ti ti-file-text"></i> ' + esc(f.filename) + '</a>').join(' ') + '</div>' : '';
+
+          html += '<div class="ob-item">' + ico +
+            '<div class="ob-mid"><div class="ob-title">' + esc(n.title) + ' ' + ownerChipHtml(n.ob_owner) +
+              (n.ob_leaver ? ' <span class="own leaver" title="Visible to the leaver">SHARED</span>' : '') + '</div>' +
+              (n.body ? '<div class="ob-why">' + esc(n.body) + '</div>' : '') + fileChips +
+              '<input type="file" id="exFile_' + n.id + '" data-ex-file="' + n.id + '" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx">' +
+            '</div>' +
+            '<div class="ob-right">' + chip + actions + '</div></div>';
+        }
+      });
+
+      html += '</div>'; // .setup
+      body.innerHTML = html;
+
+      body.querySelectorAll('[data-ex-act]').forEach(el => el.addEventListener('click', () => {
+        const act = el.dataset.exAct, id = el.dataset.id;
+        if (act === 'mark_left' && !confirm('Mark this employee as left? This revokes their place on the team and cancels open tasks.')) return;
+        doExitAction(id, act);
+      }));
+      body.querySelectorAll('[data-ex-upload]').forEach(el => el.addEventListener('click', () => {
+        const inp = document.getElementById('exFile_' + el.dataset.exUpload); if (inp) { inp.dataset.auto = el.dataset.auto; inp.click(); }
+      }));
+      body.querySelectorAll('[data-ex-file]').forEach(el => el.addEventListener('change', () => uploadExitFile(el.dataset.exFile, el.dataset.auto === '1')));
     }
 
     // --- Kick off ------------------------------------------------------

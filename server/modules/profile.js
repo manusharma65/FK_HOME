@@ -17,6 +17,7 @@ const { requireAuth, logAudit } = require('../auth');
 const { notifyEvent, notify } = require('../notify');
 const lifecycle = require('./lifecycle');
 const onboardingTpl = require('./onboarding-template');
+const offboardingTpl = require('./offboarding-template');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -115,6 +116,7 @@ router.get('/:userId/overview', async (req, res) => {
               u.employment_type, u.work_pattern, u.probation_end_date,
               u.probation_status, u.left_date,
               u.notice_period_days, u.emergency_contact,
+              u.last_working_day, u.notice_date, u.exit_reason,
               u.emp_id, u.personal_email, u.blood_group,
               u.bank_account_holder, u.bank_name, u.bank_account_number,
               u.bank_ifsc, u.pan,
@@ -259,13 +261,14 @@ router.get('/:userId/drawer/:drawer', async (req, res) => {
     );
     out.files = f.rows;
 
-    // Notes — reviews + onboarding (the two kinds in r0.10)
-    if (drawer === 'reviews' || drawer === 'onboarding') {
-      const kind = drawer === 'reviews' ? 'review' : 'onboarding';
+    // Notes — reviews + onboarding + offboarding
+    if (drawer === 'reviews' || drawer === 'onboarding' || drawer === 'offboarding') {
+      const kind = drawer === 'reviews' ? 'review' : drawer;
       const n = await db.query(
         `SELECT n.id, n.title, n.body, n.is_completed, n.completed_at,
                 n.completed_by_user_id,
                 n.ob_status, n.ob_required, n.ob_group, n.ob_sort, n.ob_redo_reason, n.ob_field,
+                n.ob_owner, n.ob_leaver,
                 n.review_type, n.review_date, n.status,
                 n.cancelled_at, n.cancelled_by, n.cancel_reason,
                 (SELECT COALESCE(display_name, full_name) FROM users WHERE id = n.completed_by_user_id) AS completed_by_name,
@@ -1187,6 +1190,111 @@ router.post('/:userId/onboarding/:noteId/action', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('[onboarding action] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- GET /api/profile/offboarding/active ---------- (HR) exits in progress
+router.get('/offboarding/active', async (req, res) => {
+  if (!req.user.can('profile.view.any')) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const r = await db.query(
+      `SELECT u.id, COALESCE(u.display_name,u.full_name) AS name, u.emp_id, u.last_working_day,
+              (SELECT COUNT(*) FROM profile_notes n WHERE n.user_id=u.id AND n.kind='offboarding')::int AS total,
+              (SELECT COUNT(*) FROM profile_notes n WHERE n.user_id=u.id AND n.kind='offboarding' AND (n.ob_status='verified' OR n.is_completed))::int AS done
+         FROM users u
+        WHERE u.last_working_day IS NOT NULL AND u.employment_status <> 'left' AND u.deleted_at IS NULL
+        ORDER BY u.last_working_day ASC`
+    );
+    res.json({ exits: r.rows });
+  } catch (e) { console.error('[offboarding active]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// ---------- POST /api/profile/:userId/offboarding/start ----------
+// HR records notice + last working day → generates the general exit checklist.
+router.post('/:userId/offboarding/start', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad id' });
+  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+
+  const { last_working_day, notice_date, reason } = req.body || {};
+  if (!last_working_day || !/^\d{4}-\d{2}-\d{2}$/.test(last_working_day)) {
+    return res.status(400).json({ error: 'last_working_day must be YYYY-MM-DD' });
+  }
+  const nd = (notice_date && /^\d{4}-\d{2}-\d{2}$/.test(notice_date)) ? notice_date : null;
+
+  try {
+    const ex = await db.query(`SELECT employment_status FROM users WHERE id=$1 AND deleted_at IS NULL`, [userId]);
+    if (ex.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (ex.rows[0].employment_status === 'left') return res.status(400).json({ error: 'User has already left' });
+
+    await db.query(
+      `UPDATE users SET last_working_day=$2, notice_date=COALESCE($3, CURRENT_DATE),
+         exit_reason=$4, updated_at=NOW() WHERE id=$1`,
+      [userId, last_working_day, nd, (reason || '').slice(0, 500) || null]
+    );
+
+    const depts = await db.query(
+      `SELECT d.name FROM user_department_memberships m
+         JOIN departments d ON d.id = m.department_id
+        WHERE m.user_id = $1 AND m.deleted_at IS NULL`, [userId]
+    );
+    await offboardingTpl.applyOffboardingTemplate(userId, req.user.id, depts.rows.map(r => r.name));
+
+    const hr = await hrApproverIds();
+    const who = await db.query(`SELECT COALESCE(display_name,full_name) AS n FROM users WHERE id=$1`, [userId]);
+    const name = who.rows[0] ? who.rows[0].n : 'An employee';
+    const url = '#profile/' + userId + '/offboarding';
+    await notify({ userIds: hr, type: 'offboarding.started', title: 'Offboarding started',
+      body: name + ' — last working day ' + last_working_day + '. Exit clearances created.',
+      action_url: url, related_user_id: userId, related_type: 'user', related_id: userId });
+    await notify({ userIds: [userId], type: 'offboarding.started', title: 'Your last working day is set',
+      body: 'A few wrap-up items are in your profile. We will share your documents there.',
+      action_url: '#profile/' + userId, related_type: 'user', related_id: userId });
+
+    await logAudit({ req, module: 'profile', action: 'offboarding.start', target_type: 'user', target_id: userId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[offboarding start] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/offboarding/:noteId/action ----------
+// Clearance workflow: done / reopen (HR or manager), plus mark_left (HR).
+router.post('/:userId/offboarding/:noteId/action', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const noteId = parseInt(req.params.noteId, 10);
+  if (!Number.isFinite(userId) || !Number.isFinite(noteId)) return res.status(400).json({ error: 'Bad id' });
+  const { action } = req.body || {};
+
+  const cur = await db.query(`SELECT * FROM profile_notes WHERE id=$1 AND user_id=$2 AND kind='offboarding'`, [noteId, userId]);
+  if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+
+  let isHr = req.user.can('profile.edit.any');
+  let canAct = isHr;
+  if (!canAct && req.user.can('profile.edit.dept')) canAct = await isSameDept(req.user.id, userId);
+  if (!canAct) return res.status(403).json({ error: 'Permission denied' });
+
+  try {
+    if (action === 'done') {
+      await db.query(`UPDATE profile_notes SET ob_status='verified', is_completed=TRUE, completed_at=NOW(),
+        completed_by_user_id=$2, ob_decided_by_user_id=$2, ob_decided_at=NOW(), updated_at=NOW() WHERE id=$1`, [noteId, req.user.id]);
+    } else if (action === 'reopen') {
+      await db.query(`UPDATE profile_notes SET ob_status='to_do', is_completed=FALSE, updated_at=NOW() WHERE id=$1`, [noteId]);
+    } else if (action === 'mark_left') {
+      if (!isHr) return res.status(403).json({ error: 'Permission denied' });
+      await db.query(`UPDATE users SET employment_status='left', left_date=COALESCE(left_date, CURRENT_DATE), updated_at=NOW() WHERE id=$1`, [userId]);
+      await db.query(`UPDATE profile_notes SET ob_status='verified', is_completed=TRUE, completed_at=NOW(),
+        completed_by_user_id=$2, ob_decided_at=NOW(), updated_at=NOW() WHERE id=$1`, [noteId, req.user.id]);
+      try { await lifecycle.cancelTasksForUser(userId, 'user_left'); } catch (e) { /* best effort */ }
+    } else {
+      return res.status(400).json({ error: 'Unknown action' });
+    }
+    await logAudit({ req, module: 'profile', action: 'offboarding.' + action, target_type: 'profile_note', target_id: noteId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[offboarding action] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
 });

@@ -887,6 +887,24 @@
             <div id="onboardingBody"></div>
           </div>
 
+          <!-- Your exit (leaver) -->
+          <div class="card" id="exitCard" style="display:none;cursor:pointer" onclick="location.hash='#profile/me'">
+            <div class="card-header">
+              <div class="card-title"><i class="ti ti-door-exit"></i> Your last working day</div>
+              <span class="card-meta" id="exitMeta">—</span>
+            </div>
+            <div id="exitBody"></div>
+          </div>
+
+          <!-- Exits in progress (HR) -->
+          <div class="card" id="hrExitsCard" style="display:none">
+            <div class="card-header">
+              <div class="card-title"><i class="ti ti-door-exit"></i> Exits in progress</div>
+              <span class="card-meta" id="hrExitsMeta">—</span>
+            </div>
+            <div id="hrExitsBody"></div>
+          </div>
+
           <!-- My work (placeholder until Section 4) -->
           <div class="card" id="myWorkCard" onclick="location.hash='#my-work'" style="cursor:pointer">
             <div class="card-header">
@@ -1310,6 +1328,8 @@ async function init() {
     loadAttOverview();
     loadMyTasks();           // r0.10
     loadMyOnboarding();      // r0.10
+    loadMyExit();            // offboarding — leaver nudge
+    loadActiveExits();       // offboarding — HR exits-in-progress
     startHeartbeat();
     startBreakCountdown();
     startPolling();
@@ -1651,6 +1671,52 @@ async function loadMyTasks() {
       line(inProg, 'in progress', '#0F6E56') +
       '<div style="font-size:13px;color:var(--muted);text-align:center;padding-top:4px">Tap to open My Work \u2192</div>';
   } catch (e) { console.error('[loadMyTasks]', e); }
+}
+
+function fkExitDate(iso) {
+  try { return new Date(iso).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }); } catch (e) { return iso; }
+}
+
+// Offboarding — leaver's "your last day" nudge.
+async function loadMyExit() {
+  if (!window.fkUser) return;
+  const card = document.getElementById('exitCard');
+  if (!card) return;
+  try {
+    const r = await fetch('/api/profile/' + window.fkUser.id + '/overview', { credentials: 'include' });
+    if (!r.ok) return;
+    const o = await r.json(); const u = o.user || {};
+    if (!u.last_working_day || u.employment_status === 'left') { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const days = Math.ceil((new Date(u.last_working_day).getTime() - Date.now()) / 86400000);
+    document.getElementById('exitMeta').textContent = days >= 0 ? (days + ' day' + (days === 1 ? '' : 's') + ' to go') : 'Last day passed';
+    document.getElementById('exitBody').innerHTML =
+      '<div style="font-size:14px;color:var(--muted)">Your last working day is <b>' + fkExitDate(u.last_working_day) + '</b>. A few wrap-up items and your documents are in your profile.</div>' +
+      '<div style="margin-top:10px"><span style="font-size:14px;color:var(--amber);font-weight:500">Open your exit \u2192</span></div>';
+  } catch (e) { /* ignore */ }
+}
+
+// Offboarding — HR's "exits in progress" nudge.
+async function loadActiveExits() {
+  const card = document.getElementById('hrExitsCard');
+  if (!card) return;
+  try {
+    const r = await fetch('/api/profile/offboarding/active', { credentials: 'include' });
+    if (!r.ok) { card.style.display = 'none'; return; } // 403 for non-HR
+    const d = await r.json(); const exits = d.exits || [];
+    if (!exits.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    document.getElementById('hrExitsMeta').textContent = exits.length + ' in progress';
+    document.getElementById('hrExitsBody').innerHTML = exits.map(function (e) {
+      const days = Math.ceil((new Date(e.last_working_day).getTime() - Date.now()) / 86400000);
+      const when = days >= 0 ? (days + 'd to last day') : 'past last day';
+      return '<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:0.5px solid var(--line);cursor:pointer" onclick="location.hash=\'#profile/' + e.id + '\'">' +
+        '<i class="ti ti-door-exit" style="font-size:18px;color:#475569"></i>' +
+        '<div style="flex:1"><div style="font-size:14px;font-weight:500">' + (e.name || '') + '</div>' +
+        '<div style="font-size:12px;color:var(--muted)">' + e.done + '/' + e.total + ' cleared \u00b7 ' + when + '</div></div>' +
+        '<i class="ti ti-chevron-right" style="color:var(--muted)"></i></div>';
+    }).join('');
+  } catch (e) { /* ignore */ }
 }
 
 async function loadMyOnboarding() {
