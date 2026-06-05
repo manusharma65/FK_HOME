@@ -342,9 +342,11 @@ window.fkModules['profile'] = {
     const escAttr = esc;
     const fmtDate = (iso) => {
       if (!iso) return '';
-      const d = new Date(iso);
-      if (isNaN(d.getTime())) return iso;
-      return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+      const s = String(iso);
+      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (m) return m[3] + '/' + m[2] + '/' + m[1];
+      const d = new Date(s);
+      return isNaN(d.getTime()) ? s : d.toLocaleDateString('en-GB');
     };
     const fmtSize = (b) => {
       if (b == null) return '';
@@ -444,8 +446,8 @@ window.fkModules['profile'] = {
         if (viewer.can_manage_probation && inProg) {
           btns += '<button class="det-btn" id="profManageProb"><i class="ti ti-user-check"></i> Manage probation</button>';
         }
-        // Start offboarding (HR) — active employee, not already leaving/left.
-        if (viewer.can_edit_any && u.employment_status === 'active' && !u.last_working_day) {
+        // Start offboarding (HR) — anyone not already leaving/left.
+        if (viewer.can_edit_any && u.employment_status !== 'left' && !u.last_working_day) {
           btns += '<button class="det-btn" id="profStartExit"><i class="ti ti-door-exit"></i> Start offboarding</button>';
         }
         acts.innerHTML = btns;
@@ -717,7 +719,7 @@ window.fkModules['profile'] = {
       // Personal: contact + emergency + DOB + address read-only
       if (drawer === 'personal' && overview && overview.user) {
         const u = overview.user;
-        const dobStr = u.date_of_birth ? String(u.date_of_birth).slice(0, 10) : '';
+        const dobStr = u.date_of_birth ? fmtDate(u.date_of_birth) : '';
         if (u.phone || u.email) {
           html += '<div class="info-block">' +
             '<div class="info-block-title">Contact</div>' +
@@ -914,14 +916,16 @@ window.fkModules['profile'] = {
             }
             loadDrawer('reviews');
           } else if (b.dataset.act === 'reschedule') {
-            const newDate = prompt('New review date (YYYY-MM-DD):');
-            if (!newDate) return;
-            const r = await fetch('/api/profile/' + profileUserId + '/notes/' + rid,
-              { method: 'PATCH', credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ review_date: newDate }) });
-            if (!r.ok) { alert('Reschedule failed'); return; }
-            loadDrawer('reviews');
+            openDateModal({
+              title: 'Reschedule review', dateLabel: 'New review date', saveLabel: 'Reschedule',
+              onSave: async (iso) => {
+                const r = await fetch('/api/profile/' + profileUserId + '/notes/' + rid,
+                  { method: 'PATCH', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ review_date: iso }) });
+                if (!r.ok) { alert('Reschedule failed'); return false; }
+                loadDrawer('reviews'); return true;
+              } });
           }
         });
       });
@@ -1175,12 +1179,15 @@ window.fkModules['profile'] = {
 
       const snap = [
         ['Emp ID', u.emp_id], ['Work email', u.email], ['Personal email', u.personal_email],
-        ['Phone', u.phone], ['Department', dept], ['Joined', u.hire_date ? fmtDate(u.hire_date) : ''],
+        ['Phone', u.phone], ['Department', dept], ['Manager', u.manager_name],
+        ['Joined', u.hire_date ? fmtDate(u.hire_date) : ''],
         ['Date of birth', dob], ['Blood group', u.blood_group],
       ];
       const snapCard = '<div class="card"><div class="card-title">Snapshot</div><div class="field-grid">' +
         snap.map(p => '<div class="fld"><div class="fl">' + p[0] + '</div><div class="fv' + (p[1] ? '' : ' empty') + '">' + (p[1] ? esc(p[1]) : 'Not set') + '</div></div>').join('') +
-        '</div></div>';
+        '</div>' +
+        (viewer.can_edit_any ? '<div style="margin-top:16px"><button class="edit-link" data-assign-mgr="1">' + (u.manager_user_id ? 'Change manager' : 'Assign manager') + '</button></div>' : '') +
+        '</div>';
 
       body.innerHTML = '<div class="two-col">' + completeCard + snapCard + '</div>';
       body.querySelectorAll('.add-btn[data-go]').forEach(el => {
@@ -1189,6 +1196,8 @@ window.fkModules['profile'] = {
           else loadDrawer('details');
         });
       });
+      const amb = body.querySelector('[data-assign-mgr]');
+      if (amb) amb.addEventListener('click', openManagerPicker);
     }
 
     // ---- My details -----------------------------------------------------
@@ -1411,6 +1420,72 @@ window.fkModules['profile'] = {
         if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
         await loadOverview();
       } catch (e) { alert('Failed'); }
+    }
+
+    // ---- Date picker modal (UK display via native input; ISO value) ----
+    function openDateModal(opts) {
+      const o = opts || {};
+      const ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;z-index:200';
+      ov.innerHTML = '<div style="background:var(--surface);border-radius:14px;padding:22px 24px;width:400px;max-width:92vw;box-shadow:0 10px 40px rgba(0,0,0,0.2)">' +
+        '<h3 style="margin:0 0 6px;font-size:18px;font-weight:600">' + esc(o.title || 'Pick a date') + '</h3>' +
+        (o.intro ? '<p style="margin:0 0 14px;font-size:14px;color:var(--muted)">' + esc(o.intro) + '</p>' : '<div style="height:8px"></div>') +
+        '<label style="font-size:13px;color:var(--muted)">' + esc(o.dateLabel || 'Date') + '</label>' +
+        '<input id="dmDate" type="date" lang="en-GB" style="width:100%;padding:11px 13px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;background:var(--surface);color:var(--ink);font-family:inherit;margin-top:5px" />' +
+        (o.withReason ? '<label style="font-size:13px;color:var(--muted);display:block;margin-top:14px">' + esc(o.reasonLabel || 'Reason (optional)') + '</label>' +
+          '<textarea id="dmReason" rows="3" style="width:100%;padding:11px 13px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;background:var(--surface);color:var(--ink);font-family:inherit;margin-top:5px;resize:vertical"></textarea>' : '') +
+        '<div style="display:flex;gap:10px;margin-top:18px;justify-content:flex-end">' +
+          '<button class="det-btn" id="dmCancel">Cancel</button>' +
+          '<button class="det-btn primary" id="dmSave">' + esc(o.saveLabel || 'Save') + '</button>' +
+        '</div></div>';
+      document.body.appendChild(ov);
+      const close = () => ov.remove();
+      ov.addEventListener('click', e => { if (e.target === ov) close(); });
+      ov.querySelector('#dmCancel').addEventListener('click', close);
+      ov.querySelector('#dmSave').addEventListener('click', async () => {
+        const iso = ov.querySelector('#dmDate').value;
+        if (!iso) { alert('Please pick a date.'); return; }
+        const reason = o.withReason ? (ov.querySelector('#dmReason').value || '') : '';
+        const ok = await o.onSave(iso, reason);
+        if (ok !== false) close();
+      });
+    }
+
+    // ---- Manager assignment (HR) ---------------------------------------
+    async function openManagerPicker() {
+      let people = [];
+      try { const r = await fetch('/api/profile/people', { credentials: 'include' }); if (r.ok) people = (await r.json()).people || []; } catch (e) { /* ignore */ }
+      const cur = overview.user.manager_user_id;
+      const opts = ['<option value="">\u2014 No manager \u2014</option>'].concat(
+        people.filter(p => p.id !== profileUserId).map(p =>
+          '<option value="' + p.id + '"' + (p.id === cur ? ' selected' : '') + '>' + esc(p.name) + (p.emp_id ? ' (' + esc(p.emp_id) + ')' : '') + '</option>')
+      ).join('');
+      const ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;z-index:200';
+      ov.innerHTML = '<div style="background:var(--surface);border-radius:14px;padding:22px 24px;width:400px;max-width:92vw;box-shadow:0 10px 40px rgba(0,0,0,0.2)">' +
+        '<h3 style="margin:0 0 6px;font-size:18px;font-weight:600">Assign manager</h3>' +
+        '<p style="margin:0 0 14px;font-size:14px;color:var(--muted)">Who does ' + esc(overview.user.display_name || overview.user.full_name || 'this person') + ' report to?</p>' +
+        '<select id="mgrSel" style="width:100%;padding:12px 14px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;background:var(--surface);color:var(--ink);font-family:inherit">' + opts + '</select>' +
+        '<div style="display:flex;gap:10px;margin-top:18px;justify-content:flex-end">' +
+          '<button class="det-btn" id="mgrCancel">Cancel</button>' +
+          '<button class="det-btn primary" id="mgrSave">Save</button>' +
+        '</div></div>';
+      document.body.appendChild(ov);
+      const close = () => ov.remove();
+      ov.addEventListener('click', e => { if (e.target === ov) close(); });
+      ov.querySelector('#mgrCancel').addEventListener('click', close);
+      ov.querySelector('#mgrSave').addEventListener('click', async () => {
+        const val = ov.querySelector('#mgrSel').value;
+        try {
+          const r = await fetch('/api/profile/' + profileUserId + '/manager', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+            body: JSON.stringify({ manager_user_id: val || null }),
+          });
+          if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+          close();
+          await loadOverview();
+        } catch (e) { alert('Failed'); }
+      });
     }
 
     // ---- Onboarding (interactive, India template) -----------------------
@@ -1693,18 +1768,36 @@ window.fkModules['profile'] = {
       return '<span class="own ' + owner + '">' + (map[owner] || owner.toUpperCase()) + '</span>';
     }
 
-    async function startOffboarding() {
-      const lwd = prompt('Last working day (YYYY-MM-DD):');
-      if (!lwd) return;
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(lwd)) { alert('Use YYYY-MM-DD'); return; }
-      const reason = prompt('Reason for leaving (optional — internal):') || '';
+    function startOffboarding() {
+      openDateModal({
+        title: 'Start offboarding',
+        intro: 'Set their last working day. This creates the exit clearances and notifies HR and the employee.',
+        dateLabel: 'Last working day',
+        withReason: true,
+        reasonLabel: 'Reason for leaving (optional — internal)',
+        saveLabel: 'Start offboarding',
+        onSave: async (iso, reason) => {
+          try {
+            const r = await fetch('/api/profile/' + profileUserId + '/offboarding/start', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+              body: JSON.stringify({ last_working_day: iso, reason }),
+            });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return false; }
+            await loadOverview();
+            return true;
+          } catch (e) { alert('Failed'); return false; }
+        },
+      });
+    }
+
+    async function addExitNote(id, txt) {
       try {
-        const r = await fetch('/api/profile/' + profileUserId + '/offboarding/start', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-          body: JSON.stringify({ last_working_day: lwd, reason }),
+        const r = await fetch('/api/profile/' + profileUserId + '/notes/' + id, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ body: txt }),
         });
         if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
-        await loadOverview();
+        refreshSetup();
       } catch (e) { alert('Failed'); }
     }
 
@@ -1747,6 +1840,7 @@ window.fkModules['profile'] = {
       const notes = (data.notes || []).slice().sort((a, b) => ((a.ob_sort || 9999) - (b.ob_sort || 9999)) || (a.id - b.id));
       const isDone = (n) => n.ob_status === 'verified' || n.is_completed;
       const filesOf = (n) => (n.attached_files && n.attached_files.length) ? n.attached_files : [];
+      const exitBodies = {};
 
       // ===== LEAVER PANEL (the person, when they're not HR) =====
       if (isSelf && !isHr) {
@@ -1820,10 +1914,14 @@ window.fkModules['profile'] = {
         // Full & Final group: surfacing card first
         if (g === 'Full & Final settlement') {
           const grat = exitGratuity(u.hire_date, u.last_working_day);
+          const lb = data.leave_balance;
+          const encash = (lb && lb.remaining != null)
+            ? (Number(lb.remaining) % 1 ? Number(lb.remaining).toFixed(1) : Number(lb.remaining)) + ' days'
+            : 'see Leaves';
           html += '<div class="fnf-card">' +
             '<div class="fnf-line"><span>Tenure</span><span class="v">' + tenureText(u.hire_date) + '</span></div>' +
             '<div class="fnf-line"><span>Gratuity eligibility</span><span class="v"><span class="flag' + (grat.eligible ? ' ok' : '') + '">' + grat.text + '</span></span></div>' +
-            '<div class="fnf-line"><span>Leave encashment</span><span class="v" style="font-weight:400;color:var(--muted)">confirm final balance in Leaves</span></div>' +
+            '<div class="fnf-line"><span>Leave balance to encash</span><span class="v">' + encash + '</span></div>' +
           '</div>';
         }
 
@@ -1850,6 +1948,12 @@ window.fkModules['profile'] = {
           }
 
           const fs = filesOf(n);
+          const isInterview = /exit interview/i.test(n.title);
+          if (isInterview) {
+            exitBodies[n.id] = n.body || '';
+            const hasNotes = n.body && !/internal to hr/i.test(n.body);
+            actions += '<button class="ob-btn" data-ex-note="' + n.id + '">' + (hasNotes ? 'Edit notes' : 'Add notes') + '</button>';
+          }
           const fileChips = fs.length ? '<div>' + fs.map(f => '<a class="ob-filechip" href="/api/files/' + f.id + '" target="_blank"><i class="ti ti-file-text"></i> ' + esc(f.filename) + '</a>').join(' ') + '</div>' : '';
 
           html += '<div class="ob-item">' + ico +
@@ -1874,6 +1978,13 @@ window.fkModules['profile'] = {
         const inp = document.getElementById('exFile_' + el.dataset.exUpload); if (inp) { inp.dataset.auto = el.dataset.auto; inp.click(); }
       }));
       body.querySelectorAll('[data-ex-file]').forEach(el => el.addEventListener('change', () => uploadExitFile(el.dataset.exFile, el.dataset.auto === '1')));
+      body.querySelectorAll('[data-ex-note]').forEach(el => el.addEventListener('click', () => {
+        const id = el.dataset.exNote;
+        const cur = /internal to hr/i.test(exitBodies[id] || '') ? '' : (exitBodies[id] || '');
+        const txt = prompt('Exit interview notes (internal — not shown to the leaver):', cur);
+        if (txt === null) return;
+        addExitNote(id, txt);
+      }));
     }
 
     // --- Kick off ------------------------------------------------------

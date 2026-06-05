@@ -16,6 +16,7 @@ const { db } = require('../db');
 const { requireAuth, logAudit } = require('../auth');
 const { notifyEvent, notify } = require('../notify');
 const lifecycle = require('./lifecycle');
+const leaveEngine = require('./leave-engine');
 const onboardingTpl = require('./onboarding-template');
 const offboardingTpl = require('./offboarding-template');
 
@@ -117,6 +118,8 @@ router.get('/:userId/overview', async (req, res) => {
               u.probation_status, u.left_date,
               u.notice_period_days, u.emergency_contact,
               u.last_working_day, u.notice_date, u.exit_reason,
+              u.manager_user_id,
+              (SELECT COALESCE(display_name, full_name) FROM users WHERE id = u.manager_user_id) AS manager_name,
               u.emp_id, u.personal_email, u.blood_group,
               u.bank_account_holder, u.bank_name, u.bank_account_number,
               u.bank_ifsc, u.pan,
@@ -315,6 +318,11 @@ router.get('/:userId/drawer/:drawer', async (req, res) => {
         [userId]
       );
       out.salary = s.rows[0] || null;
+    }
+
+    // Offboarding: surface the live leave balance for the FnF encashment line.
+    if (drawer === 'offboarding') {
+      try { out.leave_balance = await leaveEngine.getBalance(userId); } catch (e) { out.leave_balance = null; }
     }
 
     res.json(out);
@@ -1297,6 +1305,37 @@ router.post('/:userId/offboarding/:noteId/action', async (req, res) => {
     console.error('[offboarding action] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
+});
+
+// ---------- GET /api/profile/people ---------- (HR) active people for the manager picker
+router.get('/people', async (req, res) => {
+  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const r = await db.query(
+      `SELECT id, COALESCE(display_name, full_name) AS name, emp_id
+         FROM users WHERE deleted_at IS NULL AND employment_status = 'active'
+        ORDER BY name ASC`);
+    res.json({ people: r.rows });
+  } catch (e) { console.error('[profile/people]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// ---------- PUT /api/profile/:userId/manager ---------- (HR) assign / clear a manager
+router.put('/:userId/manager', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad id' });
+  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+  let mgr = (req.body || {}).manager_user_id;
+  mgr = (mgr === '' || mgr == null) ? null : parseInt(mgr, 10);
+  if (mgr != null && (!Number.isFinite(mgr) || mgr === userId)) return res.status(400).json({ error: 'Invalid manager' });
+  try {
+    if (mgr != null) {
+      const m = await db.query(`SELECT 1 FROM users WHERE id=$1 AND deleted_at IS NULL AND employment_status='active'`, [mgr]);
+      if (m.rows.length === 0) return res.status(400).json({ error: 'Manager not found' });
+    }
+    await db.query(`UPDATE users SET manager_user_id=$2, updated_at=NOW() WHERE id=$1`, [userId, mgr]);
+    await logAudit({ req, module: 'profile', action: 'manager.set', target_type: 'user', target_id: userId });
+    res.json({ ok: true });
+  } catch (e) { console.error('[manager set]', e.message); res.status(500).json({ error: 'Failed' }); }
 });
 
 module.exports = router;

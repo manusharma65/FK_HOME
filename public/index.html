@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en-GB">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -1674,7 +1674,11 @@ async function loadMyTasks() {
 }
 
 function fkExitDate(iso) {
-  try { return new Date(iso).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }); } catch (e) { return iso; }
+  if (!iso) return '';
+  var s = String(iso);
+  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return m[3] + '/' + m[2] + '/' + m[1];
+  try { var d = new Date(s); return isNaN(d.getTime()) ? s : d.toLocaleDateString('en-GB'); } catch (e) { return s; }
 }
 
 // Offboarding — leaver's "your last day" nudge.
