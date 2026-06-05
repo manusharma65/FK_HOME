@@ -168,8 +168,9 @@ router.post('/users', requirePermission('admin.users.create'), async (req, res) 
     // Welcome notification
     await notifyEvent('system.welcome', { targetUserId: newUser.id });
 
-    // r0.10 — Apply onboarding template (copy base checklist for this user)
-    await lifecycle.applyOnboardingTemplate(newUser.id, req.user.id);
+    // Onboarding checklist is applied above via the India template
+    // (applyOnboardingTemplate). The old onboarding_templates DB seed is
+    // retired — it duplicated the India items (ID/address/bank/emergency).
 
     // r0.10 — If hire_date was set during creation, also generate review schedule.
     // (Most of the time hire_date is filled in later via the Employment tab —

@@ -20,6 +20,7 @@ window.fkModules['profile'] = {
   render() {
     return '' +
       '<style>' +
+        '#prof-mod{max-width:1120px;margin:0 auto}' +
         '#prof-mod .header-card{background:var(--surface);border:0.5px solid var(--line);border-radius:12px;padding:20px 22px;display:flex;gap:18px;align-items:center;margin-bottom:18px}' +
         '#prof-mod .avatar-lg{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:600;color:var(--ink);flex-shrink:0}' +
         '#prof-mod .header-info{flex:1;min-width:0}' +
@@ -249,6 +250,9 @@ window.fkModules['profile'] = {
         '#profSetup .setup-top h3{margin:0;font-size:18px;font-weight:600}' +
         '#profSetup .setup-top .sub{font-size:14px;color:var(--muted);margin-top:2px}' +
         '#profSetup .setup-top .count{margin-left:auto;font-size:14px;color:var(--muted);font-weight:500;white-space:nowrap}' +
+        '#profSetup .setup-toggle{margin-left:14px;width:34px;height:34px;border-radius:9px;border:0.5px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none}' +
+        '#profSetup .setup-toggle:hover{color:var(--ink);background:var(--bg)}' +
+        '#profSetup .setup-toggle i{font-size:18px}' +
         '#profSetup .setup .ob-pbar{margin-bottom:6px}' +
         '#profSetup .setup .ob-grp-head{border-top:0.5px solid var(--line);margin-top:8px;padding-top:14px}' +
         '#profSetup .setup .ob-grp-head.first{border-top:none;margin-top:4px;padding-top:8px}' +
@@ -1084,6 +1088,7 @@ window.fkModules['profile'] = {
     const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
     let detailsEditing = null; // which group is currently in edit mode
     let setupExpanded = false; // setup strip: expanded record view when complete
+    let setupOpen = true;      // setup strip: checklist open/collapsed (incomplete state)
 
     function canEditThis() { return viewer.is_self || viewer.can_edit_any; }
     function canSeePrivate() { return viewer.is_self || viewer.can_view_salary || viewer.can_edit_any; }
@@ -1503,18 +1508,24 @@ window.fkModules['profile'] = {
       const headTitle = allRequiredDone ? 'Your joining documents' : (isSelf ? 'Let\u2019s get you set up' : esc(overview.user.display_name || overview.user.full_name || 'Onboarding'));
       const headSub = allRequiredDone ? 'Your onboarding record.' : 'About 10 minutes \u2014 finish these and you\u2019re fully on the system and on payroll.';
       const collapseLink = (allRequiredDone && setupExpanded) ? ' <span class="vd" id="setupCollapse" style="cursor:pointer;color:var(--amber-deep);margin-left:10px">Hide</span>' : '';
+      // Collapsible chevron — only while actively onboarding (incomplete).
+      const chevron = !allRequiredDone
+        ? '<button class="setup-toggle" id="setupToggle" title="' + (setupOpen ? 'Collapse' : 'Expand') + '"><i class="ti ti-chevron-' + (setupOpen ? 'up' : 'down') + '"></i></button>'
+        : '';
 
       html += '<div class="setup">' +
         '<div class="setup-top"><div class="ic"><i class="ti ti-rocket"></i></div>' +
           '<div><h3>' + headTitle + '</h3><div class="sub">' + headSub + '</div></div>' +
-          '<div class="count">' + done + ' of ' + total + ' done \u00b7 ' + pct + '%' + collapseLink + '</div></div>' +
+          '<div class="count">' + done + ' of ' + total + ' done \u00b7 ' + pct + '%' + collapseLink + '</div>' + chevron + '</div>' +
         '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div>';
 
-      if (isSelf && !allRequiredDone) {
+      const showChecklist = allRequiredDone || setupOpen; // when complete+expanded, always show the record
+      if (isSelf && !allRequiredDone && setupOpen) {
         html += '<div class="ob-privacy"><i class="ti ti-lock"></i> Your documents are private \u2014 only HR can see them. Stuck on anything? Message HR and we\u2019ll help.</div>';
       }
 
-      // Groups (headers + items inside the one card)
+      // Groups (headers + items inside the one card) — hidden when collapsed.
+      if (showChecklist) {
       const groups = [];
       const byGroup = {};
       for (const n of notes) {
@@ -1586,12 +1597,15 @@ window.fkModules['profile'] = {
           '<label>Details (the why) \u2014 optional</label><textarea id="obNewBody" rows="2"></textarea>' +
           '<div style="margin-top:14px"><button class="ob-btn primary" data-ob-additem>Add item</button></div></div>';
       }
+      } // showChecklist
 
       html += '</div>'; // .setup
       body.innerHTML = html;
 
       const cb = document.getElementById('setupCollapse');
       if (cb) cb.addEventListener('click', () => { setupExpanded = false; refreshSetup(); });
+      const st = document.getElementById('setupToggle');
+      if (st) st.addEventListener('click', () => { setupOpen = !setupOpen; refreshSetup(); });
 
       body.querySelectorAll('[data-ob-go]').forEach(el => el.addEventListener('click', () => {
         if (el.dataset.obGo === 'photo') { const b = document.getElementById('profPhotoBtn'); if (b) b.click(); }
