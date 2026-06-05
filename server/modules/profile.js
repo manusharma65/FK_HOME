@@ -16,6 +16,7 @@ const { db } = require('../db');
 const { requireAuth, logAudit } = require('../auth');
 const { notifyEvent, notify } = require('../notify');
 const lifecycle = require('./lifecycle');
+const onboardingTpl = require('./onboarding-template');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -264,6 +265,7 @@ router.get('/:userId/drawer/:drawer', async (req, res) => {
       const n = await db.query(
         `SELECT n.id, n.title, n.body, n.is_completed, n.completed_at,
                 n.completed_by_user_id,
+                n.ob_status, n.ob_required, n.ob_group, n.ob_sort, n.ob_redo_reason, n.ob_field,
                 n.review_type, n.review_date, n.status,
                 n.cancelled_at, n.cancelled_by, n.cancel_reason,
                 (SELECT COALESCE(display_name, full_name) FROM users WHERE id = n.completed_by_user_id) AS completed_by_name,
@@ -912,6 +914,8 @@ router.put('/:userId/personal', async (req, res) => {
       ]
     );
 
+    try { await onboardingTpl.syncOnboardingFromProfile(userId); } catch (e) { console.error('[ob sync personal]', e.message); }
+
     await logAudit({
       req, module: 'profile', action: 'personal.updated',
       target_type: 'user', target_id: userId,
@@ -976,6 +980,7 @@ router.post('/:userId/photo', (req, res) => {
         [userId, req.file.buffer, req.file.mimetype]
       );
       await logAudit({ req, module: 'profile', action: 'photo.updated', target_type: 'user', target_id: userId });
+      try { await onboardingTpl.syncOnboardingFromProfile(userId); } catch (e) { console.error('[ob sync photo]', e.message); }
       res.json({ ok: true });
     } catch (e) {
       console.error('[profile/photo post] failed:', e.message);
@@ -1093,6 +1098,7 @@ router.post('/detail-change/:id/decide', async (req, res) => {
 
     if (decision === 'approve') {
       await applySensitiveChanges(dcr.user_id, dcr.changes);
+      try { await onboardingTpl.syncOnboardingFromProfile(dcr.user_id); } catch (e) { console.error('[ob sync detail]', e.message); }
     }
     await db.query(
       `UPDATE detail_change_requests SET status = $1, decided_by_user_id = $2, decided_at = NOW(), decided_note = $3 WHERE id = $4`,
@@ -1127,6 +1133,60 @@ router.post('/:userId/emp-id', async (req, res) => {
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'That Emp ID is already in use' });
     console.error('[profile/emp-id] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/profile/:userId/onboarding/:noteId/action ----------
+// Onboarding workflow: submit (employee) -> verify / needs_redo (HR), plus N/A / reopen.
+router.post('/:userId/onboarding/:noteId/action', async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const noteId = parseInt(req.params.noteId, 10);
+  if (!Number.isFinite(userId) || !Number.isFinite(noteId)) return res.status(400).json({ error: 'Bad id' });
+  const { action, reason } = req.body || {};
+
+  const cur = await db.query(`SELECT * FROM profile_notes WHERE id=$1 AND user_id=$2 AND kind='onboarding'`, [noteId, userId]);
+  if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+  const c = cur.rows[0];
+
+  const isSelf = req.user.id === userId;
+  let isHr = req.user.can('profile.edit.any');
+  if (!isHr && req.user.can('profile.edit.dept')) isHr = await isSameDept(req.user.id, userId);
+
+  const url = '#profile/' + userId + '/onboarding';
+  try {
+    if (action === 'submit') {
+      if (!(isSelf || isHr)) return res.status(403).json({ error: 'Permission denied' });
+      await db.query(`UPDATE profile_notes SET ob_status='submitted', ob_redo_reason=NULL, is_completed=FALSE, updated_at=NOW() WHERE id=$1`, [noteId]);
+      const hr = await hrApproverIds();
+      const who = await db.query(`SELECT COALESCE(display_name,full_name) AS n FROM users WHERE id=$1`, [userId]);
+      const name = who.rows[0] ? who.rows[0].n : 'An employee';
+      await notify({ userIds: hr, type: 'onboarding.submitted', title: 'Onboarding item to verify',
+        body: name + ' submitted: ' + c.title, action_url: url,
+        related_user_id: userId, related_type: 'profile_note', related_id: noteId });
+    } else if (action === 'verify') {
+      if (!isHr) return res.status(403).json({ error: 'Permission denied' });
+      await db.query(`UPDATE profile_notes SET ob_status='verified', is_completed=TRUE, completed_at=NOW(), completed_by_user_id=$2, ob_decided_by_user_id=$2, ob_decided_at=NOW(), ob_redo_reason=NULL, updated_at=NOW() WHERE id=$1`, [noteId, req.user.id]);
+      await notify({ userIds: [userId], type: 'onboarding.verified', title: 'Onboarding item verified', body: 'HR verified: ' + c.title, action_url: url, related_type: 'profile_note', related_id: noteId });
+    } else if (action === 'needs_redo') {
+      if (!isHr) return res.status(403).json({ error: 'Permission denied' });
+      const rsn = (reason || '').slice(0, 300) || null;
+      await db.query(`UPDATE profile_notes SET ob_status='needs_redo', is_completed=FALSE, ob_decided_by_user_id=$2, ob_decided_at=NOW(), ob_redo_reason=$3, updated_at=NOW() WHERE id=$1`, [noteId, req.user.id, rsn]);
+      await notify({ userIds: [userId], type: 'onboarding.needs_redo', title: 'Onboarding item needs redoing', body: c.title + (rsn ? ' — ' + rsn : ''), action_url: url, related_type: 'profile_note', related_id: noteId });
+    } else if (action === 'na') {
+      if (!(isSelf || isHr)) return res.status(403).json({ error: 'Permission denied' });
+      if (c.ob_required) return res.status(400).json({ error: 'This item is required and cannot be marked not applicable' });
+      await db.query(`UPDATE profile_notes SET ob_status='na', is_completed=TRUE, ob_redo_reason=NULL, updated_at=NOW() WHERE id=$1`, [noteId]);
+    } else if (action === 'reopen') {
+      if (!(isSelf || isHr)) return res.status(403).json({ error: 'Permission denied' });
+      await db.query(`UPDATE profile_notes SET ob_status='to_do', is_completed=FALSE, ob_redo_reason=NULL, updated_at=NOW() WHERE id=$1`, [noteId]);
+    } else {
+      return res.status(400).json({ error: 'Unknown action' });
+    }
+    await logAudit({ req, module: 'profile', action: 'onboarding.' + action, target_type: 'profile_note', target_id: noteId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[onboarding action] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
 });

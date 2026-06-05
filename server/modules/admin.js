@@ -11,6 +11,7 @@ const leaveEngine = require('./leave-engine');
 const backupEngine = require('./backup');
 const lifecycle = require('./lifecycle');
 const { nextEmpId } = require('./emp-id');
+const { applyOnboardingTemplate } = require('./onboarding-template');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -127,6 +128,9 @@ router.post('/users', requirePermission('admin.users.create'), async (req, res) 
        ON CONFLICT (user_id, year) DO NOTHING`,
       [newUser.id, year]
     );
+
+    // Auto-apply the India onboarding checklist to the new joiner.
+    try { await applyOnboardingTemplate(newUser.id, req.user.id); } catch (e) { console.error('[onboarding template]', e.message); }
 
     // Auto-add to channels: All-hands + their primary department channel
     const allHands = await db.query(`SELECT id FROM chat_channels WHERE type = 'all_hands' LIMIT 1`);

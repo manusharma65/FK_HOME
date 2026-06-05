@@ -191,6 +191,52 @@ window.fkModules['profile'] = {
         '#prof-mod .info-row{font-size:16px;margin-bottom:10px}' +
         '#prof-mod .info-label{font-size:16px;min-width:160px}' +
         '#prof-mod .file-name{font-size:16px}' +
+        '#prof-mod .pill.probation{background:var(--amber-soft);color:var(--amber-deep)}' +
+        '#prof-mod .pill.on-track{background:var(--green-soft);color:var(--green)}' +
+        '#prof-mod .pill.off{background:rgba(20,22,27,0.06);color:var(--muted)}' +
+        '#prof-mod .ob-welcome{background:linear-gradient(180deg,var(--amber-soft),var(--surface));border:0.5px solid var(--line);border-radius:14px;padding:22px 24px;margin-bottom:14px}' +
+        '#prof-mod .ob-welcome h3{margin:0 0 4px;font-size:20px;font-weight:600}' +
+        '#prof-mod .ob-welcome p{margin:0 0 16px;font-size:15px;color:var(--muted)}' +
+        '#prof-mod .ob-pcount{display:flex;justify-content:space-between;font-size:14px;color:var(--muted);margin-bottom:8px}' +
+        '#prof-mod .ob-pbar{height:10px;border-radius:99px;background:rgba(20,22,27,0.10);overflow:hidden}' +
+        '#prof-mod .ob-pbar>i{display:block;height:100%;background:var(--amber);border-radius:99px}' +
+        '#prof-mod .ob-privacy{display:flex;align-items:center;gap:9px;font-size:14px;color:var(--muted);background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:22px}' +
+        '#prof-mod .ob-privacy i{font-size:18px;color:var(--green)}' +
+        '#prof-mod .ob-grp{background:var(--surface);border:0.5px solid var(--line);border-radius:14px;padding:8px 22px 12px;margin-bottom:18px}' +
+        '#prof-mod .ob-grp-head{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:600;padding:16px 0 6px}' +
+        '#prof-mod .ob-grp-head .n{width:26px;height:26px;border-radius:7px;background:var(--amber-soft);color:var(--amber-deep);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}' +
+        '#prof-mod .ob-item{display:flex;align-items:flex-start;gap:14px;padding:16px 0;border-top:0.5px solid var(--line)}' +
+        '#prof-mod .ob-item:first-of-type{border-top:none}' +
+        '#prof-mod .ob-ico{width:30px;height:30px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:16px;margin-top:1px}' +
+        '#prof-mod .ob-ico.todo{border:2px solid var(--line);color:var(--muted)}' +
+        '#prof-mod .ob-ico.sub{background:var(--amber-soft);color:var(--amber-deep)}' +
+        '#prof-mod .ob-ico.ver{background:var(--green);color:#fff}' +
+        '#prof-mod .ob-ico.redo{background:var(--red-soft);color:var(--red)}' +
+        '#prof-mod .ob-ico.na{background:rgba(20,22,27,0.06);color:var(--muted)}' +
+        '#prof-mod .ob-mid{flex:1;min-width:0}' +
+        '#prof-mod .ob-title{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
+        '#prof-mod .ob-req{font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--amber-deep);background:var(--amber-soft);padding:2px 7px;border-radius:5px}' +
+        '#prof-mod .ob-opt{font-size:11px;font-weight:600;color:var(--muted);background:rgba(20,22,27,0.06);padding:2px 7px;border-radius:5px}' +
+        '#prof-mod .ob-why{font-size:14px;color:var(--muted);margin-top:3px;line-height:1.45}' +
+        '#prof-mod .ob-redo-msg{font-size:13px;color:var(--red);background:var(--red-soft);border-radius:8px;padding:8px 11px;margin-top:8px}' +
+        '#prof-mod .ob-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex:none}' +
+        '#prof-mod .ob-chip{font-size:12px;font-weight:600;padding:4px 11px;border-radius:99px;white-space:nowrap}' +
+        '#prof-mod .ob-chip.todo{background:rgba(20,22,27,0.06);color:var(--muted)}' +
+        '#prof-mod .ob-chip.sub{background:var(--amber-soft);color:var(--amber-deep)}' +
+        '#prof-mod .ob-chip.ver{background:var(--green-soft);color:var(--green)}' +
+        '#prof-mod .ob-chip.redo{background:var(--red-soft);color:var(--red)}' +
+        '#prof-mod .ob-chip.na{background:rgba(20,22,27,0.06);color:var(--muted)}' +
+        '#prof-mod .ob-btn{padding:9px 16px;border-radius:9px;font-size:14px;font-weight:500;cursor:pointer;border:0.5px solid var(--line);background:var(--surface);color:var(--ink);white-space:nowrap}' +
+        '#prof-mod .ob-btn.primary{background:var(--amber);color:#fff;border-color:var(--amber)}' +
+        '#prof-mod .ob-btn.ghost{border:none;background:none;color:var(--muted);padding:6px 4px;font-size:13px}' +
+        '#prof-mod .ob-filechip{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);background:var(--bg);border:0.5px solid var(--line);border-radius:7px;padding:5px 9px;margin-top:8px;text-decoration:none}' +
+        '#prof-mod .ob-filechip i{font-size:15px;color:var(--muted)}' +
+        '#prof-mod .ob-del{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px}' +
+        '#prof-mod .ob-del:hover{color:var(--red)}' +
+        '#prof-mod .ob-add{background:var(--surface);border:0.5px dashed var(--line);border-radius:14px;padding:18px 22px;margin-bottom:18px}' +
+        '#prof-mod .ob-add h3{font-size:16px;font-weight:600;margin:0 0 12px}' +
+        '#prof-mod .ob-add label{font-size:14px;color:var(--muted);display:block;margin-top:10px}' +
+        '#prof-mod .ob-add input,#prof-mod .ob-add textarea{width:100%;padding:11px 13px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;font-family:inherit;margin-top:6px;color:var(--ink);background:var(--surface)}' +
       '</style>' +
       '<div id="prof-mod">' +
         '<div class="header-card" id="profHeader">' +
@@ -317,12 +363,31 @@ window.fkModules['profile'] = {
           '<div class="prof-bar"><i style="width:' + (c.percent || 0) + '%"></i></div></div>' +
         '<div class="prof-tile"><div class="t-lbl">Status</div><div class="t-val" style="color:' + statusColour + '">' + statusLabel + '</div></div>';
 
-      // Status pill (kept, top-right)
+      // Status pill (kept, top-right) — probation state first, then presence.
       const sp = document.getElementById('profStatusPill');
-      if (u.status === 'active') sp.innerHTML = '<span class="pill">Active</span>';
-      else if (u.status === 'idle') sp.innerHTML = '<span class="pill idle">Idle</span>';
-      else if (u.status === 'offline') sp.innerHTML = '<span class="pill off">Offline</span>';
-      else sp.innerHTML = '';
+      let probationPill = '';
+      if (u.probation_status === 'in_probation') probationPill = '<span class="pill probation"><i class="ti ti-clock"></i> Probation</span>';
+      else if (u.probation_status === 'probation_pass_expected') probationPill = '<span class="pill on-track"><i class="ti ti-circle-check"></i> On track</span>';
+      else if (u.probation_status === 'extended') probationPill = '<span class="pill probation"><i class="ti ti-alert-triangle"></i> Probation extended</span>';
+      else if (u.probation_status === 'failed') probationPill = '<span class="pill off"><i class="ti ti-x"></i> Probation failed</span>';
+      let presence = '';
+      if (u.status === 'active') presence = '<span class="pill">Active</span>';
+      else if (u.status === 'idle') presence = '<span class="pill idle">Idle</span>';
+      else if (u.status === 'offline') presence = '<span class="pill off">Offline</span>';
+      sp.innerHTML = probationPill + (probationPill && presence ? ' ' : '') + presence;
+
+      // Manage probation (HR) — visible while probation is in progress.
+      const acts = document.getElementById('profActions');
+      if (acts) {
+        const inProg = ['in_probation', 'probation_pass_expected', 'extended'].includes(u.probation_status);
+        if (viewer.can_manage_probation && inProg) {
+          acts.innerHTML = '<button class="det-btn" id="profManageProb"><i class="ti ti-user-check"></i> Manage probation</button>';
+          const mp = document.getElementById('profManageProb');
+          if (mp) mp.addEventListener('click', manageProbation);
+        } else {
+          acts.innerHTML = '';
+        }
+      }
 
       // Photo upload (self or HR)
       const canEditPhoto = viewer.is_self || viewer.can_edit_any;
@@ -425,7 +490,13 @@ window.fkModules['profile'] = {
         if (drawer === 'details') { renderMyDetails(); return; }
         if (drawer === 'time') { await renderAttendanceDrawer(); return; }
         if (drawer === 'pay') { await renderPaySection(); return; }
-        // employment + onboarding = file drawers
+        if (drawer === 'onboarding') {
+          const r = await fetch('/api/profile/' + profileUserId + '/drawer/onboarding', { credentials: 'include' });
+          const data = r.ok ? await r.json() : { notes: [], files: [] };
+          renderOnboardingSection(data);
+          return;
+        }
+        // employment = file drawer
         const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer, { credentials: 'include' });
         if (!r.ok) {
           body.innerHTML = '<div style="color:var(--red)">Failed to load</div>';
@@ -1261,6 +1332,223 @@ window.fkModules['profile'] = {
       wirePayUpload('insurance');
       const goD = body.querySelector('[data-go-details]');
       if (goD) goD.addEventListener('click', () => loadDrawer('details'));
+    }
+
+    // ---- Probation management (HR) -------------------------------------
+    async function manageProbation() {
+      const choice = prompt('Set probation status:\n  c = Confirmed (passed)\n  e = Extended\n  f = Failed\n  o = On track (pass expected)\n\nEnter c, e, f or o:');
+      if (!choice) return;
+      const map = { c: 'confirmed', e: 'extended', f: 'failed', o: 'probation_pass_expected' };
+      const status = map[choice.trim().toLowerCase()];
+      if (!status) { alert('Invalid choice'); return; }
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/probation', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ status }),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        await loadOverview();
+      } catch (e) { alert('Failed'); }
+    }
+
+    // ---- Onboarding (interactive, India template) -----------------------
+    function obFirstName() {
+      const n = overview.user.display_name || overview.user.full_name || '';
+      return n.split(' ')[0] || n;
+    }
+
+    async function doObAction(id, action, reason) {
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/onboarding/' + id + '/action', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ action, reason: reason || null }),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        loadDrawer('onboarding');
+      } catch (e) { alert('Failed'); }
+    }
+
+    async function uploadOnboardingFile(id) {
+      const inp = document.getElementById('obFile_' + id);
+      if (!inp || !inp.files || !inp.files.length) return;
+      const f = inp.files[0];
+      if (f.size > 15 * 1024 * 1024) { alert('File too large (max 15 MB).'); inp.value = ''; return; }
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('user_id', String(profileUserId));
+      fd.append('drawer', 'onboarding');
+      fd.append('profile_note_id', String(id));
+      try {
+        const r = await fetch('/api/files/upload', { method: 'POST', credentials: 'include', body: fd });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Upload failed'); return; }
+        await doObAction(id, 'submit');
+      } catch (e) { alert('Upload failed'); }
+    }
+
+    async function addOnboardingItem() {
+      const title = (document.getElementById('obNewTitle').value || '').trim();
+      const body = (document.getElementById('obNewBody').value || '').trim();
+      if (!title) { alert('Title required'); return; }
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/notes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ kind: 'onboarding', title, body: body || null }),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        loadDrawer('onboarding');
+      } catch (e) { alert('Failed'); }
+    }
+
+    async function deleteOnboardingItem(id) {
+      if (!confirm('Remove this onboarding item?')) return;
+      try {
+        const r = await fetch('/api/profile/' + profileUserId + '/notes/' + id, { method: 'DELETE', credentials: 'include' });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+        loadDrawer('onboarding');
+      } catch (e) { alert('Failed'); }
+    }
+
+    function obIcon(status) {
+      if (status === 'verified') return '<div class="ob-ico ver"><i class="ti ti-check"></i></div>';
+      if (status === 'submitted') return '<div class="ob-ico sub"><i class="ti ti-clock"></i></div>';
+      if (status === 'needs_redo') return '<div class="ob-ico redo"><i class="ti ti-rotate"></i></div>';
+      if (status === 'na') return '<div class="ob-ico na"><i class="ti ti-minus"></i></div>';
+      return '<div class="ob-ico todo"></div>';
+    }
+
+    function renderOnboardingSection(data) {
+      const body = document.getElementById('profPanelBody');
+      const notes = (data.notes || []).slice().sort((a, b) => ((a.ob_sort || 9999) - (b.ob_sort || 9999)) || (a.id - b.id));
+      const isSelf = viewer.is_self;
+      const isHr = viewer.can_edit_any || viewer.can_edit_dept;
+      const canAct = isSelf || isHr;
+
+      const obStatusOf = (n) => n.ob_status || (n.is_completed ? 'verified' : 'to_do');
+      const isDone = (n) => { const s = obStatusOf(n); return s === 'verified' || s === 'na'; };
+      const total = notes.length;
+      const done = notes.filter(isDone).length;
+      const pct = total ? Math.round(done * 100 / total) : 0;
+
+      let html = '';
+
+      // Welcome / progress strip
+      if (isSelf) {
+        html += '<div class="ob-welcome">' +
+          '<h3>Welcome to FK Sports, ' + esc(obFirstName()) + '! \uD83D\uDC4B</h3>' +
+          '<p>Let\u2019s get you set up \u2014 about 10 minutes. Finish these and you\u2019re fully on the system and on payroll.</p>' +
+          '<div class="ob-pcount"><span>' + done + ' of ' + total + ' done</span><span>' + pct + '%</span></div>' +
+          '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div></div>' +
+          '<div class="ob-privacy"><i class="ti ti-lock"></i> Your documents are private \u2014 only HR can see them. Stuck on anything? Message HR and we\u2019ll help.</div>';
+      } else {
+        html += '<div class="ob-welcome"><h3>' + esc(overview.user.display_name || overview.user.full_name || 'Onboarding') + '</h3>' +
+          '<div class="ob-pcount"><span>' + done + ' of ' + total + ' done</span><span>' + pct + '%</span></div>' +
+          '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div></div>';
+      }
+
+      if (total === 0) {
+        html += '<div class="ob-grp"><div style="padding:24px 0;text-align:center;color:var(--muted)">No onboarding items.</div></div>';
+      }
+
+      // Group items by ob_group, in first-seen order
+      const groups = [];
+      const byGroup = {};
+      for (const n of notes) {
+        const g = n.ob_group || 'More items';
+        if (!byGroup[g]) { byGroup[g] = []; groups.push(g); }
+        byGroup[g].push(n);
+      }
+
+      groups.forEach((g, gi) => {
+        html += '<div class="ob-grp"><div class="ob-grp-head"><span class="n">' + (gi + 1) + '</span> ' + esc(g) + '</div>';
+        for (const n of byGroup[g]) {
+          const s = obStatusOf(n);
+          const linked = !!n.ob_field;
+          let chip = '', actions = '';
+
+          if (s === 'verified') {
+            chip = '<span class="ob-chip ver">Verified</span>';
+            if (isHr) actions = '<button class="ob-btn" data-ob-act="needs_redo" data-id="' + n.id + '">Needs redo\u2026</button>';
+          } else if (s === 'submitted') {
+            chip = '<span class="ob-chip sub">With HR to check</span>';
+            if (isHr) actions = '<button class="ob-btn primary" data-ob-act="verify" data-id="' + n.id + '"><i class="ti ti-check"></i> Verify</button>' +
+                                '<button class="ob-btn" data-ob-act="needs_redo" data-id="' + n.id + '">Needs redo\u2026</button>';
+          } else if (s === 'na') {
+            chip = '<span class="ob-chip na">Not applicable</span>';
+            if (canAct) actions = '<button class="ob-btn ghost" data-ob-act="reopen" data-id="' + n.id + '">Undo</button>';
+          } else if (s === 'needs_redo') {
+            chip = '<span class="ob-chip redo">Needs redo</span>';
+            if (canAct) {
+              actions = linked
+                ? '<button class="ob-btn primary" data-ob-go="' + (n.ob_field === 'photo' ? 'photo' : 'details') + '">' + (n.ob_field === 'photo' ? 'Add photo' : 'Update in My details') + '</button>'
+                : '<button class="ob-btn primary" data-ob-upload="' + n.id + '">Re-upload</button>';
+            }
+          } else { // to_do
+            chip = '<span class="ob-chip todo">To do</span>';
+            if (canAct) {
+              if (linked) {
+                actions = '<button class="ob-btn primary" data-ob-go="' + (n.ob_field === 'photo' ? 'photo' : 'details') + '">' + (n.ob_field === 'photo' ? 'Add photo' : 'Add') + '</button>' +
+                          '<button class="ob-btn ghost" data-ob-upload="' + n.id + '">Attach file</button>';
+              } else {
+                actions = '<button class="ob-btn primary" data-ob-upload="' + n.id + '">Upload</button>';
+              }
+              if (!n.ob_required) actions += '<button class="ob-btn ghost" data-ob-act="na" data-id="' + n.id + '">Mark N/A</button>';
+            }
+          }
+
+          // attached files
+          let files = '';
+          if (n.attached_files && n.attached_files.length) {
+            files = n.attached_files.map(f => '<a class="ob-filechip" href="/api/files/' + f.id + '" target="_blank"><i class="ti ti-file-text"></i> ' + esc(f.filename) + '</a>').join(' ');
+          }
+
+          const tag = n.ob_required ? '<span class="ob-req">REQUIRED</span>' : (n.ob_required === false ? '<span class="ob-opt">OPTIONAL</span>' : '');
+          html += '<div class="ob-item">' +
+            obIcon(s) +
+            '<div class="ob-mid">' +
+              '<div class="ob-title">' + esc(n.title) + tag +
+                (isHr ? '<button class="ob-del" data-ob-del="' + n.id + '" title="Remove"><i class="ti ti-trash"></i></button>' : '') +
+              '</div>' +
+              (n.body ? '<div class="ob-why">' + esc(n.body) + '</div>' : '') +
+              (s === 'needs_redo' && n.ob_redo_reason ? '<div class="ob-redo-msg"><b>HR asked you to redo this:</b> ' + esc(n.ob_redo_reason) + '</div>' : '') +
+              (files ? '<div>' + files + '</div>' : '') +
+              '<input type="file" id="obFile_' + n.id + '" data-ob-file="' + n.id + '" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx">' +
+            '</div>' +
+            '<div class="ob-right">' + chip + actions + '</div>' +
+          '</div>';
+        }
+        html += '</div>';
+      });
+
+      // HR: add a custom item
+      if (isHr) {
+        html += '<div class="ob-add"><h3>Add an onboarding item</h3>' +
+          '<label>Title</label><input type="text" id="obNewTitle" placeholder="e.g. Sign IT security policy">' +
+          '<label>Details (the why) \u2014 optional</label><textarea id="obNewBody" rows="2"></textarea>' +
+          '<div style="margin-top:14px"><button class="ob-btn primary" data-ob-additem>Add item</button></div></div>';
+      }
+
+      body.innerHTML = html;
+
+      // Wire
+      body.querySelectorAll('[data-ob-go]').forEach(el => el.addEventListener('click', () => {
+        if (el.dataset.obGo === 'photo') { const b = document.getElementById('profPhotoBtn'); if (b) b.click(); }
+        else loadDrawer('details');
+      }));
+      body.querySelectorAll('[data-ob-upload]').forEach(el => el.addEventListener('click', () => {
+        const inp = document.getElementById('obFile_' + el.dataset.obUpload); if (inp) inp.click();
+      }));
+      body.querySelectorAll('[data-ob-file]').forEach(el => el.addEventListener('change', () => uploadOnboardingFile(el.dataset.obFile)));
+      body.querySelectorAll('[data-ob-act]').forEach(el => el.addEventListener('click', () => {
+        const id = el.dataset.id, act = el.dataset.obAct;
+        if (act === 'needs_redo') {
+          const reason = prompt('What needs redoing? This is sent to the employee:');
+          if (reason === null) return;
+          doObAction(id, 'needs_redo', reason);
+        } else doObAction(id, act);
+      }));
+      body.querySelectorAll('[data-ob-del]').forEach(el => el.addEventListener('click', () => deleteOnboardingItem(el.dataset.obDel)));
+      const addBtn = body.querySelector('[data-ob-additem]');
+      if (addBtn) addBtn.addEventListener('click', addOnboardingItem);
     }
 
     // --- Kick off ------------------------------------------------------
