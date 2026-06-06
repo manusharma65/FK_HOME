@@ -233,6 +233,7 @@ router.get('/month.csv', requireSalary, async (req, res) => {
 // ============================================================================
 
 const { notify } = require('../notify');
+const leaveEngine = require('./leave-engine');
 
 const COMPANY = {
   name: 'FK Enterprises',
@@ -329,17 +330,31 @@ async function lopDatesForUser(userId, range) {
 
 // Build the full snapshot object for one employee for one month.
 // lopOverride (number) lets HR override the detected LOP during review.
+// Days in the month the person was NOT yet on payroll (joined mid-month).
+function nonEmployedDays(u, range) {
+  if (!u.hire_date) return 0;
+  const hd = dateStr(u.hire_date);
+  const hy = +hd.slice(0, 4), hm = +hd.slice(5, 7), hday = +hd.slice(8, 10);
+  if (hy > range.year || (hy === range.year && hm > range.month)) return Number(range.end.slice(8, 10)); // joined after this month
+  if (hy === range.year && hm === range.month) return hday - 1;                                          // joined this month
+  return 0;                                                                                              // joined earlier
+}
+
 async function buildSnapshot(u, salaryRow, range, lopOverride) {
   const calendarDays = Number(range.end.slice(8, 10));
+  const nonEmp = nonEmployedDays(u, range);
+  const employedDays = calendarDays - nonEmp;
   const lopDates = await lopDatesForUser(u.id, range);
-  const lop = (lopOverride != null && lopOverride !== '') ? Number(lopOverride) : lopDates.length;
+  let lop = (lopOverride != null && lopOverride !== '') ? Number(lopOverride) : lopDates.length;
+  lop = Math.max(0, Math.min(employedDays, lop));      // clamp 0..employed days
 
   const ctc = salaryRow ? Number(salaryRow.monthly_ctc) : (u.monthly_salary != null ? Number(u.monthly_salary) : 0);
   const flagged = !salaryRow || !ctc;
   const flagNote = !salaryRow ? 'No salary structure on file' : (!ctc ? 'Salary is zero' : null);
 
   const master = splitSalary(ctc);
-  const actualGross = lop > 0 ? Math.round(ctc * (calendarDays - lop) / calendarDays) : ctc;
+  const payDays = Math.max(0, employedDays - lop);
+  const actualGross = (payDays >= calendarDays) ? ctc : Math.round(ctc * payDays / calendarDays);
   const actual = splitSalary(actualGross);
 
   const earnings = [
@@ -357,16 +372,17 @@ async function buildSnapshot(u, salaryRow, range, lopOverride) {
   }
   const totalEarnMaster = master.basic + master.hra + master.special;
   const totalEarnActual = actualGross;
-  const totalDeductions = deductions.reduce((s, d) => s + d.actual, 0);
-  const net = totalEarnActual - totalDeductions;
+  const totalExtra = 0;                                // none at generation; HR adds in the editor
+  const totalDeductions = deductions.reduce((s, d) => s + Number(d.actual || 0), 0);
+  const net = totalEarnActual + totalExtra - totalDeductions;
 
   return {
     emp_name: u.display_name || u.full_name,
-    emp_designation: null,                 // no title field yet — shows as —
+    emp_designation: null,
     emp_department: u.dept_name || null,
     emp_code: u.emp_id || null,
     emp_location: COMPANY.location,
-    pf_no: null, pf_uan: null,             // no field yet — shows as —
+    pf_no: null, pf_uan: null,
     bank_name: u.bank_name || null,
     bank_account: u.bank_account_number || null,
     pan: u.pan || null,
@@ -374,13 +390,16 @@ async function buildSnapshot(u, salaryRow, range, lopOverride) {
     currency: (salaryRow && salaryRow.currency) || u.salary_currency || 'INR',
     monthly_ctc: ctc,
     calendar_days: calendarDays,
+    employed_days: employedDays,
     lop_days: lop,
-    paid_days: calendarDays - lop,
+    paid_days: payDays,
     lop_dates: JSON.stringify(lopDates),
     earnings: JSON.stringify(earnings),
+    extra_earnings: JSON.stringify([]),
     deductions: JSON.stringify(deductions),
     total_earn_master: totalEarnMaster,
     total_earn_actual: totalEarnActual,
+    total_extra: totalExtra,
     total_deductions: totalDeductions,
     net_pay: net,
     net_in_words: inrInWords(net),
@@ -424,32 +443,34 @@ async function upsertPayslip(runId, userId, range, snap) {
     `INSERT INTO payslips
        (run_id, user_id, year, month, emp_name, emp_designation, emp_department,
         emp_code, emp_location, pf_no, pf_uan, bank_name, bank_account, pan, doj,
-        currency, monthly_ctc, calendar_days, lop_days, paid_days, lop_dates,
-        earnings, deductions, total_earn_master, total_earn_actual,
-        total_deductions, net_pay, net_in_words, flagged, flag_note, status, generated_at)
+        currency, monthly_ctc, calendar_days, employed_days, lop_days, paid_days, lop_dates,
+        earnings, extra_earnings, deductions, total_earn_master, total_earn_actual,
+        total_extra, total_deductions, net_pay, net_in_words, flagged, flag_note,
+        held, status, generated_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-             $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,'draft',NOW())
+             $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,FALSE,'draft',NOW())
      ON CONFLICT (run_id, user_id) DO UPDATE SET
         emp_name=EXCLUDED.emp_name, emp_designation=EXCLUDED.emp_designation,
         emp_department=EXCLUDED.emp_department, emp_code=EXCLUDED.emp_code,
         emp_location=EXCLUDED.emp_location, pf_no=EXCLUDED.pf_no, pf_uan=EXCLUDED.pf_uan,
         bank_name=EXCLUDED.bank_name, bank_account=EXCLUDED.bank_account, pan=EXCLUDED.pan,
         doj=EXCLUDED.doj, currency=EXCLUDED.currency, monthly_ctc=EXCLUDED.monthly_ctc,
-        calendar_days=EXCLUDED.calendar_days, lop_days=EXCLUDED.lop_days,
-        paid_days=EXCLUDED.paid_days, lop_dates=EXCLUDED.lop_dates,
-        earnings=EXCLUDED.earnings, deductions=EXCLUDED.deductions,
+        calendar_days=EXCLUDED.calendar_days, employed_days=EXCLUDED.employed_days,
+        lop_days=EXCLUDED.lop_days, paid_days=EXCLUDED.paid_days, lop_dates=EXCLUDED.lop_dates,
+        earnings=EXCLUDED.earnings, extra_earnings=EXCLUDED.extra_earnings, deductions=EXCLUDED.deductions,
         total_earn_master=EXCLUDED.total_earn_master, total_earn_actual=EXCLUDED.total_earn_actual,
-        total_deductions=EXCLUDED.total_deductions, net_pay=EXCLUDED.net_pay,
-        net_in_words=EXCLUDED.net_in_words, flagged=EXCLUDED.flagged, flag_note=EXCLUDED.flag_note,
+        total_extra=EXCLUDED.total_extra, total_deductions=EXCLUDED.total_deductions,
+        net_pay=EXCLUDED.net_pay, net_in_words=EXCLUDED.net_in_words,
+        flagged=EXCLUDED.flagged, flag_note=EXCLUDED.flag_note,
         override_reason=NULL, overridden_by=NULL, overridden_at=NULL,
-        status='draft', generated_at=NOW()
+        held=FALSE, status='draft', generated_at=NOW()
      WHERE payslips.status <> 'published'`,
     [runId, userId, range.year, range.month, snap.emp_name, snap.emp_designation,
      snap.emp_department, snap.emp_code, snap.emp_location, snap.pf_no, snap.pf_uan,
      snap.bank_name, snap.bank_account, snap.pan, snap.doj, snap.currency,
-     snap.monthly_ctc, snap.calendar_days, snap.lop_days, snap.paid_days, snap.lop_dates,
-     snap.earnings, snap.deductions, snap.total_earn_master, snap.total_earn_actual,
-     snap.total_deductions, snap.net_pay, snap.net_in_words, snap.flagged, snap.flag_note]
+     snap.monthly_ctc, snap.calendar_days, snap.employed_days, snap.lop_days, snap.paid_days, snap.lop_dates,
+     snap.earnings, snap.extra_earnings, snap.deductions, snap.total_earn_master, snap.total_earn_actual,
+     snap.total_extra, snap.total_deductions, snap.net_pay, snap.net_in_words, snap.flagged, snap.flag_note]
   );
 }
 
@@ -462,9 +483,6 @@ router.post('/run', requireSalary, async (req, res) => {
     let run = (await db.query(
       `SELECT * FROM payroll_runs WHERE year = $1 AND month = $2`,
       [range.year, range.month])).rows[0];
-    if (run && run.status === 'approved') {
-      return res.status(409).json({ error: 'This month is already approved. Revoke a payslip to make changes.' });
-    }
     if (!run) {
       run = (await db.query(
         `INSERT INTO payroll_runs (year, month, status, created_by)
@@ -499,11 +517,21 @@ router.get('/run', requireSalary, async (req, res) => {
     if (!run) return res.json({ run: null, rows: [] });
     const ps = await db.query(
       `SELECT p.id, p.user_id, p.emp_name, p.emp_department, p.net_pay, p.total_earn_actual,
-              p.total_deductions, p.lop_days, p.lop_dates, p.calendar_days, p.status,
-              p.flagged, p.flag_note, p.override_reason, p.monthly_ctc,
+              p.total_extra, p.total_deductions, p.lop_days, p.lop_dates, p.calendar_days,
+              p.employed_days, p.status, p.held, p.flagged, p.flag_note, p.override_reason,
+              p.monthly_ctc, p.earnings, p.extra_earnings, p.deductions,
               u.initials, u.avatar_colour
          FROM payslips p JOIN users u ON u.id = p.user_id
         WHERE p.run_id = $1 ORDER BY p.emp_name`, [run.id]);
+    // Attach leave balance + daily rate so the editor can offer leave encashment.
+    for (const r of ps.rows) {
+      const cd = Number(r.calendar_days) || 30;
+      r.daily_rate = Math.round(Number(r.monthly_ctc || 0) / cd);
+      try {
+        const bal = await leaveEngine.getBalance(r.user_id);
+        r.leave_remaining = bal && bal.remaining != null ? Number(bal.remaining) : 0;
+      } catch (e) { r.leave_remaining = 0; }
+    }
     res.json({ run, rows: ps.rows });
   } catch (err) {
     console.error('[payroll/run get] error:', err);
@@ -511,40 +539,69 @@ router.get('/run', requireSalary, async (req, res) => {
   }
 });
 
-// ---------- PUT /api/payroll/payslip/:id/override  { lop_days, reason } ----------
-// Override the detected LOP for one payslip, recompute, log the reason.
+// ---------- PUT /api/payroll/payslip/:id/override ----------
+// Full line editor: { lop_days, extra_earnings:[{label,amount,reason}],
+//   deductions:[{label,amount,reason}], reason, publish:bool }
+// Recomputes from the snapshot's CTC + calendar/employed days; editing holds the
+// row (excluded from "publish all ready") unless publish:true is sent.
 router.put('/payslip/:id/override', requireSalary, async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const lopDays = Number(req.body.lop_days);
   const reason = String(req.body.reason || '').trim();
-  if (!id || !Number.isFinite(lopDays) || lopDays < 0) return res.status(400).json({ error: 'Bad input' });
+  if (!id) return res.status(400).json({ error: 'Bad id' });
   if (!reason) return res.status(400).json({ error: 'A reason is required' });
   try {
     const p = (await db.query(`SELECT * FROM payslips WHERE id = $1`, [id])).rows[0];
     if (!p) return res.status(404).json({ error: 'Not found' });
     if (p.status === 'published') return res.status(409).json({ error: 'This payslip is published. Revoke it first.' });
+
     const cd = Number(p.calendar_days);
+    const employed = Number(p.employed_days != null ? p.employed_days : cd);
     const ctc = Number(p.monthly_ctc);
-    const actualGross = lopDays > 0 ? Math.round(ctc * (cd - lopDays) / cd) : ctc;
-    const a = splitSalary(actualGross);
+    let lop = Number(req.body.lop_days);
+    if (!Number.isFinite(lop)) lop = Number(p.lop_days) || 0;
+    lop = Math.max(0, Math.min(employed, lop));                 // clamp 0..employed days
+
+    const payDays = Math.max(0, employed - lop);
+    const gross = (payDays >= cd) ? ctc : Math.round(ctc * payDays / cd);
+    const a = splitSalary(gross);
     const earnings = [
-      { label: 'Basic (60%)',             master: Math.round(ctc*0.6), actual: a.basic },
-      { label: 'HRA (30%)',               master: Math.round(ctc*0.3), actual: a.hra },
-      { label: 'Special Allowance (10%)', master: ctc - Math.round(ctc*0.6) - Math.round(ctc*0.3), actual: a.special },
+      { label: 'Basic (60%)',             master: Math.round(ctc * 0.6), actual: a.basic },
+      { label: 'HRA (30%)',               master: Math.round(ctc * 0.3), actual: a.hra },
+      { label: 'Special Allowance (10%)', master: ctc - Math.round(ctc * 0.6) - Math.round(ctc * 0.3), actual: a.special },
     ];
-    const deductions = p.deductions || [];
+
+    const cleanLines = (arr) => (Array.isArray(arr) ? arr : [])
+      .map(x => ({ label: String(x.label || '').trim(), amount: Math.round(Number(x.amount) || 0), reason: String(x.reason || '').trim() }))
+      .filter(x => x.label && x.amount !== 0);
+    const extra = cleanLines(req.body.extra_earnings);
+    const deductions = cleanLines(req.body.deductions).map(d => ({ label: d.label, actual: d.amount, reason: d.reason }));
+
+    const totalExtra = extra.reduce((s, e) => s + e.amount, 0);
     const totalDed = deductions.reduce((s, d) => s + Number(d.actual || 0), 0);
-    const net = actualGross - totalDed;
+    const net = gross + totalExtra - totalDed;
+    const publish = req.body.publish === true;
+
     await db.query(
-      `UPDATE payslips SET lop_days=$1, paid_days=$2, earnings=$3, total_earn_actual=$4,
-              net_pay=$5, net_in_words=$6, override_reason=$7, overridden_by=$8, overridden_at=NOW()
-        WHERE id=$9`,
-      [lopDays, cd - lopDays, JSON.stringify(earnings), actualGross, net, inrInWords(net),
-       reason, req.user.id, id]);
-    res.json({ ok: true, net_pay: net });
+      `UPDATE payslips SET lop_days=$1, paid_days=$2, earnings=$3, extra_earnings=$4, deductions=$5,
+              total_earn_actual=$6, total_extra=$7, total_deductions=$8, net_pay=$9, net_in_words=$10,
+              override_reason=$11, overridden_by=$12, overridden_at=NOW(),
+              held = CASE WHEN $13 THEN FALSE ELSE TRUE END,
+              status = CASE WHEN $13 THEN 'published' ELSE 'draft' END,
+              published_at = CASE WHEN $13 THEN NOW() ELSE published_at END
+        WHERE id=$14`,
+      [lop, payDays, JSON.stringify(earnings), JSON.stringify(extra), JSON.stringify(deductions),
+       gross, totalExtra, totalDed, net, inrInWords(net), reason, req.user.id, publish, id]);
+
+    if (publish) {
+      await notify({ userIds: [p.user_id], type: 'payslip.ready', title: 'Your payslip is ready',
+        body: `Your payslip for ${MONTHS[p.month]} ${p.year} is now available in your Pay section.`,
+        action_url: '/#me/profile?tab=pay', related_type: 'payslip' });
+      await refreshRunStatus(p.run_id);
+    }
+    res.json({ ok: true, net_pay: net, negative: net < 0 });
   } catch (err) {
     console.error('[payroll/override] error:', err);
-    res.status(500).json({ error: 'Failed to override' });
+    res.status(500).json({ error: 'Failed to save changes' });
   }
 });
 
@@ -573,35 +630,43 @@ router.post('/payslip/:id/regenerate', requireSalary, async (req, res) => {
   }
 });
 
-// ---------- POST /api/payroll/run/:id/approve ----------
-// Approve the run: publish every draft payslip, lock figures, notify employees.
-router.post('/run/:id/approve', requireSalary, async (req, res) => {
+// Mark the run 'approved' once every non-flagged payslip is published, else 'draft'.
+async function refreshRunStatus(runId) {
+  const left = (await db.query(
+    `SELECT COUNT(*)::int AS n FROM payslips
+       WHERE run_id=$1 AND status<>'published' AND flagged=FALSE`, [runId])).rows[0].n;
+  if (left === 0) {
+    await db.query(`UPDATE payroll_runs SET status='approved', approved_at=NOW() WHERE id=$1`, [runId]);
+  } else {
+    await db.query(`UPDATE payroll_runs SET status='draft', approved_at=NULL, approved_by=NULL WHERE id=$1`, [runId]);
+  }
+}
+
+// ---------- POST /api/payroll/run/:id/publish-ready ----------
+// Publish every payslip that is ready: draft, not held, not flagged. Notify each.
+router.post('/run/:id/publish-ready', requireSalary, async (req, res) => {
   const runId = parseInt(req.params.id, 10);
   try {
     const run = (await db.query(`SELECT * FROM payroll_runs WHERE id = $1`, [runId])).rows[0];
     if (!run) return res.status(404).json({ error: 'Not found' });
-    if (run.status === 'approved') return res.status(409).json({ error: 'Already approved' });
     const published = await db.query(
-      `UPDATE payslips SET status='published', published_at=NOW()
-        WHERE run_id=$1 AND status='draft' RETURNING user_id, year, month`, [runId]);
-    await db.query(
-      `UPDATE payroll_runs SET status='approved', approved_by=$1, approved_at=NOW() WHERE id=$2`,
-      [req.user.id, runId]);
+      `UPDATE payslips SET status='published', published_at=NOW(), held=FALSE
+        WHERE run_id=$1 AND status='draft' AND held=FALSE AND flagged=FALSE
+        RETURNING user_id`, [runId]);
+    if (published.rows.length > 0) {
+      await db.query(`UPDATE payroll_runs SET approved_by=$1 WHERE id=$2`, [req.user.id, runId]);
+    }
     const period = `${MONTHS[run.month]} ${run.year}`;
     for (const row of published.rows) {
-      await notify({
-        userIds: [row.user_id],
-        type: 'payslip.ready',
-        title: 'Your payslip is ready',
+      await notify({ userIds: [row.user_id], type: 'payslip.ready', title: 'Your payslip is ready',
         body: `Your payslip for ${period} is now available in your Pay section.`,
-        action_url: '/#me/profile?tab=pay',
-        related_type: 'payslip',
-      });
+        action_url: '/#me/profile?tab=pay', related_type: 'payslip' });
     }
+    await refreshRunStatus(runId);
     res.json({ ok: true, published: published.rows.length });
   } catch (err) {
-    console.error('[payroll/approve] error:', err);
-    res.status(500).json({ error: 'Failed to approve' });
+    console.error('[payroll/publish-ready] error:', err);
+    res.status(500).json({ error: 'Failed to publish' });
   }
 });
 
@@ -617,6 +682,8 @@ router.post('/payslip/:id/revoke', requireSalary, async (req, res) => {
     await db.query(
       `UPDATE payslips SET status='revoked', revoked_at=NOW(), revoke_reason=$1, revoked_by=$2 WHERE id=$3`,
       [reason, req.user.id, id]);
+    const pr = (await db.query(`SELECT run_id FROM payslips WHERE id = $1`, [id])).rows[0];
+    if (pr) await refreshRunStatus(pr.run_id);
     res.json({ ok: true });
   } catch (err) {
     console.error('[payroll/revoke] error:', err);
@@ -633,8 +700,9 @@ router.post('/payslip/:id/publish', requireSalary, async (req, res) => {
     if (!p) return res.status(404).json({ error: 'Not found' });
     if (p.status === 'published') return res.status(409).json({ error: 'Already published' });
     await db.query(
-      `UPDATE payslips SET status='published', published_at=NOW(),
+      `UPDATE payslips SET status='published', published_at=NOW(), held=FALSE,
               revoked_at=NULL, revoke_reason=NULL, revoked_by=NULL WHERE id=$1`, [id]);
+    await refreshRunStatus(p.run_id);
     await notify({
       userIds: [p.user_id],
       type: 'payslip.ready',
@@ -696,11 +764,16 @@ router.get('/payslip/:id/html', async (req, res) => {
 function renderPayslipHtml(p) {
   const period = `${MONTHS[p.month]} ${p.year}`;
   const earnings = Array.isArray(p.earnings) ? p.earnings : [];
+  const extra = Array.isArray(p.extra_earnings) ? p.extra_earnings : [];
   const deductions = Array.isArray(p.deductions) ? p.deductions : [];
   const v = (x) => (x == null || x === '') ? '\u2014' : escHtml(x);
-  const earnRows = earnings.map(e =>
+  let earnRows = earnings.map(e =>
     `<tr><td>${escHtml(e.label)}</td><td class="num">${fmtINR(e.master)}</td><td class="num">${fmtINR(e.actual)}</td></tr>`
   ).join('');
+  earnRows += extra.map(e =>
+    `<tr><td>${escHtml(e.label)}</td><td class="num">&mdash;</td><td class="num">${fmtINR(e.amount)}</td></tr>`
+  ).join('');
+  const totalEarnActual = Number(p.total_earn_actual || 0) + Number(p.total_extra || 0);
   let dedRows;
   if (deductions.length) {
     dedRows = deductions.map(d =>
@@ -774,7 +847,7 @@ function renderPayslipHtml(p) {
         <div class="row"><span class="k">Department</span><span class="v">${v(p.emp_department)}</span></div>
         <div class="row"><span class="k">Location</span><span class="v">${v(p.emp_location)}</span></div>
         <div class="row"><span class="k">Joining Date</span><span class="v">${fmtDayMonYear(p.doj)}</span></div>
-        <div class="row"><span class="k">Effective Work Days</span><span class="v">${escHtml(p.calendar_days)}</span></div>
+        <div class="row"><span class="k">Effective Work Days</span><span class="v">${escHtml(p.employed_days != null ? p.employed_days : p.calendar_days)}</span></div>
         <div class="row"><span class="k">LOP</span><span class="v">${escHtml(p.lop_days)}</span></div>
       </div>
       <div class="c">
@@ -791,7 +864,7 @@ function renderPayslipHtml(p) {
       <div class="pane"><table>
         <thead><tr><th>Earnings</th><th class="num">Master</th><th class="num">Actual</th></tr></thead>
         <tbody>${earnRows}</tbody>
-        <tfoot><tr><td>Total Earnings</td><td class="num">${fmtINR(p.total_earn_master)}</td><td class="num">${fmtINR(p.total_earn_actual)}</td></tr></tfoot>
+        <tfoot><tr><td>Total Earnings</td><td class="num">${fmtINR(p.total_earn_master)}</td><td class="num">${fmtINR(totalEarnActual)}</td></tr></tfoot>
       </table></div>
       <div class="pane"><table>
         <thead><tr><th>Deductions</th><th class="num">Actual</th></tr></thead>

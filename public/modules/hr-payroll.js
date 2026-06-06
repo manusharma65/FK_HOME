@@ -228,12 +228,15 @@ window.fkModules['hr/payroll'] = {
     const moneyINR = (n) => '\u20B9' + Number(n || 0).toLocaleString('en-IN',
       { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 
-    function statusChip(s, flagged) {
-      if (flagged) return '<span class="chip amber">No salary</span>';
-      if (s === 'published') return '<span class="chip green">Published</span>';
-      if (s === 'revoked') return '<span class="chip red">Revoked</span>';
-      return '<span class="chip muted">Draft</span>';
+    function statusChip(r) {
+      if (r.flagged) return '<span class="chip amber">No salary on file</span>';
+      if (r.status === 'published') return '<span class="chip green">Published</span>';
+      if (r.status === 'revoked') return '<span class="chip red">Revoked</span>';
+      if (r.held || r.override_reason) return '<span class="chip amber">Edited · held</span>';
+      return '<span class="chip muted">Draft · ready</span>';
     }
+
+    var genRows = {};   // id -> row, so the editor has full data
 
     async function loadGen() {
       const { y, m } = getYM();
@@ -253,36 +256,38 @@ window.fkModules['hr/payroll'] = {
     function renderGenPanel(d, y, m) {
       const wrap = document.getElementById('prGenWrap');
       const label = monthName(y, m);
+      genRows = {};
       if (!d.run) {
         wrap.dataset.runId = '';
         wrap.innerHTML =
           '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">' +
             '<div><div style="font-size:15px;font-weight:600">Generate payslips for ' + esc(label) + '</div>' +
-            '<div style="font-size:12px;color:var(--muted);margin-top:3px;max-width:520px">Creates a draft payslip for every active India employee from their salary and attendance. Nothing is published until you review and approve.</div></div>' +
+            '<div style="font-size:12px;color:var(--muted);margin-top:3px;max-width:520px">Creates a draft payslip for every active India employee from their salary and attendance. Nothing is published until you review and publish.</div></div>' +
             '<button class="btn pr-run" style="background:var(--green);color:#fff;border-color:var(--green);padding:10px 18px;font-size:14px"><i class="ti ti-player-play"></i> Run payroll</button>' +
           '</div>';
         return;
       }
       const run = d.run;
       const rows = d.rows || [];
-      const approved = run.status === 'approved';
+      rows.forEach(r => { genRows[r.id] = r; });
       wrap.dataset.runId = run.id;
       const totalNet = rows.filter(r => r.status !== 'revoked').reduce((s, r) => s + Number(r.net_pay || 0), 0);
       const flagged = rows.filter(r => r.flagged).length;
+      const publishedCount = rows.filter(r => r.status === 'published').length;
+      const readyCount = rows.filter(r => r.status === 'draft' && !r.held && !r.flagged).length;
 
       const head =
-        '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px">' +
           '<div><div style="font-size:15px;font-weight:600">Payroll — ' + esc(label) + ' ' +
-            (approved ? '<span class="chip green">Approved</span>' : '<span class="chip muted">Draft</span>') + '</div>' +
-          '<div style="font-size:12px;color:var(--muted);margin-top:3px">' + rows.length + ' payslips · total net ' + moneyINR(totalNet) +
-            (flagged ? ' · <span style="color:var(--amber-deep)">' + flagged + ' with no salary on file</span>' : '') +
-            (approved && run.approved_by_name ? ' · approved by ' + esc(run.approved_by_name) : '') + '</div></div>' +
+            (run.status === 'approved' ? '<span class="chip green">Complete</span>' : '<span class="chip muted">Draft</span>') + '</div>' +
+          '<div style="font-size:12px;color:var(--muted);margin-top:3px">' + rows.length + ' payslips · ' + publishedCount + ' published · total net ' + moneyINR(totalNet) +
+            (flagged ? ' · <span style="color:var(--amber-deep)">' + flagged + ' with no salary on file</span>' : '') + '</div></div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-            (approved ? '' :
-              '<button class="btn pr-rerun" style="padding:9px 14px"><i class="ti ti-refresh"></i> Re-generate all</button>' +
-              '<button class="btn pr-approve" style="background:var(--green);color:#fff;border-color:var(--green);padding:9px 16px;font-size:14px"><i class="ti ti-check"></i> Approve &amp; publish all</button>') +
+            '<button class="btn pr-rerun" style="padding:9px 14px"><i class="ti ti-refresh"></i> Re-generate all</button>' +
+            '<button class="btn pr-publishready" ' + (readyCount ? '' : 'disabled ') + 'style="background:var(--green);color:#fff;border-color:var(--green);padding:9px 16px;font-size:14px' + (readyCount ? '' : ';opacity:.5') + '"><i class="ti ti-upload"></i> Publish all ready (' + readyCount + ')</button>' +
           '</div>' +
-        '</div>';
+        '</div>' +
+        '<div style="font-size:12px;color:var(--muted);background:var(--bg);border:0.5px solid var(--line);border-radius:8px;padding:8px 12px;margin:8px 0 12px">Publish each person when their figures are right — individually, or “Publish all ready” to push everyone with no unresolved edits. Edited rows are held until you publish them.</div>';
 
       const list = rows.map(r => {
         const lopTxt = Number(r.lop_days) > 0
@@ -291,24 +296,34 @@ window.fkModules['hr/payroll'] = {
         const lopDates = (Array.isArray(r.lop_dates) && r.lop_dates.length)
           ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">LOP: ' + r.lop_dates.map(esc).join(', ') + '</div>' : '';
         const ovr = r.override_reason
-          ? '<div style="font-size:11px;color:var(--amber-deep);margin-top:2px"><i class="ti ti-pencil"></i> Override: ' + esc(r.override_reason) + '</div>' : '';
-        const actions = approved
-          ? '<button class="btn pr-pview" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-eye"></i> View</button>' +
-            (r.status === 'published'
-              ? '<button class="btn pr-revoke" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-ban"></i> Revoke</button>'
-              : '<button class="btn pr-republish" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-upload"></i> Re-publish</button>')
-          : '<button class="btn pr-pview" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-eye"></i> Preview</button>' +
-            '<button class="btn pr-override" data-id="' + r.id + '" data-lop="' + r.lop_days + '" data-name="' + esc(r.emp_name) + '" style="padding:8px 12px"><i class="ti ti-pencil"></i> Override</button>' +
-            '<button class="btn pr-regen" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-refresh"></i> Re-generate</button>';
-        return '<tr style="border-top:0.5px solid var(--line)">' +
+          ? '<div style="font-size:11px;color:var(--amber-deep);margin-top:2px"><i class="ti ti-pencil"></i> ' + esc(r.override_reason) + '</div>' : '';
+        const netCol = (Number(r.net_pay) < 0)
+          ? '<span style="color:var(--red);font-weight:600">' + moneyINR(r.net_pay) + '</span>'
+          : (r.flagged ? '<span style="color:var(--muted)">—</span>' : '<span style="font-weight:600">' + moneyINR(r.net_pay) + '</span>');
+        let actions;
+        if (r.status === 'published') {
+          actions = '<button class="btn pr-pview" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-eye"></i> View</button>' +
+                    '<button class="btn pr-revoke" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-ban"></i> Revoke</button>';
+        } else if (r.status === 'revoked') {
+          actions = '<button class="btn pr-pview" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-eye"></i> View</button>' +
+                    '<button class="btn pr-edit" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-pencil"></i> Edit</button>' +
+                    '<button class="btn pr-publish" data-id="' + r.id + '" style="padding:8px 12px;background:var(--green);color:#fff;border-color:var(--green)"><i class="ti ti-upload"></i> Re-publish</button>';
+        } else if (r.flagged) {
+          actions = '<button class="btn" disabled style="padding:8px 12px;opacity:.5"><i class="ti ti-upload"></i> Publish</button>';
+        } else {
+          actions = '<button class="btn pr-pview" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-eye"></i> Preview</button>' +
+                    '<button class="btn pr-edit" data-id="' + r.id + '" style="padding:8px 12px"><i class="ti ti-pencil"></i> Edit</button>' +
+                    '<button class="btn pr-publish" data-id="' + r.id + '" style="padding:8px 12px;background:var(--green);color:#fff;border-color:var(--green)"><i class="ti ti-upload"></i> Publish</button>';
+        }
+        return '<tr style="border-top:0.5px solid var(--line)' + (r.flagged ? ';background:var(--bg)' : '') + '">' +
           '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
             '<span style="width:24px;height:24px;border-radius:50%;background:' + (r.avatar_colour || '#888780') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none">' + esc(r.initials || '') + '</span>' +
             '<div>' + esc(r.emp_name) + lopDates + ovr + '</div>' +
           '</div></td>' +
           '<td style="padding:10px 8px;color:var(--muted)">' + esc(r.emp_department || '\u2014') + '</td>' +
           '<td style="padding:10px 8px;text-align:right">' + lopTxt + '</td>' +
-          '<td style="padding:10px 8px;text-align:right;font-weight:600">' + moneyINR(r.net_pay) + '</td>' +
-          '<td style="padding:10px 8px">' + statusChip(r.status, r.flagged) + '</td>' +
+          '<td style="padding:10px 8px;text-align:right">' + netCol + '</td>' +
+          '<td style="padding:10px 8px">' + statusChip(r) + '</td>' +
           '<td style="padding:10px 8px"><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">' + actions + '</div></td>' +
         '</tr>';
       }).join('');
@@ -325,20 +340,132 @@ window.fkModules['hr/payroll'] = {
           '</tr></thead><tbody>' + list + '</tbody></table></div>';
     }
 
-    // Small modal (reuses the drill overlay) for Override / Revoke reasons.
+    // ---- Line editor (LOP + earnings + deductions + reason) ----------------
+    var ed = { id: null, extra: [], deds: [] };
+    function edCompute() {
+      const row = genRows[ed.id]; if (!row) return;
+      const cd = Number(row.calendar_days) || 30;
+      const employed = Number(row.employed_days != null ? row.employed_days : cd);
+      const ctc = Number(row.monthly_ctc) || 0;
+      let lop = Number(document.getElementById('edLop').value) || 0;
+      lop = Math.max(0, Math.min(employed, lop));
+      const payDays = Math.max(0, employed - lop);
+      const gross = (payDays >= cd) ? ctc : Math.round(ctc * payDays / cd);
+      const basic = Math.round(gross * 0.6), hra = Math.round(gross * 0.3), spec = gross - basic - hra;
+      document.getElementById('edBasic').textContent = moneyINR(basic);
+      document.getElementById('edHra').textContent = moneyINR(hra);
+      document.getElementById('edSpec').textContent = moneyINR(spec);
+      const addE = ed.extra.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const totD = ed.deds.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const net = gross + addE - totD;
+      document.getElementById('edNet').textContent = moneyINR(net);
+      document.getElementById('edWarn').style.display = net < 0 ? 'block' : 'none';
+    }
+    function edRowHtml(kind, i, o) {
+      return '<div class="ed-lrow" style="display:grid;grid-template-columns:1.4fr .9fr 1.4fr auto;gap:8px;align-items:center;margin-bottom:8px">' +
+        '<input placeholder="Label" value="' + esc(o.label || '') + '" oninput="window.__edSet(\'' + kind + '\',' + i + ',\'label\',this.value)">' +
+        '<input type="number" placeholder="Amount" value="' + (o.amount != null ? esc(o.amount) : '') + '" oninput="window.__edSet(\'' + kind + '\',' + i + ',\'amount\',this.value)">' +
+        '<input placeholder="Reason" value="' + esc(o.reason || '') + '" oninput="window.__edSet(\'' + kind + '\',' + i + ',\'reason\',this.value)">' +
+        '<button class="btn" style="padding:7px 10px" onclick="window.__edDel(\'' + kind + '\',' + i + ')"><i class="ti ti-x"></i></button></div>';
+    }
+    function edDraw() {
+      document.getElementById('edExtra').innerHTML = ed.extra.map((o, i) => edRowHtml('extra', i, o)).join('');
+      document.getElementById('edDeds').innerHTML = ed.deds.map((o, i) => edRowHtml('deds', i, o)).join('');
+    }
+    window.__edSet = function (kind, i, field, val) { ed[kind][i][field] = val; if (field === 'amount') edCompute(); };
+    window.__edDel = function (kind, i) { ed[kind].splice(i, 1); edDraw(); edCompute(); };
+
+    function openEditor(id) {
+      const row = genRows[id]; if (!row) return;
+      ed.id = id;
+      ed.extra = (Array.isArray(row.extra_earnings) ? row.extra_earnings : []).map(o => ({ label: o.label, amount: o.amount, reason: o.reason || '' }));
+      ed.deds = (Array.isArray(row.deductions) ? row.deductions : []).map(o => ({ label: o.label, amount: (o.actual != null ? o.actual : o.amount), reason: o.reason || '' }));
+      const cd = Number(row.calendar_days) || 30;
+      const employed = Number(row.employed_days != null ? row.employed_days : cd);
+      const daily = Number(row.daily_rate || Math.round(Number(row.monthly_ctc || 0) / cd));
+      const balDays = Number(row.leave_remaining || 0);
+      const wrap = document.getElementById('prDrillWrap');
+      wrap.style.display = 'flex';
+      const encash = balDays > 0
+        ? '<div style="background:#EAF6EE;border:1px solid #BFE3CA;border-radius:9px;padding:10px 12px;font-size:12.5px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0">' +
+            '<div>\uD83D\uDCA1 <b>Leave encashment</b> available — balance <b>' + balDays + ' days</b> \u00D7 ' + moneyINR(daily) + ' = <b>' + moneyINR(balDays * daily) + '</b></div>' +
+            '<button class="btn" id="edEncash" style="padding:7px 11px">Add as earning</button></div>'
+        : '';
+      wrap.innerHTML =
+        '<div class="card" style="max-width:660px;width:100%;background:var(--surface);max-height:90vh;overflow:auto;padding:0">' +
+          '<div style="padding:16px 20px;border-bottom:0.5px solid var(--line);display:flex;align-items:center;justify-content:space-between">' +
+            '<div><div style="font-size:16px;font-weight:600">Edit payslip — ' + esc(row.emp_name) + '</div>' +
+            '<div style="font-size:12px;color:var(--muted);margin-top:2px">Base CTC ' + moneyINR(row.monthly_ctc) + ' · ' + employed + ' work days in month · daily rate ' + moneyINR(daily) + '</div></div>' +
+            '<button class="btn" id="edClose" style="padding:7px 10px"><i class="ti ti-x"></i></button>' +
+          '</div>' +
+          '<div style="padding:16px 20px">' +
+            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:4px 0 8px">1 · Unpaid days (LOP)</div>' +
+            '<div style="display:flex;gap:10px;align-items:center">' +
+              '<input id="edLop" type="number" min="0" max="' + employed + '" value="' + esc(row.lop_days || 0) + '" style="width:120px;padding:8px 10px;border:0.5px solid var(--line);border-radius:9px" oninput="(' + 'function(){})();">' +
+              '<div style="font-size:11.5px;color:var(--muted)">0–' + employed + ' only. Pay is pro-rated. Mid-month joiners are prorated from joining date automatically.</div>' +
+            '</div>' +
+            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">2 · Earnings</div>' +
+            '<div style="display:grid;grid-template-columns:1.4fr .9fr;gap:8px;background:var(--bg);border-radius:9px;padding:8px 10px;margin-bottom:6px"><div>Basic (60%)</div><div style="text-align:right" id="edBasic">—</div></div>' +
+            '<div style="display:grid;grid-template-columns:1.4fr .9fr;gap:8px;background:var(--bg);border-radius:9px;padding:8px 10px;margin-bottom:6px"><div>HRA (30%)</div><div style="text-align:right" id="edHra">—</div></div>' +
+            '<div style="display:grid;grid-template-columns:1.4fr .9fr;gap:8px;background:var(--bg);border-radius:9px;padding:8px 10px;margin-bottom:6px"><div>Special Allowance (10%)</div><div style="text-align:right" id="edSpec">—</div></div>' +
+            encash +
+            '<div id="edExtra"></div>' +
+            '<button class="btn" id="edAddE" style="padding:8px 12px"><i class="ti ti-plus"></i> Add earning (bonus, arrears, incentive, reimbursement…)</button>' +
+            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">3 · Deductions</div>' +
+            '<div id="edDeds"></div>' +
+            '<button class="btn" id="edAddD" style="padding:8px 12px"><i class="ti ti-plus"></i> Add deduction (advance recovery, loan, penalty…)</button>' +
+            '<div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;background:#FCF1E8;border:1px solid #F0CFB4;border-left:4px solid var(--amber-deep);border-radius:11px;padding:13px 18px">' +
+              '<div style="font-size:12px;color:var(--muted)">Net pay for ' + esc(monthName(getYM().y, getYM().m)) + '</div>' +
+              '<div style="font-size:22px;font-weight:800" id="edNet">—</div></div>' +
+            '<div id="edWarn" style="display:none;margin-top:10px;background:#FBEAE8;border:1px solid #F0C9C3;color:var(--red);font-size:12.5px;padding:9px 12px;border-radius:9px">\u26A0 Net pay is negative — deductions exceed earnings. You can still save, but please double-check.</div>' +
+            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">4 · Reason for changes (logged)</div>' +
+            '<input id="edReason" type="text" placeholder="e.g. 3 days LOP plus festival bonus" style="width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:9px">' +
+          '</div>' +
+          '<div style="padding:14px 20px;border-top:0.5px solid var(--line);display:flex;gap:9px;justify-content:flex-end;background:var(--bg)">' +
+            '<button class="btn" id="edCancel" style="padding:9px 16px">Cancel</button>' +
+            '<button class="btn" id="edSaveHold" style="padding:9px 16px"><i class="ti ti-device-floppy"></i> Save draft (hold)</button>' +
+            '<button class="btn" id="edSavePub" style="padding:9px 16px;background:var(--green);color:#fff;border-color:var(--green)"><i class="ti ti-upload"></i> Save &amp; publish</button>' +
+          '</div>' +
+        '</div>';
+      document.getElementById('edLop').addEventListener('input', edCompute);
+      document.getElementById('edAddE').onclick = () => { ed.extra.push({ label: '', amount: '', reason: '' }); edDraw(); };
+      document.getElementById('edAddD').onclick = () => { ed.deds.push({ label: '', amount: '', reason: '' }); edDraw(); };
+      const enc = document.getElementById('edEncash');
+      if (enc) enc.onclick = () => { ed.extra.push({ label: 'Leave encashment (' + balDays + ' days)', amount: balDays * daily, reason: 'Leave encashment on ' + balDays + ' days balance' }); edDraw(); edCompute(); };
+      document.getElementById('edClose').onclick = closeEditor;
+      document.getElementById('edCancel').onclick = closeEditor;
+      document.getElementById('edSaveHold').onclick = () => saveEditor(false);
+      document.getElementById('edSavePub').onclick = () => saveEditor(true);
+      edDraw(); edCompute();
+    }
+    function closeEditor() { const w = document.getElementById('prDrillWrap'); w.style.display = 'none'; w.innerHTML = ''; }
+    async function saveEditor(publish) {
+      const reason = (document.getElementById('edReason').value || '').trim();
+      if (!reason) { alert('Please enter a reason for the changes.'); return; }
+      const lop = Number(document.getElementById('edLop').value) || 0;
+      const extra = ed.extra.filter(e => (e.label || '').trim() && Number(e.amount));
+      const deds = ed.deds.filter(e => (e.label || '').trim() && Number(e.amount));
+      const body = { lop_days: lop, extra_earnings: extra, deductions: deds, reason: reason, publish: publish };
+      const btnH = document.getElementById('edSaveHold'), btnP = document.getElementById('edSavePub');
+      btnH.disabled = true; btnP.disabled = true;
+      try {
+        const r = await fetch('/api/payroll/payslip/' + ed.id + '/override', { method: 'PUT', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed'); btnH.disabled = false; btnP.disabled = false; return; }
+        closeEditor();
+        await loadGen();
+      } catch (e) { console.error(e); alert('Failed'); btnH.disabled = false; btnP.disabled = false; }
+    }
+
     function openReasonModal(opts) {
       const wrap = document.getElementById('prDrillWrap');
       wrap.style.display = 'flex';
-      const lopField = opts.withLop
-        ? '<label style="display:block;font-size:12px;color:var(--muted);margin:10px 0 4px">Corrected LOP days</label>' +
-          '<input id="prmLop" type="number" min="0" step="0.5" value="' + esc(opts.lop || 0) + '" style="width:100%;padding:9px 12px;border:0.5px solid var(--line);border-radius:8px;font-size:14px">'
-        : '';
       wrap.innerHTML =
         '<div class="card" style="max-width:460px;width:100%;padding:18px 20px;background:var(--surface)">' +
           '<div style="font-size:15px;font-weight:600;margin-bottom:4px">' + esc(opts.title) + '</div>' +
           '<div style="font-size:12px;color:var(--muted)">' + esc(opts.sub || '') + '</div>' +
-          lopField +
-          '<label style="display:block;font-size:12px;color:var(--muted);margin:10px 0 4px">Reason (logged)</label>' +
+          '<label style="display:block;font-size:12px;color:var(--muted);margin:12px 0 4px">Reason (logged)</label>' +
           '<textarea id="prmReason" rows="3" style="width:100%;padding:9px 12px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;resize:vertical" placeholder="Why this change?"></textarea>' +
           '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">' +
             '<button class="btn" id="prmCancel" style="padding:9px 16px">Cancel</button>' +
@@ -349,12 +476,10 @@ window.fkModules['hr/payroll'] = {
       document.getElementById('prmSave').onclick = async () => {
         const reason = (document.getElementById('prmReason').value || '').trim();
         if (!reason) { alert('Please enter a reason.'); return; }
-        const body = { reason };
-        if (opts.withLop) body.lop_days = Number(document.getElementById('prmLop').value || 0);
         const btn = document.getElementById('prmSave'); btn.disabled = true;
         try {
           const r = await fetch(opts.url, { method: opts.method, credentials: 'include',
-            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: reason }) });
           const d = await r.json();
           if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
           wrap.style.display = 'none'; wrap.innerHTML = '';
@@ -365,7 +490,7 @@ window.fkModules['hr/payroll'] = {
 
     document.addEventListener('click', async function payrollGenHandler(ev) {
       const t = ev.target.closest && ev.target.closest(
-        '.pr-run,.pr-rerun,.pr-approve,.pr-regen,.pr-revoke,.pr-republish,.pr-override,.pr-pview');
+        '.pr-run,.pr-rerun,.pr-publishready,.pr-publish,.pr-edit,.pr-revoke,.pr-pview');
       if (!t) return;
       ev.preventDefault();
       const { y, m } = getYM();
@@ -373,9 +498,9 @@ window.fkModules['hr/payroll'] = {
       const runId = genWrap ? genWrap.dataset.runId : '';
 
       if (t.classList.contains('pr-pview')) {
-        window.open('/api/payroll/payslip/' + t.dataset.id + '/html', '_blank', 'noopener');
-        return;
+        window.open('/api/payroll/payslip/' + t.dataset.id + '/html', '_blank', 'noopener'); return;
       }
+      if (t.classList.contains('pr-edit')) { openEditor(parseInt(t.dataset.id, 10)); return; }
       if (t.classList.contains('pr-run') || t.classList.contains('pr-rerun')) {
         t.disabled = true;
         try {
@@ -387,55 +512,38 @@ window.fkModules['hr/payroll'] = {
         } catch (e) { console.error(e); alert('Failed to generate'); t.disabled = false; }
         return;
       }
-      if (t.classList.contains('pr-approve')) {
+      if (t.classList.contains('pr-publishready')) {
         if (!runId) return;
-        if (!confirm('Approve and publish all payslips for this month? Each employee will be notified and the figures will be locked.')) return;
+        if (!confirm('Publish all ready payslips? Each of those employees will be notified and their figures locked.')) return;
         t.disabled = true;
         try {
-          const r = await fetch('/api/payroll/run/' + runId + '/approve', { method: 'POST', credentials: 'include' });
+          const r = await fetch('/api/payroll/run/' + runId + '/publish-ready', { method: 'POST', credentials: 'include' });
           const d = await r.json();
           if (!r.ok) { alert(d.error || 'Failed'); t.disabled = false; return; }
           await loadGen();
         } catch (e) { console.error(e); alert('Failed'); t.disabled = false; }
         return;
       }
-      if (t.classList.contains('pr-regen')) {
+      if (t.classList.contains('pr-publish')) {
+        if (!confirm('Publish this payslip? The employee will be notified and the figures locked.')) return;
         t.disabled = true;
         try {
-          const r = await fetch('/api/payroll/payslip/' + t.dataset.id + '/regenerate', { method: 'POST', credentials: 'include' });
+          const r = await fetch('/api/payroll/payslip/' + t.dataset.id + '/publish', { method: 'POST', credentials: 'include' });
           const d = await r.json();
           if (!r.ok) { alert(d.error || 'Failed'); t.disabled = false; return; }
           await loadGen();
         } catch (e) { console.error(e); alert('Failed'); t.disabled = false; }
-        return;
-      }
-      if (t.classList.contains('pr-override')) {
-        openReasonModal({
-          title: 'Override ' + (t.dataset.name || 'payslip'),
-          sub: 'Set the corrected unpaid (LOP) days. The payslip is recomputed and the reason is logged.',
-          withLop: true, lop: t.dataset.lop, cta: 'Save override',
-          url: '/api/payroll/payslip/' + t.dataset.id + '/override', method: 'PUT',
-        });
         return;
       }
       if (t.classList.contains('pr-revoke')) {
         openReasonModal({
-          title: 'Revoke payslip', sub: 'The employee will no longer see this payslip. You can fix and re-publish.',
+          title: 'Revoke payslip', sub: 'The employee will no longer see this payslip. You can edit and re-publish.',
           withLop: false, cta: 'Revoke', url: '/api/payroll/payslip/' + t.dataset.id + '/revoke', method: 'POST',
         });
         return;
       }
-      if (t.classList.contains('pr-republish')) {
-        if (!confirm('Re-publish this payslip? The employee will be notified again.')) return;
-        try {
-          const r = await fetch('/api/payroll/payslip/' + t.dataset.id + '/publish', { method: 'POST', credentials: 'include' });
-          const d = await r.json();
-          if (!r.ok) { alert(d.error || 'Failed'); return; }
-          await loadGen();
-        } catch (e) { console.error(e); alert('Failed'); }
-        return;
-      }
     });
+
 
     document.getElementById('prPrev').addEventListener('click', () => {
       let { y, m } = getYM(); m--; if (m < 1) { m = 12; y--; } setYM(y, m); load(); loadGen();
