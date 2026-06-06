@@ -173,6 +173,30 @@
   }
   .nav-item .count.alert { background: #2C1A1A; color: #E24B4A; }
   .nav-item .count.amber { background: #2C1F0E; color: var(--amber); }
+
+  /* ===== r0.43 — sidebar groups (Option B: bold spine + solid active pill) ===== */
+  .navgrp { margin-top: 13px; }
+  .navgrp:first-of-type { margin-top: 4px; }
+  .navgrp-h { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; user-select: none; transition: background .14s; }
+  .navgrp-h:hover { background: rgba(255,255,255,0.05); }
+  .navgrp-ico { width: 27px; height: 27px; border-radius: 8px; background: var(--accent); color: #14161B; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; box-shadow: 0 3px 8px rgba(var(--soft),0.35); }
+  .navgrp-lbl { flex: 1; font-size: 12px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: #F2F0EA; }
+  .navgrp-cnt { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.5); background: rgba(255,255,255,0.07); border-radius: 99px; padding: 1px 8px; }
+  .navgrp-cnt:empty { display: none; }
+  .navgrp-chev { color: rgba(255,255,255,0.42); font-size: 18px; transition: transform .22s; flex-shrink: 0; }
+  .navgrp.collapsed .navgrp-chev { transform: rotate(-90deg); }
+  .navgrp-items { overflow: hidden; transition: max-height .26s ease, opacity .2s; margin: 5px 0 0 14px; padding-left: 13px; border-left: 2px solid rgba(var(--soft),0.55); }
+  .navgrp.collapsed .navgrp-items { max-height: 0 !important; opacity: 0; border-color: transparent; }
+  /* active item = solid section-colour pill */
+  .navgrp .nav-item.on { background: var(--accent); color: #14161B; font-weight: 600; }
+  .navgrp .nav-item.on i { color: #14161B; }
+  .navgrp .nav-item.on .count { background: rgba(20,22,27,0.18); color: #14161B; }
+  .navgrp .nav-item.on:hover { background: var(--accent); color: #14161B; }
+  .g-ws  { --accent: #EFA431; --soft: 239,164,49; }
+  .g-hr  { --accent: #36B58F; --soft: 54,181,143; }
+  .g-day { --accent: #5E9BE0; --soft: 94,155,224; }
+  .g-sys { --accent: #8B82E6; --soft: 139,130,230; }
+  .g-you { --accent: #E67D5B; --soft: 230,125,91; }
   .nav-spacer { height: 18px; }
 
   .sidebar-break {
@@ -656,6 +680,10 @@
         <span>Running late?</span>
       </button>
 
+      <!-- ===== WORKSPACE ===== -->
+      <div class="navgrp g-ws" id="grpWorkspace">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-layout-grid"></i></span><span class="navgrp-lbl">Workspace</span><span class="navgrp-cnt" id="cntWorkspace"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
       <div class="nav-item on" id="navHome" data-route="#home">
         <i class="ti ti-home"></i>
         <span>My FK Space</span>
@@ -684,7 +712,13 @@
         <span class="soon-badge">soon</span>
       </div>
 
-      <p class="nav-section chip collapsible sec-hr" id="navSectionHR" style="margin-top:18px;display:none"><span class="sec-ico"><i class="ti ti-users"></i></span><span class="sec-lbl">HR</span></p>
+        </div>
+      </div>
+
+      <!-- ===== HR ===== -->
+      <div class="navgrp g-hr" id="grpHR" style="display:none">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-users"></i></span><span class="navgrp-lbl">HR</span><span class="navgrp-cnt" id="cntHR"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
       <div class="nav-item" id="navHrQueue" data-route="#hr-queue" style="display:none" onclick="location.hash='#hr-queue'">
         <i class="ti ti-inbox"></i>
         <span>HR Queue</span>
@@ -722,7 +756,13 @@
         <span>Payroll</span>
       </div>
 
-      <p class="nav-section chip collapsible sec-day" id="navSectionDay" style="margin-top:18px"><span class="sec-ico"><i class="ti ti-clock"></i></span><span class="sec-lbl">DAY</span></p>
+        </div>
+      </div>
+
+      <!-- ===== MY DAY ===== -->
+      <div class="navgrp g-day" id="grpDay">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-clock"></i></span><span class="navgrp-lbl">My Day</span><span class="navgrp-cnt" id="cntDay"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
       <div class="nav-item" data-route="#my-growth" onclick="location.hash='#my-growth'">
         <i class="ti ti-trending-up"></i>
         <span>My Growth</span>
@@ -733,7 +773,13 @@
         <span class="count" id="chatUnreadCount" style="display:none">0</span>
       </div>
 
-      <p class="nav-section chip collapsible sec-system" id="navSectionSystem" style="margin-top:18px;display:none"><span class="sec-ico"><i class="ti ti-settings"></i></span><span class="sec-lbl">SYSTEM</span></p>
+        </div>
+      </div>
+
+      <!-- ===== SYSTEM ===== -->
+      <div class="navgrp g-sys" id="grpSystem" style="display:none">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-settings"></i></span><span class="navgrp-lbl">System</span><span class="navgrp-cnt" id="cntSystem"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
       <div class="nav-item" id="navSysHolidays" data-route="#system/holidays" style="display:none" onclick="location.hash='#system/holidays'">
         <i class="ti ti-calendar"></i>
         <span>Holidays</span>
@@ -763,10 +809,16 @@
         <span>Backups</span>
       </div>
 
-      <p class="nav-section chip collapsible sec-you" id="navSectionYou" style="margin-top:18px"><span class="sec-ico"><i class="ti ti-user"></i></span><span class="sec-lbl">ABOUT ME</span></p>
+        </div>
+      </div>
+
+      <!-- ===== ABOUT ME ===== -->
+      <div class="navgrp g-you" id="grpYou">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-user"></i></span><span class="navgrp-lbl">About Me</span><span class="navgrp-cnt" id="cntYou"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
       <div class="nav-item" id="navYouOnboarding" style="display:none" onclick="goToMyOnboarding()">
         <i class="ti ti-clipboard-check"></i>
-        <span>Your onboarding</span>
+        <span>My First Days</span>
         <span class="count" id="navYouOnboardingCount" style="display:none">0/0</span>
       </div>
       <div class="nav-item" onclick="goToMyProfile()">
@@ -777,7 +829,10 @@
         <i class="ti ti-beach"></i>
         <span>Leaves &amp; time</span>
       </div>
-      <div class="nav-item" onclick="logout()">
+        </div>
+      </div>
+
+      <div class="nav-item" id="navSignout" onclick="logout()" style="margin-top:10px">
         <i class="ti ti-logout"></i>
         <span>Sign out</span>
       </div>
@@ -1183,8 +1238,8 @@
         <div id="leaveHalfPartWrap" style="display:none">
           <label>Which half</label>
           <select id="leaveHalfPart">
-            <option value="first">First half (morning)</option>
-            <option value="second">Second half (afternoon)</option>
+            <option value="am">First half (morning)</option>
+            <option value="pm">Second half (afternoon)</option>
           </select>
         </div>
         <label>Reason (optional)</label>
@@ -1412,7 +1467,7 @@ function render() {
   if (can('profile.salary.view')) {
     show('navHrPayroll'); anyHR = true;
   }
-  if (anyHR) showText('navSectionHR');
+  if (anyHR) { const g = document.getElementById('grpHR'); if (g) g.style.display = ''; }
 
   // SYSTEM section — owner-level mostly
   let anySys = false;
@@ -1431,54 +1486,47 @@ function render() {
   if (can('admin.backup.manage')) {
     show('navSysBackups'); anySys = true;
   }
-  if (anySys) showText('navSectionSystem');
+  if (anySys) { const g = document.getElementById('grpSystem'); if (g) g.style.display = ''; }
 
-  // r0.15.3 — Collapsible sidebar sections (HR + SYSTEM). Click the header
-  // to collapse/expand the items below. Persisted in localStorage.
-  function setupCollapsibleSection(headerId) {
-    const header = document.getElementById(headerId);
-    if (!header) return;
-    const storageKey = 'fk_nav_collapsed_' + headerId;
-    function getItems() {
-      const items = [];
-      let n = header.nextElementSibling;
-      while (n && !n.classList.contains('nav-section')) {
-        if (n.classList.contains('nav-item')) items.push(n);
-        n = n.nextElementSibling;
+  // r0.43 — Collapsible sidebar groups (Option B). Each .navgrp wraps a header
+  // and a .navgrp-items container; clicking the header animates it open/closed,
+  // remembers the state per person, and the count chip shows how many items are
+  // inside. Runs after permission gating so heights/counts reflect what's shown.
+  function setupNavGroup(grpId) {
+    const grp = document.getElementById(grpId);
+    if (!grp) return;
+    const header = grp.querySelector('.navgrp-h');
+    const items = grp.querySelector('.navgrp-items');
+    const cnt = grp.querySelector('.navgrp-cnt');
+    if (!header || !items) return;
+    const storageKey = 'fk_nav_collapsed_' + grpId;
+    if (cnt) {
+      let n = 0;
+      items.querySelectorAll('.nav-item').forEach(it => { if (it.style.display !== 'none') n++; });
+      cnt.textContent = n > 0 ? String(n) : '';
+    }
+    function setOpenHeight() { if (!grp.classList.contains('collapsed')) items.style.maxHeight = items.scrollHeight + 'px'; }
+    function toggle(collapse) {
+      if (collapse) {
+        items.style.maxHeight = items.scrollHeight + 'px';
+        requestAnimationFrame(() => { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; });
+      } else {
+        grp.classList.remove('collapsed');
+        items.style.maxHeight = items.scrollHeight + 'px';
       }
-      return items;
+      try { localStorage.setItem(storageKey, collapse ? '1' : '0'); } catch (e) {}
     }
-    function applyCollapsed(collapsed) {
-      if (collapsed) header.classList.add('collapsed'); else header.classList.remove('collapsed');
-      const items = getItems();
-      items.forEach(it => {
-        if (collapsed) {
-          if (it.style.display !== 'none') it.dataset.preCollapseDisplay = it.style.display || '';
-          it.style.display = 'none';
-        } else {
-          // restore to whatever it was before, or '' (which lets the perm gating's own
-          // display:none stick if the item was originally hidden)
-          if (it.dataset.preCollapseDisplay !== undefined) {
-            it.style.display = it.dataset.preCollapseDisplay;
-            delete it.dataset.preCollapseDisplay;
-          }
-        }
-      });
-    }
-    header.addEventListener('click', function () {
-      const nowCollapsed = !header.classList.contains('collapsed');
-      try { localStorage.setItem(storageKey, nowCollapsed ? '1' : '0'); } catch (e) {}
-      applyCollapsed(nowCollapsed);
-    });
-    // Restore saved state
+    header.addEventListener('click', () => toggle(!grp.classList.contains('collapsed')));
     let saved = null;
     try { saved = localStorage.getItem(storageKey); } catch (e) {}
-    if (saved === '1') applyCollapsed(true);
+    if (saved === '1') { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; }
+    else setOpenHeight();
   }
-  setupCollapsibleSection('navSectionHR');
-  setupCollapsibleSection('navSectionDay');
-  setupCollapsibleSection('navSectionSystem');
-  setupCollapsibleSection('navSectionYou');
+  ['grpWorkspace', 'grpHR', 'grpDay', 'grpSystem', 'grpYou'].forEach(setupNavGroup);
+  // Keep open groups correctly sized if the window resizes.
+  window.addEventListener('resize', () => {
+    document.querySelectorAll('.navgrp:not(.collapsed) .navgrp-items').forEach(it => { it.style.maxHeight = it.scrollHeight + 'px'; });
+  });
 
   // YOU — Your onboarding shows only if user has incomplete onboarding items
   // (will be wired in stage 4 when the home content loads — for now hidden by default)
@@ -2268,7 +2316,7 @@ function openLeaveModal(existing) {
   document.getElementById('leaveReason').value = (existing && existing.reason) ? existing.reason : '';
   const half = !!(existing && existing.is_half_day);
   document.getElementById('leaveHalf').checked = half;
-  document.getElementById('leaveHalfPart').value = (existing && existing.half_day_part) ? existing.half_day_part : 'first';
+  document.getElementById('leaveHalfPart').value = (existing && existing.half_day_part) ? existing.half_day_part : 'am';
   document.getElementById('leaveHalfPartWrap').style.display = half ? '' : 'none';
   const title = document.getElementById('leaveModalTitle');
   const btn = document.getElementById('leaveBtn');

@@ -128,7 +128,8 @@ window.fkModules['leaves-time'] = {
         panel.innerHTML = rows.map(l => {
           const typeLabel = typeLabels[l.request_type] || l.request_type || 'Leave';
           const dys = (l.total_days != null) ? fdays(l.total_days) : '\u2014';
-          const half = l.is_half_day ? ' (half day' + (l.half_day_part ? ', ' + l.half_day_part : '') + ')' : '';
+          const halfPart = l.half_day_part === 'am' ? 'morning' : l.half_day_part === 'pm' ? 'afternoon' : l.half_day_part;
+          const half = l.is_half_day ? ' (half day' + (halfPart ? ', ' + halfPart : '') + ')' : '';
           const actions = (l.status === 'pending')
             ? '<div style="display:flex;gap:8px;margin-top:10px">' +
                 '<button class="btn-secondary" data-edit-leave="' + l.id + '" style="padding:10px 18px;font-size:14px">Edit</button>' +
