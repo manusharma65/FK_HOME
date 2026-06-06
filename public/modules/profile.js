@@ -1903,133 +1903,22 @@ window.fkModules['profile'] = {
         return;
       }
 
-      // ===== HR / MANAGER TRACKER =====
+      // ===== HR / MANAGER: slim banner — the full tracker lives in HR Insights =====
       const total = notes.length;
       const done = notes.filter(isDone).length;
-      const pct = total ? Math.round(done * 100 / total) : 0;
-      const dept = (u.departments && u.departments.length) ? u.departments.map(d => d.name).join(', ') : '';
       const left = u.employment_status === 'left';
-
-      let html = '<div class="exit-head"><div class="deco"></div>' +
-        '<h2><i class="ti ti-door-exit"></i> Offboarding \u2014 ' + esc(u.display_name || u.full_name || '') + '</h2>' +
-        '<div class="emeta">' +
-          (u.emp_id ? '<span>' + esc(u.emp_id) + (dept ? ' \u00b7 ' + esc(dept) : '') + '</span>' : (dept ? '<span>' + esc(dept) + '</span>' : '')) +
-          (u.notice_date ? '<span>Notice given <b>' + esc(fmtDate(u.notice_date)) + '</b></span>' : '') +
-          '<span>Last working day <b>' + esc(fmtDate(u.last_working_day)) + '</b></span>' +
-          '<span>Tenure <b>' + tenureText(u.hire_date) + '</b></span>' +
-        '</div>' +
-        (left ? '<div class="fnf-badge"><i class="ti ti-check"></i> Employee has left</div>'
-              : '<div class="fnf-badge"><i class="ti ti-alert-triangle"></i> Full &amp; Final due within <b>2 working days</b> of the last day</div>') +
+      const progress = total ? (done + '/' + total + ' cleared') : 'no checklist yet';
+      body.innerHTML =
+        '<div id="exitBanner" style="display:flex;align-items:center;gap:14px;padding:16px 18px;border-radius:14px;background:#EEF1F5;border:0.5px solid var(--line);cursor:pointer">' +
+          '<div style="width:40px;height:40px;border-radius:10px;background:#475569;color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px"><i class="ti ti-door-exit"></i></div>' +
+          '<div style="flex:1">' +
+            '<div style="font-size:15px;font-weight:600">' + (left ? 'Exited' : 'Offboarding in progress') + '</div>' +
+            '<div style="font-size:13px;color:var(--muted)">Last working day ' + esc(fmtDate(u.last_working_day)) + ' \u00b7 ' + progress + '</div>' +
+          '</div>' +
+          '<div style="font-size:14px;color:#475569;font-weight:500;white-space:nowrap">Open in HR Insights \u2192</div>' +
         '</div>';
-
-      // Self-heal: offboarding started but no checklist items exist.
-      if (total === 0) {
-        html += '<div class="setup"><div style="text-align:center;padding:22px 16px">' +
-          '<div style="font-size:16px;font-weight:600;margin-bottom:6px">No exit checklist yet</div>' +
-          '<div style="font-size:14px;color:var(--muted);max-width:420px;margin:0 auto 16px">This offboarding has no items. Generate the standard exit checklist to continue.</div>' +
-          '<button class="det-btn primary" id="exGen"><i class="ti ti-rotate-clockwise"></i> Generate exit checklist</button>' +
-          '<div style="margin-top:14px"><button class="edit-link" id="exCancel0" style="color:var(--red)">Cancel offboarding instead</button></div>' +
-          '</div></div>';
-        body.innerHTML = html;
-        const g = document.getElementById('exGen');
-        if (g) g.addEventListener('click', regenerateExit);
-        const c0 = document.getElementById('exCancel0');
-        if (c0) c0.addEventListener('click', () => cancelOffboarding(left));
-        return;
-      }
-
-      html += '<div class="setup"><div class="setup-top"><div class="ic slate"><i class="ti ti-clipboard-list"></i></div>' +
-        '<div><h3>Exit clearances</h3><div class="sub">Run these in parallel so Full &amp; Final lands inside the 2-day window.</div></div>' +
-        '<div class="count">' + done + ' of ' + total + ' done \u00b7 ' + pct + '%</div></div>' +
-        '<div class="ob-pbar"><i style="width:' + pct + '%"></i></div>';
-
-      const groups = []; const byGroup = {};
-      for (const n of notes) { const g = n.ob_group || 'Other'; if (!byGroup[g]) { byGroup[g] = []; groups.push(g); } byGroup[g].push(n); }
-
-      groups.forEach((g, gi) => {
-        html += '<div class="ob-grp-head' + (gi === 0 ? ' first' : '') + '"><span class="n">' + (gi + 1) + '</span> ' + esc(g) + '</div>';
-
-        // Full & Final group: surfacing card first
-        if (g === 'Full & Final settlement') {
-          const grat = exitGratuity(u.hire_date, u.last_working_day);
-          const lb = data.leave_balance;
-          const encash = (lb && lb.remaining != null)
-            ? (Number(lb.remaining) % 1 ? Number(lb.remaining).toFixed(1) : Number(lb.remaining)) + ' days'
-            : 'see Leaves';
-          html += '<div class="fnf-card">' +
-            '<div class="fnf-line"><span>Tenure</span><span class="v">' + tenureText(u.hire_date) + '</span></div>' +
-            '<div class="fnf-line"><span>Gratuity eligibility</span><span class="v"><span class="flag' + (grat.eligible ? ' ok' : '') + '">' + grat.text + '</span></span></div>' +
-            '<div class="fnf-line"><span>Leave balance to encash</span><span class="v">' + encash + '</span></div>' +
-          '</div>';
-        }
-
-        for (const n of byGroup[g]) {
-          const done2 = isDone(n);
-          const isDoc = g === 'Documents to issue';
-          const isFnf = g === 'Full & Final settlement';
-          const isLeftBtn = n.ob_sort === 120 || /mark as left/i.test(n.title);
-          const ico = done2 ? '<div class="ob-ico ver"><i class="ti ti-check"></i></div>' : '<div class="ob-ico todo"></div>';
-          const chip = done2 ? '<span class="ob-chip ver">Done</span>' : '<span class="ob-chip todo">To do</span>';
-
-          let actions = '';
-          if (done2) {
-            actions = '<button class="ob-btn" data-ex-act="reopen" data-id="' + n.id + '">Reopen</button>';
-          } else if (isLeftBtn) {
-            actions = '<button class="ob-btn primary" data-ex-act="mark_left" data-id="' + n.id + '">Mark left</button>';
-          } else if (isDoc) {
-            actions = '<button class="ob-btn primary" data-ex-upload="' + n.id + '" data-auto="1">Upload</button>';
-          } else if (isFnf) {
-            actions = '<button class="ob-btn" data-ex-upload="' + n.id + '" data-auto="0">Upload doc</button>' +
-                      '<button class="ob-btn primary" data-ex-act="done" data-id="' + n.id + '">Mark done</button>';
-          } else {
-            actions = '<button class="ob-btn primary" data-ex-act="done" data-id="' + n.id + '">Mark done</button>';
-          }
-
-          const fs = filesOf(n);
-          const isInterview = /exit interview/i.test(n.title);
-          if (isInterview) {
-            exitBodies[n.id] = n.body || '';
-            const hasNotes = n.body && !/internal to hr/i.test(n.body);
-            actions += '<button class="ob-btn" data-ex-note="' + n.id + '">' + (hasNotes ? 'Edit notes' : 'Add notes') + '</button>';
-          }
-          const fileChips = fs.length ? '<div>' + fs.map(f => '<a class="ob-filechip" href="/api/files/' + f.id + '" target="_blank"><i class="ti ti-file-text"></i> ' + esc(f.filename) + '</a>').join(' ') + '</div>' : '';
-
-          html += '<div class="ob-item">' + ico +
-            '<div class="ob-mid"><div class="ob-title">' + esc(n.title) + ' ' + ownerChipHtml(n.ob_owner) +
-              (n.ob_leaver ? ' <span class="own leaver" title="Visible to the leaver">SHARED</span>' : '') + '</div>' +
-              (n.body ? '<div class="ob-why">' + esc(n.body) + '</div>' : '') + fileChips +
-              '<input type="file" id="exFile_' + n.id + '" data-ex-file="' + n.id + '" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx">' +
-            '</div>' +
-            '<div class="ob-right">' + chip + actions + '</div></div>';
-        }
-      });
-
-      html += '</div>'; // .setup
-      html += '<div style="margin-top:14px;display:flex;justify-content:center">' +
-        '<button class="det-btn" id="exCancel" style="color:var(--red);border-color:var(--red-soft)">' +
-        '<i class="ti ti-arrow-back-up"></i> ' + (left ? 'Reinstate employee (cancel exit)' : 'Cancel offboarding \u2014 they\u2019re staying') +
-        '</button></div>';
-      body.innerHTML = html;
-
-      const exC = document.getElementById('exCancel');
-      if (exC) exC.addEventListener('click', () => cancelOffboarding(left));
-
-      body.querySelectorAll('[data-ex-act]').forEach(el => el.addEventListener('click', () => {
-        const act = el.dataset.exAct, id = el.dataset.id;
-        if (act === 'mark_left' && !confirm('Mark this employee as left? This revokes their place on the team and cancels open tasks.')) return;
-        doExitAction(id, act);
-      }));
-      body.querySelectorAll('[data-ex-upload]').forEach(el => el.addEventListener('click', () => {
-        const inp = document.getElementById('exFile_' + el.dataset.exUpload); if (inp) { inp.dataset.auto = el.dataset.auto; inp.click(); }
-      }));
-      body.querySelectorAll('[data-ex-file]').forEach(el => el.addEventListener('change', () => uploadExitFile(el.dataset.exFile, el.dataset.auto === '1')));
-      body.querySelectorAll('[data-ex-note]').forEach(el => el.addEventListener('click', () => {
-        const id = el.dataset.exNote;
-        const cur = /internal to hr/i.test(exitBodies[id] || '') ? '' : (exitBodies[id] || '');
-        const txt = prompt('Exit interview notes (internal — not shown to the leaver):', cur);
-        if (txt === null) return;
-        addExitNote(id, txt);
-      }));
+      const eb = document.getElementById('exitBanner');
+      if (eb) eb.addEventListener('click', () => { location.hash = '#hr/insights'; });
     }
 
     // --- Kick off ------------------------------------------------------

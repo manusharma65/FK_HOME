@@ -30,7 +30,7 @@ const ALLOWED_MIME = new Set([
 ]);
 const ALLOWED_DRAWERS = new Set([
   'personal','employment','salary','reviews',
-  'payroll','insurance','onboarding',
+  'payroll','insurance','onboarding','offboarding',
 ]);
 const DRAWER_LABELS = {
   personal: 'Personal',
@@ -40,6 +40,7 @@ const DRAWER_LABELS = {
   payroll: 'Payroll',
   insurance: 'Insurance',
   onboarding: 'Onboarding',
+  offboarding: 'Offboarding',
 };
 
 const upload = multer({

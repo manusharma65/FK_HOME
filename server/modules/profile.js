@@ -50,12 +50,12 @@ async function hrApproverIds() {
 }
 
 const ALLOWED_DRAWERS = new Set([
-  'onboarding','reviews','employment','salary',
+  'onboarding','offboarding','reviews','employment','salary',
   'payroll','insurance','personal',
 ]);
 const NOTE_KINDS = new Set(['review','onboarding']);
 const NOTE_KIND_LABELS = { review: 'review', onboarding: 'onboarding' };
-const DRAWER_ORDER = ['onboarding','reviews','employment','salary','payroll','insurance','personal'];
+const DRAWER_ORDER = ['onboarding','offboarding','reviews','employment','salary','payroll','insurance','personal'];
 
 // ---------- helpers ----------
 async function isSameDept(viewerId, targetUserId) {
@@ -89,6 +89,7 @@ async function visibleDrawers(viewer, targetUserId) {
   if (isOwn || canSeeDept) {
     // Everyone with view rights can see these
     drawers.add('onboarding');
+    drawers.add('offboarding');
     drawers.add('reviews');
     drawers.add('employment');
     drawers.add('payroll');

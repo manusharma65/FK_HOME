@@ -12,7 +12,7 @@ window.fkModules['hr/insights'] = {
   title: 'Insights',
 
   render() {
-    return '' +
+    return '<div id="insCards">' +
       '<div class="card">' +
         '<div class="card-header">' +
           '<div class="card-title"><i class="ti ti-shield-check"></i> People on probation</div>' +
@@ -67,7 +67,28 @@ window.fkModules['hr/insights'] = {
             '<tbody id="insOnbBody"><tr><td colspan="4" style="text-align:center;color:var(--muted);padding:18px">Loading…</td></tr></tbody>' +
           '</table>' +
         '</div>' +
-      '</div>';
+      '</div>' +
+
+      '<div class="card" style="margin-top:14px">' +
+        '<div class="card-header">' +
+          '<div class="card-title"><i class="ti ti-door-exit"></i> Exits in progress</div>' +
+          '<span class="card-meta" id="insExitCount">—</span>' +
+        '</div>' +
+        '<div style="overflow-x:auto">' +
+          '<table class="data-table" style="width:100%;border-collapse:collapse">' +
+            '<thead><tr>' +
+              '<th style="text-align:left;padding:8px 10px;font-size:13px;color:var(--muted)">Person</th>' +
+              '<th style="text-align:left;padding:8px 10px;font-size:13px;color:var(--muted)">Last working day</th>' +
+              '<th style="text-align:left;padding:8px 10px;font-size:13px;color:var(--muted)">Cleared</th>' +
+              '<th style="text-align:left;padding:8px 10px;font-size:13px;color:var(--muted)">Full &amp; Final</th>' +
+              '<th></th>' +
+            '</tr></thead>' +
+            '<tbody id="insExitBody"><tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">Loading…</td></tr></tbody>' +
+          '</table>' +
+        '</div>' +
+      '</div>' +
+      '</div>' +
+      '<div id="insExitPanel" style="display:none"></div>';
   },
 
   async mount() {
@@ -184,6 +205,64 @@ window.fkModules['hr/insights'] = {
       console.error('[fkModules hr/insights]', e);
       probBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:18px">Failed to load.</td></tr>';
     }
+
+    // ----- Exits in progress + tracker panel (offboarding lives here) -----
+    const cards = document.getElementById('insCards');
+    const panel = document.getElementById('insExitPanel');
+    const exitBody = document.getElementById('insExitBody');
+
+    async function loadExits() {
+      try {
+        const r = await fetch('/api/profile/offboarding/active', { credentials: 'include' });
+        const countEl = document.getElementById('insExitCount');
+        if (!r.ok) { if (countEl) countEl.textContent = '—'; exitBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">—</td></tr>'; return; }
+        const d = await r.json();
+        const exits = d.exits || [];
+        if (countEl) countEl.textContent = exits.length + (exits.length === 1 ? ' exit' : ' exits');
+        if (!exits.length) { exitBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">No exits in progress.</td></tr>'; return; }
+        exitBody.innerHTML = exits.map(function (e) {
+          const days = Math.ceil((new Date(e.last_working_day).getTime() - Date.now()) / 86400000);
+          const fnf = days >= 0 ? '<span class="chip ' + (days <= 2 ? 'red' : 'amber') + '">' + days + 'd to last day</span>' : '<span class="chip red">past last day</span>';
+          const pct = e.total > 0 ? Math.round(e.done * 100 / e.total) : 0;
+          return '<tr style="border-top:0.5px solid var(--line)">' +
+            '<td style="padding:8px 10px;font-weight:500">' + esc(e.name || '') + (e.emp_id ? ' <span style="color:var(--muted);font-size:12px">' + esc(e.emp_id) + '</span>' : '') + '</td>' +
+            '<td style="padding:8px 10px;color:var(--muted)">' + fmtDate(e.last_working_day) + '</td>' +
+            '<td style="padding:8px 10px">' + e.done + '/' + e.total + ' (' + pct + '%)</td>' +
+            '<td style="padding:8px 10px">' + fnf + '</td>' +
+            '<td style="padding:8px 10px;text-align:right"><button class="btn btn-primary" data-manage-exit="' + e.id + '">Manage</button></td>' +
+          '</tr>';
+        }).join('');
+        exitBody.querySelectorAll('[data-manage-exit]').forEach(function (b) {
+          b.addEventListener('click', function () { openExit(parseInt(b.getAttribute('data-manage-exit'), 10)); });
+        });
+      } catch (err) {
+        exitBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:18px">Failed to load.</td></tr>';
+      }
+    }
+
+    function openExit(userId) {
+      if (cards) cards.style.display = 'none';
+      panel.style.display = '';
+      panel.innerHTML = '<button class="btn" id="exitBack" style="margin-bottom:14px"><i class="ti ti-arrow-left"></i> Back to exits</button><div id="exitTrackerHost"></div>';
+      const back = document.getElementById('exitBack');
+      if (back) back.addEventListener('click', backToList);
+      if (window.fkExitTracker && typeof window.fkExitTracker.render === 'function') {
+        window.fkExitTracker.render(document.getElementById('exitTrackerHost'), userId, function (removed) {
+          if (removed) backToList();
+        });
+      } else {
+        document.getElementById('exitTrackerHost').innerHTML = '<div style="padding:20px;color:var(--red)">Exit tracker not loaded — please refresh.</div>';
+      }
+    }
+
+    function backToList() {
+      panel.style.display = 'none';
+      panel.innerHTML = '';
+      if (cards) cards.style.display = '';
+      loadExits();
+    }
+
+    loadExits();
   },
 
   unmount() { /* read-only, nothing to clean up */ }

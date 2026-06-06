@@ -113,22 +113,30 @@ router.post('/request', async (req, res) => {
     // (keyed by leave_year_start), so we no longer invent a flat-25 calendar
     // row here. Ensure the current leave-year row exists by asking the engine
     // to recompute it from accrual, then update taken/pending.
-    await leaveEngine.recomputeBalanceFor(req.user.id, { note: 'Ensure balance row on leave request' });
-    await recomputeBalance(req.user.id);
+    // The request is saved above. Derivative updates + notifications must NEVER
+    // fail the response — a recompute crash here is exactly what made Tanu's
+    // "leave assigned but the screen did nothing" happen.
+    try {
+      await leaveEngine.recomputeBalanceFor(req.user.id, { note: 'Ensure balance row on leave request' });
+      await recomputeBalance(req.user.id);
+    } catch (e) { console.error('[leaves/request] balance recompute failed:', e.message); }
 
-    await logAudit({ req, module: 'leaves', action: 'request.created', target_type: 'leave_request', target_id: r.rows[0].id, after: r.rows[0] });
+    try {
+      await logAudit({ req, module: 'leaves', action: 'request.created', target_type: 'leave_request', target_id: r.rows[0].id, after: r.rows[0] });
+    } catch (e) { console.error('[leaves/request] audit failed:', e.message); }
 
-    // Notify managers / Bobby / HR via template
-    const range = start_date === end_date
-      ? formatDateUK(start_date)
-      : `${formatDateUK(start_date)} → ${formatDateUK(end_date)}`;
-    const daysText = `${formatDays(totalDays)} day${totalDays === 1 ? '' : 's'}`;
-    await notifyEvent('leave.requested', {
-      actorUserId: req.user.id,
-      name: req.user.display_name || req.user.full_name,
-      range, daysText, reason: reason || null,
-      related_id: r.rows[0].id,
-    });
+    try {
+      const range = start_date === end_date
+        ? formatDateUK(start_date)
+        : `${formatDateUK(start_date)} → ${formatDateUK(end_date)}`;
+      const daysText = `${formatDays(totalDays)} day${totalDays === 1 ? '' : 's'}`;
+      await notifyEvent('leave.requested', {
+        actorUserId: req.user.id,
+        name: req.user.display_name || req.user.full_name,
+        range, daysText, reason: reason || null,
+        related_id: r.rows[0].id,
+      });
+    } catch (e) { console.error('[leaves/request] notify failed:', e.message); }
 
     res.json({ ok: true, request: r.rows[0] });
   } catch (err) {
@@ -375,24 +383,29 @@ router.post('/:id/decide', async (req, res) => {
       }
     }
 
-    await logAudit({
-      req, module: 'leaves',
-      action: decision === 'approved' ? 'request.approved' : 'request.rejected',
-      target_type: 'leave_request', target_id: id,
-      before: { status: lr.status }, after: { status: decision, decision_note }
-    });
+    // Decision is saved above — audit + notify must never 500 the response
+    // (this is what made approve/reject "do nothing" while actually working).
+    try {
+      await logAudit({
+        req, module: 'leaves',
+        action: decision === 'approved' ? 'request.approved' : 'request.rejected',
+        target_type: 'leave_request', target_id: id,
+        before: { status: lr.status }, after: { status: decision, decision_note }
+      });
+    } catch (e) { console.error('[leaves/decide] audit failed:', e.message); }
 
-    // Notify the requester via template
-    const range2 = lr.start_date === lr.end_date
-      ? formatDateUK(lr.start_date)
-      : `${formatDateUK(lr.start_date)} → ${formatDateUK(lr.end_date)}`;
-    const daysText2 = `${formatDays(lr.total_days)} day${Number(lr.total_days) === 1 ? '' : 's'}`;
-    await notifyEvent(decision === 'approved' ? 'leave.approved' : 'leave.rejected', {
-      actorUserId: lr.user_id,
-      range: range2, daysText: daysText2,
-      decisionNote: decision_note || null,
-      related_id: id,
-    });
+    try {
+      const range2 = lr.start_date === lr.end_date
+        ? formatDateUK(lr.start_date)
+        : `${formatDateUK(lr.start_date)} → ${formatDateUK(lr.end_date)}`;
+      const daysText2 = `${formatDays(lr.total_days)} day${Number(lr.total_days) === 1 ? '' : 's'}`;
+      await notifyEvent(decision === 'approved' ? 'leave.approved' : 'leave.rejected', {
+        actorUserId: lr.user_id,
+        range: range2, daysText: daysText2,
+        decisionNote: decision_note || null,
+        related_id: id,
+      });
+    } catch (e) { console.error('[leaves/decide] notify failed:', e.message); }
 
     res.json({ ok: true });
   } catch (err) {
