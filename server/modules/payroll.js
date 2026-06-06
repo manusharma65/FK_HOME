@@ -226,4 +226,591 @@ router.get('/month.csv', requireSalary, async (req, res) => {
   }
 });
 
+// ============================================================================
+// PAYROLL GENERATION ENGINE (r0.45) — generate -> review -> approve -> publish
+// India only. 60/30/10 split. Actual pro-rated by calendar days less LOP.
+// Net = total earnings (actual) - total deductions. Snapshot frozen on publish.
+// ============================================================================
+
+const { notify } = require('../notify');
+
+const COMPANY = {
+  name: 'FK Enterprises',
+  addr1: 'B-719 Tower B, 7th Floor Noida One, B-8 Sector 62,',
+  addr2: 'Noida, Uttar Pradesh 201301',
+  location: 'Noida',
+};
+const MONTHS = ['', 'January','February','March','April','May','June','July',
+                'August','September','October','November','December'];
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function dateStr(d) {
+  if (!d) return null;
+  return (d instanceof Date) ? d.toISOString().slice(0, 10) : String(d).slice(0, 10);
+}
+function fmtDayMonYear(d) {
+  const s = dateStr(d); if (!s) return '\u2014';
+  const [y, m, dd] = s.split('-');
+  const mon = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(m)] || '';
+  return `${dd} ${mon} ${y}`;
+}
+
+// INR amount formatted with Indian digit grouping + 2 decimals.
+function fmtINR(n) {
+  let v = Number(n) || 0;
+  const neg = v < 0; v = Math.abs(v);
+  const [intp, dec] = v.toFixed(2).split('.');
+  const last3 = intp.length > 3 ? intp.slice(-3) : intp;
+  let rest = intp.length > 3 ? intp.slice(0, -3) : '';
+  if (rest) rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+  return (neg ? '-' : '') + (rest ? rest + ',' + last3 : last3) + '.' + dec;
+}
+
+// Number to Indian-system words: "Rupees ... Only".
+function inrInWords(num) {
+  num = Math.round(Number(num) || 0);
+  if (num === 0) return 'Rupees Zero Only';
+  const ones = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten',
+    'Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
+  const tens = ['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+  const two = (n) => n < 20 ? ones[n] : (tens[Math.floor(n/10)] + (n%10 ? ' ' + ones[n%10] : ''));
+  const three = (n) => {
+    const h = Math.floor(n/100), r = n%100;
+    return (h ? ones[h] + ' Hundred' + (r ? ' ' : '') : '') + (r ? two(r) : '');
+  };
+  const crore = Math.floor(num/10000000); num %= 10000000;
+  const lakh = Math.floor(num/100000); num %= 100000;
+  const thousand = Math.floor(num/1000); num %= 1000;
+  const parts = [];
+  if (crore)    parts.push(three(crore) + ' Crore');
+  if (lakh)     parts.push(two(lakh) + ' Lakh');
+  if (thousand) parts.push(two(thousand) + ' Thousand');
+  if (num)      parts.push(three(num));
+  return 'Rupees ' + parts.join(' ').replace(/\s+/g, ' ').trim() + ' Only';
+}
+
+function splitSalary(gross) {
+  const g = Math.round(Number(gross) || 0);
+  const basic = Math.round(g * 0.6);
+  const hra = Math.round(g * 0.3);
+  const special = g - basic - hra;   // remainder so the three always sum to g
+  return { basic, hra, special };
+}
+
+// Collect the LOP (unpaid) dates for a user in a month — mirrors rollupForUser's
+// unpaid counting exactly, so a Sunday / day-off / holiday / approved paid leave
+// is never treated as LOP.
+async function lopDatesForUser(userId, range) {
+  const att = await db.query(
+    `SELECT for_date, status, is_paid, sick_notified_hours
+       FROM attendance_day
+      WHERE user_id = $1 AND for_date BETWEEN $2 AND $3
+      ORDER BY for_date`,
+    [userId, range.start, range.end]
+  );
+  const dates = [];
+  for (const row of att.rows) {
+    const s = row.status;
+    let unpaid = false;
+    if (row.is_paid === true) unpaid = false;
+    else if (row.is_paid === false) unpaid = true;
+    else if (['on_time','late','very_late','worked_voluntary','on_leave','off_holiday'].includes(s)) unpaid = false;
+    else if (s === 'off_sick') unpaid = !(Number(row.sick_notified_hours) >= 4);
+    else if (s === 'off_pattern' || s === 'off_cs_rota') unpaid = false; // no expectation
+    else unpaid = false;
+    if (unpaid) dates.push(dateStr(row.for_date));
+  }
+  return dates;
+}
+
+// Build the full snapshot object for one employee for one month.
+// lopOverride (number) lets HR override the detected LOP during review.
+async function buildSnapshot(u, salaryRow, range, lopOverride) {
+  const calendarDays = Number(range.end.slice(8, 10));
+  const lopDates = await lopDatesForUser(u.id, range);
+  const lop = (lopOverride != null && lopOverride !== '') ? Number(lopOverride) : lopDates.length;
+
+  const ctc = salaryRow ? Number(salaryRow.monthly_ctc) : (u.monthly_salary != null ? Number(u.monthly_salary) : 0);
+  const flagged = !salaryRow || !ctc;
+  const flagNote = !salaryRow ? 'No salary structure on file' : (!ctc ? 'Salary is zero' : null);
+
+  const master = splitSalary(ctc);
+  const actualGross = lop > 0 ? Math.round(ctc * (calendarDays - lop) / calendarDays) : ctc;
+  const actual = splitSalary(actualGross);
+
+  const earnings = [
+    { label: 'Basic (60%)',             master: master.basic,   actual: actual.basic },
+    { label: 'HRA (30%)',               master: master.hra,     actual: actual.hra },
+    { label: 'Special Allowance (10%)', master: master.special, actual: actual.special },
+  ];
+  const deductions = [];
+  if (salaryRow) {
+    for (const i of [1, 2, 3]) {
+      const label = salaryRow['deduction_' + i + '_label'];
+      const amt = Number(salaryRow['deduction_' + i + '_amount']) || 0;
+      if (label && amt > 0) deductions.push({ label, actual: amt });
+    }
+  }
+  const totalEarnMaster = master.basic + master.hra + master.special;
+  const totalEarnActual = actualGross;
+  const totalDeductions = deductions.reduce((s, d) => s + d.actual, 0);
+  const net = totalEarnActual - totalDeductions;
+
+  return {
+    emp_name: u.display_name || u.full_name,
+    emp_designation: null,                 // no title field yet — shows as —
+    emp_department: u.dept_name || null,
+    emp_code: u.emp_id || null,
+    emp_location: COMPANY.location,
+    pf_no: null, pf_uan: null,             // no field yet — shows as —
+    bank_name: u.bank_name || null,
+    bank_account: u.bank_account_number || null,
+    pan: u.pan || null,
+    doj: dateStr(u.hire_date),
+    currency: (salaryRow && salaryRow.currency) || u.salary_currency || 'INR',
+    monthly_ctc: ctc,
+    calendar_days: calendarDays,
+    lop_days: lop,
+    paid_days: calendarDays - lop,
+    lop_dates: JSON.stringify(lopDates),
+    earnings: JSON.stringify(earnings),
+    deductions: JSON.stringify(deductions),
+    total_earn_master: totalEarnMaster,
+    total_earn_actual: totalEarnActual,
+    total_deductions: totalDeductions,
+    net_pay: net,
+    net_in_words: inrInWords(net),
+    flagged, flag_note: flagNote,
+  };
+}
+
+// Gather eligible employees (active, non-owner, India/INR) + their salary row.
+async function eligibleEmployees() {
+  const users = await db.query(
+    `SELECT u.id, u.full_name, u.display_name, u.hire_date, u.monthly_salary,
+            u.salary_currency, u.emp_id, u.pan, u.bank_name, u.bank_account_number,
+            (SELECT d.name FROM user_department_memberships m
+              JOIN departments d ON d.id = m.department_id
+              WHERE m.user_id = u.id AND m.deleted_at IS NULL AND m.is_primary = TRUE
+              LIMIT 1) AS dept_name,
+            EXISTS (SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+                    WHERE ug.user_id = u.id AND g.slug = 'owner') AS is_owner
+       FROM users u
+      WHERE u.deleted_at IS NULL AND u.employment_status = 'active'
+        AND COALESCE(u.salary_currency, 'INR') = 'INR'
+      ORDER BY u.full_name`
+  );
+  const out = [];
+  for (const u of users.rows) {
+    if (u.is_owner) continue;                       // owner is not paid via payroll
+    const s = await db.query(
+      `SELECT monthly_ctc, currency,
+              deduction_1_label, deduction_1_amount,
+              deduction_2_label, deduction_2_amount,
+              deduction_3_label, deduction_3_amount
+         FROM salary_structures WHERE user_id = $1`, [u.id]);
+    out.push({ user: u, salaryRow: s.rows[0] || null });
+  }
+  return out;
+}
+
+// Upsert a payslip snapshot into the payslips table (draft).
+async function upsertPayslip(runId, userId, range, snap) {
+  await db.query(
+    `INSERT INTO payslips
+       (run_id, user_id, year, month, emp_name, emp_designation, emp_department,
+        emp_code, emp_location, pf_no, pf_uan, bank_name, bank_account, pan, doj,
+        currency, monthly_ctc, calendar_days, lop_days, paid_days, lop_dates,
+        earnings, deductions, total_earn_master, total_earn_actual,
+        total_deductions, net_pay, net_in_words, flagged, flag_note, status, generated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+             $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,'draft',NOW())
+     ON CONFLICT (run_id, user_id) DO UPDATE SET
+        emp_name=EXCLUDED.emp_name, emp_designation=EXCLUDED.emp_designation,
+        emp_department=EXCLUDED.emp_department, emp_code=EXCLUDED.emp_code,
+        emp_location=EXCLUDED.emp_location, pf_no=EXCLUDED.pf_no, pf_uan=EXCLUDED.pf_uan,
+        bank_name=EXCLUDED.bank_name, bank_account=EXCLUDED.bank_account, pan=EXCLUDED.pan,
+        doj=EXCLUDED.doj, currency=EXCLUDED.currency, monthly_ctc=EXCLUDED.monthly_ctc,
+        calendar_days=EXCLUDED.calendar_days, lop_days=EXCLUDED.lop_days,
+        paid_days=EXCLUDED.paid_days, lop_dates=EXCLUDED.lop_dates,
+        earnings=EXCLUDED.earnings, deductions=EXCLUDED.deductions,
+        total_earn_master=EXCLUDED.total_earn_master, total_earn_actual=EXCLUDED.total_earn_actual,
+        total_deductions=EXCLUDED.total_deductions, net_pay=EXCLUDED.net_pay,
+        net_in_words=EXCLUDED.net_in_words, flagged=EXCLUDED.flagged, flag_note=EXCLUDED.flag_note,
+        override_reason=NULL, overridden_by=NULL, overridden_at=NULL,
+        status='draft', generated_at=NOW()
+     WHERE payslips.status <> 'published'`,
+    [runId, userId, range.year, range.month, snap.emp_name, snap.emp_designation,
+     snap.emp_department, snap.emp_code, snap.emp_location, snap.pf_no, snap.pf_uan,
+     snap.bank_name, snap.bank_account, snap.pan, snap.doj, snap.currency,
+     snap.monthly_ctc, snap.calendar_days, snap.lop_days, snap.paid_days, snap.lop_dates,
+     snap.earnings, snap.deductions, snap.total_earn_master, snap.total_earn_actual,
+     snap.total_deductions, snap.net_pay, snap.net_in_words, snap.flagged, snap.flag_note]
+  );
+}
+
+// ---------- POST /api/payroll/run  { year, month } ----------
+// Generate (or regenerate) a draft run for the period.
+router.post('/run', requireSalary, async (req, res) => {
+  const range = monthRange(req.body.year, req.body.month);
+  if (!range) return res.status(400).json({ error: 'Bad year/month' });
+  try {
+    let run = (await db.query(
+      `SELECT * FROM payroll_runs WHERE year = $1 AND month = $2`,
+      [range.year, range.month])).rows[0];
+    if (run && run.status === 'approved') {
+      return res.status(409).json({ error: 'This month is already approved. Revoke a payslip to make changes.' });
+    }
+    if (!run) {
+      run = (await db.query(
+        `INSERT INTO payroll_runs (year, month, status, created_by)
+         VALUES ($1,$2,'draft',$3) RETURNING *`,
+        [range.year, range.month, req.user.id])).rows[0];
+    }
+    const emps = await eligibleEmployees();
+    let flaggedCount = 0;
+    for (const { user, salaryRow } of emps) {
+      const snap = await buildSnapshot(user, salaryRow, range);
+      if (snap.flagged) flaggedCount++;
+      await upsertPayslip(run.id, user.id, range, snap);
+    }
+    res.json({ ok: true, run_id: run.id, generated: emps.length, flagged: flaggedCount });
+  } catch (err) {
+    console.error('[payroll/run] error:', err);
+    res.status(500).json({ error: 'Failed to generate payroll' });
+  }
+});
+
+// ---------- GET /api/payroll/run?year=&month= ----------
+// Fetch the run + payslips for the review screen.
+router.get('/run', requireSalary, async (req, res) => {
+  const range = monthRange(req.query.year, req.query.month);
+  if (!range) return res.status(400).json({ error: 'Bad year/month' });
+  try {
+    const run = (await db.query(
+      `SELECT r.*, (SELECT COALESCE(display_name, full_name) FROM users WHERE id = r.created_by) AS created_by_name,
+              (SELECT COALESCE(display_name, full_name) FROM users WHERE id = r.approved_by) AS approved_by_name
+         FROM payroll_runs r WHERE year = $1 AND month = $2`,
+      [range.year, range.month])).rows[0] || null;
+    if (!run) return res.json({ run: null, rows: [] });
+    const ps = await db.query(
+      `SELECT p.id, p.user_id, p.emp_name, p.emp_department, p.net_pay, p.total_earn_actual,
+              p.total_deductions, p.lop_days, p.lop_dates, p.calendar_days, p.status,
+              p.flagged, p.flag_note, p.override_reason, p.monthly_ctc,
+              u.initials, u.avatar_colour
+         FROM payslips p JOIN users u ON u.id = p.user_id
+        WHERE p.run_id = $1 ORDER BY p.emp_name`, [run.id]);
+    res.json({ run, rows: ps.rows });
+  } catch (err) {
+    console.error('[payroll/run get] error:', err);
+    res.status(500).json({ error: 'Failed to load run' });
+  }
+});
+
+// ---------- PUT /api/payroll/payslip/:id/override  { lop_days, reason } ----------
+// Override the detected LOP for one payslip, recompute, log the reason.
+router.put('/payslip/:id/override', requireSalary, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const lopDays = Number(req.body.lop_days);
+  const reason = String(req.body.reason || '').trim();
+  if (!id || !Number.isFinite(lopDays) || lopDays < 0) return res.status(400).json({ error: 'Bad input' });
+  if (!reason) return res.status(400).json({ error: 'A reason is required' });
+  try {
+    const p = (await db.query(`SELECT * FROM payslips WHERE id = $1`, [id])).rows[0];
+    if (!p) return res.status(404).json({ error: 'Not found' });
+    if (p.status === 'published') return res.status(409).json({ error: 'This payslip is published. Revoke it first.' });
+    const cd = Number(p.calendar_days);
+    const ctc = Number(p.monthly_ctc);
+    const actualGross = lopDays > 0 ? Math.round(ctc * (cd - lopDays) / cd) : ctc;
+    const a = splitSalary(actualGross);
+    const earnings = [
+      { label: 'Basic (60%)',             master: Math.round(ctc*0.6), actual: a.basic },
+      { label: 'HRA (30%)',               master: Math.round(ctc*0.3), actual: a.hra },
+      { label: 'Special Allowance (10%)', master: ctc - Math.round(ctc*0.6) - Math.round(ctc*0.3), actual: a.special },
+    ];
+    const deductions = p.deductions || [];
+    const totalDed = deductions.reduce((s, d) => s + Number(d.actual || 0), 0);
+    const net = actualGross - totalDed;
+    await db.query(
+      `UPDATE payslips SET lop_days=$1, paid_days=$2, earnings=$3, total_earn_actual=$4,
+              net_pay=$5, net_in_words=$6, override_reason=$7, overridden_by=$8, overridden_at=NOW()
+        WHERE id=$9`,
+      [lopDays, cd - lopDays, JSON.stringify(earnings), actualGross, net, inrInWords(net),
+       reason, req.user.id, id]);
+    res.json({ ok: true, net_pay: net });
+  } catch (err) {
+    console.error('[payroll/override] error:', err);
+    res.status(500).json({ error: 'Failed to override' });
+  }
+});
+
+// ---------- POST /api/payroll/payslip/:id/regenerate ----------
+// Fix-at-source: recompute one payslip from current attendance.
+router.post('/payslip/:id/regenerate', requireSalary, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const p = (await db.query(`SELECT * FROM payslips WHERE id = $1`, [id])).rows[0];
+    if (!p) return res.status(404).json({ error: 'Not found' });
+    if (p.status === 'published') return res.status(409).json({ error: 'Published — revoke first.' });
+    const range = monthRange(p.year, p.month);
+    const u = (await db.query(
+      `SELECT u.id, u.full_name, u.display_name, u.hire_date, u.monthly_salary,
+              u.salary_currency, u.emp_id, u.pan, u.bank_name, u.bank_account_number,
+              (SELECT d.name FROM user_department_memberships m JOIN departments d ON d.id=m.department_id
+                WHERE m.user_id=u.id AND m.deleted_at IS NULL AND m.is_primary=TRUE LIMIT 1) AS dept_name
+         FROM users u WHERE u.id = $1`, [p.user_id])).rows[0];
+    const s = (await db.query(`SELECT * FROM salary_structures WHERE user_id = $1`, [p.user_id])).rows[0] || null;
+    const snap = await buildSnapshot(u, s, range);
+    await upsertPayslip(p.run_id, p.user_id, range, snap);
+    res.json({ ok: true, net_pay: snap.net_pay });
+  } catch (err) {
+    console.error('[payroll/regenerate] error:', err);
+    res.status(500).json({ error: 'Failed to regenerate' });
+  }
+});
+
+// ---------- POST /api/payroll/run/:id/approve ----------
+// Approve the run: publish every draft payslip, lock figures, notify employees.
+router.post('/run/:id/approve', requireSalary, async (req, res) => {
+  const runId = parseInt(req.params.id, 10);
+  try {
+    const run = (await db.query(`SELECT * FROM payroll_runs WHERE id = $1`, [runId])).rows[0];
+    if (!run) return res.status(404).json({ error: 'Not found' });
+    if (run.status === 'approved') return res.status(409).json({ error: 'Already approved' });
+    const published = await db.query(
+      `UPDATE payslips SET status='published', published_at=NOW()
+        WHERE run_id=$1 AND status='draft' RETURNING user_id, year, month`, [runId]);
+    await db.query(
+      `UPDATE payroll_runs SET status='approved', approved_by=$1, approved_at=NOW() WHERE id=$2`,
+      [req.user.id, runId]);
+    const period = `${MONTHS[run.month]} ${run.year}`;
+    for (const row of published.rows) {
+      await notify({
+        userIds: [row.user_id],
+        type: 'payslip.ready',
+        title: 'Your payslip is ready',
+        body: `Your payslip for ${period} is now available in your Pay section.`,
+        action_url: '/#me/profile?tab=pay',
+        related_type: 'payslip',
+      });
+    }
+    res.json({ ok: true, published: published.rows.length });
+  } catch (err) {
+    console.error('[payroll/approve] error:', err);
+    res.status(500).json({ error: 'Failed to approve' });
+  }
+});
+
+// ---------- POST /api/payroll/payslip/:id/revoke  { reason } ----------
+router.post('/payslip/:id/revoke', requireSalary, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const reason = String(req.body.reason || '').trim();
+  if (!reason) return res.status(400).json({ error: 'A reason is required' });
+  try {
+    const p = (await db.query(`SELECT status FROM payslips WHERE id = $1`, [id])).rows[0];
+    if (!p) return res.status(404).json({ error: 'Not found' });
+    if (p.status !== 'published') return res.status(409).json({ error: 'Only published payslips can be revoked' });
+    await db.query(
+      `UPDATE payslips SET status='revoked', revoked_at=NOW(), revoke_reason=$1, revoked_by=$2 WHERE id=$3`,
+      [reason, req.user.id, id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[payroll/revoke] error:', err);
+    res.status(500).json({ error: 'Failed to revoke' });
+  }
+});
+
+// ---------- POST /api/payroll/payslip/:id/publish ----------
+// Re-publish a single payslip after a fix (revoke -> fix -> reissue loop).
+router.post('/payslip/:id/publish', requireSalary, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const p = (await db.query(`SELECT * FROM payslips WHERE id = $1`, [id])).rows[0];
+    if (!p) return res.status(404).json({ error: 'Not found' });
+    if (p.status === 'published') return res.status(409).json({ error: 'Already published' });
+    await db.query(
+      `UPDATE payslips SET status='published', published_at=NOW(),
+              revoked_at=NULL, revoke_reason=NULL, revoked_by=NULL WHERE id=$1`, [id]);
+    await notify({
+      userIds: [p.user_id],
+      type: 'payslip.ready',
+      title: 'Your payslip is ready',
+      body: `Your payslip for ${MONTHS[p.month]} ${p.year} is now available in your Pay section.`,
+      action_url: '/#me/profile?tab=pay',
+      related_type: 'payslip',
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[payroll/publish] error:', err);
+    res.status(500).json({ error: 'Failed to publish' });
+  }
+});
+
+// ---------- GET /api/payroll/user/:userId  — published payslips for a user ----------
+// Visible to the person themselves, or Owner/HR (salary.view).
+router.get('/user/:userId', async (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  const userId = parseInt(req.params.userId, 10);
+  if (!userId) return res.status(400).json({ error: 'Bad userId' });
+  const isSelf = req.user.id === userId;
+  if (!isSelf && !req.user.can('profile.salary.view')) return res.status(403).json({ error: 'Permission denied' });
+  try {
+    const r = await db.query(
+      `SELECT id, year, month, net_pay, published_at
+         FROM payslips WHERE user_id = $1 AND status = 'published'
+        ORDER BY year DESC, month DESC`, [userId]);
+    res.json({ payslips: r.rows.map(p => ({
+      id: p.id, year: p.year, month: p.month, net_pay: p.net_pay,
+      label: `${MONTHS[p.month]} ${p.year}`, published_at: p.published_at,
+    })) });
+  } catch (err) {
+    console.error('[payroll/user] error:', err);
+    res.status(500).json({ error: 'Failed to load payslips' });
+  }
+});
+
+// ---------- GET /api/payroll/payslip/:id/html — the rendered payslip ----------
+// Owner/HR can view any (for preview); an employee can view their own published one.
+router.get('/payslip/:id/html', async (req, res) => {
+  if (!req.user) return res.status(401).send('Not signed in');
+  const id = parseInt(req.params.id, 10);
+  try {
+    const p = (await db.query(`SELECT * FROM payslips WHERE id = $1`, [id])).rows[0];
+    if (!p) return res.status(404).send('Not found');
+    const isSelf = req.user.id === p.user_id;
+    const isHr = req.user.can('profile.salary.view');
+    if (!isHr && !(isSelf && p.status === 'published')) return res.status(403).send('Permission denied');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(renderPayslipHtml(p));
+  } catch (err) {
+    console.error('[payroll/html] error:', err);
+    res.status(500).send('Failed to render payslip');
+  }
+});
+
+// Render the approved payslip design from a stored snapshot row.
+function renderPayslipHtml(p) {
+  const period = `${MONTHS[p.month]} ${p.year}`;
+  const earnings = Array.isArray(p.earnings) ? p.earnings : [];
+  const deductions = Array.isArray(p.deductions) ? p.deductions : [];
+  const v = (x) => (x == null || x === '') ? '\u2014' : escHtml(x);
+  const earnRows = earnings.map(e =>
+    `<tr><td>${escHtml(e.label)}</td><td class="num">${fmtINR(e.master)}</td><td class="num">${fmtINR(e.actual)}</td></tr>`
+  ).join('');
+  let dedRows;
+  if (deductions.length) {
+    dedRows = deductions.map(d =>
+      `<tr><td>${escHtml(d.label)}</td><td class="num">${fmtINR(d.actual)}</td></tr>`).join('');
+    while (deductions.length + (dedRows.match(/<tr>/g) || []).length < 3) break;
+  } else {
+    dedRows = `<tr><td class="empty">No deductions</td><td class="num">&mdash;</td></tr>`;
+  }
+  // pad deduction rows up to 3 for visual balance with the earnings pane
+  const dedCount = deductions.length || 1;
+  let pad = '';
+  for (let i = dedCount; i < 3; i++) pad += `<tr><td>&nbsp;</td><td class="num"></td></tr>`;
+  const banner = (p.status === 'draft')
+    ? `<div style="background:#FFF7E6;border:1px solid #F2D88A;color:#8A6D1F;font-size:11px;padding:8px 14px;border-radius:6px;margin-bottom:14px;text-align:center">DRAFT — not yet approved or published</div>`
+    : (p.status === 'revoked')
+    ? `<div style="background:#FDEDED;border:1px solid #F2B8B8;color:#9B2C2C;font-size:11px;padding:8px 14px;border-radius:6px;margin-bottom:14px;text-align:center">REVOKED</div>`
+    : '';
+
+  return `<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>${escHtml(COMPANY.name)} — Payslip ${escHtml(period)}</title>
+<style>
+  :root{ --ink:#1A1C22; --muted:#6B6F76; --line:#E2E4E8; --orange:#E8722B; --tint:#FCF1E8; }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:#73767D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       color:var(--ink);padding:28px 14px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .sheet{width:794px;max-width:100%;margin:0 auto;background:#fff;padding:38px 42px 34px;box-shadow:0 16px 46px rgba(0,0,0,.30)}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:24px;padding-bottom:16px}
+  .top img{height:60px;width:auto;display:block}
+  .top .co{text-align:right}
+  .top .co h1{margin:0;font-size:20px;font-weight:700}
+  .top .co p{margin:4px 0 0;font-size:11px;color:var(--muted);line-height:1.55;max-width:320px;margin-left:auto}
+  .rule{height:3px;background:var(--orange);border-radius:2px}
+  .title{text-align:center;font-size:15px;font-weight:600;letter-spacing:.02em;margin:18px 0 20px}
+  .title span{color:var(--muted);font-weight:500}
+  .meta{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .meta .c:first-child{border-right:1px solid var(--line)}
+  .meta .row{display:flex;justify-content:space-between;gap:10px;padding:8px 14px;font-size:12px;border-bottom:1px solid var(--line)}
+  .meta .c .row:last-child{border-bottom:none}
+  .meta .k{color:var(--muted)} .meta .v{font-weight:600;text-align:right}
+  .tables{display:grid;grid-template-columns:1.35fr 1fr;margin-top:18px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .tables .pane:first-child{border-right:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{background:#F6F7F9;text-align:left;padding:9px 14px;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);border-bottom:1px solid var(--line)}
+  th.num{text-align:right}
+  td{padding:8px 14px;border-bottom:1px solid var(--line)}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  tfoot td{font-weight:700;background:#FAFBFC;border-top:1px solid var(--ink);border-bottom:none}
+  .empty{color:#A6A9AF}
+  .net{margin-top:18px;display:flex;justify-content:space-between;align-items:center;background:var(--tint);
+       border:1px solid #F0CFB4;border-left:4px solid var(--orange);border-radius:8px;padding:15px 20px}
+  .net .lbl{font-size:12px;color:var(--muted)} .net .words{font-size:12px;font-style:italic;margin-top:3px}
+  .net .amt{font-size:23px;font-weight:800}
+  .foot{margin-top:22px;border-top:1px solid var(--line);padding-top:12px;text-align:center;color:#9A9DA3;font-size:10.5px;line-height:1.7}
+  @media print{ @page{size:A4;margin:12mm} body{background:#fff;padding:0} .sheet{box-shadow:none;width:auto;max-width:none;padding:0} }
+</style></head><body>
+  <div class="sheet">
+    ${banner}
+    <div class="top">
+      <img src="/assets/payslip-logo.png" alt="${escHtml(COMPANY.name)}"/>
+      <div class="co"><h1>${escHtml(COMPANY.name)}</h1>
+        <p>${escHtml(COMPANY.addr1)}<br/>${escHtml(COMPANY.addr2)}</p></div>
+    </div>
+    <div class="rule"></div>
+    <div class="title">Payslip <span>for the month of</span> ${escHtml(period)}</div>
+    <div class="meta">
+      <div class="c">
+        <div class="row"><span class="k">Name</span><span class="v">${v(p.emp_name)}</span></div>
+        <div class="row"><span class="k">Designation</span><span class="v">${v(p.emp_designation)}</span></div>
+        <div class="row"><span class="k">Department</span><span class="v">${v(p.emp_department)}</span></div>
+        <div class="row"><span class="k">Location</span><span class="v">${v(p.emp_location)}</span></div>
+        <div class="row"><span class="k">Joining Date</span><span class="v">${fmtDayMonYear(p.doj)}</span></div>
+        <div class="row"><span class="k">Effective Work Days</span><span class="v">${escHtml(p.calendar_days)}</span></div>
+        <div class="row"><span class="k">LOP</span><span class="v">${escHtml(p.lop_days)}</span></div>
+      </div>
+      <div class="c">
+        <div class="row"><span class="k">Employee No</span><span class="v">${v(p.emp_code)}</span></div>
+        <div class="row"><span class="k">Bank Name</span><span class="v">${v(p.bank_name)}</span></div>
+        <div class="row"><span class="k">Bank A/C No</span><span class="v">${v(p.bank_account)}</span></div>
+        <div class="row"><span class="k">PAN</span><span class="v">${v(p.pan)}</span></div>
+        <div class="row"><span class="k">PF No</span><span class="v">${v(p.pf_no)}</span></div>
+        <div class="row"><span class="k">PF UAN</span><span class="v">${v(p.pf_uan)}</span></div>
+        <div class="row"><span class="k">Currency</span><span class="v">${escHtml(p.currency)} (&#8377;)</span></div>
+      </div>
+    </div>
+    <div class="tables">
+      <div class="pane"><table>
+        <thead><tr><th>Earnings</th><th class="num">Master</th><th class="num">Actual</th></tr></thead>
+        <tbody>${earnRows}</tbody>
+        <tfoot><tr><td>Total Earnings</td><td class="num">${fmtINR(p.total_earn_master)}</td><td class="num">${fmtINR(p.total_earn_actual)}</td></tr></tfoot>
+      </table></div>
+      <div class="pane"><table>
+        <thead><tr><th>Deductions</th><th class="num">Actual</th></tr></thead>
+        <tbody>${dedRows}${pad}</tbody>
+        <tfoot><tr><td>Total Deductions</td><td class="num">${fmtINR(p.total_deductions)}</td></tr></tfoot>
+      </table></div>
+    </div>
+    <div class="net">
+      <div><div class="lbl">Net Pay for ${escHtml(period)}</div><div class="words">${escHtml(p.net_in_words)}</div></div>
+      <div class="amt">&#8377; ${fmtINR(p.net_pay)}</div>
+    </div>
+    <div class="foot">This is a system-generated payslip and does not require a signature.<br/>Generated ${fmtDayMonYear(p.generated_at)} &middot; FK Home</div>
+  </div>
+</body></html>`;
+}
+
 module.exports = router;
+// Exposed for tests / reuse (router stays the primary export).
+module.exports.inrInWords = inrInWords;
+module.exports.splitSalary = splitSalary;
+module.exports.fmtINR = fmtINR;
+module.exports.renderPayslipHtml = renderPayslipHtml;

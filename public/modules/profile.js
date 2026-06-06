@@ -1425,11 +1425,31 @@ window.fkModules['profile'] = {
             : '<div class="fld"><div class="fv empty">No bank details yet. Add them in My details.</div></div>') +
         '</div>';
       }
+      // Generated payslips (from the payroll engine) — self or HR can view.
+      let genPayslips = [];
+      try {
+        const pr = await fetch('/api/payroll/user/' + profileUserId, { credentials: 'include' });
+        if (pr.ok) { const pd = await pr.json(); genPayslips = pd.payslips || []; }
+      } catch (e) { genPayslips = []; }
+      html += '<div class="card"><div class="card-title"><i class="ti ti-file-invoice"></i> Payslips</div>';
+      if (genPayslips.length) {
+        html += '<div class="stack" style="gap:8px;margin-top:8px">' + genPayslips.map(p =>
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:0.5px solid var(--line);border-radius:8px">' +
+            '<div><div style="font-weight:500">' + esc(p.label) + '</div>' +
+            '<div style="font-size:12px;color:var(--muted)">Net \u20B9' + Number(p.net_pay || 0).toLocaleString('en-IN') + '</div></div>' +
+            '<button class="btn pay-view-slip" data-id="' + p.id + '" style="padding:9px 16px"><i class="ti ti-eye"></i> View</button>' +
+          '</div>').join('') + '</div>';
+      } else {
+        html += '<div class="fld" style="margin-top:6px"><div class="fv empty">No payslips yet. They appear here once HR approves payroll for the month.</div></div>';
+      }
+      html += '</div>';
       html += payFileGroupHtml('Payslips and tax', 'payroll', (data.payroll && data.payroll.files) || []);
       html += payFileGroupHtml('Insurance', 'insurance', (data.insurance && data.insurance.files) || []);
       html += '</div>';
 
       body.innerHTML = html;
+      body.querySelectorAll('.pay-view-slip').forEach(b => b.addEventListener('click', () =>
+        window.open('/api/payroll/payslip/' + b.dataset.id + '/html', '_blank', 'noopener')));
       wireFileRowHandlers();
       wirePayUpload('payroll');
       wirePayUpload('insurance');
