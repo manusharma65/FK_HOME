@@ -124,6 +124,27 @@ window.fkExitTracker = (function () {
         await load();
       } catch (e) { alert('Failed'); }
     }
+    // Proper notes editor (replaces a raw browser prompt).
+    function openNotesEditor(id, current) {
+      const ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(20,22,27,.5);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px';
+      ov.innerHTML =
+        '<div style="background:#fff;border-radius:12px;max-width:520px;width:100%;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.3)">' +
+          '<h3 style="margin:0 0 4px;font-size:17px">Exit interview notes</h3>' +
+          '<p style="margin:0 0 14px;font-size:13px;color:var(--muted,#6B6F76)">Internal \u2014 not shown to the leaver.</p>' +
+          '<textarea id="exNoteTa" placeholder="What came up in the exit conversation\u2026" style="width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--line,#E2E4E8);border-radius:9px;font-size:14px;font-family:inherit;line-height:1.5;resize:vertical;box-sizing:border-box"></textarea>' +
+          '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">' +
+            '<button data-exn-cancel style="padding:10px 18px;font-size:14px;border-radius:8px;border:1px solid var(--line,#E2E4E8);background:#fff;cursor:pointer">Cancel</button>' +
+            '<button data-exn-save style="padding:10px 18px;font-size:14px;border-radius:8px;border:none;background:var(--ink,#14161B);color:#fff;font-weight:600;cursor:pointer">Save notes</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(ov);
+      const ta = ov.querySelector('#exNoteTa'); ta.value = current || ''; ta.focus();
+      const close = () => ov.remove();
+      ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+      ov.querySelector('[data-exn-cancel]').addEventListener('click', close);
+      ov.querySelector('[data-exn-save]').addEventListener('click', () => { const v = ta.value; close(); addNote(id, v); });
+    }
     async function uploadFile(id, autoDone) {
       const inp = document.getElementById('exFile_' + id);
       if (!inp || !inp.files || !inp.files.length) return;
@@ -258,9 +279,7 @@ window.fkExitTracker = (function () {
       container.querySelectorAll('[data-ex-note]').forEach(el => el.addEventListener('click', () => {
         const id = el.dataset.exNote;
         const cur = /internal to hr/i.test(exitBodies[id] || '') ? '' : (exitBodies[id] || '');
-        const txt = prompt('Exit interview notes (internal — not shown to the leaver):', cur);
-        if (txt === null) return;
-        addNote(id, txt);
+        openNotesEditor(id, cur);
       }));
     }
 

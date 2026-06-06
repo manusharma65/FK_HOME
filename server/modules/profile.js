@@ -53,7 +53,7 @@ const ALLOWED_DRAWERS = new Set([
   'onboarding','offboarding','reviews','employment','salary',
   'payroll','insurance','personal',
 ]);
-const NOTE_KINDS = new Set(['review','onboarding']);
+const NOTE_KINDS = new Set(['review','onboarding','offboarding']);
 const NOTE_KIND_LABELS = { review: 'review', onboarding: 'onboarding' };
 const DRAWER_ORDER = ['onboarding','offboarding','reviews','employment','salary','payroll','insurance','personal'];
 

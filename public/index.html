@@ -192,7 +192,6 @@
   .navgrp .nav-item.on i { color: #14161B; }
   .navgrp .nav-item.on .count { background: rgba(20,22,27,0.18); color: #14161B; }
   .navgrp .nav-item.on:hover { background: var(--accent); color: #14161B; }
-  .g-ws  { --accent: #EFA431; --soft: 239,164,49; }
   .g-hr  { --accent: #36B58F; --soft: 54,181,143; }
   .g-day { --accent: #5E9BE0; --soft: 94,155,224; }
   .g-sys { --accent: #8B82E6; --soft: 139,130,230; }
@@ -680,10 +679,6 @@
         <span>Running late?</span>
       </button>
 
-      <!-- ===== WORKSPACE ===== -->
-      <div class="navgrp g-ws" id="grpWorkspace">
-        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-layout-grid"></i></span><span class="navgrp-lbl">Workspace</span><span class="navgrp-cnt" id="cntWorkspace"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
-        <div class="navgrp-items">
       <div class="nav-item on" id="navHome" data-route="#home">
         <i class="ti ti-home"></i>
         <span>My FK Space</span>
@@ -710,9 +705,6 @@
         <i class="ti ti-ship"></i>
         <span>Logistics</span>
         <span class="soon-badge">soon</span>
-      </div>
-
-        </div>
       </div>
 
       <!-- ===== HR ===== -->
@@ -1522,7 +1514,7 @@ function render() {
     if (saved === '1') { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; }
     else setOpenHeight();
   }
-  ['grpWorkspace', 'grpHR', 'grpDay', 'grpSystem', 'grpYou'].forEach(setupNavGroup);
+  ['grpHR', 'grpDay', 'grpSystem', 'grpYou'].forEach(setupNavGroup);
   // Keep open groups correctly sized if the window resizes.
   window.addEventListener('resize', () => {
     document.querySelectorAll('.navgrp:not(.collapsed) .navgrp-items').forEach(it => { it.style.maxHeight = it.scrollHeight + 'px'; });
