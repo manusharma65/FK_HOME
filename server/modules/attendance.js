@@ -461,13 +461,23 @@ router.post('/regularise', async (req, res) => {
     return res.status(400).json({ error: 'Date and reason are required.' });
   }
   try {
+    // The form may send bare times ("07:30"); the columns are TIMESTAMPTZ.
+    // Combine HH:MM with for_date; pass through anything already full.
+    const combineDT = (time) => {
+      if (!time) return null;
+      const t = String(time).trim();
+      if (/^\d{1,2}:\d{2}$/.test(t)) return for_date + ' ' + (t.length === 4 ? '0' + t : t) + ':00';
+      return t; // already a full timestamp / ISO string
+    };
+    const firstLogin = combineDT(requested_first_login);
+    const lastLogout = combineDT(requested_last_logout);
     const r = await db.query(
       `INSERT INTO attendance_regularisations
         (user_id, for_date, reason, requested_first_login, requested_last_logout)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
       [req.user.id, for_date, reason.trim(),
-       requested_first_login || null, requested_last_logout || null]
+       firstLogin, lastLogout]
     );
     await logAudit({ req, module: 'attendance', action: 'regularise.requested',
                     target_type: 'attendance_regularisation', target_id: r.rows[0].id,

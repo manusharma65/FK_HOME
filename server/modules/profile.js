@@ -1284,8 +1284,10 @@ router.post('/:userId/offboarding/regenerate', async (req, res) => {
         WHERE m.user_id = $1 AND m.deleted_at IS NULL`, [userId]
     );
     await offboardingTpl.applyOffboardingTemplate(userId, req.user.id, depts.rows.map(r => r.name));
+    const cnt = await db.query(`SELECT COUNT(*)::int AS c FROM profile_notes WHERE user_id=$1 AND kind='offboarding'`, [userId]);
+    console.log('[offboarding regenerate] user ' + userId + ' now has ' + cnt.rows[0].c + ' exit items');
     await logAudit({ req, module: 'profile', action: 'offboarding.regenerate', target_type: 'user', target_id: userId });
-    res.json({ ok: true });
+    res.json({ ok: true, count: cnt.rows[0].c });
   } catch (e) {
     console.error('[offboarding regenerate] failed:', e.message);
     res.status(500).json({ error: e.message || 'Failed' });

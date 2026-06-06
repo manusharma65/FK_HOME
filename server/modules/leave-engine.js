@@ -164,8 +164,9 @@ async function recomputeBalanceFor(userId, opts = {}) {
     `INSERT INTO leave_balances
        (user_id, year, leave_year_start, entitled_days, carryover_days, taken_days, pending_days, recomputed_at, updated_at)
      VALUES ($1, $2, $3, $4, 0, $5, $6, NOW(), NOW())
-     ON CONFLICT (user_id, leave_year_start) DO UPDATE
-       SET entitled_days = EXCLUDED.entitled_days,
+     ON CONFLICT (user_id, year) DO UPDATE
+       SET leave_year_start = EXCLUDED.leave_year_start,
+           entitled_days = EXCLUDED.entitled_days,
            taken_days    = EXCLUDED.taken_days,
            pending_days  = EXCLUDED.pending_days,
            recomputed_at = NOW(),
