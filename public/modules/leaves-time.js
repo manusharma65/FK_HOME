@@ -93,9 +93,10 @@ window.fkModules['leaves-time'] = {
 
   async mount(el) {
     const $ = (id) => el.querySelector('#' + id);
+    let leaveRows = [];
     function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function fdays(n){ if(n==null) return '\u2014'; const x=Number(n); return Number.isInteger(x)?String(x):x.toFixed(1); }
-    function dOnly(v){ if(!v) return '\u2014'; if(typeof v==='string') return v.slice(0,10); try{return new Date(v).toISOString().slice(0,10);}catch(e){return String(v);} }
+    function dOnly(v){ if(!v) return '\u2014'; var s=String(v); var m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return m[3]+'/'+m[2]+'/'+m[1]; var d=new Date(s); return isNaN(d.getTime())?s:d.toLocaleDateString('en-GB'); }
     function tOnly(v){ if(!v) return '\u2014'; if(typeof v==='string'&&/^\d{2}:\d{2}/.test(v)) return v.slice(0,5); try{return new Date(v).toTimeString().slice(0,5);}catch(e){return '\u2014';} }
     function leavePill(s){ const m={pending:['amber','Pending'],approved:['green','Approved'],denied:['red','Denied'],rejected:['red','Rejected'],cancelled:['muted','Cancelled'],recorded:['muted','Recorded']}; const v=m[s]||['muted',s||'\u2014']; return '<span class="pill '+v[0]+'">'+v[1]+'</span>'; }
     function regPill(s){ const m={pending:['amber','Pending'],approved:['green','Approved'],denied:['red','Denied']}; const v=m[s]||['muted',s||'\u2014']; return '<span class="pill '+v[0]+'">'+v[1]+'</span>'; }
@@ -117,16 +118,39 @@ window.fkModules['leaves-time'] = {
         if (!r.ok) { panel.innerHTML = '<div class="empty">Cannot load leaves.</div>'; return; }
         const data = await r.json();
         const rows = data.requests || data.leaves || [];
+        leaveRows = rows;
         const b = data.balance || {};
         $('ltBalance').textContent = fdays(b.remaining);
         $('ltUsed').textContent = fdays(b.used);
         $('ltPending').textContent = fdays(b.pending);
         if (rows.length === 0) { panel.innerHTML = '<div class="empty">No leave requests this year.</div>'; return; }
-        panel.innerHTML = rows.map(l =>
-          '<div class="row"><div><div class="t1">' + dOnly(l.start_date) + ' \u2192 ' + dOnly(l.end_date) + '</div>' +
-          '<div class="t2">' + esc(l.leave_type || l.type || 'Leave') + ' \u00b7 ' + (l.days || '\u2014') + (Number(l.days) === 1 ? ' day' : ' days') +
-          (l.reason ? ' \u00b7 ' + esc(l.reason) : '') + '</div></div>' + leavePill(l.status) + '</div>'
-        ).join('');
+        const typeLabels = { annual: 'Annual leave', unpaid: 'Unpaid leave', compassionate: 'Compassionate', sick: 'Sick', other: 'Other' };
+        panel.innerHTML = rows.map(l => {
+          const typeLabel = typeLabels[l.request_type] || l.request_type || 'Leave';
+          const dys = (l.total_days != null) ? fdays(l.total_days) : '\u2014';
+          const half = l.is_half_day ? ' (half day' + (l.half_day_part ? ', ' + l.half_day_part : '') + ')' : '';
+          const actions = (l.status === 'pending')
+            ? '<div style="display:flex;gap:8px;margin-top:10px">' +
+                '<button class="btn-secondary" data-edit-leave="' + l.id + '" style="padding:10px 18px;font-size:14px">Edit</button>' +
+                '<button class="btn-secondary" data-cancel-leave="' + l.id + '" style="padding:10px 18px;font-size:14px;color:var(--red)">Cancel</button>' +
+              '</div>'
+            : '';
+          return '<div class="row" style="align-items:flex-start"><div style="flex:1"><div class="t1">' + dOnly(l.start_date) + ' \u2192 ' + dOnly(l.end_date) + '</div>' +
+            '<div class="t2">' + esc(typeLabel) + ' \u00b7 ' + dys + (Number(l.total_days) === 1 ? ' day' : ' days') + half +
+            (l.reason ? ' \u00b7 ' + esc(l.reason) : '') + '</div>' + actions + '</div>' + leavePill(l.status) + '</div>';
+        }).join('');
+        panel.querySelectorAll('[data-edit-leave]').forEach(btn => btn.addEventListener('click', () => {
+          const lv = leaveRows.find(x => String(x.id) === btn.getAttribute('data-edit-leave'));
+          if (lv && typeof window.openLeaveModal === 'function') window.openLeaveModal(lv);
+        }));
+        panel.querySelectorAll('[data-cancel-leave]').forEach(btn => btn.addEventListener('click', async () => {
+          if (!confirm('Cancel this leave request?')) return;
+          try {
+            const cr = await fetch('/api/leaves/' + btn.getAttribute('data-cancel-leave') + '/cancel', { method: 'POST', credentials: 'include' });
+            if (!cr.ok) { const d = await cr.json().catch(() => ({})); alert(d.error || 'Failed'); return; }
+            loadLeaves();
+          } catch (e) { alert('Network error'); }
+        }));
       } catch (e) { panel.innerHTML = '<div class="empty">Network error.</div>'; }
     }
 
@@ -182,5 +206,13 @@ window.fkModules['leaves-time'] = {
     loadLeaves();
     loadAttendance();
     loadLateness();
-  }
+
+    // Let the global leave modal refresh this page after an edit/request.
+    window.__fkLeavesReload = function () {
+      if (!document.body.contains(el)) return;
+      try { loadLeaves(); loadAttendance(); loadLateness(); } catch (e) {}
+    };
+  },
+
+  unmount() { window.__fkLeavesReload = null; }
 };

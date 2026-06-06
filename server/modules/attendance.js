@@ -460,6 +460,11 @@ router.post('/regularise', async (req, res) => {
   if (!for_date || !reason || reason.trim().length < 3) {
     return res.status(400).json({ error: 'Date and reason are required.' });
   }
+  // Can only regularise a PAST day — today isn't finished and the future hasn't
+  // happened, so there's nothing settled to correct.
+  if (for_date >= nowInLondon().date) {
+    return res.status(400).json({ error: "You can only regularise a past day — today isn't finished yet." });
+  }
   try {
     // The form may send bare times ("07:30"); the columns are TIMESTAMPTZ.
     // Combine HH:MM with for_date; pass through anything already full.
@@ -1605,3 +1610,4 @@ module.exports.tickDailyMidnight = tickDailyMidnight;
 module.exports.tickWeeklySunday = tickWeeklySunday;
 module.exports.recordLogin = recordLogin;
 module.exports.recordLogout = recordLogout;
+module.exports.computeExpectedStatus = computeExpectedStatus;

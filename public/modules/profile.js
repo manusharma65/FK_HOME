@@ -1098,13 +1098,45 @@ window.fkModules['profile'] = {
           else if (status && status.startsWith('off_')) { cls += ' att-empty'; }
           else { cls += ' att-empty'; }
           // WFH special-case if there's a wfh marker — could refine later
-          html += '<div class="' + cls + '">' + day +
+          const clickable = rec && dateStr <= todayIso;
+          html += '<div class="' + cls + '"' + (clickable ? ' data-d="' + dateStr + '" style="cursor:pointer"' : '') + '>' + day +
             (flag ? '<div class="att-flag">' + flag + '</div>' : '') +
             '</div>';
         }
         grid.innerHTML = html;
 
-        // Roll-up tiles
+        // Click a day → show its detail (expected vs actual login, how late).
+        let detail = document.getElementById('attDayDetail');
+        if (!detail) {
+          detail = document.createElement('div');
+          detail.id = 'attDayDetail';
+          detail.style.cssText = 'margin-top:12px;font-size:14px;color:var(--ink);min-height:20px';
+          grid.parentNode.insertBefore(detail, grid.nextSibling);
+        }
+        detail.innerHTML = '<span style="color:var(--muted)">Tap a day to see its detail.</span>';
+        const fmtT = (ts) => { if (!ts) return '\u2014'; try { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); } catch (e) { return '\u2014'; } };
+        const expT = (ts, m) => { if (!ts) return '\u2014'; try { const d = new Date(ts); d.setMinutes(d.getMinutes() - (m || 0)); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); } catch (e) { return '\u2014'; } };
+        const describeDay = (rec, ds) => {
+          const dl = fmtDate(ds);
+          const s = rec ? rec.status : null;
+          if (s === 'late' || s === 'very_late') return '<b>' + dl + '</b> \u2014 expected ' + expT(rec.first_login, rec.late_minutes) + ', logged in ' + fmtT(rec.first_login) + ' \u00b7 <span style="color:var(--amber-deep)">' + (rec.late_minutes || 0) + ' min late</span>';
+          if (s === 'on_time' || s === 'worked_voluntary') return '<b>' + dl + '</b> \u2014 logged in ' + fmtT(rec.first_login) + ' \u00b7 <span style="color:var(--green)">on time</span>';
+          if (s === 'on_leave') return '<b>' + dl + '</b> \u2014 on approved leave';
+          if (s === 'off_sick') return '<b>' + dl + '</b> \u2014 off sick';
+          if (s === 'off_holiday') return '<b>' + dl + '</b> \u2014 public holiday';
+          if (s === 'not_yet_in') return '<b>' + dl + '</b> \u2014 no login recorded';
+          if (s && s.indexOf('off_') === 0) return '<b>' + dl + '</b> \u2014 not a working day';
+          return '<b>' + dl + '</b> \u2014 ' + (s || 'no record');
+        };
+        grid._byDate = byDate;
+        if (!grid._attClickWired) {
+          grid._attClickWired = true;
+          grid.addEventListener('click', (ev) => {
+            const cell = ev.target.closest('[data-d]');
+            if (!cell) return;
+            detail.innerHTML = describeDay(grid._byDate[cell.getAttribute('data-d')], cell.getAttribute('data-d'));
+          });
+        }
         let worked = 0, late = 0, al = 0, sick = 0;
         for (const d of days) {
           if (d.status === 'on_time' || d.status === 'worked_voluntary') worked++;
@@ -1186,7 +1218,7 @@ window.fkModules['profile'] = {
       const snapCard = '<div class="card"><div class="card-title">Snapshot</div><div class="field-grid">' +
         snap.map(p => '<div class="fld"><div class="fl">' + p[0] + '</div><div class="fv' + (p[1] ? '' : ' empty') + '">' + (p[1] ? esc(p[1]) : 'Not set') + '</div></div>').join('') +
         '</div>' +
-        (viewer.can_edit_any ? '<div style="margin-top:16px"><button class="edit-link" data-assign-mgr="1">' + (u.manager_user_id ? 'Change manager' : 'Assign manager') + '</button></div>' : '') +
+        (viewer.can_edit_any ? '<div style="margin-top:16px"><button class="det-btn" data-assign-mgr="1"><i class="ti ti-user-cog"></i> ' + (u.manager_user_id ? 'Change manager' : 'Assign manager') + '</button></div>' : '') +
         '</div>';
 
       body.innerHTML = '<div class="two-col">' + completeCard + snapCard + '</div>';

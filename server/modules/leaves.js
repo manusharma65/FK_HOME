@@ -10,11 +10,32 @@ const { db } = require('../db');
 const { requireAuth, logAudit } = require('../auth');
 const { notify, notifyManagersOf, notifyEvent } = require('../notify');
 const leaveEngine = require('./leave-engine');
+const attendance = require('./attendance');
 
 const router = express.Router();
 router.use(requireAuth);
 
-// Helper — count business days inclusive
+// Helper — count the user's actual WORKING days in [start, end] inclusive.
+// Uses the same resolver as attendance: respects the alternating-Saturday
+// pattern, the CS rota, and public holidays. A day counts only if the person
+// is expected to work it ('pending'); pattern/rota/holiday off-days don't.
+// This is what lets a working Saturday or a CS Sunday be taken as leave, and
+// stops a non-working weekend day from being bookable.
+async function countWorkingDays(userId, startStr, endStr) {
+  const start = new Date(startStr + 'T00:00:00Z');
+  const end = new Date(endStr + 'T00:00:00Z');
+  let days = 0;
+  const cur = new Date(start);
+  while (cur <= end) {
+    const ds = cur.toISOString().slice(0, 10);
+    try {
+      const expected = await attendance.computeExpectedStatus(userId, ds);
+      if (expected === 'pending') days++;
+    } catch (e) { /* if we can't classify a day, don't count it */ }
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return days;
+}
 function businessDaysBetween(startStr, endStr) {
   const start = new Date(startStr + 'T00:00:00Z');
   const end = new Date(endStr + 'T00:00:00Z');
@@ -80,8 +101,15 @@ router.post('/request', async (req, res) => {
   }
   if (end_date < start_date) return res.status(400).json({ error: 'end_date must be >= start_date' });
 
-  const totalDays = is_half_day && start_date === end_date ? 0.5 : businessDaysBetween(start_date, end_date);
-  if (totalDays <= 0) return res.status(400).json({ error: 'No working days in that range' });
+  let totalDays;
+  if (is_half_day && start_date === end_date) {
+    const wd = await countWorkingDays(req.user.id, start_date, end_date);
+    if (wd <= 0) return res.status(400).json({ error: "That day isn't a working day for you, so it can't be a half day." });
+    totalDays = 0.5;
+  } else {
+    totalDays = await countWorkingDays(req.user.id, start_date, end_date);
+  }
+  if (totalDays <= 0) return res.status(400).json({ error: "No working days in that range for you — check your weekend / rota pattern." });
 
   try {
     // r0.31 — block overlapping requests. A pending or approved leave that
@@ -182,7 +210,77 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-// ---------- LIST OWN ----------
+// ---------- EDIT OWN PENDING ----------
+// Edit your own request while it's still pending. Once approved/rejected it's
+// locked (cancel & reapply). Re-validates dates, re-checks overlaps (excluding
+// itself), and recomputes the working-day total the same way as a new request.
+router.put('/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  const { request_type, start_date, end_date, reason, is_half_day, half_day_part } = req.body || {};
+  const type = request_type || 'annual';
+  if (!start_date || !end_date) return res.status(400).json({ error: 'start_date and end_date required' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start_date) || !/^\d{4}-\d{2}-\d{2}$/.test(end_date)) {
+    return res.status(400).json({ error: 'Dates must be YYYY-MM-DD' });
+  }
+  if (end_date < start_date) return res.status(400).json({ error: 'end_date must be >= start_date' });
+
+  try {
+    const cur = await db.query(`SELECT * FROM leave_requests WHERE id = $1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const lr = cur.rows[0];
+    if (lr.user_id !== req.user.id) return res.status(403).json({ error: 'Not your request' });
+    if (lr.status !== 'pending') return res.status(400).json({ error: 'Only pending requests can be edited. Cancel and re-apply instead.' });
+
+    let totalDays;
+    if (is_half_day && start_date === end_date) {
+      const wd = await countWorkingDays(req.user.id, start_date, end_date);
+      if (wd <= 0) return res.status(400).json({ error: "That day isn't a working day for you, so it can't be a half day." });
+      totalDays = 0.5;
+    } else {
+      totalDays = await countWorkingDays(req.user.id, start_date, end_date);
+    }
+    if (totalDays <= 0) return res.status(400).json({ error: "No working days in that range for you — check your weekend / rota pattern." });
+
+    // Overlap check — exclude this request itself.
+    const clash = await db.query(
+      `SELECT id, start_date, end_date, status FROM leave_requests
+        WHERE user_id = $1 AND id <> $4
+          AND status IN ('pending','approved')
+          AND start_date <= $3::date AND end_date >= $2::date
+        LIMIT 1`,
+      [req.user.id, start_date, end_date, id]);
+    if (clash.rows.length) {
+      const c = clash.rows[0];
+      return res.status(409).json({
+        error: 'Those dates overlap another ' + c.status + ' leave ('
+          + String(c.start_date).slice(0,10) + ' → ' + String(c.end_date).slice(0,10) + ').'
+      });
+    }
+
+    const upd = await db.query(
+      `UPDATE leave_requests
+          SET request_type=$2, start_date=$3, end_date=$4, total_days=$5,
+              is_half_day=$6, half_day_part=$7, reason=$8, updated_at=NOW()
+        WHERE id=$1
+        RETURNING *`,
+      [id, type, start_date, end_date, totalDays, !!is_half_day, half_day_part || null, reason || null]);
+
+    // Saved — side-effects must never fail the response.
+    try {
+      await leaveEngine.recomputeBalanceFor(req.user.id, { note: 'Recompute on leave edit' });
+      await recomputeBalance(req.user.id);
+    } catch (e) { console.error('[leaves/edit] balance recompute failed:', e.message); }
+    try {
+      await logAudit({ req, module: 'leaves', action: 'request.edited', target_type: 'leave_request', target_id: id, before: lr, after: upd.rows[0] });
+    } catch (e) { console.error('[leaves/edit] audit failed:', e.message); }
+
+    res.json({ ok: true, request: upd.rows[0] });
+  } catch (err) {
+    console.error('[leaves/edit] error:', err);
+    res.status(500).json({ error: 'Failed to edit' });
+  }
+});
 //   ?user_id=X — view another user's leaves. Requires leaves.view.any or
 //                leaves.view.dept (target must be in your dept).
 router.get('/mine', async (req, res) => {

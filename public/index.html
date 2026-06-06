@@ -1161,7 +1161,7 @@
   <!-- ===== LEAVE REQUEST MODAL ===== -->
   <div class="modal-bg" id="leaveModal">
     <div class="modal">
-      <h2>Request leave</h2>
+      <h2 id="leaveModalTitle">Request leave</h2>
       <p class="modal-sub">Your manager (or HR) will review and approve.</p>
       <div class="modal-err" id="leaveErr"></div>
       <div class="modal-ok" id="leaveOk">Request submitted.</div>
@@ -1177,6 +1177,16 @@
         <input type="date" id="leaveStart" required />
         <label>End date</label>
         <input type="date" id="leaveEnd" required />
+        <label style="display:flex;align-items:center;gap:8px;margin-top:6px;font-weight:normal;cursor:pointer">
+          <input type="checkbox" id="leaveHalf" style="width:auto;margin:0" /> Half day (single day only)
+        </label>
+        <div id="leaveHalfPartWrap" style="display:none">
+          <label>Which half</label>
+          <select id="leaveHalfPart">
+            <option value="first">First half (morning)</option>
+            <option value="second">Second half (afternoon)</option>
+          </select>
+        </div>
         <label>Reason (optional)</label>
         <textarea id="leaveReason" placeholder="Family wedding, holiday booking ref, etc."></textarea>
         <div class="modal-actions">
@@ -1834,6 +1844,16 @@ function renderPersonRow(p) {
     in_meeting: '#378ADD', wfh: '#1D9E75',
     on_leave: '#888780', offline: '#B4B2A9'
   }[p.status] || '#B4B2A9';
+  const STATUS_BADGE = {
+    heads_down: ['Heads down', '#7F77DD'],
+    in_meeting: ['In meeting', '#378ADD'],
+    on_break:   ['On break',   '#85B7EB'],
+    wfh:        ['WFH',        '#1D9E75'],
+    off_sick:   ['Off sick',   '#A32D2D'],
+    on_leave:   ['On leave',   '#888780'],
+  };
+  const bd = STATUS_BADGE[p.status];
+  const badge = bd ? `<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:99px;white-space:nowrap;margin-right:8px;background:${bd[1]}1A;color:${bd[1]}">${bd[0]}</span>` : '';
   const isLate = p.status === 'running_late';
   const isOff = p.status === 'off_sick' || p.status === 'on_leave' || p.status === 'offline';
   const role = isLate ? `<span class="person-late">${p.status_note || 'Running late'}</span>` : (p.role_label || '—');
@@ -1844,6 +1864,7 @@ function renderPersonRow(p) {
         <p class="person-name" style="${isOff ? 'color:var(--soft)' : ''}">${escapeHtml(p.name)}</p>
         <p class="person-role">${role}</p>
       </div>
+      ${badge}
       <button class="person-msg-btn" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
     </div>`;
 }
@@ -2238,37 +2259,71 @@ document.addEventListener('click', function(e) {
 });
 
 // --- LEAVE REQUEST ---
-function openLeaveModal() {
-  document.getElementById('leaveStart').value = '';
-  document.getElementById('leaveEnd').value = '';
-  document.getElementById('leaveReason').value = '';
+let _editingLeaveId = null;
+function openLeaveModal(existing) {
+  _editingLeaveId = (existing && existing.id) ? existing.id : null;
+  document.getElementById('leaveType').value = (existing && existing.request_type) ? existing.request_type : 'annual';
+  document.getElementById('leaveStart').value = existing ? String(existing.start_date).slice(0,10) : '';
+  document.getElementById('leaveEnd').value = existing ? String(existing.end_date).slice(0,10) : '';
+  document.getElementById('leaveReason').value = (existing && existing.reason) ? existing.reason : '';
+  const half = !!(existing && existing.is_half_day);
+  document.getElementById('leaveHalf').checked = half;
+  document.getElementById('leaveHalfPart').value = (existing && existing.half_day_part) ? existing.half_day_part : 'first';
+  document.getElementById('leaveHalfPartWrap').style.display = half ? '' : 'none';
+  const title = document.getElementById('leaveModalTitle');
+  const btn = document.getElementById('leaveBtn');
+  if (title) title.textContent = _editingLeaveId ? 'Edit leave request' : 'Request leave';
+  if (btn) btn.textContent = _editingLeaveId ? 'Save changes' : 'Submit request';
+  document.getElementById('leaveErr').classList.remove('on');
+  document.getElementById('leaveOk').classList.remove('on');
   openModal('leaveModal');
 }
+document.getElementById('leaveHalf').addEventListener('change', function () {
+  document.getElementById('leaveHalfPartWrap').style.display = this.checked ? '' : 'none';
+  if (this.checked) {
+    const s = document.getElementById('leaveStart').value;
+    if (s) document.getElementById('leaveEnd').value = s; // a half day is a single day
+  }
+});
 document.getElementById('leaveForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('leaveBtn');
   const err = document.getElementById('leaveErr');
   const ok = document.getElementById('leaveOk');
+  const editing = _editingLeaveId;
+  const restore = editing ? 'Save changes' : 'Submit request';
   err.classList.remove('on'); ok.classList.remove('on');
-  btn.disabled = true; btn.textContent = 'Submitting…';
+  btn.disabled = true; btn.textContent = editing ? 'Saving…' : 'Submitting…';
   try {
+    const half = document.getElementById('leaveHalf').checked;
+    const start = document.getElementById('leaveStart').value;
+    let end = document.getElementById('leaveEnd').value;
+    if (half) end = start;
     const body = {
       request_type: document.getElementById('leaveType').value,
-      start_date: document.getElementById('leaveStart').value,
-      end_date: document.getElementById('leaveEnd').value,
+      start_date: start,
+      end_date: end,
       reason: document.getElementById('leaveReason').value,
+      is_half_day: half,
+      half_day_part: half ? document.getElementById('leaveHalfPart').value : null,
     };
-    const r = await fetch('/api/leaves/request', {
-      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+    const url = editing ? ('/api/leaves/' + editing) : '/api/leaves/request';
+    const method = editing ? 'PUT' : 'POST';
+    const r = await fetch(url, {
+      method, headers: {'Content-Type':'application/json'}, credentials: 'include',
       body: JSON.stringify(body)
     });
     const data = await r.json();
-    if (!r.ok) { err.textContent = data.error || 'Failed'; err.classList.add('on'); btn.disabled = false; btn.textContent = 'Submit request'; return; }
+    if (!r.ok) { err.textContent = data.error || 'Failed'; err.classList.add('on'); btn.disabled = false; btn.textContent = restore; return; }
     ok.classList.add('on');
-    btn.textContent = 'Submitted';
-    setTimeout(async () => { closeModal('leaveModal'); btn.disabled = false; btn.textContent = 'Submit request'; await reload(); }, 1200);
+    btn.textContent = editing ? 'Saved' : 'Submitted';
+    setTimeout(async () => {
+      closeModal('leaveModal'); btn.disabled = false; btn.textContent = restore; _editingLeaveId = null;
+      await reload();
+      if (typeof window.__fkLeavesReload === 'function') window.__fkLeavesReload();
+    }, 1200);
   } catch (e) {
-    err.textContent = 'Network error'; err.classList.add('on'); btn.disabled = false; btn.textContent = 'Submit request';
+    err.textContent = 'Network error'; err.classList.add('on'); btn.disabled = false; btn.textContent = restore;
   }
 });
 
@@ -2865,6 +2920,9 @@ function openPeopleModalFiltered(status) {
 function renderPeopleTable() {
   const tbl = document.getElementById('peopleTable');
   const header = '<div class="prow h"><div class="nm">NAME</div><div class="dt">DEPT</div><div class="tm">IN</div><div>STATUS</div></div>';
+  const presById = {};
+  (typeof _allPeople !== 'undefined' ? _allPeople : []).forEach(p => { if (p && p.id != null) presById[p.id] = p.status; });
+  const PRES_BADGE = { heads_down: ['Heads down', '#7F77DD'], in_meeting: ['In meeting', '#378ADD'], on_break: ['On break', '#85B7EB'], wfh: ['WFH', '#1D9E75'] };
   const rows = attOverviewRows
     .filter(r => attOverviewFilter === 'all' || r.status === attOverviewFilter)
     .map(r => {
@@ -2874,11 +2932,13 @@ function renderPeopleTable() {
       const pin = (r.wfh_lat != null && r.wfh_lng != null)
         ? ' <i class="ti ti-map-pin" style="font-size:14px;color:var(--green,#1D9E75);cursor:pointer;vertical-align:middle" title="WFH location — view on map" onclick="event.stopPropagation();window.open(\'https://www.google.com/maps?q=' + r.wfh_lat + ',' + r.wfh_lng + '\',\'_blank\')"></i>'
         : '';
+      const pb = PRES_BADGE[presById[r.user_id]];
+      const presBadge = pb ? ' <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:99px;margin-left:6px;background:' + pb[1] + '1A;color:' + pb[1] + '">' + pb[0] + '</span>' : '';
       return '<div class="prow"' + clickable + '>' +
         '<div class="nm">' + escapeHtml(r.full_name) + pin + '</div>' +
         '<div class="dt">' + escapeHtml(r.dept_name || '—') + '</div>' +
         '<div class="tm">' + tm + '</div>' +
-        '<div><span class="pill-status ' + cls + '">' + statusLabel(r.status) + '</span></div>' +
+        '<div><span class="pill-status ' + cls + '">' + statusLabel(r.status) + '</span>' + presBadge + '</div>' +
       '</div>';
     }).join('');
   tbl.innerHTML = header + (rows || '<div class="prow"><div style="grid-column:1/-1;text-align:center;color:var(--soft);font-size:15px">No people in this view.</div></div>');
@@ -2887,8 +2947,11 @@ function renderPeopleTable() {
 
 // --- REGULARISATION MODAL -------------------------------------
 function openRegulariseModal() {
-  const today = new Date().toISOString().slice(0, 10);
-  document.getElementById('regDate').value = today;
+  const d = new Date(); d.setDate(d.getDate() - 1);
+  const yest = d.toISOString().slice(0, 10);
+  const regDate = document.getElementById('regDate');
+  regDate.value = yest;
+  regDate.max = yest; // you can only regularise a past day
   document.getElementById('regReason').value = '';
   document.getElementById('regFirstLogin').value = '';
   document.getElementById('regLastLogout').value = '';

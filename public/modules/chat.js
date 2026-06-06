@@ -201,6 +201,23 @@ window.fkModules['chat'] = {
     // who am I + can I delete groups (HR/owner)?
     try { const r = await fetch('/api/auth/me', { credentials: 'include' }); if (r.ok) { me = await r.json(); const perms = me.permissions || []; canDelete = perms.includes('profile.view.any') || perms.includes('*'); } } catch (e) {}
 
+    // Live presence so you can see "Heads down" etc. before/while you message.
+    let presenceById = {};
+    const PRESENCE_BADGE = {
+      heads_down: ['Heads down', '#7F77DD'], in_meeting: ['In meeting', '#378ADD'],
+      on_break: ['On break', '#85B7EB'], wfh: ['Working from home', '#1D9E75'],
+      off_sick: ['Off sick', '#A32D2D'], on_leave: ['On leave', '#888780'],
+    };
+    async function loadPresence() {
+      try {
+        const r = await fetch('/api/team/whos-on', { credentials: 'include' });
+        if (!r.ok) return;
+        const d = await r.json();
+        (d.people || []).forEach(p => { if (p && p.id != null) presenceById[p.id] = p.status; });
+      } catch (e) {}
+    }
+    await loadPresence();
+
     async function loadChannels() {
       try {
         const r = await fetch('/api/chat/channels', { credentials: 'include' });
@@ -252,9 +269,18 @@ window.fkModules['chat'] = {
       currentChannelObj = ch;
       if (!ch) return;
       $('chChannelName').textContent = ch.name || 'Channel';
-      $('chChannelSub').textContent = ch.type === 'all_hands' ? 'Everyone is in this channel'
-        : ch.type === 'department' ? (ch.department_name + ' team')
-        : ch.type === 'group' ? 'Group' : ch.type === 'dm' ? 'Direct message' : '';
+      const sub = $('chChannelSub');
+      if (ch.type === 'dm') {
+        const st = ch.other_user && presenceById[ch.other_user.id];
+        const pb = PRESENCE_BADGE[st];
+        sub.textContent = st === 'heads_down' ? "Heads down — please don't interrupt" : (pb ? pb[0] : 'Direct message');
+        sub.style.color = pb ? pb[1] : '';
+      } else {
+        sub.style.color = '';
+        sub.textContent = ch.type === 'all_hands' ? 'Everyone is in this channel'
+          : ch.type === 'department' ? (ch.department_name + ' team')
+          : ch.type === 'group' ? 'Group' : '';
+      }
       $('chComposeForm').style.display = '';
       $('chManageBtn').classList.toggle('on', ch.type === 'group');
       clearReply();
@@ -384,10 +410,12 @@ window.fkModules['chat'] = {
       if (q) { const s = q.toLowerCase(); rows = rows.filter(u => (u.name || '').toLowerCase().includes(s)); }
       if (!rows.length) { list.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:10px;text-align:center">No match.</div>'; return; }
       const checked = new Set(Array.from(el.querySelectorAll('#' + listId + ' input:checked')).map(x => x.value));
-      list.innerHTML = rows.map(u =>
-        '<label>' + (multi ? '<input type="checkbox" value="' + u.id + '" ' + (checked.has(String(u.id)) ? 'checked' : '') + ' style="width:auto" />' : '<input type="radio" name="' + listId + 'r" value="' + u.id + '" style="width:auto" />') +
-        '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '\u00b7') + '</span><span>' + escapeHtml(u.name) + '</span></label>'
-      ).join('');
+      list.innerHTML = rows.map(u => {
+        const pb = PRESENCE_BADGE[presenceById[u.id]];
+        const badge = pb ? '<span style="margin-left:auto;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;background:' + pb[1] + '1A;color:' + pb[1] + '">' + pb[0] + '</span>' : '';
+        return '<label>' + (multi ? '<input type="checkbox" value="' + u.id + '" ' + (checked.has(String(u.id)) ? 'checked' : '') + ' style="width:auto" />' : '<input type="radio" name="' + listId + 'r" value="' + u.id + '" style="width:auto" />') +
+        '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '\u00b7') + '</span><span>' + escapeHtml(u.name) + '</span>' + badge + '</label>';
+      }).join('');
     }
 
     // ---- New entry ----
