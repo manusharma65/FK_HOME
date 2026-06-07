@@ -21,10 +21,10 @@ window.fkModules['profile'] = {
     return '' +
       '<style>' +
         '#prof-mod{max-width:1120px;margin:0 auto}' +
-        '#prof-mod .header-card{background:var(--surface);border:0.5px solid var(--line);border-radius:12px;padding:20px 22px;display:flex;gap:18px;align-items:center;margin-bottom:18px}' +
+        '#prof-mod .header-card{background:linear-gradient(120deg,#FFF6EC 0%,#FDEDDD 100%);border:1px solid #F0E2CE;border-radius:20px;padding:22px 24px;display:flex;gap:18px;align-items:center;margin-bottom:18px;box-shadow:0 4px 16px rgba(232,114,43,.08)}' +
         '#prof-mod .avatar-lg{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:600;color:var(--ink);flex-shrink:0}' +
         '#prof-mod .header-info{flex:1;min-width:0}' +
-        '#prof-mod .header-info h1{font-size:22px;font-weight:500;margin:0 0 4px;letter-spacing:-0.3px}' +
+        '#prof-mod .header-info h1{font-family:"Fraunces",Georgia,serif;font-size:27px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em}' +
         '#prof-mod .header-meta{font-size:14px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap}' +
         '#prof-mod .header-meta span{display:flex;align-items:center;gap:5px}' +
         '#prof-mod .pill{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:500;background:var(--green-soft);color:var(--green)}' +
@@ -124,7 +124,7 @@ window.fkModules['profile'] = {
         '#prof-mod .prof-tiles{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}' +
         '#prof-mod .prof-tile{background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}' +
         '#prof-mod .prof-tile .t-lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}' +
-        '#prof-mod .prof-tile .t-val{font-size:17px;font-weight:500;margin-top:3px;display:flex;align-items:center;gap:7px}' +
+        '#prof-mod .prof-tile .t-val{font-family:"Fraunces",Georgia,serif;font-size:17px;font-weight:600;margin-top:3px;display:flex;align-items:center;gap:7px}' +
         '#prof-mod .prof-bar{height:6px;border-radius:99px;background:var(--line);margin-top:7px;overflow:hidden}' +
         '#prof-mod .prof-bar > i{display:block;height:100%;background:var(--amber);border-radius:99px}' +
         // Detail edit forms — full-size fields + buttons (no tiny inline controls)
@@ -155,7 +155,7 @@ window.fkModules['profile'] = {
         '#prof-mod .prof-tiles{gap:14px;margin-top:18px}' +
         '#prof-mod .prof-tile{padding:14px 18px;min-width:175px;border-radius:12px}' +
         '#prof-mod .prof-tile .t-lbl{font-size:13px;font-weight:600;letter-spacing:0.6px}' +
-        '#prof-mod .prof-tile .t-val{font-size:28px;font-weight:600;margin-top:6px}' +
+        '#prof-mod .prof-tile .t-val{font-family:"Fraunces",Georgia,serif;font-size:28px;font-weight:600;margin-top:6px}' +
         '#prof-mod .prof-bar{height:8px;margin-top:10px}' +
         '#prof-mod .pill{font-size:15px;padding:5px 14px}' +
         '#prof-mod .sectabs{display:flex;gap:4px;border-bottom:0.5px solid var(--line);margin:0 4px 24px;flex-wrap:wrap}' +
@@ -164,7 +164,7 @@ window.fkModules['profile'] = {
         '#prof-mod .sectab.on{color:var(--amber-deep);border-bottom-color:var(--amber)}' +
         '#prof-mod .sectab:hover{color:var(--ink)}' +
         '#prof-mod .sectab .count{margin-left:2px;background:var(--amber-soft);color:var(--amber-deep);font-size:12px;font-weight:600;padding:1px 8px;border-radius:99px}' +
-        '#prof-mod .sec-title,#prof-mod #profPanelTitle{font-size:24px;font-weight:600;margin:0 0 4px}' +
+        '#prof-mod .sec-title,#prof-mod #profPanelTitle{font-family:"Fraunces",Georgia,serif;font-size:24px;font-weight:600;margin:0 0 4px}' +
         '#prof-mod .sec-sub,#prof-mod #profPanelSub{font-size:16px;color:var(--muted);margin:0 0 22px}' +
         '#prof-mod .two-col{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px}' +
         '#prof-mod .card{background:var(--surface);border:0.5px solid var(--line);border-radius:14px;padding:22px 24px}' +
