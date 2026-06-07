@@ -12,6 +12,31 @@
 <!-- FK Home r0.26: Recruitment pipeline (Kanban: openings/candidates/stages/standby/reject) + My Work recruitment pointer -->
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style id="fk-home-v2">
+  :root{ --canvas:#F4EFE7; --orange:#E8722B; --orange-2:#F3992E; --disp:'Fraunces',Georgia,serif; --body:'Hanken Grotesk',-apple-system,BlinkMacSystemFont,sans-serif; }
+  /* Home redesign — scoped to the home view; other pages convert on their own turn */
+  .home-hero, .home-zone{ font-family:var(--body); }
+  .home-hero{ position:relative; overflow:hidden; border-radius:22px; padding:26px 28px; margin:8px 0 16px; color:#fff;
+    background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%); }
+  .home-hero:after{ content:""; position:absolute; right:-60px; top:-90px; width:300px; height:300px; border-radius:50%;
+    background:radial-gradient(circle at 30% 30%, rgba(243,153,46,.55), rgba(243,153,46,0) 70%); }
+  .home-hero h1{ font-family:var(--disp); font-weight:600; font-size:32px; margin:0; letter-spacing:-.01em; position:relative; color:#fff; }
+  .home-hero .greet-sub{ margin:7px 0 0; color:#E8DDD2; font-size:14.5px; position:relative; }
+  .home-zone .card{ border-radius:18px; padding:20px 22px; border:1px solid var(--line); box-shadow:0 2px 10px rgba(36,31,27,.04); background:var(--surface); }
+  .home-zone .card-title{ font-family:var(--disp); font-weight:600; font-size:18px; }
+  .home-zone .card-title i{ font-size:19px; color:var(--orange); }
+  .home-zone .card-meta{ font-size:13.5px; }
+  .home-zone .att-overview .kpi{ background:#FBF6EC; border:1px solid #EFE6D5; border-radius:14px; padding:15px 10px; }
+  .home-zone .att-overview .kpi .v{ font-family:var(--disp); font-size:27px; font-weight:700; }
+  .home-zone .att-overview .kpi .l{ font-size:11.5px; font-weight:600; margin-top:6px; }
+  .home-zone .att-overview .kpi.voluntary{ background:var(--green-soft); }
+  /* Managing — chat beside Who's-in-today (was CSS-columns, which stacked them) */
+  #manageZone .masonry{ columns:auto; display:grid; grid-template-columns:1.15fr 1fr; gap:16px; align-items:start; }
+  #manageZone .masonry > .card{ display:block; width:auto; margin-bottom:0; break-inside:auto; }
+  @media (max-width:1000px){ #manageZone .masonry{ grid-template-columns:1fr; } }
+  .home-zone .zone-label .zt{ font-size:12.5px; letter-spacing:.12em; }
+</style>
 <style>
   :root {
     --bg: #FAF7F2;
@@ -892,8 +917,10 @@
         </div>
       </div>
       <div class="padded">
-        <h1 id="greeting">—</h1>
-        <p class="greet-sub" id="greetSub">—</p>
+        <div class="home-hero">
+          <h1 id="greeting">—</h1>
+          <p class="greet-sub" id="greetSub">—</p>
+        </div>
       </div>
 
       <!-- Top alerts (full width, above the day) -->
