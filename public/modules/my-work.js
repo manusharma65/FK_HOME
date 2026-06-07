@@ -94,7 +94,7 @@ window.fkModules['my-work'] = {
           '#mw-mod .mwc-pill{font-size:13.5px;padding:6px 11px;border-radius:99px;cursor:pointer;font-weight:500}' +
           '#mw-mod .mwc-files-box{background:var(--bg2,#F4F2EC);border-radius:10px;padding:12px 14px;margin-bottom:16px}' +
           '#mw-mod .mwc-file{display:flex;align-items:center;gap:9px;font-size:14.5px;background:var(--surface);border-radius:7px;padding:8px 11px;margin-bottom:8px}' +
-          '#mw-mod .mwc-link{color:#185FA5;cursor:pointer}' +
+          '#mw-mod .mwc-link{color:#E8722B;cursor:pointer}' +
           '#mw-mod .mwc-del{color:#A32D2D;cursor:pointer}' +
           '#mw-mod .mwc-upload{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;box-sizing:border-box;padding:9px;border:0.5px solid var(--line);border-radius:7px;background:var(--surface);cursor:pointer;font-size:14.5px}' +
           '#mw-mod .mwc-upload:hover{background:var(--hover,#F1EFE8)}' +
@@ -309,7 +309,7 @@ window.fkModules['my-work'] = {
         if (n === 0) { mount.innerHTML=''; return; }
         mount.innerHTML =
           '<div onclick="location.hash=\'#recruitment\'" style="cursor:pointer;display:flex;align-items:center;gap:10px;background:var(--surface);border:0.5px solid var(--line);border-radius:9px;padding:12px 15px;margin-bottom:14px">' +
-            '<i class="ti ti-user-search" style="font-size:18px;color:#185FA5"></i>' +
+            '<i class="ti ti-user-search" style="font-size:18px;color:#E8722B"></i>' +
             '<span style="flex:1;font-size:14px">Recruitment \u2014 <strong>' + n + '</strong> candidate' + (n>1?'s':'') + ' need action</span>' +
             '<i class="ti ti-chevron-right" style="font-size:17px;color:var(--muted)"></i>' +
           '</div>';
@@ -439,18 +439,18 @@ window.fkModules['my-work'] = {
 
       const filesHtml = (d.files||[]).map(f => {
         const isImg=(f.mime_type||'').startsWith('image/');
-        return '<div class="mwc-file"><i class="ti '+(isImg?'ti-photo':'ti-file-text')+'" style="font-size:18px;color:#185FA5"></i>' +
+        return '<div class="mwc-file"><i class="ti '+(isImg?'ti-photo':'ti-file-text')+'" style="font-size:18px;color:#E8722B"></i>' +
           '<a href="/api/tasks/file/'+f.id+'" target="_blank" style="color:inherit;text-decoration:none">'+esc(f.filename)+'</a>' +
           '<span style="margin-left:auto;display:flex;gap:12px"><span class="mwc-link" data-replacefile="'+f.id+'">Replace</span><span class="mwc-del" data-delfile="'+f.id+'">Delete</span></span></div>';
       }).join('');
 
-      const ctx = t.related_name ? ' \u00b7 <a href="#" id="mwcCtx" style="color:#185FA5;text-decoration:none">about '+esc(t.related_name)+' \u2192</a>' : '';
+      const ctx = t.related_name ? ' \u00b7 <a href="#" id="mwcCtx" style="color:#E8722B;text-decoration:none">about '+esc(t.related_name)+' \u2192</a>' : '';
       const assignedLine = (t.assigned_by_name && t.assigned_by_user_id!==t.assignee_user_id) ? 'Assigned by '+esc(t.assigned_by_name)+' \u00b7 ' : '';
 
       const m = $('mwCardMount');
       m.innerHTML =
         '<div class="mwc-bg" id="mwcBg"><div class="mwc">' +
-          '<div class="mwc-head" style="background:'+headColour+'">' +
+          '<div class="mwc-head" style="background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%)">' +
             '<div><div class="mwc-kicker"><i class="ti '+kindIcon+'"></i> '+esc((cat||t.kind||'task').replace("_"," "))+'</div>' +
               '<div class="mwc-title">'+esc(t.title)+'</div></div>' +
             '<span class="mwc-status">'+(t.status==='in_progress'?'In progress':(t.status==='done'?'Done':'To do'))+'</span>' +
@@ -458,7 +458,7 @@ window.fkModules['my-work'] = {
           '<div class="mwc-body">' +
             '<div class="mwc-meta">'+assignedLine+(t.created_at?new Date(t.created_at).toLocaleDateString('en-GB'):'')+ ctx +'</div>' +
 
-            '<div class="mwc-label"><i class="ti ti-pencil" style="color:'+headColour+'"></i> What did you do? <span class="mwc-hint">\u2014 flows into your daily report</span></div>' +
+            '<div class="mwc-label"><i class="ti ti-pencil" style="color:#E8722B"></i> What did you do? <span class="mwc-hint">\u2014 flows into your daily report</span></div>' +
             '<textarea id="mwcDid" class="mwc-textarea" rows="3" placeholder="e.g. Created login, sent welcome email, collected ID + bank details">'+esc(w.did||'')+'</textarea>' +
 
             '<div class="mwc-tiles">' +

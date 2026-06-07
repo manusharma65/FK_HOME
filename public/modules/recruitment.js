@@ -30,7 +30,7 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-col{flex:1 1 0;min-width:120px;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
         '#rec-mod .rec-col-head{font-size:13.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;display:flex;justify-content:space-between}' +
         '#rec-mod .rec-cand{background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:11px 12px;margin-bottom:8px;cursor:grab}' +
-        '#rec-mod .rec-cand:hover{border-color:var(--ink)}' +
+        '#rec-mod .rec-cand:hover{border-color:#E8722B}' +
         '#rec-mod .rec-cand.dragging{opacity:.5}' +
         '#rec-mod .rec-col.drop-target{outline:2px dashed var(--ink);outline-offset:-2px}' +
         '#rec-mod .rec-cand-name{font-size:14px;font-weight:500}' +
@@ -39,15 +39,15 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-standby{background:#FFF8EC}' +
         '#rec-mod .rec-ended-strip{margin-top:14px;border-top:0.5px solid var(--line);padding-top:12px}' +
         '#rec-mod .rec-end-row{display:flex;justify-content:space-between;font-size:14.5px;color:var(--muted);padding:8px 0;border-bottom:0.5px solid var(--line);gap:10px}' +
-        '#rec-mod .rec-end-row .reopen{font-size:13.5px;color:#185FA5;cursor:pointer;flex:none}' +
+        '#rec-mod .rec-end-row .reopen{font-size:13.5px;color:#E8722B;cursor:pointer;flex:none}' +
         '#rec-mod .rec-modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:1000}' +
         '#rec-mod .rec-modal{background:var(--surface);border-radius:12px;padding:20px 22px;max-width:520px;width:94%;max-height:88vh;overflow-y:auto}' +
         '#rec-mod .rec-modal-bare{background:var(--surface);border-radius:12px;padding:0;max-width:600px;width:94%;max-height:90vh;overflow:hidden auto}' +
-        '#rec-mod .rec-chead{background:#185FA5;color:#fff;padding:20px 24px}' +
+        '#rec-mod .rec-chead{background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%);color:#fff;padding:20px 24px}' +
         '#rec-mod .rec-chead .kick{font-size:13.5px;text-transform:uppercase;letter-spacing:.05em;opacity:.92;display:flex;align-items:center;gap:6px}' +
         '#rec-mod .rec-chead .nm{font-size:23px;font-weight:500;margin-top:5px}' +
         '#rec-mod .rec-chead .src{font-size:14.5px;opacity:.92;margin-top:7px}' +
-        '#rec-mod .rec-chead .cpill{font-size:14.5px;background:rgba(255,255,255,.92);color:#0C447C;padding:6px 14px;border-radius:99px;font-weight:500;flex:none}' +
+        '#rec-mod .rec-chead .cpill{font-size:14.5px;background:rgba(255,255,255,.92);color:#9a3d12;padding:6px 14px;border-radius:99px;font-weight:500;flex:none}' +
         '#rec-mod .rec-cbody{padding:22px 24px}' +
         '#rec-mod .rec-empty-line{background:var(--bg2,#F4F2EC);border-radius:8px;padding:14px;text-align:center;font-size:14.5px;color:var(--soft)}' +
         '#rec-mod .rec-panel{background:var(--bg2,#F4F2EC);border-radius:8px;padding:13px 15px}' +
@@ -56,7 +56,7 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-field label{display:block;font-size:13.5px;color:var(--muted);margin-bottom:4px}' +
         '#rec-mod .rec-field input,#rec-mod .rec-field select,#rec-mod .rec-field textarea{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit;box-sizing:border-box}' +
         '#rec-mod .rec-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
-        '#rec-mod .rec-avatar{width:46px;height:46px;border-radius:50%;background:var(--bg2,#E6F1FB);color:#185FA5;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:15px;flex:none}' +
+        '#rec-mod .rec-avatar{width:46px;height:46px;border-radius:50%;background:#F2ECE2;color:#9a3d12;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:15px;flex:none}' +
         '#rec-mod .rec-kv{font-size:14.5px}' +
         '#rec-mod .rec-kv .k{font-size:12.5px;color:var(--muted)}' +
         '#rec-mod .rec-sec{border-top:0.5px solid var(--line);padding-top:12px;margin-top:14px}' +
@@ -326,7 +326,7 @@ window.fkModules['recruitment'] = {
         '<div class="rec-cbody">' +
           (m.why_shortlist ? '<div class="rec-why" style="margin-bottom:18px"><span style="color:var(--muted)">Why shortlisted:</span> ' + esc(m.why_shortlist) + '</div>' : '') +
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-            '<div class="rec-sec-h2"><i class="ti ti-id" style="color:#185FA5"></i> Details</div>' +
+            '<div class="rec-sec-h2"><i class="ti ti-id" style="color:#E8722B"></i> Details</div>' +
             '<button class="rec-btn" id="recAddDetails" style="font-size:14.5px;padding:6px 13px"><i class="ti ti-plus"></i> Add details</button></div>' +
           detailsBody +
           '<div class="rec-panel" style="margin-top:18px"><div class="rec-sec-h2"><i class="ti ti-paperclip"></i> Files \u2014 CV, photo</div>' +
@@ -369,7 +369,7 @@ window.fkModules['recruitment'] = {
         const box = $('recFiles'); if(!box) return;
         box.innerHTML = files.length ? files.map(f=>{
           const isImg = (f.mime_type||'').startsWith('image/');
-          return '<div class="rec-file"><i class="ti '+(isImg?'ti-photo':'ti-file-text')+'" style="font-size:17px;color:#185FA5"></i>' +
+          return '<div class="rec-file"><i class="ti '+(isImg?'ti-photo':'ti-file-text')+'" style="font-size:17px;color:#E8722B"></i>' +
             '<a href="/api/recruitment/files/'+f.id+'" target="_blank" style="color:inherit;text-decoration:none">'+esc(f.filename)+'</a>' +
             '<span class="del" data-delfile="'+f.id+'">Remove</span></div>';
         }).join('') : '<div class="rec-cand-sub">No files yet.</div>';

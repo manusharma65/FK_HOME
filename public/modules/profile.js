@@ -266,7 +266,7 @@ window.fkModules['profile'] = {
         '#profSetup .setup-done .txt{font-weight:600;color:var(--green)}' +
         '#profSetup .setup-done .vd{margin-left:auto;font-size:14px;color:var(--green);font-weight:600;cursor:pointer}' +
         // ----- Offboarding: HR tracker + leaver panel -----
-        '#profSetup .exit-head{position:relative;border-radius:16px;padding:22px 24px;margin-bottom:14px;color:#fff;overflow:hidden;background:linear-gradient(120deg,#3A4250,#5A6473)}' +
+        '#profSetup .exit-head{position:relative;border-radius:16px;padding:22px 24px;margin-bottom:14px;color:#fff;overflow:hidden;background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%)}' +
         '#profSetup .exit-head .deco{position:absolute;right:-30px;top:-40px;width:170px;height:170px;border-radius:50%;background:rgba(255,255,255,0.07)}' +
         '#profSetup .exit-head h2{margin:0;font-size:21px;font-weight:700;position:relative;display:flex;align-items:center;gap:9px}' +
         '#profSetup .exit-head .emeta{position:relative;display:flex;gap:18px;flex-wrap:wrap;font-size:14px;opacity:.95;margin-top:8px}' +
