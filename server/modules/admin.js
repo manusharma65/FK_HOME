@@ -582,14 +582,16 @@ router.post('/users/bulk-employment', requirePermission('admin.employment.edit')
            probation_end_date = COALESCE($6, probation_end_date),
            notice_period_days = COALESCE($7, notice_period_days),
            emergency_contact = COALESCE($8, emergency_contact),
+           last_working_day = COALESCE($9, last_working_day),
            updated_at = NOW()
-         WHERE id = $9 AND deleted_at IS NULL`,
+         WHERE id = $10 AND deleted_at IS NULL`,
         [u.hire_date || null,
          (u.monthly_salary != null && u.monthly_salary !== '') ? u.monthly_salary : null,
          u.salary_currency || null, u.employment_type || null, u.work_pattern || null,
          probEnd || null,
          (u.notice_period_days != null && u.notice_period_days !== '') ? u.notice_period_days : null,
-         u.emergency_contact || null, u.id]
+         u.emergency_contact || null,
+         u.last_working_day || null, u.id]
       );
       updated++;
     } catch (err) {
