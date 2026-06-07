@@ -669,8 +669,11 @@
     background: var(--surface); color: var(--ink);
   }
   #moduleView .btn:hover { background: #F1EFE8; }
-  #moduleView .data-table th { font-weight: 500; }
-  #moduleView .data-table tr:hover td { background: rgba(20,22,27,0.02); }
+  #moduleView .data-table th { font-family:'Hanken Grotesk',sans-serif !important; font-weight:700 !important; font-size:11.5px !important; text-transform:uppercase; letter-spacing:.05em; color:var(--muted) !important; padding:6px 12px 10px !important; border-bottom:1px solid var(--line); }
+  #moduleView .data-table td { padding:14px 12px; border-top:1px solid var(--line); font-size:14.5px; vertical-align:middle; }
+  #moduleView .data-table tbody tr:first-child td { border-top:0; }
+  #moduleView .data-table tr:hover td { background: rgba(232,114,43,.05); }
+  #moduleView .card-meta { font-weight:600; }
 </style>
   <link rel="stylesheet" href="/modules/module-base.css">
 </head>
