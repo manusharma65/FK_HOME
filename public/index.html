@@ -689,6 +689,12 @@
   #moduleView .ap-btn.ap-btn-primary, #moduleView .mwc-btn.done, #moduleView .new-btn {
     background:linear-gradient(135deg,#F3992E,#E8722B) !important; color:#fff !important; border:0 !important; box-shadow:0 4px 12px rgba(232,114,43,.25); }
   #moduleView .ap-btn.ap-btn-danger { color:#A32D2D !important; }
+  /* Remaining primary buttons that were still ink → orange pill, everywhere */
+  #moduleView .mw-add, #moduleView .mw-form .save, #moduleView .btn-primary, #moduleView .btn.primary {
+    background:linear-gradient(135deg,#F3992E,#E8722B) !important; color:#fff !important; border:0 !important;
+    border-radius:11px !important; padding:10px 22px !important; font-weight:600 !important;
+    box-shadow:0 4px 12px rgba(232,114,43,.25); font-family:'Hanken Grotesk',sans-serif !important; cursor:pointer; }
+  #moduleView .mw-add:hover, #moduleView .mw-form .save:hover, #moduleView .btn-primary:hover, #moduleView .btn.primary:hover { transform:translateY(-1px); }
   /* Shared page hero — rendered by the loader for every module page */
   #moduleView .fk-page-hero { position:relative; overflow:hidden; border-radius:22px; padding:24px 28px; color:#fff; margin:6px 0 20px; background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%); }
   #moduleView .fk-page-hero:after { content:""; position:absolute; right:-60px; top:-90px; width:280px; height:280px; border-radius:50%; background:radial-gradient(circle at 30% 30%, rgba(243,153,46,.5), rgba(243,153,46,0) 70%); }
@@ -768,10 +774,6 @@
       <div class="nav-item" id="navHrPeople" data-route="#hr/users" style="display:none" onclick="location.hash='#hr/users'">
         <i class="ti ti-users"></i>
         <span>People</span>
-      </div>
-      <div class="nav-item" id="navHrEmployment" data-route="#hr/employment" style="display:none" onclick="location.hash='#hr/employment'">
-        <i class="ti ti-briefcase"></i>
-        <span>Employment</span>
       </div>
       <div class="nav-item" id="navHrApprovals" data-route="#hr/approvals" style="display:none" onclick="location.hash='#hr/approvals'">
         <i class="ti ti-checkbox"></i>
@@ -1386,7 +1388,6 @@
 <script src="/modules/backups.js"></script>
 <script src="/modules/settings.js"></script>
 <script src="/modules/users.js"></script>
-<script src="/modules/employment.js"></script>
 <script src="/modules/approvals.js"></script>
 <script src="/modules/reports.js"></script>
 <script src="/modules/attendance.js"></script>
@@ -1490,7 +1491,7 @@ function render() {
     show('navHrPeople'); anyHR = true;
   }
   if (can('admin.employment.edit') || can('admin.employment.view')) {
-    show('navHrEmployment'); anyHR = true;
+    anyHR = true;
   }
   if (can('leaves.approve.any') || can('leaves.approve.dept') || can('attendance.regularise.approve.any') || can('attendance.regularise.approve.dept')) {
     show('navHrApprovals'); anyHR = true;
