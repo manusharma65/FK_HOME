@@ -170,7 +170,7 @@ window.fkModules['hr/attendance'] = {
         const dept = (u.departments && u.departments[0] && u.departments[0].name) || '';
         return '<tr class="clickable" data-uid="' + u.id + '">' +
           '<td><div style="display:flex;align-items:center;gap:11px"><span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '—') + '</span>' +
-            '<div><div style="font-weight:500;color:var(--ink)">' + escapeHtml(u.display_name || u.full_name) + '</div><div style="font-size:13.5px;color:var(--muted)">' + escapeHtml(dept) + '</div></div></div></td>' +
+            '<div><div class="nm" style="color:var(--ink)">' + escapeHtml(u.display_name || u.full_name) + '</div><div style="font-size:13.5px;color:var(--muted)">' + escapeHtml(dept) + '</div></div></div></td>' +
           numCell(c.worked, '#0F6E56') + numCell(c.late, '#9A5B1F') + numCell(c.leave, '#2D6CA8') + numCell(c.sick, '#A32D2D') +
           '<td style="text-align:right;color:var(--muted);font-size:14.5px;white-space:nowrap">View calendar <i class="ti ti-chevron-right" style="vertical-align:-1px"></i></td>' +
         '</tr>';
@@ -186,7 +186,7 @@ window.fkModules['hr/attendance'] = {
       $('taCalendar').style.display = '';
       $('taSelAvatar').style.background = selUser_.avatar_colour || '#F1EFE8';
       $('taSelAvatar').textContent = selUser_.initials || '—';
-      $('taSelName').innerHTML = escapeHtml(selUser_.display_name || selUser_.full_name) +
+      $('taSelName').innerHTML = '<span class="nm">' + escapeHtml(selUser_.display_name || selUser_.full_name) + '</span>' +
         ' <span style="color:var(--muted);font-weight:400">· ' + escapeHtml((selUser_.departments && selUser_.departments[0] && selUser_.departments[0].name) || '') + '</span>';
       renderCalendar();
     }

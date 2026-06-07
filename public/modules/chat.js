@@ -415,7 +415,7 @@ window.fkModules['chat'] = {
         const pb = PRESENCE_BADGE[presenceById[u.id]];
         const badge = pb ? '<span style="margin-left:auto;font-size:12.5px;font-weight:600;padding:2px 8px;border-radius:99px;background:' + pb[1] + '1A;color:' + pb[1] + '">' + pb[0] + '</span>' : '';
         return '<label>' + (multi ? '<input type="checkbox" value="' + u.id + '" ' + (checked.has(String(u.id)) ? 'checked' : '') + ' style="width:auto" />' : '<input type="radio" name="' + listId + 'r" value="' + u.id + '" style="width:auto" />') +
-        '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '\u00b7') + '</span><span>' + escapeHtml(u.name) + '</span>' + badge + '</label>';
+        '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '\u00b7') + '</span><span class="nm">' + escapeHtml(u.name) + '</span>' + badge + '</label>';
       }).join('');
     }
 
@@ -485,7 +485,7 @@ window.fkModules['chat'] = {
         const r = await fetch('/api/chat/channels/' + manageGroup.id + '/members', { credentials: 'include' });
         const d = await r.json();
         box.innerHTML = (d.members || []).map(m =>
-          '<div class="mrow"><span style="display:flex;align-items:center;gap:9px"><span class="avatar" style="background:' + (m.avatar_colour || '#F1EFE8') + '">' + escapeHtml(m.initials || '\u00b7') + '</span>' + escapeHtml(m.display_name || m.full_name) + '</span><button class="btn" style="font-size:13.5px;padding:4px 9px" data-remove="' + m.id + '">Remove</button></div>'
+          '<div class="mrow"><span style="display:flex;align-items:center;gap:9px"><span class="avatar" style="background:' + (m.avatar_colour || '#F1EFE8') + '">' + escapeHtml(m.initials || '\u00b7') + '</span><span class="nm">' + escapeHtml(m.display_name || m.full_name) + '</span></span><button class="btn" style="font-size:13.5px;padding:4px 9px" data-remove="' + m.id + '">Remove</button></div>'
         ).join('');
       } catch (e) { box.innerHTML = '<div style="color:var(--red)">Failed to load.</div>'; }
     }

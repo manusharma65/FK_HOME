@@ -61,7 +61,7 @@ window.fkModules['hr/regularisations'] = {
             (row.requested_first_login && row.requested_last_logout ? ' · ' : '') +
             (row.requested_last_logout ? 'Out: ' + fmtTime(row.requested_last_logout) : '') || '—';
           return '<tr>' +
-            '<td style="font-weight:500">' + escapeHtml(row.full_name) + '</td>' +
+            '<td><span class="nm">' + escapeHtml(row.full_name) + '</span></td>' +
             '<td>' + dateOnly(row.for_date) + '</td>' +
             '<td style="color:var(--muted)">' + escapeHtml(row.reason) + '</td>' +
             '<td style="font-size:14px;color:var(--muted)">' + times + '</td>' +

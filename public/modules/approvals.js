@@ -276,7 +276,7 @@ window.fkModules = window.fkModules || {};
               (row.requested_first_login && row.requested_last_logout ? ' \u00b7 ' : '') +
               (row.requested_last_logout ? 'Out: ' + fmtTime(row.requested_last_logout) : '') || '\u2014';
             return '<tr>' +
-              '<td style="font-weight:500">' + escapeHtml(row.full_name) + '</td>' +
+              '<td><span class="nm">' + escapeHtml(row.full_name) + '</span></td>' +
               '<td>' + dateOnly(row.for_date) + '</td>' +
               '<td style="color:var(--muted)">' + escapeHtml(row.reason) + '</td>' +
               '<td style="color:var(--muted)">' + times + '</td>' +

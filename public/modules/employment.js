@@ -135,7 +135,7 @@ window.fkModules['hr/employment'] = {
       $('empBody').innerHTML = users_.map(u => {
         const st = statusOf(u);
         return '<tr data-uid="' + u.id + '"' + (u.id === selectedId_ ? ' class="sel"' : '') + '>' +
-          '<td><div style="display:flex;align-items:center;gap:10px"><span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '—') + '</span><span style="font-weight:500">' + escapeHtml(u.full_name) + '</span></div></td>' +
+          '<td><div style="display:flex;align-items:center;gap:10px"><span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '—') + '</span><span class="nm">' + escapeHtml(u.full_name) + '</span></div></td>' +
           '<td style="color:var(--muted)">' + fmtDate(u.hire_date) + '</td>' +
           '<td style="color:var(--muted)">' + typeLabel(u.employment_type) + '</td>' +
           '<td><span class="status-pill ' + st + '">' + st + '</span></td>' +
@@ -156,7 +156,7 @@ window.fkModules['hr/employment'] = {
         '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">' +
           '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">' +
             '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '—') + '</span>' +
-            '<div style="font-size:16px;font-weight:500">' + escapeHtml(u.full_name) + '</div>' +
+            '<div class="nm" style="font-size:16px">' + escapeHtml(u.full_name) + '</div>' +
           '</div>' +
           '<button class="btn" id="dClose" aria-label="Close" style="padding:6px 9px;font-size:14px;line-height:1"><i class="ti ti-x"></i></button>' +
         '</div>' +

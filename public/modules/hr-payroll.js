@@ -101,7 +101,7 @@ window.fkModules['hr/payroll'] = {
             return '<tr style="background:var(--bg);color:var(--muted)">' +
               '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
                 '<span style="width:24px;height:24px;border-radius:50%;background:' + (row.avatar_colour || '#888780') + ';color:#FFF;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500">' + esc(row.initials || '') + '</span>' +
-                esc(row.name) + ' <span style="font-size:12.5px;padding:1px 6px;background:var(--surface);border-radius:4px">Owner</span>' +
+                '<span class="nm">' + esc(row.name) + '</span> <span style="font-size:12.5px;padding:1px 6px;background:var(--surface);border-radius:4px">Owner</span>' +
               '</div></td>' +
               '<td colspan="9" style="padding:10px 8px;text-align:center;font-style:italic;font-size:13.5px">n/a — owner does not accrue</td>' +
               '<td></td>' +
@@ -114,7 +114,7 @@ window.fkModules['hr/payroll'] = {
           return '<tr style="border-top:0.5px solid var(--line)">' +
             '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
               '<span style="width:24px;height:24px;border-radius:50%;background:' + (row.avatar_colour || '#888780') + ';color:#FFF;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500">' + esc(row.initials || '') + '</span>' +
-              esc(row.name) +
+              '<span class="nm">' + esc(row.name) + '</span>' +
             '</div></td>' +
             '<td style="padding:10px 8px;color:var(--muted)">' + esc(row.dept_name) + '</td>' +
             '<td style="padding:10px 8px;text-align:right">' + (row.monthly_salary != null ? '£' + Number(row.monthly_salary).toLocaleString('en-GB') : '—') + '</td>' +
@@ -193,7 +193,7 @@ window.fkModules['hr/payroll'] = {
         wrap.innerHTML =
           '<div class="card" id="prDrillCard" style="max-width:680px;width:100%;padding:14px 16px;background:var(--surface);max-height:90vh;overflow-y:auto">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
-              '<div style="font-size:15px;font-weight:500">' + esc(name) + ' · ' + monthName(y, m) + '</div>' +
+              '<div style="font-size:15px"><span class="nm">' + esc(name) + '</span> · ' + monthName(y, m) + '</div>' +
               '<button class="btn" id="prDrillClose" aria-label="Close"><i class="ti ti-x"></i></button>' +
             '</div>' +
             '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14.5px"><tbody>' + rowsHtml + '</tbody></table></div>' +
@@ -318,7 +318,7 @@ window.fkModules['hr/payroll'] = {
         return '<tr style="border-top:0.5px solid var(--line)' + (r.flagged ? ';background:var(--bg)' : '') + '">' +
           '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
             '<span style="width:24px;height:24px;border-radius:50%;background:' + (r.avatar_colour || '#888780') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:12.5px;flex:none">' + esc(r.initials || '') + '</span>' +
-            '<div>' + esc(r.emp_name) + lopDates + ovr + '</div>' +
+            '<div><span class="nm">' + esc(r.emp_name) + '</span>' + lopDates + ovr + '</div>' +
           '</div></td>' +
           '<td style="padding:10px 8px;color:var(--muted)">' + esc(r.emp_department || '\u2014') + '</td>' +
           '<td style="padding:10px 8px;text-align:right">' + lopTxt + '</td>' +

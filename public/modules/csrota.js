@@ -110,7 +110,7 @@ window.fkModules['system/csrota'] = {
         }
         html += '</tr></thead><tbody>';
         for (const name of Object.keys(userMap).sort()) {
-          html += '<tr><td>' + escapeHtml(name) + '</td>';
+          html += '<tr><td><span class="nm">' + escapeHtml(name) + '</span></td>';
           for (const dt of dates) {
             const v = userMap[name][dt] || '—';
             let cls = 'muted';

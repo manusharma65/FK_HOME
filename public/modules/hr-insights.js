@@ -141,7 +141,7 @@ window.fkModules['hr/insights'] = {
           return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.hash=\'#profile/' + p.id + '\'">' +
             '<td style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
               '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13.5px;font-weight:500">' + esc(p.initials || '') + '</span>' +
-              '<span>' + esc(p.display_name || p.full_name) + '</span>' +
+              '<span class="nm">' + esc(p.display_name || p.full_name) + '</span>' +
             '</div></td>' +
             '<td style="padding:8px 10px"><span class="chip ' + s.cls + '">' + esc(s.label) + '</span></td>' +
             '<td style="padding:8px 10px;color:var(--muted)">' + fmtDate(p.hire_date) + '</td>' +
