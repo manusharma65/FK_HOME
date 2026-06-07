@@ -88,8 +88,10 @@ window.fkModules['profile'] = {
         '#prof-mod .more-menu button.danger{color:var(--red)}' +
         // Attendance calendar
         '#prof-mod .att-cal{background:var(--surface);border:0.5px solid var(--line);border-radius:12px;padding:14px 16px}' +
-        '#prof-mod .att-cal-head{display:flex;align-items:center;justify-content:center;margin-bottom:14px}' +
-        '#prof-mod .att-cal-nav{display:inline-flex;align-items:center;gap:8px}' +
+        '#prof-mod .att-cal-head{display:flex;align-items:center;justify-content:center;margin-bottom:18px}' +
+        '#prof-mod .att-cal-nav{display:inline-flex;align-items:center;gap:14px}' +
+        '#prof-mod .att-cal-nav .header-action-btn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;font-size:18px;border:1px solid var(--line)}' +
+        '#prof-mod .att-month{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:23px;min-width:190px;text-align:center}' +
         '#prof-mod .att-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}' +
         '#prof-mod .att-cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;font-size:11px;color:var(--muted);margin-bottom:6px;text-align:center}' +
         '#prof-mod .att-day{aspect-ratio:1;border-radius:6px;padding:4px;font-size:11px;position:relative;display:flex;align-items:flex-start;justify-content:flex-end}' +
@@ -106,10 +108,10 @@ window.fkModules['profile'] = {
         '#prof-mod .att-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:11px}' +
         '#prof-mod .att-legend span{display:flex;align-items:center;gap:4px}' +
         '#prof-mod .att-legend .swatch{display:inline-block;width:10px;height:10px;border-radius:2px}' +
-        '#prof-mod .att-rollup{margin-top:14px;padding-top:14px;border-top:0.5px solid var(--line);display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}' +
-        '#prof-mod .att-tile{background:var(--bg);border-radius:8px;padding:10px 12px}' +
-        '#prof-mod .att-tile .num{font-size:18px;font-weight:500}' +
-        '#prof-mod .att-tile .lbl{font-size:11px;color:var(--muted);margin-top:2px}' +
+        '#prof-mod .att-rollup{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}' +
+        '#prof-mod .att-tile{background:#FBF6EC;border:1px solid #EFE6D5;border-radius:14px;padding:16px 18px}' +
+        '#prof-mod .att-tile .num{font-family:"Fraunces",Georgia,serif;font-size:30px;font-weight:700;line-height:1}' +
+        '#prof-mod .att-tile .lbl{font-size:12px;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}' +
         // Profile photo control
         '#prof-mod .prof-photo-wrap{position:relative;width:64px;height:64px;flex:none}' +
         '#prof-mod .prof-photo-wrap .avatar-lg{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;overflow:hidden;background-size:cover;background-position:center}' +
@@ -1047,6 +1049,11 @@ window.fkModules['profile'] = {
 
     async function renderAttendanceDrawer() {
       const body = document.getElementById('profPanelBody');
+      if (!document.getElementById('fk-fonts-fraunces')) {
+        const lk = document.createElement('link'); lk.id = 'fk-fonts-fraunces'; lk.rel = 'stylesheet';
+        lk.href = 'https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap';
+        document.head.appendChild(lk);
+      }
       // r0.16.4 — Gate the scaffold build on the LIVE panel body, not a
       // document-wide lookup. A stale #attMonthLabel left elsewhere in the DOM
       // used to make this skip the build, so #attGrid was never created and
@@ -1055,10 +1062,11 @@ window.fkModules['profile'] = {
       if (!body.querySelector('#attMonthLabel')) {
         body.innerHTML =
         '<div class="att-cal">' +
+          '<div class="att-rollup" id="attRollup"></div>' +
           '<div class="att-cal-head">' +
             '<div class="att-cal-nav">' +
               '<button class="header-action-btn" id="attPrev"><i class="ti ti-chevron-left"></i></button>' +
-              '<div id="attMonthLabel" style="font-weight:500;min-width:140px;text-align:center">—</div>' +
+              '<div id="attMonthLabel" class="att-month">—</div>' +
               '<button class="header-action-btn" id="attNext"><i class="ti ti-chevron-right"></i></button>' +
             '</div>' +
           '</div>' +
@@ -1072,7 +1080,7 @@ window.fkModules['profile'] = {
             '<span><span class="swatch" style="background:rgba(40,90,180,0.10)"></span>Leave (A.L.)</span>' +
             '<span><span class="swatch" style="background:var(--bg)"></span>Off (H)</span>' +
           '</div>' +
-          '<div class="att-rollup" id="attRollup"></div>' +
+          '<div class="att-rollup-removed" style="display:none"></div>' +
         '</div>';
         body.querySelector('#attPrev').addEventListener('click', () => {
           attMonth--; if (attMonth < 1) { attMonth = 12; attYear--; } loadAttendanceMonth();
@@ -1475,13 +1483,36 @@ window.fkModules['profile'] = {
       } catch (e) { data = {}; }
 
       let html = '<div class="stack">';
-      if (viewer.can_view_salary && data.salary && data.salary.salary) {
-        const s = data.salary.salary;
-        const curr = s.currency || '£';
-        html += '<div class="card"><div class="card-title">Current salary</div><div class="field-grid">' +
-          fieldRead('Monthly CTC', esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-GB') : '—')) +
-          (s.effective_from ? fieldRead('Effective from', fmtDate(s.effective_from)) : '') +
-        '</div></div>';
+      if (viewer.can_view_salary) {
+        const s = (data.salary && data.salary.salary) || null;
+        const curr = (s && s.currency) || 'INR';
+        if (s) {
+          html += '<div class="card"><div class="card-title">Current salary</div><div class="field-grid">' +
+            fieldRead('Monthly CTC', esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-IN') : '—')) +
+            (s.effective_from ? fieldRead('Effective from', fmtDate(s.effective_from)) : '') +
+          '</div></div>';
+        }
+        if (viewer.can_edit_salary) {
+          const eff = (s && s.effective_from) ? String(s.effective_from).slice(0, 10) : '';
+          const today = new Date().toISOString().slice(0, 10);
+          const inp = 'width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:9px;font-size:14px;margin-bottom:10px;background:var(--surface);font-family:inherit';
+          const ded = (n) => { const l = s ? (s['deduction_' + n + '_label'] || '') : ''; const a = s ? s['deduction_' + n + '_amount'] : null;
+            return '<div style="display:grid;grid-template-columns:1fr 130px;gap:8px">' +
+              '<input id="salD' + n + 'L" placeholder="Deduction ' + n + ' label" value="' + esc(l) + '" style="' + inp + '"/>' +
+              '<input id="salD' + n + 'A" type="number" placeholder="Amount" value="' + (a != null && Number(a) > 0 ? esc(a) : '') + '" style="' + inp + '"/></div>'; };
+          html += '<div class="card"><div class="card-title">' + (s ? 'Update salary' : 'Add salary') + '</div>' +
+            '<div style="font-size:12.5px;color:var(--muted);margin:2px 0 12px">This is the figure payroll uses to build payslips. Saving records a new effective-dated entry.</div>' +
+            '<label style="font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Monthly CTC (' + esc(curr) + ')</label>' +
+            '<input id="salCtc" type="number" value="' + (s && s.monthly_ctc != null ? esc(s.monthly_ctc) : '') + '" placeholder="e.g. 50000" style="' + inp + '"/>' +
+            '<label style="font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Effective from</label>' +
+            '<input id="salEff" type="date" value="' + esc(eff || today) + '" style="' + inp + '"/>' +
+            '<div style="font-size:12.5px;font-weight:600;color:var(--muted);margin:6px 0 8px">Recurring deductions (optional)</div>' +
+            ded(1) + ded(2) + ded(3) +
+            '<input id="salCur" type="hidden" value="' + esc(curr) + '"/>' +
+            '<button id="salSaveBtn" class="btn btn-primary" style="margin-top:4px;padding:10px 18px"><i class="ti ti-device-floppy"></i> Save salary</button>' +
+            '<span id="salSaveMsg" style="margin-left:10px;font-size:13px"></span>' +
+          '</div>';
+        }
       }
       if (canSeePrivate()) {
         const anyBank = u.bank_account_number || u.bank_ifsc || u.bank_name || u.bank_account_holder;
@@ -1527,6 +1558,28 @@ window.fkModules['profile'] = {
       wirePayUpload('insurance');
       const goD = body.querySelector('[data-go-details]');
       if (goD) goD.addEventListener('click', () => loadDrawer('details'));
+      const salBtn = document.getElementById('salSaveBtn');
+      if (salBtn) salBtn.addEventListener('click', async () => {
+        const msg = document.getElementById('salSaveMsg');
+        const ctc = parseFloat(document.getElementById('salCtc').value);
+        const eff = document.getElementById('salEff').value;
+        if (!(ctc >= 0)) { msg.textContent = 'Enter a valid amount'; msg.style.color = 'var(--red)'; return; }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(eff)) { msg.textContent = 'Pick an effective date'; msg.style.color = 'var(--red)'; return; }
+        const b2 = {
+          monthly_ctc: ctc, currency: document.getElementById('salCur').value || 'INR', effective_from: eff,
+          deduction_1_label: document.getElementById('salD1L').value || null, deduction_1_amount: parseFloat(document.getElementById('salD1A').value) || 0,
+          deduction_2_label: document.getElementById('salD2L').value || null, deduction_2_amount: parseFloat(document.getElementById('salD2A').value) || 0,
+          deduction_3_label: document.getElementById('salD3L').value || null, deduction_3_amount: parseFloat(document.getElementById('salD3A').value) || 0,
+        };
+        salBtn.disabled = true; msg.textContent = 'Saving…'; msg.style.color = 'var(--muted)';
+        try {
+          const r = await fetch('/api/profile/' + profileUserId + '/salary', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(b2) });
+          const d = await r.json();
+          if (!r.ok) { msg.textContent = d.error || 'Failed'; msg.style.color = 'var(--red)'; salBtn.disabled = false; return; }
+          msg.textContent = 'Saved \u2713'; msg.style.color = 'var(--green)';
+          setTimeout(() => renderPaySection(), 700);
+        } catch (e) { msg.textContent = 'Network error'; msg.style.color = 'var(--red)'; salBtn.disabled = false; }
+      });
     }
 
     // ---- Probation management (HR) -------------------------------------
