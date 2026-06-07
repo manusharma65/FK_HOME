@@ -92,10 +92,11 @@ window.fkModules['profile'] = {
         '#prof-mod .att-cal-nav{display:inline-flex;align-items:center;gap:14px}' +
         '#prof-mod .att-cal-nav .header-action-btn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;font-size:18px;border:1px solid var(--line)}' +
         '#prof-mod .att-month{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:23px;min-width:190px;text-align:center}' +
-        '#prof-mod .att-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}' +
-        '#prof-mod .att-cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;font-size:11px;color:var(--muted);margin-bottom:6px;text-align:center}' +
-        '#prof-mod .att-day{aspect-ratio:1;border-radius:6px;padding:4px;font-size:11px;position:relative;display:flex;align-items:flex-start;justify-content:flex-end}' +
-        '#prof-mod .att-day .att-flag{position:absolute;bottom:4px;left:4px;font-size:9px;font-weight:500}' +
+        '#prof-mod .att-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}' +
+        '#prof-mod .att-cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;font-size:12.5px;font-weight:600;color:var(--muted);margin-bottom:10px;text-align:center;text-transform:uppercase;letter-spacing:.04em}' +
+        '#prof-mod .att-day{min-height:74px;border-radius:13px;padding:9px 11px;position:relative;display:block}' +
+        '#prof-mod .att-day .att-num{font-family:"Fraunces",Georgia,serif;font-size:18px;font-weight:600;line-height:1}' +
+        '#prof-mod .att-day .att-flag{position:absolute;bottom:9px;left:11px;font-size:11.5px;font-weight:700;letter-spacing:.02em}' +
         '#prof-mod .att-day.att-empty{background:var(--bg);color:var(--muted)}' +
         '#prof-mod .att-day.att-worked{background:var(--green-soft);color:var(--green)}' +
         '#prof-mod .att-day.att-late{background:var(--amber-soft);color:var(--amber-deep)}' +
@@ -103,8 +104,10 @@ window.fkModules['profile'] = {
         '#prof-mod .att-day.att-sick{background:var(--red-soft);color:var(--red)}' +
         '#prof-mod .att-day.att-leave{background:rgba(40,90,180,0.10);color:#2D5BAF}' +
         '#prof-mod .att-day.att-holiday{background:var(--bg);color:var(--muted)}' +
-        '#prof-mod .att-day.att-future{background:transparent;border:0.5px dashed var(--line);color:var(--muted)}' +
-        '#prof-mod .att-day.att-today{outline:2px solid var(--amber);background:var(--amber);color:#412402}' +
+        '#prof-mod .att-day.att-future{background:transparent;border:1px dashed var(--line);color:var(--muted)}' +
+        '#prof-mod .att-day.att-today{background:linear-gradient(135deg,#F3992E,#E8722B);box-shadow:0 6px 16px rgba(232,114,43,.35)}' +
+        '#prof-mod .att-day.att-today .att-num{color:#fff}' +
+        '#prof-mod .att-day.att-today .att-flag{color:#fff}' +
         '#prof-mod .att-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:11px}' +
         '#prof-mod .att-legend span{display:flex;align-items:center;gap:4px}' +
         '#prof-mod .att-legend .swatch{display:inline-block;width:10px;height:10px;border-radius:2px}' +
@@ -1140,7 +1143,7 @@ window.fkModules['profile'] = {
         }
 
         let html = '';
-        for (let i = 0; i < leading; i++) html += '<div class="att-day att-empty"></div>';
+        for (let i = 0; i < leading; i++) html += "<div></div>";
         for (let day = 1; day <= daysInMonth; day++) {
           const dateStr = attYear + '-' + String(attMonth).padStart(2, '0') + '-' + String(day).padStart(2, '0');
           const rec = byDate[dateStr];
@@ -1162,7 +1165,7 @@ window.fkModules['profile'] = {
           else { cls += ' att-empty'; }
           // WFH special-case if there's a wfh marker — could refine later
           const clickable = rec && dateStr <= todayIso;
-          html += '<div class="' + cls + '"' + (clickable ? ' data-d="' + dateStr + '" style="cursor:pointer"' : '') + '>' + day +
+          html += '<div class="' + cls + '"' + (clickable ? " data-d=\"" + dateStr + "\" style=\"cursor:pointer\"" : "") + ">" + "<span class=\"att-num\">" + day + "</span>" +
             (flag ? '<div class="att-flag">' + flag + '</div>' : '') +
             '</div>';
         }
@@ -1483,7 +1486,7 @@ window.fkModules['profile'] = {
       } catch (e) { data = {}; }
 
       let html = '<div class="stack">';
-      if (viewer.can_view_salary) {
+      if (viewer.can_view_salary || viewer.is_self) {
         const s = (data.salary && data.salary.salary) || null;
         const curr = (s && s.currency) || 'INR';
         if (s) {
@@ -1491,23 +1494,19 @@ window.fkModules['profile'] = {
             fieldRead('Monthly CTC', esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-IN') : '—')) +
             (s.effective_from ? fieldRead('Effective from', fmtDate(s.effective_from)) : '') +
           '</div></div>';
+        } else if (!viewer.can_edit_salary) {
+          html += '<div class="card"><div class="card-title">Current salary</div><div class="fld"><div class="fv empty">No salary on file yet.</div></div></div>';
         }
         if (viewer.can_edit_salary) {
           const eff = (s && s.effective_from) ? String(s.effective_from).slice(0, 10) : '';
           const today = new Date().toISOString().slice(0, 10);
           const inp = 'width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:9px;font-size:14px;margin-bottom:10px;background:var(--surface);font-family:inherit';
-          const ded = (n) => { const l = s ? (s['deduction_' + n + '_label'] || '') : ''; const a = s ? s['deduction_' + n + '_amount'] : null;
-            return '<div style="display:grid;grid-template-columns:1fr 130px;gap:8px">' +
-              '<input id="salD' + n + 'L" placeholder="Deduction ' + n + ' label" value="' + esc(l) + '" style="' + inp + '"/>' +
-              '<input id="salD' + n + 'A" type="number" placeholder="Amount" value="' + (a != null && Number(a) > 0 ? esc(a) : '') + '" style="' + inp + '"/></div>'; };
           html += '<div class="card"><div class="card-title">' + (s ? 'Update salary' : 'Add salary') + '</div>' +
-            '<div style="font-size:12.5px;color:var(--muted);margin:2px 0 12px">This is the figure payroll uses to build payslips. Saving records a new effective-dated entry.</div>' +
+            '<div style="font-size:12.5px;color:var(--muted);margin:2px 0 12px">This is the figure payroll uses to build payslips. Saving records a new effective-dated entry. (Bonuses or one-off deductions are added per month on the payslip itself.)</div>' +
             '<label style="font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Monthly CTC (' + esc(curr) + ')</label>' +
             '<input id="salCtc" type="number" value="' + (s && s.monthly_ctc != null ? esc(s.monthly_ctc) : '') + '" placeholder="e.g. 50000" style="' + inp + '"/>' +
             '<label style="font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Effective from</label>' +
             '<input id="salEff" type="date" value="' + esc(eff || today) + '" style="' + inp + '"/>' +
-            '<div style="font-size:12.5px;font-weight:600;color:var(--muted);margin:6px 0 8px">Recurring deductions (optional)</div>' +
-            ded(1) + ded(2) + ded(3) +
             '<input id="salCur" type="hidden" value="' + esc(curr) + '"/>' +
             '<button id="salSaveBtn" class="btn btn-primary" style="margin-top:4px;padding:10px 18px"><i class="ti ti-device-floppy"></i> Save salary</button>' +
             '<span id="salSaveMsg" style="margin-left:10px;font-size:13px"></span>' +
@@ -1567,9 +1566,6 @@ window.fkModules['profile'] = {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(eff)) { msg.textContent = 'Pick an effective date'; msg.style.color = 'var(--red)'; return; }
         const b2 = {
           monthly_ctc: ctc, currency: document.getElementById('salCur').value || 'INR', effective_from: eff,
-          deduction_1_label: document.getElementById('salD1L').value || null, deduction_1_amount: parseFloat(document.getElementById('salD1A').value) || 0,
-          deduction_2_label: document.getElementById('salD2L').value || null, deduction_2_amount: parseFloat(document.getElementById('salD2A').value) || 0,
-          deduction_3_label: document.getElementById('salD3L').value || null, deduction_3_amount: parseFloat(document.getElementById('salD3A').value) || 0,
         };
         salBtn.disabled = true; msg.textContent = 'Saving…'; msg.style.color = 'var(--muted)';
         try {

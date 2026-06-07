@@ -96,8 +96,8 @@ async function visibleDrawers(viewer, targetUserId) {
     drawers.add('insurance');
     drawers.add('personal');
   }
-  if (viewer.can('profile.salary.view') || viewer.can('profile.salary.edit')) {
-    drawers.add('salary');
+  if (isOwn || viewer.can('profile.salary.view') || viewer.can('profile.salary.edit')) {
+    drawers.add('salary');   // your own salary is visible to you; editing stays salary-gated
   }
   return DRAWER_ORDER.filter(d => drawers.has(d));
 }
