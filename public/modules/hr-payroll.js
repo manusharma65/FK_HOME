@@ -271,7 +271,7 @@ window.fkModules['hr/payroll'] = {
       const rows = d.rows || [];
       rows.forEach(r => { genRows[r.id] = r; });
       wrap.dataset.runId = run.id;
-      const totalNet = rows.filter(r => r.status !== 'revoked').reduce((s, r) => s + Number(r.net_pay || 0), 0);
+      const totalNet = rows.filter(r => r.status !== 'revoked' && !r.flagged).reduce((s, r) => s + Number(r.net_pay || 0), 0);
       const flagged = rows.filter(r => r.flagged).length;
       const publishedCount = rows.filter(r => r.status === 'published').length;
       const readyCount = rows.filter(r => r.status === 'draft' && !r.held && !r.flagged).length;

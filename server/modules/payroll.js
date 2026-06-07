@@ -348,9 +348,9 @@ async function buildSnapshot(u, salaryRow, range, lopOverride) {
   let lop = (lopOverride != null && lopOverride !== '') ? Number(lopOverride) : lopDates.length;
   lop = Math.max(0, Math.min(employedDays, lop));      // clamp 0..employed days
 
-  const ctc = salaryRow ? Number(salaryRow.monthly_ctc) : (u.monthly_salary != null ? Number(u.monthly_salary) : 0);
+  const ctc = salaryRow ? Number(salaryRow.monthly_ctc) : 0;   // drawer is the source of truth
   const flagged = !salaryRow || !ctc;
-  const flagNote = !salaryRow ? 'No salary structure on file' : (!ctc ? 'Salary is zero' : null);
+  const flagNote = !salaryRow ? 'No salary on file — add it in the salary drawer' : (!ctc ? 'Salary is zero' : null);
 
   const master = splitSalary(ctc);
   const payDays = Math.max(0, employedDays - lop);
