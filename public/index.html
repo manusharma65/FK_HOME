@@ -679,6 +679,16 @@
   .fk-btn:hover { transform:translateY(-1px); }
   .fk-btn-primary { background:linear-gradient(135deg,#F3992E,#E8722B); color:#fff; border:0; box-shadow:0 4px 12px rgba(232,114,43,.25); }
   .fk-btn-outline { background:var(--surface); border-color:var(--line); color:#5b524a; }
+  /* --- App-wide finish: every module page header + the self-styled action buttons --- */
+  #moduleView h2 { font-family:'Fraunces',Georgia,serif; font-weight:600; letter-spacing:-.01em; }
+  #moduleView .ap-btn, #moduleView .mwc-btn, #moduleView .new-btn {
+    padding:10px 22px !important; font-size:14px !important; font-weight:600 !important; border-radius:11px !important;
+    border:1px solid var(--line) !important; background:var(--surface); color:var(--ink); cursor:pointer;
+    font-family:'Hanken Grotesk',sans-serif !important; transition:transform .12s, box-shadow .12s; }
+  #moduleView .ap-btn:hover, #moduleView .mwc-btn:hover, #moduleView .new-btn:hover { transform:translateY(-1px); }
+  #moduleView .ap-btn.ap-btn-primary, #moduleView .mwc-btn.done, #moduleView .new-btn {
+    background:linear-gradient(135deg,#F3992E,#E8722B) !important; color:#fff !important; border:0 !important; box-shadow:0 4px 12px rgba(232,114,43,.25); }
+  #moduleView .ap-btn.ap-btn-danger { color:#A32D2D !important; }
 </style>
   <link rel="stylesheet" href="/modules/module-base.css">
 </head>
