@@ -340,12 +340,23 @@ async function lopDatesForUser(userId, range) {
 // lopOverride (number) lets HR override the detected LOP during review.
 // Days in the month the person was NOT yet on payroll (joined mid-month).
 function nonEmployedDays(u, range) {
-  if (!u.hire_date) return 0;
-  const hd = dateStr(u.hire_date);
-  const hy = +hd.slice(0, 4), hm = +hd.slice(5, 7), hday = +hd.slice(8, 10);
-  if (hy > range.year || (hy === range.year && hm > range.month)) return Number(range.end.slice(8, 10)); // joined after this month
-  if (hy === range.year && hm === range.month) return hday - 1;                                          // joined this month
-  return 0;                                                                                              // joined earlier
+  const cd = Number(range.end.slice(8, 10));
+  let nonEmp = 0;
+  // Joined mid-month → exclude days before the hire date.
+  if (u.hire_date) {
+    const hd = dateStr(u.hire_date);
+    const hy = +hd.slice(0, 4), hm = +hd.slice(5, 7), hday = +hd.slice(8, 10);
+    if (hy > range.year || (hy === range.year && hm > range.month)) return cd; // joined after this month
+    if (hy === range.year && hm === range.month) nonEmp += (hday - 1);
+  }
+  // Left mid-month → exclude days after the last working day.
+  if (u.last_working_day) {
+    const ld = dateStr(u.last_working_day);
+    const ly = +ld.slice(0, 4), lm = +ld.slice(5, 7), lday = +ld.slice(8, 10);
+    if (ly < range.year || (ly === range.year && lm < range.month)) return cd; // left before this month
+    if (ly === range.year && lm === range.month) nonEmp += (cd - lday);
+  }
+  return Math.min(cd, nonEmp);
 }
 
 async function buildSnapshot(u, salaryRow, range, lopOverride) {
@@ -380,7 +391,29 @@ async function buildSnapshot(u, salaryRow, range, lopOverride) {
   }
   const totalEarnMaster = master.basic + master.hra + master.special;
   const totalEarnActual = actualGross;
-  const totalExtra = 0;                                // none at generation; HR adds in the editor
+
+  // Leave encashment — auto line on a leaver's final-month payslip.
+  const extraEarnings = [];
+  let totalExtra = 0;
+  const lwd = u.last_working_day ? dateStr(u.last_working_day) : null;
+  const leaverThisMonth = !!lwd && (+lwd.slice(0, 4) === range.year && +lwd.slice(5, 7) === range.month);
+  if (leaverThisMonth && ctc > 0) {
+    const dailyRate = Math.round(ctc / calendarDays);
+    let rem = 0;
+    try {
+      const bal = await leaveEngine.getBalance(u.id);
+      rem = (bal && bal.remaining != null) ? Math.max(0, Number(bal.remaining)) : 0;
+    } catch (e) { rem = 0; }
+    if (rem > 0 && dailyRate > 0) {
+      const amt = Math.round(rem * dailyRate);
+      extraEarnings.push({
+        label: 'Leave encashment (' + rem + (rem === 1 ? ' day' : ' days') + ')',
+        amount: amt, reason: 'Auto: unused leave paid on exit',
+      });
+      totalExtra = amt;
+    }
+  }
+
   const totalDeductions = deductions.reduce((s, d) => s + Number(d.actual || 0), 0);
   const net = totalEarnActual + totalExtra - totalDeductions;
 
@@ -403,7 +436,7 @@ async function buildSnapshot(u, salaryRow, range, lopOverride) {
     paid_days: payDays,
     lop_dates: JSON.stringify(lopDates),
     earnings: JSON.stringify(earnings),
-    extra_earnings: JSON.stringify([]),
+    extra_earnings: JSON.stringify(extraEarnings),
     deductions: JSON.stringify(deductions),
     total_earn_master: totalEarnMaster,
     total_earn_actual: totalEarnActual,
@@ -416,10 +449,11 @@ async function buildSnapshot(u, salaryRow, range, lopOverride) {
 }
 
 // Gather eligible employees (active, non-owner, India/INR) + their salary row.
-async function eligibleEmployees() {
+async function eligibleEmployees(range) {
   const users = await db.query(
     `SELECT u.id, u.full_name, u.display_name, u.hire_date, u.monthly_salary,
             u.salary_currency, u.emp_id, u.pan, u.bank_name, u.bank_account_number,
+            u.last_working_day,
             (SELECT d.name FROM user_department_memberships m
               JOIN departments d ON d.id = m.department_id
               WHERE m.user_id = u.id AND m.deleted_at IS NULL AND m.is_primary = TRUE
@@ -427,9 +461,15 @@ async function eligibleEmployees() {
             EXISTS (SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
                     WHERE ug.user_id = u.id AND g.slug = 'owner') AS is_owner
        FROM users u
-      WHERE u.deleted_at IS NULL AND u.employment_status = 'active'
+      WHERE u.deleted_at IS NULL
         AND COALESCE(u.salary_currency, 'INR') = 'INR'
-      ORDER BY u.full_name`
+        AND (
+          u.employment_status = 'active'
+          OR (u.last_working_day IS NOT NULL
+              AND u.last_working_day BETWEEN $1::date AND $2::date)
+        )
+      ORDER BY u.full_name`,
+    [range.start, range.end]
   );
   const out = [];
   for (const u of users.rows) {
@@ -497,7 +537,7 @@ router.post('/run', requireSalary, async (req, res) => {
          VALUES ($1,$2,'draft',$3) RETURNING *`,
         [range.year, range.month, req.user.id])).rows[0];
     }
-    const emps = await eligibleEmployees();
+    const emps = await eligibleEmployees(range);
     let flaggedCount = 0;
     for (const { user, salaryRow } of emps) {
       const snap = await buildSnapshot(user, salaryRow, range);
@@ -625,6 +665,7 @@ router.post('/payslip/:id/regenerate', requireSalary, async (req, res) => {
     const u = (await db.query(
       `SELECT u.id, u.full_name, u.display_name, u.hire_date, u.monthly_salary,
               u.salary_currency, u.emp_id, u.pan, u.bank_name, u.bank_account_number,
+              u.last_working_day,
               (SELECT d.name FROM user_department_memberships m JOIN departments d ON d.id=m.department_id
                 WHERE m.user_id=u.id AND m.deleted_at IS NULL AND m.is_primary=TRUE LIMIT 1) AS dept_name
          FROM users u WHERE u.id = $1`, [p.user_id])).rows[0];
