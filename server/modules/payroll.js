@@ -44,8 +44,10 @@ async function rollupForUser(userId, range) {
   let sickPaid = 0, sickUnpaid = 0;
   let lateCount = 0;
   let weekendsPaid = 0, weekendsUnpaid = 0;
+  const todayIso = new Date().toISOString().slice(0, 10);
   for (const row of att.rows) {
     const s = row.status;
+    const ds = (row.for_date instanceof Date) ? row.for_date.toISOString().slice(0,10) : String(row.for_date).slice(0,10);
     const dow = new Date(row.for_date).getUTCDay(); // 0=Sun, 6=Sat
     const isWeekend = (dow === 0 || dow === 6);
     // Paid / unpaid counts (use the is_paid flag if set, else infer from status)
@@ -54,8 +56,10 @@ async function rollupForUser(userId, range) {
     else if (['on_time','late','very_late','worked_voluntary','on_leave','off_holiday'].includes(s)) paid++;
     else if (s === 'off_sick') {
       if (Number(row.sick_notified_hours) >= 4) paid++; else unpaid++;
-    } else if (s === 'off_pattern' || s === 'off_cs_rota') {
-      // weekend-flag covers this; non-weekend "off_pattern" = neither paid nor unpaid (no expectation)
+    } else if (s === 'no_show') unpaid++;                    // expected, never logged in
+    else if (s === 'pending') { if (ds < todayIso) unpaid++; } // past day still pending = absent
+    else if (s === 'off_pattern' || s === 'off_cs_rota') {
+      // weekend-flag covers this; non-weekend "off_pattern" = neither paid nor unpaid (rostered rest)
     }
     // Specific category counts
     if (s === 'on_leave') annualLeave++;
@@ -313,17 +317,21 @@ async function lopDatesForUser(userId, range) {
       ORDER BY for_date`,
     [userId, range.start, range.end]
   );
+  const todayIso = new Date().toISOString().slice(0, 10);
   const dates = [];
   for (const row of att.rows) {
     const s = row.status;
+    const ds = dateStr(row.for_date);
     let unpaid = false;
     if (row.is_paid === true) unpaid = false;
     else if (row.is_paid === false) unpaid = true;
     else if (['on_time','late','very_late','worked_voluntary','on_leave','off_holiday'].includes(s)) unpaid = false;
     else if (s === 'off_sick') unpaid = !(Number(row.sick_notified_hours) >= 4);
-    else if (s === 'off_pattern' || s === 'off_cs_rota') unpaid = false; // no expectation
+    else if (s === 'no_show') unpaid = true;                 // expected, never logged in → not paid
+    else if (s === 'pending') unpaid = (ds < todayIso);      // a past day still "pending" = absent
+    else if (s === 'off_pattern' || s === 'off_cs_rota') unpaid = false; // rostered rest — paid
     else unpaid = false;
-    if (unpaid) dates.push(dateStr(row.for_date));
+    if (unpaid) dates.push(ds);
   }
   return dates;
 }

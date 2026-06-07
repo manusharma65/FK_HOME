@@ -727,7 +727,7 @@ router.get('/:userId/attendance-days', async (req, res) => {
   try {
     const days = await db.query(
       `SELECT for_date, status, is_paid, weekend_pay_status,
-              first_login, late_minutes, sick_notified_hours, active_minutes
+              first_login, last_logout, late_minutes, sick_notified_hours, active_minutes
          FROM attendance_day
         WHERE user_id = $1 AND for_date BETWEEN $2 AND $3
         ORDER BY for_date`,

@@ -504,7 +504,6 @@ window.fkModules['profile'] = {
       const SECTIONS = [
         { key: 'about',      icon: 'ti-user-circle', label: 'About me',   show: true },
         { key: 'details',    icon: 'ti-id',          label: 'My details', show: true },
-        { key: 'employment', icon: 'ti-briefcase',   label: 'Employment', show: hasEmployment, count: counts.employment },
         { key: 'pay',        icon: 'ti-coin',        label: 'Pay',        show: hasPay, count: payCount },
         { key: 'time',       icon: 'ti-calendar',    label: 'Time',       show: true },
       ].filter(s => s.show);
@@ -1105,36 +1104,53 @@ window.fkModules['profile'] = {
         }
         grid.innerHTML = html;
 
-        // Click a day → show its detail (expected vs actual login, how late).
-        let detail = document.getElementById('attDayDetail');
-        if (!detail) {
-          detail = document.createElement('div');
-          detail.id = 'attDayDetail';
-          detail.style.cssText = 'margin-top:12px;font-size:14px;color:var(--ink);min-height:20px';
-          grid.parentNode.insertBefore(detail, grid.nextSibling);
-        }
-        detail.innerHTML = '<span style="color:var(--muted)">Tap a day to see its detail.</span>';
+        // Click a day → open a modal with that day's detail (login, logout, lateness).
         const fmtT = (ts) => { if (!ts) return '\u2014'; try { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); } catch (e) { return '\u2014'; } };
-        const expT = (ts, m) => { if (!ts) return '\u2014'; try { const d = new Date(ts); d.setMinutes(d.getMinutes() - (m || 0)); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); } catch (e) { return '\u2014'; } };
-        const describeDay = (rec, ds) => {
-          const dl = fmtDate(ds);
+        const dayMeta = (rec) => {
           const s = rec ? rec.status : null;
-          if (s === 'late' || s === 'very_late') return '<b>' + dl + '</b> \u2014 expected ' + expT(rec.first_login, rec.late_minutes) + ', logged in ' + fmtT(rec.first_login) + ' \u00b7 <span style="color:var(--amber-deep)">' + (rec.late_minutes || 0) + ' min late</span>';
-          if (s === 'on_time' || s === 'worked_voluntary') return '<b>' + dl + '</b> \u2014 logged in ' + fmtT(rec.first_login) + ' \u00b7 <span style="color:var(--green)">on time</span>';
-          if (s === 'on_leave') return '<b>' + dl + '</b> \u2014 on approved leave';
-          if (s === 'off_sick') return '<b>' + dl + '</b> \u2014 off sick';
-          if (s === 'off_holiday') return '<b>' + dl + '</b> \u2014 public holiday';
-          if (s === 'not_yet_in') return '<b>' + dl + '</b> \u2014 no login recorded';
-          if (s && s.indexOf('off_') === 0) return '<b>' + dl + '</b> \u2014 not a working day';
-          return '<b>' + dl + '</b> \u2014 ' + (s || 'no record');
+          if (s === 'on_time') return { label: 'On time', color: 'var(--green)' };
+          if (s === 'worked_voluntary') return { label: 'Worked (rest day)', color: 'var(--green)' };
+          if (s === 'late' || s === 'very_late') return { label: (rec.late_minutes || 0) + ' min late', color: 'var(--amber-deep)' };
+          if (s === 'on_leave') return { label: 'Approved leave', color: '#2D6CA8' };
+          if (s === 'off_sick') return { label: 'Off sick', color: 'var(--red)' };
+          if (s === 'off_holiday') return { label: 'Public holiday', color: '#2D6CA8' };
+          if (s === 'no_show') return { label: 'Absent \u2014 no login', color: 'var(--red)' };
+          if (s === 'pending') return { label: 'No login recorded', color: 'var(--muted)' };
+          if (s && s.indexOf('off_') === 0) return { label: 'Rest day', color: 'var(--muted)' };
+          return { label: (s || 'No record'), color: 'var(--muted)' };
         };
+        function showDayModal(rec, ds) {
+          const m = dayMeta(rec);
+          const worked = rec && ['on_time','late','very_late','worked_voluntary'].indexOf(rec.status) >= 0;
+          let ov = document.getElementById('attDayModal');
+          if (!ov) { ov = document.createElement('div'); ov.id = 'attDayModal'; document.body.appendChild(ov); }
+          ov.style.cssText = 'position:fixed;inset:0;background:rgba(20,22,27,.5);display:flex;align-items:center;justify-content:center;z-index:200;padding:16px';
+          const line = (k, v, last) => '<div style="display:flex;justify-content:space-between;padding:10px 0' + (last ? '' : ';border-bottom:0.5px solid var(--line)') + '"><span style="color:var(--muted)">' + k + '</span><span style="font-weight:600">' + v + '</span></div>';
+          const rows =
+            '<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:0.5px solid var(--line)"><span style="color:var(--muted)">Status</span><span style="font-weight:600;color:' + m.color + '">' + m.label + '</span></div>' +
+            line('Logged in', worked ? fmtT(rec.first_login) : '\u2014') +
+            line('Logged out', worked ? fmtT(rec.last_logout) : '\u2014', !(worked && rec.active_minutes)) +
+            (worked && rec.active_minutes ? line('Active time', (Math.round(rec.active_minutes / 60 * 10) / 10) + ' h', true) : '');
+          ov.innerHTML =
+            '<div style="background:var(--surface);border-radius:14px;max-width:380px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.4);overflow:hidden">' +
+              '<div style="padding:15px 18px;border-bottom:0.5px solid var(--line);display:flex;align-items:center;justify-content:space-between">' +
+                '<div style="font-size:15px;font-weight:700">' + fmtDate(ds) + '</div>' +
+                '<button id="attModalClose" style="border:0.5px solid var(--line);background:var(--surface);border-radius:8px;width:30px;height:30px;cursor:pointer;color:var(--muted);font-size:15px">\u2715</button>' +
+              '</div>' +
+              '<div style="padding:4px 18px 16px">' + rows + '</div>' +
+            '</div>';
+          const close = () => { ov.style.display = 'none'; };
+          ov.onclick = (e) => { if (e.target === ov) close(); };
+          document.getElementById('attModalClose').onclick = close;
+          ov.style.display = 'flex';
+        }
         grid._byDate = byDate;
         if (!grid._attClickWired) {
           grid._attClickWired = true;
           grid.addEventListener('click', (ev) => {
             const cell = ev.target.closest('[data-d]');
             if (!cell) return;
-            detail.innerHTML = describeDay(grid._byDate[cell.getAttribute('data-d')], cell.getAttribute('data-d'));
+            showDayModal(grid._byDate[cell.getAttribute('data-d')], cell.getAttribute('data-d'));
           });
         }
         let worked = 0, late = 0, al = 0, sick = 0;
