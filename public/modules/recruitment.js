@@ -6,6 +6,7 @@ window.fkModules = window.fkModules || {};
 
 window.fkModules['recruitment'] = {
   title: 'Recruitment',
+  noHero: true,
   render() {
     return '<div id="rec-mod" class="fk-mod">' +
       '<style>' +

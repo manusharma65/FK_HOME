@@ -15,6 +15,7 @@ window.fkModules = window.fkModules || {};
 
 window.fkModules['chat'] = {
   title: 'Team chat',
+  noHero: true,
 
   render() {
     return '' +

@@ -13,6 +13,7 @@ window.fkModules = window.fkModules || {};
 
 window.fkModules['hr-queue'] = {
   title: 'HR Queue',
+  noHero: true,
 
   render() {
     return '' +

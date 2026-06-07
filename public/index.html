@@ -689,6 +689,10 @@
   #moduleView .ap-btn.ap-btn-primary, #moduleView .mwc-btn.done, #moduleView .new-btn {
     background:linear-gradient(135deg,#F3992E,#E8722B) !important; color:#fff !important; border:0 !important; box-shadow:0 4px 12px rgba(232,114,43,.25); }
   #moduleView .ap-btn.ap-btn-danger { color:#A32D2D !important; }
+  /* Shared page hero — rendered by the loader for every module page */
+  #moduleView .fk-page-hero { position:relative; overflow:hidden; border-radius:22px; padding:24px 28px; color:#fff; margin:6px 0 20px; background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%); }
+  #moduleView .fk-page-hero:after { content:""; position:absolute; right:-60px; top:-90px; width:280px; height:280px; border-radius:50%; background:radial-gradient(circle at 30% 30%, rgba(243,153,46,.5), rgba(243,153,46,0) 70%); }
+  #moduleView .fk-page-hero h1 { font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:30px; margin:0; position:relative; color:#fff; }
 </style>
   <link rel="stylesheet" href="/modules/module-base.css">
 </head>

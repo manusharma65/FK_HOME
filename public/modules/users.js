@@ -20,6 +20,7 @@ window.fkModules = window.fkModules || {};
 
 window.fkModules['hr/users'] = {
   title: 'People',
+  noHero: true,
   render() {
     return '' +
     '<div id="usr-mod" class="fk-mod"><style>' +

@@ -115,7 +115,18 @@ window.fkModules = window.fkModules || {};
 
     try {
       const html = (typeof mod.render === 'function') ? mod.render() : '';
-      mv.innerHTML = html || '';
+      const heroHtml = mod.noHero ? '' :
+        '<div class="fk-page-hero"><h1>' + String(mod.title || 'FK Home').replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</h1></div>';
+      mv.innerHTML = heroHtml + (html || '');
+      if (heroHtml) {
+        // The page also prints its own title heading — drop that duplicate so the hero is the single header.
+        const t = String(mod.title || '').trim();
+        const heads = mv.querySelectorAll('h1, h2');
+        for (const h of heads) {
+          if (h.closest('.fk-page-hero')) continue;
+          if (h.textContent.trim() === t) { h.remove(); break; }
+        }
+      }
       current = { key: moduleKey, mod };
       if (typeof mod.mount === 'function') {
         await mod.mount(mv, { params, fullKey: key });
