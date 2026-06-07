@@ -98,12 +98,13 @@ function pickRoleLabel(depts, groupSlugs) {
     return '';
   }
   // Pick top tier across departments: manager → lead → specialist
-  const order = { manager: 0, lead: 1, agent: 2 };
+  const order = { manager: 0, lead: 1, senior: 2, agent: 3 };
   const sorted = [...depts].sort((a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9));
   const top = sorted[0];
   if (top.role === 'manager') return `${top.name} Manager`;
-  if (top.role === 'lead') return `${top.name} Executive`;
-  return `${top.name} Specialist`;
+  if (top.role === 'lead') return `${top.name} Team Lead`;
+  if (top.role === 'senior') return `${top.name} Senior Executive`;
+  return `${top.name} Executive`;
 }
 
 // GET /api/team/search — returns ALL active users for the Find someone modal.

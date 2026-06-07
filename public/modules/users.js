@@ -105,7 +105,7 @@ window.fkModules['hr/users'] = {
       document.head.appendChild(lk);
     }
     const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    const roleLabel = (r) => r === 'manager' ? 'Manager' : (r === 'lead' ? 'Executive' : 'Specialist');
+    const roleLabel = (r) => r === 'manager' ? 'Manager' : (r === 'lead' ? 'Team Lead' : (r === 'senior' ? 'Senior Executive' : 'Executive'));
     const dOnly = (d) => d ? String(d).slice(0,10) : '';
     let departments_=[], groups_=[], users_=[], filter_='all', search_='';
 
@@ -170,7 +170,7 @@ window.fkModules['hr/users'] = {
           '<div class="r2"><div><label>Work email</label><input id="wEmail" placeholder="name@fksports.co.uk"/></div><div><label>Display name</label><input id="wDisp" placeholder="optional"/></div></div></div>'+
         '<div class="pane" data-n="1"><h2>Where do they fit?</h2><p class="lead">Department, role and who they report to — from day one.</p>'+
           '<label>Primary department</label><select id="wDept">'+deptOpts+'</select>'+
-          '<label>Role</label><div id="wRole"><span class="opt on" data-r="agent">Specialist</span><span class="opt" data-r="lead">Executive</span><span class="opt" data-r="manager">Manager</span></div>'+
+          '<label>Role</label><div id="wRole"><span class="opt on" data-r="agent">Executive</span><span class="opt" data-r="senior">Senior Executive</span><span class="opt" data-r="lead">Team Lead</span><span class="opt" data-r="manager">Manager</span></div>'+
           '<label style="margin-top:6px">Reports to (manager)</label><select id="wMgr">'+mgrOpts+'</select></div>'+
         '<div class="pane" data-n="2"><h2>The employment record</h2><p class="lead">This drives leave accrual and payroll, so we set it now.</p>'+
           '<label>Joining date</label><input type="date" id="wHire"/>'+
@@ -237,7 +237,7 @@ window.fkModules['hr/users'] = {
       const mgrOpts='<option value="">— none —</option>'+users_.filter(x=>x.id!==id&&x.employment_status==='active').map(x=>'<option value="'+x.id+'"'+(x.id===mgrId?' selected':'')+'>'+esc(x.display_name||x.full_name)+'</option>').join('');
       const deptRows=departments_.map(d=>{const m=(u.departments||[]).find(x=>x.slug===d.slug);const ck=m?'checked':'';const role=m?m.role:'agent';const pr=m?m.is_primary:false;
         return '<label style="display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:9px;font-weight:500;margin-bottom:8px"><input type="checkbox" data-slug="'+d.slug+'" '+ck+' style="width:auto;margin:0"/><span>'+esc(d.name)+'</span>'+
-          '<select data-role="'+d.slug+'" style="width:auto;margin:0;padding:4px 8px"><option value="agent"'+(role==='agent'?' selected':'')+'>Specialist</option><option value="lead"'+(role==='lead'?' selected':'')+'>Executive</option><option value="manager"'+(role==='manager'?' selected':'')+'>Manager</option></select>'+
+          '<select data-role="'+d.slug+'" style="width:auto;margin:0;padding:4px 8px"><option value="agent"'+(role==='agent'?' selected':'')+'>Executive</option><option value="senior"'+(role==='senior'?' selected':'')+'>Senior Executive</option><option value="lead"'+(role==='lead'?' selected':'')+'>Team Lead</option><option value="manager"'+(role==='manager'?' selected':'')+'>Manager</option></select>'+
           '<label style="display:flex;align-items:center;gap:4px;margin:0;font-size:12px;color:var(--muted)"><input type="checkbox" data-prim="'+d.slug+'" '+(pr?'checked':'')+' style="width:auto;margin:0"/>primary</label></label>';}).join('');
       const grpRows=groups_.filter(g=>g.slug!=='employee-base').map(g=>{const has=(u.groups||[]).some(x=>x.slug===g.slug);const own=g.slug==='owner';
         return '<label style="display:flex;align-items:center;gap:8px;font-weight:500;margin-bottom:6px"><input type="checkbox" value="'+g.slug+'" '+(has?'checked':'')+' '+(own?'disabled':'')+' style="width:auto;margin:0"/>'+esc(g.name)+'</label>';}).join('');

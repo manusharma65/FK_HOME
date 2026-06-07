@@ -703,15 +703,40 @@ window.fkModules['profile'] = {
         html += '</div>';
       }
 
-      // Salary: render the salary card if present
-      if (drawer === 'salary' && data.salary) {
-        const s = data.salary;
-        const curr = s.currency || '£';
+      // Salary: read-only summary + editable form (drawer is can_edit_salary gated)
+      if (drawer === 'salary') {
+        const s = data.salary || {};
+        const curr = s.currency || 'INR';
+        const eff = s.effective_from ? String(s.effective_from).slice(0, 10) : '';
+        const today = new Date().toISOString().slice(0, 10);
+        if (data.salary) {
+          html += '<div class="info-block">' +
+            '<div class="info-block-title">Current salary</div>' +
+            '<div class="info-row"><span class="info-label">Monthly CTC</span> ' + esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-IN') : '—') + '</div>' +
+            (s.effective_from ? '<div class="info-row"><span class="info-label">Effective from</span> ' + fmtDate(s.effective_from) + '</div>' : '') +
+          '</div>';
+        }
+        const inp = 'width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;margin-bottom:10px;background:var(--surface)';
+        const dedRow = (n) => {
+          const l = s['deduction_' + n + '_label'] || '';
+          const a = s['deduction_' + n + '_amount'];
+          return '<div style="display:grid;grid-template-columns:1fr 120px;gap:8px">' +
+            '<input id="salD' + n + 'L" placeholder="Deduction ' + n + ' label" value="' + esc(l) + '" style="' + inp + '"/>' +
+            '<input id="salD' + n + 'A" type="number" placeholder="Amount" value="' + (a != null && Number(a) > 0 ? esc(a) : '') + '" style="' + inp + '"/>' +
+          '</div>';
+        };
         html += '<div class="info-block">' +
-          '<div class="info-block-title">Current salary</div>' +
-          '<div class="info-row"><span class="info-label">Monthly CTC</span> ' + esc(curr) + ' ' + (s.monthly_ctc != null ? Number(s.monthly_ctc).toLocaleString('en-GB') : '—') + '</div>' +
-          (s.effective_from ? '<div class="info-row"><span class="info-label">Effective from</span> ' + fmtDate(s.effective_from) + '</div>' : '') +
-          (s.notes ? '<div class="info-row" style="white-space:pre-wrap"><span class="info-label">Notes</span> ' + esc(s.notes) + '</div>' : '') +
+          '<div class="info-block-title">' + (data.salary ? 'Update salary' : 'Add salary') + '</div>' +
+          '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">This is the figure payroll uses to build payslips. Saving records a new effective-dated entry.</div>' +
+          '<label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Monthly CTC (' + esc(curr) + ')</label>' +
+          '<input id="salCtc" type="number" value="' + (s.monthly_ctc != null ? esc(s.monthly_ctc) : '') + '" placeholder="e.g. 50000" style="' + inp + '"/>' +
+          '<label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Effective from</label>' +
+          '<input id="salEff" type="date" value="' + esc(eff || today) + '" style="' + inp + '"/>' +
+          '<div style="font-size:12px;font-weight:600;color:var(--muted);margin:6px 0 8px">Recurring deductions (optional)</div>' +
+          dedRow(1) + dedRow(2) + dedRow(3) +
+          '<input id="salCur" type="hidden" value="' + esc(curr) + '"/>' +
+          '<button id="salSaveBtn" class="header-action-btn" style="margin-top:6px"><i class="ti ti-device-floppy"></i> Save salary</button>' +
+          '<span id="salSaveMsg" style="margin-left:10px;font-size:13px"></span>' +
         '</div>';
       }
 
@@ -777,6 +802,37 @@ window.fkModules['profile'] = {
       body.innerHTML = html;
       wireFileRowHandlers();
       wireUploadHandler(drawer);
+
+      // Salary edit form (gated drawer) — save to the record payroll reads.
+      if (drawer === 'salary') {
+        const sb = document.getElementById('salSaveBtn');
+        if (sb) sb.addEventListener('click', async () => {
+          const msg = document.getElementById('salSaveMsg');
+          const ctc = parseFloat(document.getElementById('salCtc').value);
+          const eff = document.getElementById('salEff').value;
+          if (!(ctc >= 0)) { msg.textContent = 'Enter a valid amount'; msg.style.color = 'var(--red)'; return; }
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(eff)) { msg.textContent = 'Pick an effective date'; msg.style.color = 'var(--red)'; return; }
+          const body2 = {
+            monthly_ctc: ctc,
+            currency: document.getElementById('salCur').value || 'INR',
+            effective_from: eff,
+            deduction_1_label: document.getElementById('salD1L').value || null,
+            deduction_1_amount: parseFloat(document.getElementById('salD1A').value) || 0,
+            deduction_2_label: document.getElementById('salD2L').value || null,
+            deduction_2_amount: parseFloat(document.getElementById('salD2A').value) || 0,
+            deduction_3_label: document.getElementById('salD3L').value || null,
+            deduction_3_amount: parseFloat(document.getElementById('salD3A').value) || 0,
+          };
+          sb.disabled = true; msg.textContent = 'Saving…'; msg.style.color = 'var(--muted)';
+          try {
+            const r = await fetch('/api/profile/' + profileUserId + '/salary', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body2) });
+            const d = await r.json();
+            if (!r.ok) { msg.textContent = d.error || 'Failed'; msg.style.color = 'var(--red)'; sb.disabled = false; return; }
+            msg.textContent = 'Saved \u2713'; msg.style.color = 'var(--green)';
+            setTimeout(() => loadDrawer('salary'), 700);
+          } catch (e) { msg.textContent = 'Network error'; msg.style.color = 'var(--red)'; sb.disabled = false; }
+        });
+      }
     }
 
     // --- Reviews drawer (Monday-style cards, r0.16 NEW) ---------------

@@ -279,7 +279,7 @@ router.put('/users/:id/departments', requirePermission('admin.users.edit'), asyn
     // Validate
     for (const m of memberships) {
       if (!m.department_slug) return res.status(400).json({ error: 'Each membership needs department_slug' });
-      if (m.role && !['agent','lead','manager'].includes(m.role)) return res.status(400).json({ error: 'Bad role' });
+      if (m.role && !['agent','senior','lead','manager'].includes(m.role)) return res.status(400).json({ error: 'Bad role' });
     }
 
     // Soft-delete existing
