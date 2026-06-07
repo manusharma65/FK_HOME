@@ -18,31 +18,35 @@ window.fkModules['hr-queue'] = {
     return '' +
       '<div id="hrq-mod" class="fk-mod">' +
         '<style>' +
-          '#hrq-mod .hrq-sub{font-size:13px;color:var(--muted);margin-bottom:4px}' +
-          '#hrq-mod .hrq-help{font-size:13px;color:var(--soft);background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:10px 13px;margin:12px 0 18px}' +
-          '#hrq-mod .hrq-glabel{font-size:12px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:18px 0 10px}' +
-          '#hrq-mod .hrq-card{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:10px}' +
+          '#hrq-mod{font-family:"Hanken Grotesk",-apple-system,sans-serif}' +
+          '#hrq-mod .hrq-hero{position:relative;overflow:hidden;border-radius:22px;padding:24px 28px;color:#fff;margin:6px 0 18px;background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%)}' +
+          '#hrq-mod .hrq-hero:after{content:"";position:absolute;right:-60px;top:-90px;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle at 30% 30%,rgba(243,153,46,.5),rgba(243,153,46,0) 70%)}' +
+          '#hrq-mod .hrq-hero h1{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:30px;margin:0;position:relative}' +
+          '#hrq-mod .hrq-hero .hrq-sub{margin:7px 0 0;color:#E8DDD2;font-size:14px;position:relative}' +
+          '#hrq-mod .hrq-help{font-size:13.5px;line-height:1.5;color:#5b524a;background:#FBF0DC;border:1px solid #F0E2CE;border-radius:14px;padding:14px 16px;margin:0 0 20px}' +
+          '#hrq-mod .hrq-glabel{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin:22px 0 12px}' +
+          '#hrq-mod .hrq-card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:18px 20px;margin-bottom:14px;box-shadow:0 2px 10px rgba(36,31,27,.04);transition:transform .14s,box-shadow .14s}' +
+          '#hrq-mod .hrq-card:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(36,31,27,.08)}' +
           '#hrq-mod .hrq-card.overdue{border-color:#F09595}' +
-          '#hrq-mod .hrq-top{display:flex;align-items:flex-start;gap:12px}' +
-          '#hrq-mod .hrq-ico{font-size:19px;flex:none;margin-top:1px}' +
+          '#hrq-mod .hrq-top{display:flex;align-items:flex-start;gap:13px}' +
+          '#hrq-mod .hrq-ico{font-size:22px;flex:none;margin-top:2px}' +
           '#hrq-mod .hrq-mid{flex:1;min-width:0}' +
-          '#hrq-mod .hrq-title{font-size:15px;font-weight:500}' +
-          '#hrq-mod .hrq-body{font-size:13px;color:var(--muted);margin-top:3px}' +
-          '#hrq-mod .hrq-owner{font-size:11px;padding:4px 10px;border-radius:99px;flex:none;white-space:nowrap}' +
-          '#hrq-mod .hrq-actions{display:flex;gap:10px;margin-top:14px}' +
-          '#hrq-mod .hrq-btn{flex:1;padding:11px;font-size:14px;border-radius:8px;border:0.5px solid var(--line);background:var(--surface);cursor:pointer;text-align:center}' +
-          '#hrq-mod .hrq-btn:hover{background:var(--hover,#F1EFE8)}' +
-          '#hrq-mod .hrq-btn.primary{background:var(--ink);color:var(--bg,#fff);border-color:var(--ink)}' +
-          '#hrq-mod .hrq-btn.cover{background:#FFF8EC;border-color:#FAC775;color:#854F0B}' +
+          '#hrq-mod .hrq-title{font-family:"Fraunces",Georgia,serif;font-size:18px;font-weight:600}' +
+          '#hrq-mod .hrq-body{font-size:13.5px;color:var(--muted);margin-top:3px}' +
+          '#hrq-mod .hrq-owner{font-size:11.5px;font-weight:600;padding:5px 12px;border-radius:99px;flex:none;white-space:nowrap}' +
+          '#hrq-mod .hrq-actions{display:flex;gap:12px;margin-top:16px}' +
+          '#hrq-mod .hrq-btn{flex:1;padding:13px;font-size:14.5px;font-weight:600;border-radius:12px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;text-align:center;font-family:inherit;transition:transform .12s,box-shadow .12s}' +
+          '#hrq-mod .hrq-btn:hover{transform:translateY(-1px)}' +
+          '#hrq-mod .hrq-btn.primary{background:linear-gradient(135deg,#F3992E,#E8722B);color:#fff;border:0;box-shadow:0 6px 16px rgba(232,114,43,.28)}' +
+          '#hrq-mod .hrq-btn.cover{background:#FFF8EC;border-color:#F2D9A6;color:#854F0B}' +
           '#hrq-mod .pill.overdue{background:#FCEBEB;color:#A32D2D}' +
           '#hrq-mod .pill.due{background:#FAEEDA;color:#854F0B}' +
           '#hrq-mod .pill.mine{background:#E1F5EE;color:#0F6E56}' +
-          '#hrq-mod .pill.theirs{background:#EDEDF0;color:#555}' +
-          '#hrq-mod .hrq-empty{text-align:center;color:var(--muted);padding:34px;font-size:14px}' +
+          '#hrq-mod .pill.theirs{background:#F2ECE2;color:#5b524a}' +
+          '#hrq-mod .hrq-empty{text-align:center;color:var(--muted);padding:40px;font-size:15px;background:var(--surface);border:1px solid var(--line);border-radius:18px}' +
         '</style>' +
 
-        '<h2 style="margin:0">HR Queue</h2>' +
-        '<div class="hrq-sub" id="hrqSub">\u2014</div>' +
+        '<div class="hrq-hero"><h1>HR Queue</h1><div class="hrq-sub" id="hrqSub">\u2014</div></div>' +
         '<div class="hrq-help">Work that\u2019s landed for the HR team. Each item shows whose it is. ' +
           'Do your own with the buttons; if a colleague is off, use <strong>Cover</strong> to take theirs \u2014 ' +
           'whoever completes it is recorded as having done it.</div>' +
