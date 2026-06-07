@@ -25,7 +25,7 @@ window.fkModules['hr-queue'] = {
           '#hrq-mod .hrq-hero h1{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:30px;margin:0;position:relative}' +
           '#hrq-mod .hrq-hero .hrq-sub{margin:7px 0 0;color:#E8DDD2;font-size:14px;position:relative}' +
           '#hrq-mod .hrq-help{font-size:13.5px;line-height:1.5;color:#5b524a;background:#FBF0DC;border:1px solid #F0E2CE;border-radius:14px;padding:14px 16px;margin:0 0 20px}' +
-          '#hrq-mod .hrq-glabel{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin:22px 0 12px}' +
+          '#hrq-mod .hrq-glabel{font-size:13.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin:22px 0 12px}' +
           '#hrq-mod .hrq-card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:18px 20px;margin-bottom:14px;box-shadow:0 2px 10px rgba(36,31,27,.04);transition:transform .14s,box-shadow .14s}' +
           '#hrq-mod .hrq-card:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(36,31,27,.08)}' +
           '#hrq-mod .hrq-card.overdue{border-color:#F09595}' +

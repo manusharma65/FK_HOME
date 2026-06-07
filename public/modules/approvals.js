@@ -33,7 +33,7 @@ window.fkModules = window.fkModules || {};
     const ed = new Date(e).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
     return s === e ? sd : sd + ' \u2192 ' + ed;
   }
-  function dateOnly(v) { return v ? String(v).slice(0, 10) : ''; }
+  function dateOnly(v) { if(!v) return ''; var s=String(v); var m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return m[3]+'/'+m[2]+'/'+m[1]; var d=new Date(s); return isNaN(d.getTime())?s:d.toLocaleDateString('en-GB'); }
   function fmtTime(t) {
     if (!t) return '\u2014';
     if (typeof t === 'string' && /^\d{2}:\d{2}/.test(t)) return t.slice(0, 5);
@@ -50,10 +50,10 @@ window.fkModules = window.fkModules || {};
             '#ap-mod .ap-tabs{display:flex;gap:6px;border-bottom:0.5px solid var(--line);margin-bottom:20px}' +
             '#ap-mod .ap-tab{border:none;background:none;padding:12px 18px;font-size:15px;font-weight:500;color:var(--muted);border-bottom:2px solid transparent;cursor:pointer;display:flex;align-items:center;gap:9px}' +
             '#ap-mod .ap-tab.active{color:var(--ink);border-bottom-color:var(--amber)}' +
-            '#ap-mod .ap-badge{font-size:13px;padding:2px 10px;border-radius:99px;background:#F1EFE8;color:#5F5E5A;font-weight:500}' +
+            '#ap-mod .ap-badge{font-size:14.5px;padding:2px 10px;border-radius:99px;background:#F1EFE8;color:#5F5E5A;font-weight:500}' +
             '#ap-mod .ap-tab.active .ap-badge{background:var(--amber-soft);color:var(--amber-deep)}' +
             '#ap-mod table{width:100%;border-collapse:collapse;font-size:14px}' +
-            '#ap-mod th{text-align:left;font-size:13px;font-weight:500;color:var(--muted);padding:8px 10px 8px 0}' +
+            '#ap-mod th{text-align:left;font-size:14.5px;font-weight:500;color:var(--muted);padding:8px 10px 8px 0}' +
             '#ap-mod td{padding:14px 10px 14px 0;vertical-align:top}' +
             '#ap-mod .ap-btn{padding:10px 18px;font-size:14px;font-weight:500;border-radius:9px;cursor:pointer;border:0.5px solid var(--line);background:var(--bg);color:var(--ink)}' +
             '#ap-mod .ap-btn:hover{border-color:var(--line-strong)}' +
@@ -61,14 +61,14 @@ window.fkModules = window.fkModules || {};
             '#ap-mod .ap-btn-danger{border:0.5px solid var(--red);background:none;color:var(--red)}' +
             '#ap-mod .action-col{text-align:right;white-space:nowrap}' +
             '#ap-mod .action-col .ap-btn{margin-left:8px}' +
-            '#ap-mod .avatar{width:32px;height:32px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#3a3a36;flex-shrink:0}' +
+            '#ap-mod .avatar{width:32px;height:32px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:14.5px;font-weight:500;color:#3a3a36;flex-shrink:0}' +
             '#ap-mod .name-cell{display:flex;align-items:center;gap:11px}' +
-            '#ap-mod .chip{font-size:13px;background:#E6F1FB;color:#0C447C;padding:4px 11px;border-radius:99px}' +
-            '#ap-mod .disclose{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:5px;padding:2px 0}' +
+            '#ap-mod .chip{font-size:14.5px;background:#E6F1FB;color:#0C447C;padding:4px 11px;border-radius:99px}' +
+            '#ap-mod .disclose{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14.5px;display:inline-flex;align-items:center;gap:5px;padding:2px 0}' +
             '#ap-mod .disclose:hover{color:var(--ink)}' +
             '#ap-mod .bal-panel{background:#FBFAF7;border:0.5px solid var(--line);border-radius:10px;padding:16px 18px;margin-top:4px}' +
             '#ap-mod .bal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px 18px}' +
-            '#ap-mod .bal-cell .lbl{font-size:13px;color:var(--muted);margin-bottom:3px}' +
+            '#ap-mod .bal-cell .lbl{font-size:14.5px;color:var(--muted);margin-bottom:3px}' +
             '#ap-mod .bal-cell .val{font-size:17px;font-weight:500;color:var(--ink)}' +
             '#ap-mod .bal-after{margin-top:14px;padding-top:14px;border-top:0.5px solid var(--line);font-size:14px;color:var(--ink)}' +
             '#ap-mod .bal-after b{font-weight:500}' +
@@ -177,7 +177,7 @@ window.fkModules = window.fkModules || {};
           const hasBal = lr.balance != null;
           const disclose = hasBal
             ? '<button class="disclose" data-bal="' + lr.id + '"><i class="ti ti-chevron-down"></i> Balance</button>'
-            : '<span style="font-size:13px;color:var(--muted)">no balance</span>';
+            : '<span style="font-size:14.5px;color:var(--muted)">no balance</span>';
           return '' +
             '<tr class="lv-toprow" data-id="' + lr.id + '">' +
               '<td>' +

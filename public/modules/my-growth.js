@@ -26,31 +26,31 @@ window.fkModules['my-growth'] = {
           '#mg-mod .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:22px}' +
           '#mg-mod .stat{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:13px 15px}' +
           '#mg-mod .stat .v{font-size:24px;font-weight:600;line-height:1.1}' +
-          '#mg-mod .stat .l{font-size:12px;color:var(--muted);margin-top:4px}' +
-          '#mg-mod .sec-lbl{font-size:12px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}' +
+          '#mg-mod .stat .l{font-size:13.5px;color:var(--muted);margin-top:4px}' +
+          '#mg-mod .sec-lbl{font-size:13.5px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}' +
           '#mg-mod .conduct{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:15px;margin-bottom:6px}' +
           '#mg-mod .conduct-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:14px}' +
           '#mg-mod .conduct-grid .c .v{font-size:26px;font-weight:600;line-height:1}' +
-          '#mg-mod .conduct-grid .c .l{font-size:13px;color:var(--muted);margin-top:3px}' +
-          '#mg-mod .conduct-note{font-size:12px;color:var(--soft);margin-bottom:24px}' +
+          '#mg-mod .conduct-grid .c .l{font-size:14.5px;color:var(--muted);margin-top:3px}' +
+          '#mg-mod .conduct-note{font-size:13.5px;color:var(--soft);margin-bottom:24px}' +
           '#mg-mod .conduct-note a{color:var(--blue,#185FA5);text-decoration:none;cursor:pointer}' +
           '#mg-mod .panel{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:24px}' +
           '#mg-mod .row{display:flex;justify-content:space-between;align-items:center;padding:12px 15px;border-bottom:0.5px solid var(--line)}' +
           '#mg-mod .row:last-child{border-bottom:none}' +
           '#mg-mod .row .t1{font-size:14px}' +
-          '#mg-mod .row .t2{font-size:12px;color:var(--muted);margin-top:2px}' +
-          '#mg-mod .pill{display:inline-flex;font-size:12px;font-weight:500;padding:4px 11px;border-radius:99px;background:#F1EFE8;color:var(--muted)}' +
+          '#mg-mod .row .t2{font-size:13.5px;color:var(--muted);margin-top:2px}' +
+          '#mg-mod .pill{display:inline-flex;font-size:13.5px;font-weight:500;padding:4px 11px;border-radius:99px;background:#F1EFE8;color:var(--muted)}' +
           '#mg-mod .pill.green{background:#EAF3DE;color:#3B6D11}' +
           '#mg-mod .pill.amber{background:#FAEEDA;color:#9A5B1F}' +
           '#mg-mod .pill.blue{background:#E5EEF8;color:#185FA5}' +
           '#mg-mod .scoring{background:var(--bg2,#F4F2EC);border:1px dashed var(--line);border-radius:10px;padding:20px;text-align:center}' +
           '#mg-mod .scoring .t{font-size:14px;font-weight:500;margin-top:6px}' +
-          '#mg-mod .scoring .s{font-size:13px;color:var(--muted);margin-top:3px;max-width:460px;margin-left:auto;margin-right:auto}' +
+          '#mg-mod .scoring .s{font-size:14.5px;color:var(--muted);margin-top:3px;max-width:460px;margin-left:auto;margin-right:auto}' +
           '#mg-mod .empty{text-align:center;color:var(--muted);padding:18px;font-size:14px}' +
         '</style>' +
 
         '<div class="card-head" style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">' +
-          '<div><h2 style="margin:0 0 2px" id="mgTitle">My Growth</h2><span class="lt-sub" style="font-size:13px;color:var(--muted)" id="mgSub">How you\u2019re doing, and how you\u2019re developing.</span></div>' +
+          '<div><h2 style="margin:0 0 2px" id="mgTitle">My Growth</h2><span class="lt-sub" style="font-size:14.5px;color:var(--muted)" id="mgSub">How you\u2019re doing, and how you\u2019re developing.</span></div>' +
           '<div class="switcher" id="mgSwitcher"><select id="mgUserSelect"></select></div>' +
         '</div>' +
 
@@ -84,7 +84,7 @@ window.fkModules['my-growth'] = {
   async mount(el) {
     const $ = (id) => el.querySelector('#' + id);
     function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-    function dOnly(v){ if(!v) return '\u2014'; if(typeof v==='string') return v.slice(0,10); try{return new Date(v).toISOString().slice(0,10);}catch(e){return String(v);} }
+    function dOnly(v){ if(!v) return '\u2014'; var s=String(v); var m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return m[3]+'/'+m[2]+'/'+m[1]; var d=new Date(s); return isNaN(d.getTime())?s:d.toLocaleDateString('en-GB'); }
 
     let me_ = null, viewingUserId = null, viewingName = null;
 

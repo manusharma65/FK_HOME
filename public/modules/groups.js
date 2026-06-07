@@ -54,9 +54,9 @@ window.fkModules['system/groups'] = {
           '<td>' + (g.member_count != null ? g.member_count : 0) + '</td>' +
           '<td>' +
             (g.permissions || []).slice(0, 5).map(p =>
-              '<span class="chip" style="font-family:ui-monospace,monospace;font-size:12px">' + escapeHtml(p) + '</span>').join('') +
+              '<span class="chip" style="font-family:ui-monospace,monospace;font-size:13.5px">' + escapeHtml(p) + '</span>').join('') +
             ((g.permissions || []).length > 5 ?
-              '<span class="chip muted" style="font-size:12px">+' + (g.permissions.length - 5) + ' more</span>' : '') +
+              '<span class="chip muted" style="font-size:13.5px">+' + (g.permissions.length - 5) + ' more</span>' : '') +
           '</td>' +
         '</tr>'
       ).join('');

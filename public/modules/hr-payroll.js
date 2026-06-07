@@ -21,7 +21,7 @@ window.fkModules['hr/payroll'] = {
         '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">' +
           '<div>' +
             '<div class="card-title"><i class="ti ti-cash"></i> Payroll</div>' +
-            '<div style="font-size:12px;color:var(--muted);margin-top:2px">Monthly pay breakdown for every active employee.</div>' +
+            '<div style="font-size:13.5px;color:var(--muted);margin-top:2px">Monthly pay breakdown for every active employee.</div>' +
           '</div>' +
           '<div style="display:flex;gap:8px;align-items:center">' +
             '<button class="btn" id="prPrev"><i class="ti ti-chevron-left"></i></button>' +
@@ -33,19 +33,19 @@ window.fkModules['hr/payroll'] = {
       '</div>' +
 
       '<div class="card" id="prGenCard" style="margin-bottom:14px">' +
-        '<div id="prGenWrap"><div style="color:var(--muted);font-size:13px;padding:6px 0">Loading payroll run…</div></div>' +
+        '<div id="prGenWrap"><div style="color:var(--muted);font-size:14.5px;padding:6px 0">Loading payroll run…</div></div>' +
       '</div>' +
 
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px" id="prSummary">' +
-        '<div class="card" style="padding:10px 12px"><div style="font-size:11px;color:var(--muted);letter-spacing:0.04em">EMPLOYEES</div><div style="font-size:20px;font-weight:500" id="prTileEmp">—</div></div>' +
-        '<div class="card" style="padding:10px 12px"><div style="font-size:11px;color:var(--muted);letter-spacing:0.04em">PAID DAYS</div><div style="font-size:20px;font-weight:500;color:var(--green)" id="prTilePaid">—</div></div>' +
-        '<div class="card" style="padding:10px 12px"><div style="font-size:11px;color:var(--muted);letter-spacing:0.04em">UNPAID DAYS</div><div style="font-size:20px;font-weight:500;color:var(--red)" id="prTileUnpaid">—</div></div>' +
-        '<div class="card" style="padding:10px 12px"><div style="font-size:11px;color:var(--muted);letter-spacing:0.04em">WEEKENDS UNPAID</div><div style="font-size:20px;font-weight:500;color:var(--amber-deep)" id="prTileWend">—</div></div>' +
+        '<div class="card" style="padding:10px 12px"><div style="font-size:12.5px;color:var(--muted);letter-spacing:0.04em">EMPLOYEES</div><div style="font-size:20px;font-weight:500" id="prTileEmp">—</div></div>' +
+        '<div class="card" style="padding:10px 12px"><div style="font-size:12.5px;color:var(--muted);letter-spacing:0.04em">PAID DAYS</div><div style="font-size:20px;font-weight:500;color:var(--green)" id="prTilePaid">—</div></div>' +
+        '<div class="card" style="padding:10px 12px"><div style="font-size:12.5px;color:var(--muted);letter-spacing:0.04em">UNPAID DAYS</div><div style="font-size:20px;font-weight:500;color:var(--red)" id="prTileUnpaid">—</div></div>' +
+        '<div class="card" style="padding:10px 12px"><div style="font-size:12.5px;color:var(--muted);letter-spacing:0.04em">WEEKENDS UNPAID</div><div style="font-size:20px;font-weight:500;color:var(--amber-deep)" id="prTileWend">—</div></div>' +
       '</div>' +
 
       '<div class="card" style="padding:0">' +
         '<div style="overflow-x:auto">' +
-          '<table class="data-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:820px">' +
+          '<table class="data-table" style="width:100%;border-collapse:collapse;font-size:14.5px;min-width:820px">' +
             '<thead><tr style="background:var(--bg)">' +
               '<th style="text-align:left;padding:10px 12px;font-weight:500;color:var(--muted)">Employee</th>' +
               '<th style="text-align:left;padding:10px 8px;font-weight:500;color:var(--muted)">Dept</th>' +
@@ -100,10 +100,10 @@ window.fkModules['hr/payroll'] = {
           if (row.is_owner) {
             return '<tr style="background:var(--bg);color:var(--muted)">' +
               '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
-                '<span style="width:24px;height:24px;border-radius:50%;background:' + (row.avatar_colour || '#888780') + ';color:#FFF;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">' + esc(row.initials || '') + '</span>' +
-                esc(row.name) + ' <span style="font-size:11px;padding:1px 6px;background:var(--surface);border-radius:4px">Owner</span>' +
+                '<span style="width:24px;height:24px;border-radius:50%;background:' + (row.avatar_colour || '#888780') + ';color:#FFF;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500">' + esc(row.initials || '') + '</span>' +
+                esc(row.name) + ' <span style="font-size:12.5px;padding:1px 6px;background:var(--surface);border-radius:4px">Owner</span>' +
               '</div></td>' +
-              '<td colspan="9" style="padding:10px 8px;text-align:center;font-style:italic;font-size:12px">n/a — owner does not accrue</td>' +
+              '<td colspan="9" style="padding:10px 8px;text-align:center;font-style:italic;font-size:13.5px">n/a — owner does not accrue</td>' +
               '<td></td>' +
               '</tr>';
           }
@@ -113,7 +113,7 @@ window.fkModules['hr/payroll'] = {
           const wendCls = wendOk ? 'chip green' : 'chip red';
           return '<tr style="border-top:0.5px solid var(--line)">' +
             '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
-              '<span style="width:24px;height:24px;border-radius:50%;background:' + (row.avatar_colour || '#888780') + ';color:#FFF;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">' + esc(row.initials || '') + '</span>' +
+              '<span style="width:24px;height:24px;border-radius:50%;background:' + (row.avatar_colour || '#888780') + ';color:#FFF;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500">' + esc(row.initials || '') + '</span>' +
               esc(row.name) +
             '</div></td>' +
             '<td style="padding:10px 8px;color:var(--muted)">' + esc(row.dept_name) + '</td>' +
@@ -179,13 +179,13 @@ window.fkModules['hr/payroll'] = {
               const lbl = labels[day.status] || { lbl: day.status, cls: 'muted' };
               const paidTxt = day.is_paid === true ? '<span class="chip green">Paid</span>' :
                               day.is_paid === false ? '<span class="chip red">Unpaid</span>' :
-                              '<span style="font-size:12px;color:var(--muted)">—</span>';
+                              '<span style="font-size:13.5px;color:var(--muted)">—</span>';
               const wendTxt = day.weekend_pay_status ? (' · weekend ' + day.weekend_pay_status) : '';
               return '<tr style="border-top:0.5px solid var(--line)">' +
                 '<td style="padding:8px 12px;width:40px;color:var(--muted)">' + esc(dayName) + '</td>' +
                 '<td style="padding:8px 8px;width:30px">' + dayNum + '</td>' +
                 '<td style="padding:8px 8px"><span class="chip ' + lbl.cls + '">' + esc(lbl.lbl) + '</span>' +
-                  (wendTxt ? '<span style="font-size:11px;color:var(--muted);margin-left:6px">' + esc(wendTxt) + '</span>' : '') +
+                  (wendTxt ? '<span style="font-size:12.5px;color:var(--muted);margin-left:6px">' + esc(wendTxt) + '</span>' : '') +
                 '</td>' +
                 '<td style="padding:8px 8px;text-align:right">' + paidTxt + '</td>' +
               '</tr>';
@@ -196,7 +196,7 @@ window.fkModules['hr/payroll'] = {
               '<div style="font-size:15px;font-weight:500">' + esc(name) + ' · ' + monthName(y, m) + '</div>' +
               '<button class="btn" id="prDrillClose" aria-label="Close"><i class="ti ti-x"></i></button>' +
             '</div>' +
-            '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>' + rowsHtml + '</tbody></table></div>' +
+            '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14.5px"><tbody>' + rowsHtml + '</tbody></table></div>' +
           '</div>';
       } catch (e) {
         console.error('[payroll drill]', e);
@@ -242,14 +242,14 @@ window.fkModules['hr/payroll'] = {
       const { y, m } = getYM();
       const wrap = document.getElementById('prGenWrap');
       if (!wrap) return;
-      wrap.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:6px 0">Loading payroll run…</div>';
+      wrap.innerHTML = '<div style="color:var(--muted);font-size:14.5px;padding:6px 0">Loading payroll run…</div>';
       try {
         const r = await fetch('/api/payroll/run?year=' + y + '&month=' + m, { credentials: 'include' });
-        if (!r.ok) { wrap.innerHTML = '<div style="color:var(--red);font-size:13px">Permission denied or failed.</div>'; return; }
+        if (!r.ok) { wrap.innerHTML = '<div style="color:var(--red);font-size:14.5px">Permission denied or failed.</div>'; return; }
         renderGenPanel(await r.json(), y, m);
       } catch (e) {
         console.error('[payroll gen]', e);
-        wrap.innerHTML = '<div style="color:var(--red);font-size:13px">Failed to load run.</div>';
+        wrap.innerHTML = '<div style="color:var(--red);font-size:14.5px">Failed to load run.</div>';
       }
     }
 
@@ -262,7 +262,7 @@ window.fkModules['hr/payroll'] = {
         wrap.innerHTML =
           '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">' +
             '<div><div style="font-size:15px;font-weight:600">Generate payslips for ' + esc(label) + '</div>' +
-            '<div style="font-size:12px;color:var(--muted);margin-top:3px;max-width:520px">Creates a draft payslip for every active India employee from their salary and attendance. Nothing is published until you review and publish.</div></div>' +
+            '<div style="font-size:13.5px;color:var(--muted);margin-top:3px;max-width:520px">Creates a draft payslip for every active India employee from their salary and attendance. Nothing is published until you review and publish.</div></div>' +
             '<button class="btn pr-run" style="background:var(--green);color:#fff;border-color:var(--green);padding:10px 18px;font-size:14px"><i class="ti ti-player-play"></i> Run payroll</button>' +
           '</div>';
         return;
@@ -280,23 +280,23 @@ window.fkModules['hr/payroll'] = {
         '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px">' +
           '<div><div style="font-size:15px;font-weight:600">Payroll — ' + esc(label) + ' ' +
             (run.status === 'approved' ? '<span class="chip green">Complete</span>' : '<span class="chip muted">Draft</span>') + '</div>' +
-          '<div style="font-size:12px;color:var(--muted);margin-top:3px">' + rows.length + ' payslips · ' + publishedCount + ' published · total net ' + moneyINR(totalNet) +
+          '<div style="font-size:13.5px;color:var(--muted);margin-top:3px">' + rows.length + ' payslips · ' + publishedCount + ' published · total net ' + moneyINR(totalNet) +
             (flagged ? ' · <span style="color:var(--amber-deep)">' + flagged + ' with no salary on file</span>' : '') + '</div></div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
             '<button class="btn pr-rerun" style="padding:9px 14px"><i class="ti ti-refresh"></i> Re-generate all</button>' +
             '<button class="btn pr-publishready" ' + (readyCount ? '' : 'disabled ') + 'style="background:var(--green);color:#fff;border-color:var(--green);padding:9px 16px;font-size:14px' + (readyCount ? '' : ';opacity:.5') + '"><i class="ti ti-upload"></i> Publish all ready (' + readyCount + ')</button>' +
           '</div>' +
         '</div>' +
-        '<div style="font-size:12px;color:var(--muted);background:var(--bg);border:0.5px solid var(--line);border-radius:8px;padding:8px 12px;margin:8px 0 12px">Publish each person when their figures are right — individually, or “Publish all ready” to push everyone with no unresolved edits. Edited rows are held until you publish them.</div>';
+        '<div style="font-size:13.5px;color:var(--muted);background:var(--bg);border:0.5px solid var(--line);border-radius:8px;padding:8px 12px;margin:8px 0 12px">Publish each person when their figures are right — individually, or “Publish all ready” to push everyone with no unresolved edits. Edited rows are held until you publish them.</div>';
 
       const list = rows.map(r => {
         const lopTxt = Number(r.lop_days) > 0
           ? '<span style="color:var(--red);font-weight:500">' + r.lop_days + '</span>'
           : '<span style="color:var(--muted)">0</span>';
         const lopDates = (Array.isArray(r.lop_dates) && r.lop_dates.length)
-          ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">LOP: ' + r.lop_dates.map(esc).join(', ') + '</div>' : '';
+          ? '<div style="font-size:12.5px;color:var(--muted);margin-top:2px">LOP: ' + r.lop_dates.map(esc).join(', ') + '</div>' : '';
         const ovr = r.override_reason
-          ? '<div style="font-size:11px;color:var(--amber-deep);margin-top:2px"><i class="ti ti-pencil"></i> ' + esc(r.override_reason) + '</div>' : '';
+          ? '<div style="font-size:12.5px;color:var(--amber-deep);margin-top:2px"><i class="ti ti-pencil"></i> ' + esc(r.override_reason) + '</div>' : '';
         const netCol = (Number(r.net_pay) < 0)
           ? '<span style="color:var(--red);font-weight:600">' + moneyINR(r.net_pay) + '</span>'
           : (r.flagged ? '<span style="color:var(--muted)">—</span>' : '<span style="font-weight:600">' + moneyINR(r.net_pay) + '</span>');
@@ -317,7 +317,7 @@ window.fkModules['hr/payroll'] = {
         }
         return '<tr style="border-top:0.5px solid var(--line)' + (r.flagged ? ';background:var(--bg)' : '') + '">' +
           '<td style="padding:10px 12px"><div style="display:flex;align-items:center;gap:8px">' +
-            '<span style="width:24px;height:24px;border-radius:50%;background:' + (r.avatar_colour || '#888780') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none">' + esc(r.initials || '') + '</span>' +
+            '<span style="width:24px;height:24px;border-radius:50%;background:' + (r.avatar_colour || '#888780') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:12.5px;flex:none">' + esc(r.initials || '') + '</span>' +
             '<div>' + esc(r.emp_name) + lopDates + ovr + '</div>' +
           '</div></td>' +
           '<td style="padding:10px 8px;color:var(--muted)">' + esc(r.emp_department || '\u2014') + '</td>' +
@@ -329,7 +329,7 @@ window.fkModules['hr/payroll'] = {
       }).join('');
 
       wrap.innerHTML = head +
-        '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px;min-width:680px">' +
+        '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14.5px;min-width:680px">' +
           '<thead><tr style="background:var(--bg)">' +
             '<th style="text-align:left;padding:9px 12px;font-weight:500;color:var(--muted)">Employee</th>' +
             '<th style="text-align:left;padding:9px 8px;font-weight:500;color:var(--muted)">Dept</th>' +
@@ -395,30 +395,30 @@ window.fkModules['hr/payroll'] = {
         '<div class="card" style="max-width:660px;width:100%;background:var(--surface);max-height:90vh;overflow:auto;padding:0">' +
           '<div style="padding:16px 20px;border-bottom:0.5px solid var(--line);display:flex;align-items:center;justify-content:space-between">' +
             '<div><div style="font-size:16px;font-weight:600">Edit payslip — ' + esc(row.emp_name) + '</div>' +
-            '<div style="font-size:12px;color:var(--muted);margin-top:2px">Base CTC ' + moneyINR(row.monthly_ctc) + ' · ' + employed + ' work days in month · daily rate ' + moneyINR(daily) + '</div></div>' +
+            '<div style="font-size:13.5px;color:var(--muted);margin-top:2px">Base CTC ' + moneyINR(row.monthly_ctc) + ' · ' + employed + ' work days in month · daily rate ' + moneyINR(daily) + '</div></div>' +
             '<button class="btn" id="edClose" style="padding:7px 10px"><i class="ti ti-x"></i></button>' +
           '</div>' +
           '<div style="padding:16px 20px">' +
-            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:4px 0 8px">1 · Unpaid days (LOP)</div>' +
+            '<div style="font-size:13.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:4px 0 8px">1 · Unpaid days (LOP)</div>' +
             '<div style="display:flex;gap:10px;align-items:center">' +
               '<input id="edLop" type="number" min="0" max="' + employed + '" value="' + esc(row.lop_days || 0) + '" style="width:120px;padding:8px 10px;border:0.5px solid var(--line);border-radius:9px" oninput="(' + 'function(){})();">' +
               '<div style="font-size:11.5px;color:var(--muted)">0–' + employed + ' only. Pay is pro-rated. Mid-month joiners are prorated from joining date automatically.</div>' +
             '</div>' +
-            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">2 · Earnings</div>' +
+            '<div style="font-size:13.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">2 · Earnings</div>' +
             '<div style="display:grid;grid-template-columns:1.4fr .9fr;gap:8px;background:var(--bg);border-radius:9px;padding:8px 10px;margin-bottom:6px"><div>Basic (60%)</div><div style="text-align:right" id="edBasic">—</div></div>' +
             '<div style="display:grid;grid-template-columns:1.4fr .9fr;gap:8px;background:var(--bg);border-radius:9px;padding:8px 10px;margin-bottom:6px"><div>HRA (30%)</div><div style="text-align:right" id="edHra">—</div></div>' +
             '<div style="display:grid;grid-template-columns:1.4fr .9fr;gap:8px;background:var(--bg);border-radius:9px;padding:8px 10px;margin-bottom:6px"><div>Special Allowance (10%)</div><div style="text-align:right" id="edSpec">—</div></div>' +
             encash +
             '<div id="edExtra"></div>' +
             '<button class="btn" id="edAddE" style="padding:8px 12px"><i class="ti ti-plus"></i> Add earning (bonus, arrears, incentive, reimbursement…)</button>' +
-            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">3 · Deductions</div>' +
+            '<div style="font-size:13.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">3 · Deductions</div>' +
             '<div id="edDeds"></div>' +
             '<button class="btn" id="edAddD" style="padding:8px 12px"><i class="ti ti-plus"></i> Add deduction (advance recovery, loan, penalty…)</button>' +
             '<div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;background:#FCF1E8;border:1px solid #F0CFB4;border-left:4px solid var(--amber-deep);border-radius:11px;padding:13px 18px">' +
-              '<div style="font-size:12px;color:var(--muted)">Net pay for ' + esc(monthName(getYM().y, getYM().m)) + '</div>' +
+              '<div style="font-size:13.5px;color:var(--muted)">Net pay for ' + esc(monthName(getYM().y, getYM().m)) + '</div>' +
               '<div style="font-size:22px;font-weight:800" id="edNet">—</div></div>' +
             '<div id="edWarn" style="display:none;margin-top:10px;background:#FBEAE8;border:1px solid #F0C9C3;color:var(--red);font-size:12.5px;padding:9px 12px;border-radius:9px">\u26A0 Net pay is negative — deductions exceed earnings. You can still save, but please double-check.</div>' +
-            '<div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">4 · Reason for changes (logged)</div>' +
+            '<div style="font-size:13.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px">4 · Reason for changes (logged)</div>' +
             '<input id="edReason" type="text" placeholder="e.g. 3 days LOP plus festival bonus" style="width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:9px">' +
           '</div>' +
           '<div style="padding:14px 20px;border-top:0.5px solid var(--line);display:flex;gap:9px;justify-content:flex-end;background:var(--bg)">' +
@@ -464,8 +464,8 @@ window.fkModules['hr/payroll'] = {
       wrap.innerHTML =
         '<div class="card" style="max-width:460px;width:100%;padding:18px 20px;background:var(--surface)">' +
           '<div style="font-size:15px;font-weight:600;margin-bottom:4px">' + esc(opts.title) + '</div>' +
-          '<div style="font-size:12px;color:var(--muted)">' + esc(opts.sub || '') + '</div>' +
-          '<label style="display:block;font-size:12px;color:var(--muted);margin:12px 0 4px">Reason (logged)</label>' +
+          '<div style="font-size:13.5px;color:var(--muted)">' + esc(opts.sub || '') + '</div>' +
+          '<label style="display:block;font-size:13.5px;color:var(--muted);margin:12px 0 4px">Reason (logged)</label>' +
           '<textarea id="prmReason" rows="3" style="width:100%;padding:9px 12px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;resize:vertical" placeholder="Why this change?"></textarea>' +
           '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">' +
             '<button class="btn" id="prmCancel" style="padding:9px 16px">Cancel</button>' +

@@ -25,14 +25,14 @@ window.fkModules['hr/employment'] = {
         '<style>' +
           '#emp-mod .emp-grid{display:grid;grid-template-columns:1fr 340px;gap:16px;align-items:start}' +
           '@media (max-width:820px){#emp-mod .emp-grid{grid-template-columns:1fr}}' +
-          '#emp-mod .avatar{width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:500;color:#3a3a36;flex-shrink:0}' +
+          '#emp-mod .avatar{width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:13.5px;font-weight:500;color:#3a3a36;flex-shrink:0}' +
           '#emp-mod tbody tr{cursor:pointer}' +
           '#emp-mod tbody tr.sel td{background:#FBF6EC}' +
-          '#emp-mod .status-pill{display:inline-flex;font-size:12px;font-weight:500;padding:3px 10px;border-radius:99px;background:#F1EFE8;color:var(--muted);text-transform:capitalize}' +
+          '#emp-mod .status-pill{display:inline-flex;font-size:13.5px;font-weight:500;padding:3px 10px;border-radius:99px;background:#F1EFE8;color:var(--muted);text-transform:capitalize}' +
           '#emp-mod .status-pill.active{background:var(--green-soft);color:var(--green)}' +
           '#emp-mod .status-pill.probation{background:var(--amber-soft);color:var(--amber-deep)}' +
           '#emp-mod .drawer .row2{display:grid;grid-template-columns:1fr 90px;gap:10px}' +
-          '#emp-mod .drawer label{font-size:13px;color:var(--muted);display:block;margin-bottom:5px}' +
+          '#emp-mod .drawer label{font-size:14.5px;color:var(--muted);display:block;margin-bottom:5px}' +
           '#emp-mod .drawer input,#emp-mod .drawer select{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;margin-bottom:14px;background:var(--surface)}' +
           '#emp-mod .drawer-empty{color:var(--muted);font-size:14px;text-align:center;padding:40px 10px}' +
           '#emp-mod .modal-err{display:none;color:var(--red);font-size:14px;margin:6px 0}' +
@@ -160,7 +160,7 @@ window.fkModules['hr/employment'] = {
           '</div>' +
           '<button class="btn" id="dClose" aria-label="Close" style="padding:6px 9px;font-size:14px;line-height:1"><i class="ti ti-x"></i></button>' +
         '</div>' +
-        '<div style="font-size:13px;color:var(--muted);margin:0 0 18px 40px">' + escapeHtml(u.email || '') + '</div>' +
+        '<div style="font-size:14.5px;color:var(--muted);margin:0 0 18px 40px">' + escapeHtml(u.email || '') + '</div>' +
 
         '<label>Joined date</label>' +
         '<input type="date" id="dHire" value="' + dateOnly(u.hire_date) + '" />' +
@@ -196,8 +196,8 @@ window.fkModules['hr/employment'] = {
 
         '<div style="border-top:0.5px solid var(--line);padding-top:14px;margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:8px">' +
           '<div style="display:flex;gap:8px">' +
-            '<button class="btn" id="dAdjust" style="font-size:13px;padding:7px 11px">Adjust balance</button>' +
-            '<button class="btn" id="dRecompute" style="font-size:13px;padding:7px 11px">Recompute</button>' +
+            '<button class="btn" id="dAdjust" style="font-size:14.5px;padding:7px 11px">Adjust balance</button>' +
+            '<button class="btn" id="dRecompute" style="font-size:14.5px;padding:7px 11px">Recompute</button>' +
           '</div>' +
           '<button class="btn btn-primary" id="dSave">Save</button>' +
         '</div>' +

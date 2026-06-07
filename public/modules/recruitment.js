@@ -28,47 +28,47 @@ window.fkModules['recruitment'] = {
         '#rec-mod .rec-btn.danger{color:#A32D2D}' +
         '#rec-mod .rec-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px}' +
         '#rec-mod .rec-col{flex:1 1 0;min-width:120px;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
-        '#rec-mod .rec-col-head{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;display:flex;justify-content:space-between}' +
+        '#rec-mod .rec-col-head{font-size:13.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;display:flex;justify-content:space-between}' +
         '#rec-mod .rec-cand{background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:11px 12px;margin-bottom:8px;cursor:grab}' +
         '#rec-mod .rec-cand:hover{border-color:var(--ink)}' +
         '#rec-mod .rec-cand.dragging{opacity:.5}' +
         '#rec-mod .rec-col.drop-target{outline:2px dashed var(--ink);outline-offset:-2px}' +
         '#rec-mod .rec-cand-name{font-size:14px;font-weight:500}' +
-        '#rec-mod .rec-cand-sub{font-size:11px;color:var(--muted);margin-top:2px}' +
-        '#rec-mod .rec-cand-age{font-size:10px;color:var(--soft);margin-top:4px}' +
+        '#rec-mod .rec-cand-sub{font-size:12.5px;color:var(--muted);margin-top:2px}' +
+        '#rec-mod .rec-cand-age{font-size:11.5px;color:var(--soft);margin-top:4px}' +
         '#rec-mod .rec-standby{background:#FFF8EC}' +
         '#rec-mod .rec-ended-strip{margin-top:14px;border-top:0.5px solid var(--line);padding-top:12px}' +
-        '#rec-mod .rec-end-row{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);padding:8px 0;border-bottom:0.5px solid var(--line);gap:10px}' +
-        '#rec-mod .rec-end-row .reopen{font-size:12px;color:#185FA5;cursor:pointer;flex:none}' +
+        '#rec-mod .rec-end-row{display:flex;justify-content:space-between;font-size:14.5px;color:var(--muted);padding:8px 0;border-bottom:0.5px solid var(--line);gap:10px}' +
+        '#rec-mod .rec-end-row .reopen{font-size:13.5px;color:#185FA5;cursor:pointer;flex:none}' +
         '#rec-mod .rec-modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:1000}' +
         '#rec-mod .rec-modal{background:var(--surface);border-radius:12px;padding:20px 22px;max-width:520px;width:94%;max-height:88vh;overflow-y:auto}' +
         '#rec-mod .rec-modal-bare{background:var(--surface);border-radius:12px;padding:0;max-width:600px;width:94%;max-height:90vh;overflow:hidden auto}' +
         '#rec-mod .rec-chead{background:#185FA5;color:#fff;padding:20px 24px}' +
-        '#rec-mod .rec-chead .kick{font-size:12px;text-transform:uppercase;letter-spacing:.05em;opacity:.92;display:flex;align-items:center;gap:6px}' +
+        '#rec-mod .rec-chead .kick{font-size:13.5px;text-transform:uppercase;letter-spacing:.05em;opacity:.92;display:flex;align-items:center;gap:6px}' +
         '#rec-mod .rec-chead .nm{font-size:23px;font-weight:500;margin-top:5px}' +
-        '#rec-mod .rec-chead .src{font-size:13px;opacity:.92;margin-top:7px}' +
-        '#rec-mod .rec-chead .cpill{font-size:13px;background:rgba(255,255,255,.92);color:#0C447C;padding:6px 14px;border-radius:99px;font-weight:500;flex:none}' +
+        '#rec-mod .rec-chead .src{font-size:14.5px;opacity:.92;margin-top:7px}' +
+        '#rec-mod .rec-chead .cpill{font-size:14.5px;background:rgba(255,255,255,.92);color:#0C447C;padding:6px 14px;border-radius:99px;font-weight:500;flex:none}' +
         '#rec-mod .rec-cbody{padding:22px 24px}' +
-        '#rec-mod .rec-empty-line{background:var(--bg2,#F4F2EC);border-radius:8px;padding:14px;text-align:center;font-size:13px;color:var(--soft)}' +
+        '#rec-mod .rec-empty-line{background:var(--bg2,#F4F2EC);border-radius:8px;padding:14px;text-align:center;font-size:14.5px;color:var(--soft)}' +
         '#rec-mod .rec-panel{background:var(--bg2,#F4F2EC);border-radius:8px;padding:13px 15px}' +
-        '#rec-mod .rec-sec-h2{font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px;margin-bottom:8px}' +
+        '#rec-mod .rec-sec-h2{font-size:14.5px;font-weight:500;display:flex;align-items:center;gap:7px;margin-bottom:8px}' +
         '#rec-mod .rec-field{margin-bottom:11px}' +
-        '#rec-mod .rec-field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}' +
+        '#rec-mod .rec-field label{display:block;font-size:13.5px;color:var(--muted);margin-bottom:4px}' +
         '#rec-mod .rec-field input,#rec-mod .rec-field select,#rec-mod .rec-field textarea{width:100%;padding:9px 11px;border:0.5px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit;box-sizing:border-box}' +
         '#rec-mod .rec-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
         '#rec-mod .rec-avatar{width:46px;height:46px;border-radius:50%;background:var(--bg2,#E6F1FB);color:#185FA5;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:15px;flex:none}' +
-        '#rec-mod .rec-kv{font-size:13px}' +
-        '#rec-mod .rec-kv .k{font-size:11px;color:var(--muted)}' +
+        '#rec-mod .rec-kv{font-size:14.5px}' +
+        '#rec-mod .rec-kv .k{font-size:12.5px;color:var(--muted)}' +
         '#rec-mod .rec-sec{border-top:0.5px solid var(--line);padding-top:12px;margin-top:14px}' +
-        '#rec-mod .rec-sec-h{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}' +
-        '#rec-mod .rec-why{background:var(--bg2,#F4F2EC);border-radius:8px;padding:9px 12px;font-size:13px;margin:10px 0 4px}' +
-        '#rec-mod .rec-note{font-size:13px;background:var(--bg2,#F4F2EC);border-radius:7px;padding:8px 10px;margin-bottom:6px}' +
-        '#rec-mod .rec-note-meta{font-size:11px;color:var(--muted);margin-top:3px}' +
-        '#rec-mod .rec-file{display:flex;align-items:center;gap:9px;font-size:13px;padding:6px 0}' +
-        '#rec-mod .rec-file .del{margin-left:auto;font-size:12px;color:#A32D2D;cursor:pointer}' +
+        '#rec-mod .rec-sec-h{font-size:12.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}' +
+        '#rec-mod .rec-why{background:var(--bg2,#F4F2EC);border-radius:8px;padding:9px 12px;font-size:14.5px;margin:10px 0 4px}' +
+        '#rec-mod .rec-note{font-size:14.5px;background:var(--bg2,#F4F2EC);border-radius:7px;padding:8px 10px;margin-bottom:6px}' +
+        '#rec-mod .rec-note-meta{font-size:12.5px;color:var(--muted);margin-top:3px}' +
+        '#rec-mod .rec-file{display:flex;align-items:center;gap:9px;font-size:14.5px;padding:6px 0}' +
+        '#rec-mod .rec-file .del{margin-left:auto;font-size:13.5px;color:#A32D2D;cursor:pointer}' +
         '#rec-mod .rec-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}' +
         '#rec-mod .rec-empty{text-align:center;color:var(--muted);padding:30px;font-size:14px}' +
-        '#rec-mod .rec-pill{font-size:11px;background:var(--bg2,#F1EFE8);color:var(--muted);padding:4px 10px;border-radius:99px;flex:none}' +
+        '#rec-mod .rec-pill{font-size:12.5px;background:var(--bg2,#F1EFE8);color:var(--muted);padding:4px 10px;border-radius:99px;flex:none}' +
       '</style>' +
       '<div id="recRoot"><div class="rec-empty">Loading\u2026</div></div>' +
       '<div id="recModalMount"></div>' +
@@ -100,7 +100,7 @@ window.fkModules['recruitment'] = {
           if (sc.hired) chips += '<span class="rec-chip hired">' + sc.hired + ' hired</span>';
           html += '<div class="rec-open-card" data-opening="' + o.id + '">' +
             '<div style="display:flex;justify-content:space-between;align-items:center">' +
-              '<div><div class="rec-open-title">' + esc(o.title) + (o.status!=='open'?' <span style="font-size:12px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</div>' +
+              '<div><div class="rec-open-title">' + esc(o.title) + (o.status!=='open'?' <span style="font-size:13.5px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</div>' +
               '<div class="rec-cand-sub">' + (o.dept_name ? esc(o.dept_name)+' \u00b7 ' : '') + (o.active_count||0) + ' active candidate' + ((o.active_count==1)?'':'s') + '</div></div>' +
               '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--muted)"></i></div>' +
             (chips ? '<div class="rec-chips">' + chips + '</div>' : '') + '</div>';
@@ -126,7 +126,7 @@ window.fkModules['recruitment'] = {
         }
         let endedHtml = '';
         if (ended.length) {
-          endedHtml = '<div class="rec-ended-strip"><div style="cursor:pointer;font-size:13px;font-weight:500" id="recEndToggle">Ended / archived (' + ended.length + ') \u25b8</div>' +
+          endedHtml = '<div class="rec-ended-strip"><div style="cursor:pointer;font-size:14.5px;font-weight:500" id="recEndToggle">Ended / archived (' + ended.length + ') \u25b8</div>' +
             '<div id="recEndList" style="display:none;margin-top:8px">' +
             ended.map(c => { const m=c.meta||{}; const e=m.ended||{}; const how=e.how==='withdrew'?'they withdrew':'we passed';
               return '<div class="rec-end-row"><span>' + esc(c.title) + ' <span style="color:var(--soft)">\u2014 ' + how + (e.reason?': '+esc(e.reason):'') + '</span></span>' +
@@ -135,8 +135,8 @@ window.fkModules['recruitment'] = {
         }
         $('recRoot').innerHTML =
           '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;gap:12px">' +
-            '<div><div style="font-size:13px;color:var(--muted);cursor:pointer" id="recBack">\u2190 All openings</div>' +
-            '<h2 style="margin:4px 0 0">' + esc(op.title) + (isClosed?' <span style="font-size:13px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</h2></div>' +
+            '<div><div style="font-size:14.5px;color:var(--muted);cursor:pointer" id="recBack">\u2190 All openings</div>' +
+            '<h2 style="margin:4px 0 0">' + esc(op.title) + (isClosed?' <span style="font-size:14.5px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</h2></div>' +
             '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
               '<button class="rec-btn" id="recEditOpening">Edit</button>' +
               (isClosed ? '<button class="rec-btn" id="recReopenOpening">Reopen</button>' : '<button class="rec-btn" id="recCloseOpening">Close opening</button>') +
@@ -229,7 +229,7 @@ window.fkModules['recruitment'] = {
         '<div class="rec-field"><label>Name</label><input id="recCName" placeholder="Candidate name" /></div>' +
         '<div class="rec-field"><label>Source</label><input id="recCSource" placeholder="Naukri / LinkedIn / referral" /></div>' +
         '<div class="rec-field"><label>Why shortlist? (experience, skills, fit)</label><textarea id="recCWhy" rows="2" placeholder="e.g. 3yr HR exp, payroll + onboarding, immediate joiner"></textarea></div>' +
-        '<div style="font-size:11px;color:var(--soft);margin-bottom:12px">Salary, notice, CV &amp; photo come later \u2014 add them on the card as you learn them.</div>' +
+        '<div style="font-size:12.5px;color:var(--soft);margin-bottom:12px">Salary, notice, CV &amp; photo come later \u2014 add them on the card as you learn them.</div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recCCancel">Cancel</button><button class="rec-btn primary" id="recCSave">Add candidate</button></div>');
       $('recCCancel').onclick=closeModal;
       $('recCSave').onclick=async()=>{ const name=$('recCName').value.trim(); if(!name){$('recCName').focus();return;}
@@ -246,7 +246,7 @@ window.fkModules['recruitment'] = {
     }
     function openAccepted(id, openingId) {
       modal('<h3 style="margin:0 0 6px">Offer accepted</h3>' +
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">They\u2019ve said yes. Set the agreed joining date \u2014 nothing is created in the employee system yet; that happens when they actually join.</div>' +
+        '<div style="font-size:14.5px;color:var(--muted);margin-bottom:12px">They\u2019ve said yes. Set the agreed joining date \u2014 nothing is created in the employee system yet; that happens when they actually join.</div>' +
         '<div class="rec-field"><label>Agreed joining date</label><input type="date" id="recAccDate" /></div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recAccCancel">Cancel</button><button class="rec-btn primary" id="recAccSave">Move to accepted</button></div>');
       $('recAccCancel').onclick=closeModal;
@@ -262,9 +262,9 @@ window.fkModules['recruitment'] = {
       const rows = [['Name',cand.title],['Email',m.email],['Phone',m.phone],['Agreed salary',m.expected_salary],['Joining date',m.joining_date],['Notice',m.notice_period]]
         .filter(x=>x[1]).map(x=>'<div class="rec-kv"><div class="k">'+x[0]+'</div>'+esc(x[1])+'</div>').join('');
       modal('<h3 style="margin:0 0 6px">They\u2019ve joined \u2014 create their employee record</h3>' +
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">This is the moment they become an employee. Open the People page and add them \u2014 their onboarding starts automatically once you set their hire date. Copy the details below into the form (edit anything that\u2019s changed).</div>' +
+        '<div style="font-size:14.5px;color:var(--muted);margin-bottom:12px">This is the moment they become an employee. Open the People page and add them \u2014 their onboarding starts automatically once you set their hire date. Copy the details below into the form (edit anything that\u2019s changed).</div>' +
         (rows ? '<div class="rec-grid" style="margin-bottom:12px">'+rows+'</div>' : '') +
-        '<div class="rec-field" style="font-size:11px;color:var(--soft)">Their CV is on the candidate card \u2014 re-upload it to their employee profile once created.</div>' +
+        '<div class="rec-field" style="font-size:12.5px;color:var(--soft)">Their CV is on the candidate card \u2014 re-upload it to their employee profile once created.</div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recJoinCancel">Not yet</button>' +
           '<button class="rec-btn primary" id="recJoinGo">Mark joined &amp; open People \u2192</button></div>');
       $('recJoinCancel').onclick=closeModal;
@@ -281,13 +281,13 @@ window.fkModules['recruitment'] = {
           const outs = (cand && cand.meta && Array.isArray(cand.meta.outcomes)) ? cand.meta.outcomes : [];
           if (outs.length) {
             const last = outs[outs.length-1];
-            priorHtml = '<div class="rec-why" style="margin-bottom:12px"><div style="font-size:12px;color:var(--muted);margin-bottom:3px">Last round (' + (STAGE_LABEL[last.stage]||last.stage) + ')</div>' + esc(last.text) + '</div>';
+            priorHtml = '<div class="rec-why" style="margin-bottom:12px"><div style="font-size:13.5px;color:var(--muted);margin-bottom:3px">Last round (' + (STAGE_LABEL[last.stage]||last.stage) + ')</div>' + esc(last.text) + '</div>';
           }
         }
       } catch (e) {}
       modal('<h3 style="margin:0 0 6px">Move to ' + (STAGE_LABEL[stage]||stage) + '</h3>' +
         priorHtml +
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">How did this round go? (kept on the candidate\u2019s card)</div>' +
+        '<div style="font-size:14.5px;color:var(--muted);margin-bottom:12px">How did this round go? (kept on the candidate\u2019s card)</div>' +
         '<div class="rec-field"><textarea id="recOutText" rows="3" placeholder="e.g. Strong on payroll, confident communicator \u2014 worth advancing"></textarea></div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recOutSkip">Skip</button><button class="rec-btn primary" id="recOutSave">Move to ' + (STAGE_LABEL[stage]||stage) + '</button></div>');
       $('recOutSkip').onclick=async()=>{ closeModal(); await moveCandidate(id,stage,openingId,{}); };
@@ -327,13 +327,13 @@ window.fkModules['recruitment'] = {
           (m.why_shortlist ? '<div class="rec-why" style="margin-bottom:18px"><span style="color:var(--muted)">Why shortlisted:</span> ' + esc(m.why_shortlist) + '</div>' : '') +
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
             '<div class="rec-sec-h2"><i class="ti ti-id" style="color:#185FA5"></i> Details</div>' +
-            '<button class="rec-btn" id="recAddDetails" style="font-size:13px;padding:6px 13px"><i class="ti ti-plus"></i> Add details</button></div>' +
+            '<button class="rec-btn" id="recAddDetails" style="font-size:14.5px;padding:6px 13px"><i class="ti ti-plus"></i> Add details</button></div>' +
           detailsBody +
           '<div class="rec-panel" style="margin-top:18px"><div class="rec-sec-h2"><i class="ti ti-paperclip"></i> Files \u2014 CV, photo</div>' +
             '<div id="recFiles"><div class="rec-cand-sub">Loading\u2026</div></div>' +
             '<label class="rec-btn" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:10px;cursor:pointer;width:100%;box-sizing:border-box"><i class="ti ti-upload"></i> Upload CV or photo<input type="file" id="recFileInput" accept="application/pdf,image/png,image/jpeg" style="display:none"></label></div>' +
           '<div class="rec-sec-h2" style="margin-top:18px"><i class="ti ti-history"></i> Stage history</div>' +
-            '<div style="font-size:13px;color:var(--muted)">'+hist+'</div>'+outcomes +
+            '<div style="font-size:14.5px;color:var(--muted)">'+hist+'</div>'+outcomes +
           '<div class="rec-sec-h2" style="margin-top:18px"><i class="ti ti-note"></i> Notes</div>' + notes +
             '<div class="rec-field" style="margin-top:10px"><textarea id="recNoteText" rows="2" placeholder="Add a note"></textarea></div>' +
             '<button class="rec-btn" id="recNoteSave" style="width:100%">Add note</button>' +
@@ -408,7 +408,7 @@ window.fkModules['recruitment'] = {
 
     function openEndCandidate(id, openingId) {
       modal('<h3 style="margin:0 0 6px">End candidate</h3>' +
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">They\u2019re archived with the reason and can be brought back. Their files are kept 90 days then cleared.</div>' +
+        '<div style="font-size:14.5px;color:var(--muted);margin-bottom:12px">They\u2019re archived with the reason and can be brought back. Their files are kept 90 days then cleared.</div>' +
         '<div class="rec-field"><label>What happened?</label><select id="recEndHow"><option value="passed">We passed on them</option><option value="withdrew">They withdrew / declined</option></select></div>' +
         '<div class="rec-field"><label>Reason (kept on record)</label><input id="recEndReason" placeholder="e.g. not enough PPC experience / took another offer"></div>' +
         '<div class="rec-actions"><button class="rec-btn" id="recEndCancel">Cancel</button><button class="rec-btn primary" id="recEndSave">End candidate</button></div>');

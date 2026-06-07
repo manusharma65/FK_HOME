@@ -60,7 +60,7 @@ window.fkModules['system/attpolicy'] = {
               '</div>' +
               '<label>Grace minutes</label>' +
               '<input type="number" id="polGrace" min="0" max="60" required />' +
-              '<p class="hint" style="font-size:12px;color:var(--muted);margin:6px 0 0">Break time is set company-wide in Settings → Team break.</p>' +
+              '<p class="hint" style="font-size:13.5px;color:var(--muted);margin:6px 0 0">Break time is set company-wide in Settings → Team break.</p>' +
               '<div class="modal-actions">' +
                 '<button type="button" class="btn" id="polCancel">Cancel</button>' +
                 '<button type="submit" class="btn btn-primary" id="polBtn">Save policy</button>' +
@@ -99,7 +99,7 @@ window.fkModules['system/attpolicy'] = {
           if (d && d.anchor_monday) {
             const v = dateOnly(d.anchor_monday);
             $('anchorDate').value = v;
-            $('anchorMeta').textContent = 'Currently set to ' + v + ' (6-day week). Alternates every Monday from here.';
+            $('anchorMeta').textContent = 'Currently set to ' + v.split('-').reverse().join('/') + ' (6-day week). Alternates every Monday from here.';
           } else {
             $('anchorMeta').textContent = 'Not yet set.';
           }

@@ -29,11 +29,11 @@ window.fkModules['system/backups'] = {
               '<button class="btn btn-primary" id="bakRunBtn"><i class="ti ti-cloud-upload"></i> Run backup now</button>' +
             '</div>' +
           '</div>' +
-          '<div style="padding:12px 18px;background:#FBFAF7;border-bottom:0.5px solid var(--line);font-size:13px;color:var(--muted)">' +
+          '<div style="padding:12px 18px;background:#FBFAF7;border-bottom:0.5px solid var(--line);font-size:14.5px;color:var(--muted)">' +
             '<i class="ti ti-info-circle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>' +
             'Nightly backup runs at 02:00 London. Off-site copy lives in Backblaze B2. Manual run takes ~30s.' +
           '</div>' +
-          '<div id="bakDiag" style="padding:10px 18px;display:none;background:#FFF5E5;border-bottom:0.5px solid var(--line);font-size:13px;color:#9A5B1F">' +
+          '<div id="bakDiag" style="padding:10px 18px;display:none;background:#FFF5E5;border-bottom:0.5px solid var(--line);font-size:14.5px;color:#9A5B1F">' +
             '<i class="ti ti-alert-triangle" style="font-size:14px;vertical-align:-2px;margin-right:4px"></i>' +
             '<span id="bakDiagText"></span>' +
           '</div>' +
@@ -67,7 +67,7 @@ window.fkModules['system/backups'] = {
       const sizeMb = b.size_bytes ? (b.size_bytes / 1024 / 1024).toFixed(2) + ' MB' : '—';
       const dur = b.duration_ms ? (b.duration_ms / 1000).toFixed(1) + 's' : '—';
       const trig = b.trigger === 'manual' ? '<span class="chip">manual</span>' : '<span class="chip" style="background:#EDEDE6">cron</span>';
-      const key = b.object_key ? '<span style="font-family:ui-monospace,monospace;font-size:12px">' + escapeHtml(b.object_key) + '</span>' : '—';
+      const key = b.object_key ? '<span style="font-family:ui-monospace,monospace;font-size:13.5px">' + escapeHtml(b.object_key) + '</span>' : '—';
       return '<tr><td>' + startedFmt + '</td><td>' + trig + '</td><td>' + statusHtml + '</td><td>' + sizeMb + '</td><td>' + dur + '</td><td>' + key + '</td></tr>';
     }
 

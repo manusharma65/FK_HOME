@@ -57,8 +57,11 @@ window.fkModules['system/csrota'] = {
     }
     function dateOnly(v) {
       if (!v) return '';
-      if (typeof v === 'string') return v.slice(0, 10);
-      try { return new Date(v).toISOString().slice(0, 10); } catch (e) { return String(v); }
+      var s = String(v);
+      var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (m) return m[3] + '/' + m[2] + '/' + m[1];
+      var d = new Date(s);
+      return isNaN(d.getTime()) ? s : d.toLocaleDateString('en-GB');
     }
 
     async function downloadTemplate() {

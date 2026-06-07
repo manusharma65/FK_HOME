@@ -26,46 +26,46 @@ window.fkModules['chat'] = {
           '#chat-mod .channels-pane{border-right:0.5px solid var(--line);display:flex;flex-direction:column;min-height:0}' +
           '#chat-mod .channels-head{padding:13px 15px;border-bottom:0.5px solid var(--line);display:flex;align-items:center;justify-content:space-between}' +
           '#chat-mod .channels-head h2{font-size:15px;font-weight:600;margin:0}' +
-          '#chat-mod .new-btn{font-size:13px;padding:6px 11px;border:0.5px solid var(--line);border-radius:8px;background:var(--ink);color:var(--surface);cursor:pointer;display:inline-flex;align-items:center;gap:5px}' +
+          '#chat-mod .new-btn{font-size:14.5px;padding:6px 11px;border:0.5px solid var(--line);border-radius:8px;background:var(--ink);color:var(--surface);cursor:pointer;display:inline-flex;align-items:center;gap:5px}' +
           '#chat-mod .channels-list{overflow-y:auto;flex:1}' +
-          '#chat-mod .channel-section-label{font-size:11px;color:var(--soft);letter-spacing:0.06em;text-transform:uppercase;padding:12px 16px 4px}' +
+          '#chat-mod .channel-section-label{font-size:12.5px;color:var(--soft);letter-spacing:0.06em;text-transform:uppercase;padding:12px 16px 4px}' +
           '#chat-mod .ch-row{display:flex;align-items:center;gap:9px;padding:9px 16px;cursor:pointer;border-left:2px solid transparent}' +
           '#chat-mod .ch-row:hover{background:#FBFAF7}' +
           '#chat-mod .ch-row.on{background:var(--amber-soft,#FAEEDA);border-left-color:var(--amber,#EF9F27)}' +
-          '#chat-mod .ch-icon{width:24px;height:24px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--ink)}' +
+          '#chat-mod .ch-icon{width:24px;height:24px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14.5px;color:var(--ink)}' +
           '#chat-mod .ch-icon.amber{background:var(--amber-soft,#FAEEDA)}' +
           '#chat-mod .ch-info{flex:1;min-width:0}' +
           '#chat-mod .ch-name{font-size:14px;font-weight:500;line-height:1.2}' +
           '#chat-mod .ch-row.unread .ch-name{font-weight:600}' +
-          '#chat-mod .ch-preview{font-size:13px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-          '#chat-mod .ch-unread-badge{background:var(--amber,#EF9F27);color:var(--nav,#14161B);font-size:12px;font-weight:600;border-radius:99px;padding:2px 7px;min-width:18px;text-align:center}' +
+          '#chat-mod .ch-preview{font-size:14.5px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+          '#chat-mod .ch-unread-badge{background:var(--amber,#EF9F27);color:var(--nav,#14161B);font-size:13.5px;font-weight:600;border-radius:99px;padding:2px 7px;min-width:18px;text-align:center}' +
           '#chat-mod .messages-pane{display:flex;flex-direction:column;min-height:0;background:var(--bg)}' +
           '#chat-mod .msg-head{padding:11px 18px;border-bottom:0.5px solid var(--line);background:var(--surface);display:flex;align-items:center;gap:10px;flex-shrink:0}' +
           '#chat-mod .msg-head .back-btn{display:none;background:none;border:none;cursor:pointer;padding:4px;color:var(--muted)}' +
           '@media (max-width:768px){#chat-mod .msg-head .back-btn{display:inline-flex}}' +
           '#chat-mod .msg-head h2{font-size:16px;font-weight:500;margin:0}' +
-          '#chat-mod .msg-head .sub{font-size:13px;color:var(--muted)}' +
-          '#chat-mod .manage-btn{margin-left:auto;border:0.5px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 11px;font-size:13px;cursor:pointer;display:none;align-items:center;gap:5px;color:var(--ink)}' +
+          '#chat-mod .msg-head .sub{font-size:14.5px;color:var(--muted)}' +
+          '#chat-mod .manage-btn{margin-left:auto;border:0.5px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 11px;font-size:14.5px;cursor:pointer;display:none;align-items:center;gap:5px;color:var(--ink)}' +
           '#chat-mod .manage-btn.on{display:inline-flex}' +
           '#chat-mod .msg-list{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:8px}' +
           '#chat-mod .msg-group{display:flex;gap:10px;position:relative}' +
           '#chat-mod .msg-group:hover{background:rgba(20,22,27,0.02);border-radius:8px}' +
-          '#chat-mod .msg-avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:13px;color:var(--ink);flex-shrink:0}' +
+          '#chat-mod .msg-avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:14.5px;color:var(--ink);flex-shrink:0}' +
           '#chat-mod .msg-content{flex:1;min-width:0}' +
           '#chat-mod .msg-meta{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}' +
           '#chat-mod .msg-sender{font-size:14px;font-weight:500}' +
-          '#chat-mod .msg-time{font-size:12px;color:var(--soft)}' +
-          '#chat-mod .msg-edited{font-size:11px;color:var(--soft);font-style:italic}' +
+          '#chat-mod .msg-time{font-size:13.5px;color:var(--soft)}' +
+          '#chat-mod .msg-edited{font-size:12.5px;color:var(--soft);font-style:italic}' +
           '#chat-mod .msg-body{font-size:14px;line-height:1.45;color:var(--ink);word-wrap:break-word;white-space:pre-wrap}' +
-          '#chat-mod .msg-quote{border-left:3px solid var(--amber,#EF9F27);padding:3px 10px;margin-bottom:4px;background:rgba(239,159,39,0.07);border-radius:0 6px 6px 0;font-size:13px;color:var(--muted)}' +
+          '#chat-mod .msg-quote{border-left:3px solid var(--amber,#EF9F27);padding:3px 10px;margin-bottom:4px;background:rgba(239,159,39,0.07);border-radius:0 6px 6px 0;font-size:14.5px;color:var(--muted)}' +
           '#chat-mod .msg-quote b{color:var(--ink);font-weight:500}' +
           '#chat-mod .msg-actions{position:absolute;top:-8px;right:6px;display:none;gap:2px;background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:2px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}' +
           '#chat-mod .msg-group:hover .msg-actions{display:flex}' +
-          '#chat-mod .msg-actions button{border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted);padding:4px 7px;border-radius:6px}' +
+          '#chat-mod .msg-actions button{border:none;background:none;cursor:pointer;font-size:14.5px;color:var(--muted);padding:4px 7px;border-radius:6px}' +
           '#chat-mod .msg-actions button:hover{background:var(--bg);color:var(--ink)}' +
-          '#chat-mod .msg-day-divider{text-align:center;font-size:12px;color:var(--soft);margin:8px 0 4px;letter-spacing:0.04em;text-transform:uppercase}' +
+          '#chat-mod .msg-day-divider{text-align:center;font-size:13.5px;color:var(--soft);margin:8px 0 4px;letter-spacing:0.04em;text-transform:uppercase}' +
           '#chat-mod .msg-empty{text-align:center;color:var(--muted);font-size:14px;padding:32px 16px}' +
-          '#chat-mod .reply-banner{display:none;align-items:center;justify-content:space-between;gap:10px;padding:7px 14px;background:var(--amber-soft,#FAEEDA);border-top:0.5px solid var(--line);font-size:13px;color:var(--ink)}' +
+          '#chat-mod .reply-banner{display:none;align-items:center;justify-content:space-between;gap:10px;padding:7px 14px;background:var(--amber-soft,#FAEEDA);border-top:0.5px solid var(--line);font-size:14.5px;color:var(--ink)}' +
           '#chat-mod .reply-banner.on{display:flex}' +
           '#chat-mod .reply-banner button{border:none;background:none;cursor:pointer;color:var(--muted);font-size:15px}' +
           '#chat-mod .compose{border-top:0.5px solid var(--line);padding:12px 14px;background:var(--surface);display:flex;gap:10px;align-items:flex-end;flex-shrink:0}' +
@@ -80,7 +80,7 @@ window.fkModules['chat'] = {
           '#chat-mod .member-list{display:flex;flex-direction:column;gap:2px;border:0.5px solid var(--line);border-radius:8px;padding:6px;max-height:200px;overflow:auto}' +
           '#chat-mod .member-list label{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:6px;font-size:14px;cursor:pointer;margin:0}' +
           '#chat-mod .member-list label:hover{background:var(--bg)}' +
-          '#chat-mod .avatar{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:#3a3a36}' +
+          '#chat-mod .avatar{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500;color:#3a3a36}' +
           '#chat-mod .mrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 8px;border-radius:6px;font-size:14px}' +
           '#chat-mod .modal-err{display:none;color:var(--red,#A32D2D);font-size:14px;margin:6px 0}' +
           '#chat-mod .modal-err.on{display:block}' +
@@ -89,7 +89,7 @@ window.fkModules['chat'] = {
         '<div class="chat-layout">' +
           '<aside class="channels-pane" id="chChannelsPane">' +
             '<div class="channels-head"><h2>Channels</h2><button class="new-btn" id="chNew"><i class="ti ti-plus"></i> New</button></div>' +
-            '<div style="padding:8px 12px;border-bottom:0.5px solid var(--line)"><input type="text" id="chSearch" placeholder="Search messages…" style="width:100%;padding:7px 10px;border:0.5px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--ink);outline:none" /></div>' +
+            '<div style="padding:8px 12px;border-bottom:0.5px solid var(--line)"><input type="text" id="chSearch" placeholder="Search messages…" style="width:100%;padding:7px 10px;border:0.5px solid var(--line);border-radius:8px;font-size:14.5px;background:var(--bg);color:var(--ink);outline:none" /></div>' +
             '<div id="chSearchResults" style="display:none;overflow-y:auto;flex:1"></div>' +
             '<div id="chChannelsList" class="channels-list"><div class="msg-empty" style="padding:24px 16px">Loading…</div></div>' +
           '</aside>' +
@@ -142,7 +142,7 @@ window.fkModules['chat'] = {
             '<label style="margin-top:12px;display:block">Add members</label>' +
             '<input type="text" id="chMemberSearch" placeholder="Search people…" />' +
             '<div class="member-list" id="chMemberList" style="margin-top:8px">Loading…</div>' +
-            '<div style="font-size:12px;color:var(--muted);margin-top:6px" id="chMemberCount">you\'re added automatically</div>' +
+            '<div style="font-size:13.5px;color:var(--muted);margin-top:6px" id="chMemberCount">you\'re added automatically</div>' +
             '<div class="modal-actions">' +
               '<button type="button" class="btn" id="chGroupCancel">Cancel</button>' +
               '<button type="button" class="btn btn-primary" id="chGroupSave">Create group</button>' +
@@ -161,7 +161,7 @@ window.fkModules['chat'] = {
               '<button class="btn" id="chMgLeave">Leave group</button>' +
               '<button class="btn btn-danger" id="chMgDelete" style="display:none">Delete group</button>' +
             '</div>' +
-            '<div style="font-size:13px;color:var(--muted);margin-bottom:6px">In this group</div>' +
+            '<div style="font-size:14.5px;color:var(--muted);margin-bottom:6px">In this group</div>' +
             '<div id="chManageMembers" style="display:flex;flex-direction:column;gap:2px;margin-bottom:16px">Loading…</div>' +
             '<label>Add more people</label>' +
             '<input type="text" id="chManageSearch" placeholder="Search people…" />' +
@@ -413,7 +413,7 @@ window.fkModules['chat'] = {
       const checked = new Set(Array.from(el.querySelectorAll('#' + listId + ' input:checked')).map(x => x.value));
       list.innerHTML = rows.map(u => {
         const pb = PRESENCE_BADGE[presenceById[u.id]];
-        const badge = pb ? '<span style="margin-left:auto;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;background:' + pb[1] + '1A;color:' + pb[1] + '">' + pb[0] + '</span>' : '';
+        const badge = pb ? '<span style="margin-left:auto;font-size:12.5px;font-weight:600;padding:2px 8px;border-radius:99px;background:' + pb[1] + '1A;color:' + pb[1] + '">' + pb[0] + '</span>' : '';
         return '<label>' + (multi ? '<input type="checkbox" value="' + u.id + '" ' + (checked.has(String(u.id)) ? 'checked' : '') + ' style="width:auto" />' : '<input type="radio" name="' + listId + 'r" value="' + u.id + '" style="width:auto" />') +
         '<span class="avatar" style="background:' + (u.avatar_colour || '#F1EFE8') + '">' + escapeHtml(u.initials || '\u00b7') + '</span><span>' + escapeHtml(u.name) + '</span>' + badge + '</label>';
       }).join('');
@@ -485,7 +485,7 @@ window.fkModules['chat'] = {
         const r = await fetch('/api/chat/channels/' + manageGroup.id + '/members', { credentials: 'include' });
         const d = await r.json();
         box.innerHTML = (d.members || []).map(m =>
-          '<div class="mrow"><span style="display:flex;align-items:center;gap:9px"><span class="avatar" style="background:' + (m.avatar_colour || '#F1EFE8') + '">' + escapeHtml(m.initials || '\u00b7') + '</span>' + escapeHtml(m.display_name || m.full_name) + '</span><button class="btn" style="font-size:12px;padding:4px 9px" data-remove="' + m.id + '">Remove</button></div>'
+          '<div class="mrow"><span style="display:flex;align-items:center;gap:9px"><span class="avatar" style="background:' + (m.avatar_colour || '#F1EFE8') + '">' + escapeHtml(m.initials || '\u00b7') + '</span>' + escapeHtml(m.display_name || m.full_name) + '</span><button class="btn" style="font-size:13.5px;padding:4px 9px" data-remove="' + m.id + '">Remove</button></div>'
         ).join('');
       } catch (e) { box.innerHTML = '<div style="color:var(--red)">Failed to load.</div>'; }
     }
@@ -574,7 +574,7 @@ window.fkModules['chat'] = {
         if (!rows.length) { panel.innerHTML = '<div class="msg-empty" style="padding:18px 16px">No messages found.</div>'; return; }
         panel.innerHTML = rows.map(m =>
           '<div class="ch-row" data-search-open="' + m.channel_id + '" style="flex-direction:column;align-items:flex-start;gap:2px">' +
-          '<div style="font-size:12px;color:var(--soft)">' + escapeHtml(m.channel_label) + ' · ' + escapeHtml(m.sender_name) + '</div>' +
+          '<div style="font-size:13.5px;color:var(--soft)">' + escapeHtml(m.channel_label) + ' · ' + escapeHtml(m.sender_name) + '</div>' +
           '<div style="font-size:14px;color:var(--ink)">' + escapeHtml(m.body.slice(0, 80)) + '</div></div>'
         ).join('');
       } catch (e) { panel.innerHTML = '<div class="msg-empty" style="padding:18px 16px">Search failed.</div>'; }

@@ -27,13 +27,13 @@ window.fkModules['profile'] = {
         '#prof-mod .header-info h1{font-family:"Fraunces",Georgia,serif;font-size:27px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em}' +
         '#prof-mod .header-meta{font-size:14px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap}' +
         '#prof-mod .header-meta span{display:flex;align-items:center;gap:5px}' +
-        '#prof-mod .pill{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:500;background:var(--green-soft);color:var(--green)}' +
+        '#prof-mod .pill{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:99px;font-size:13.5px;font-weight:500;background:var(--green-soft);color:var(--green)}' +
         '#prof-mod .pill.off{background:var(--red-soft);color:var(--red)}' +
         '#prof-mod .pill.idle{background:var(--amber-soft);color:var(--amber-deep)}' +
         '#prof-mod .pill.probation{background:var(--amber-soft);color:var(--amber-deep)}' +
         '#prof-mod .pill.on-track{background:var(--green-soft);color:var(--green)}' +
         '#prof-mod .header-actions{display:flex;gap:8px;align-items:center}' +
-        '#prof-mod .header-action-btn{padding:6px 12px;border:0.5px solid var(--line);border-radius:8px;background:var(--surface);cursor:pointer;font-size:13px;color:var(--muted);display:inline-flex;align-items:center;gap:5px}' +
+        '#prof-mod .header-action-btn{padding:6px 12px;border:0.5px solid var(--line);border-radius:8px;background:var(--surface);cursor:pointer;font-size:14.5px;color:var(--muted);display:inline-flex;align-items:center;gap:5px}' +
         '#prof-mod .header-action-btn:hover{color:var(--ink);background:var(--bg)}' +
         '#prof-mod .profile-grid{display:grid;grid-template-columns:220px 1fr;gap:18px;align-items:start}' +
         '@media (max-width:760px){#prof-mod .profile-grid{grid-template-columns:1fr}}' +
@@ -42,13 +42,13 @@ window.fkModules['profile'] = {
         '#prof-mod .drawer-tab:hover{background:rgba(20,22,27,0.04);color:var(--ink)}' +
         '#prof-mod .drawer-tab.on{background:var(--amber-soft);color:var(--amber-deep);font-weight:500}' +
         '#prof-mod .drawer-tab i{font-size:16px}' +
-        '#prof-mod .drawer-tab .count{margin-left:auto;background:var(--line);color:var(--muted);font-size:11px;padding:1px 6px;border-radius:99px;min-width:20px;text-align:center}' +
+        '#prof-mod .drawer-tab .count{margin-left:auto;background:var(--line);color:var(--muted);font-size:12.5px;padding:1px 6px;border-radius:99px;min-width:20px;text-align:center}' +
         '#prof-mod .drawer-tab.on .count{background:var(--amber);color:white}' +
         '#prof-mod .panel{background:var(--surface);border:0.5px solid var(--line);border-radius:12px;padding:22px 24px}' +
         '#prof-mod .panel h2{font-size:18px;font-weight:500;margin:0 0 4px}' +
-        '#prof-mod .panel .sub{font-size:13px;color:var(--muted);margin:0 0 18px}' +
+        '#prof-mod .panel .sub{font-size:14.5px;color:var(--muted);margin:0 0 18px}' +
         '#prof-mod .info-block{background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}' +
-        '#prof-mod .info-block-title{font-size:13px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px}' +
+        '#prof-mod .info-block-title{font-size:14.5px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px}' +
         '#prof-mod .info-row{font-size:14px;margin-bottom:8px;color:var(--ink)}' +
         '#prof-mod .info-row:last-child{margin-bottom:0}' +
         '#prof-mod .info-label{color:var(--muted);display:inline-block;min-width:120px}' +
@@ -57,8 +57,8 @@ window.fkModules['profile'] = {
         '#prof-mod .file-row .ti-file{font-size:22px;color:var(--ink-soft,#888780)}' +
         '#prof-mod .file-row .file-meta{flex:1;min-width:0}' +
         '#prof-mod .file-row .file-name{font-size:14px;font-weight:500;word-break:break-word}' +
-        '#prof-mod .file-row .file-sub{font-size:12px;color:var(--muted);margin-top:2px}' +
-        '#prof-mod .file-row button{font-size:12px;padding:5px 9px;border:0.5px solid var(--line);background:var(--surface);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;color:var(--ink)}' +
+        '#prof-mod .file-row .file-sub{font-size:13.5px;color:var(--muted);margin-top:2px}' +
+        '#prof-mod .file-row button{font-size:13.5px;padding:5px 9px;border:0.5px solid var(--line);background:var(--surface);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;color:var(--ink)}' +
         '#prof-mod .file-row button:hover{background:var(--bg)}' +
         '#prof-mod .file-row button:disabled{opacity:0.4;cursor:not-allowed}' +
         '#prof-mod .file-row .btn-danger{color:var(--red);border-color:var(--red-soft)}' +
@@ -70,20 +70,20 @@ window.fkModules['profile'] = {
         '#prof-mod .review-card.cancelled{opacity:0.55}' +
         '#prof-mod .review-card.cancelled .stage-chip,#prof-mod .review-card.cancelled .review-date,#prof-mod .review-card.cancelled .review-notes{text-decoration:line-through}' +
         '#prof-mod .review-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap}' +
-        '#prof-mod .stage-chip{font-size:12px;padding:3px 10px;border-radius:99px;background:var(--amber-soft);color:var(--amber-deep);font-weight:500}' +
-        '#prof-mod .outcome-chip{font-size:12px;padding:3px 10px;border-radius:99px;font-weight:500;display:inline-flex;align-items:center;gap:4px}' +
+        '#prof-mod .stage-chip{font-size:13.5px;padding:3px 10px;border-radius:99px;background:var(--amber-soft);color:var(--amber-deep);font-weight:500}' +
+        '#prof-mod .outcome-chip{font-size:13.5px;padding:3px 10px;border-radius:99px;font-weight:500;display:inline-flex;align-items:center;gap:4px}' +
         '#prof-mod .outcome-chip.outcome-passed{background:var(--green-soft);color:var(--green)}' +
         '#prof-mod .outcome-chip.outcome-excellent{background:var(--green-soft);color:var(--green)}' +
         '#prof-mod .outcome-chip.outcome-needs_improvement{background:var(--red-soft);color:var(--red)}' +
         '#prof-mod .outcome-chip.outcome-salary_reviewed{background:rgba(40,90,180,0.10);color:#2D5BAF}' +
         '#prof-mod .outcome-chip.outcome-in_process{background:var(--amber-soft);color:var(--amber-deep)}' +
         '#prof-mod .outcome-chip.outcome-scheduled,#prof-mod .outcome-chip.outcome-cancelled{background:var(--line);color:var(--muted)}' +
-        '#prof-mod .review-date{font-size:13px;color:var(--muted)}' +
-        '#prof-mod .review-notes{font-size:13px;color:var(--muted);line-height:1.5;margin-bottom:8px;white-space:pre-wrap}' +
-        '#prof-mod .doc-chip{font-size:12px;padding:3px 8px;background:var(--bg);border-radius:6px;display:inline-flex;align-items:center;gap:4px;color:var(--ink)}' +
-        '#prof-mod .more-btn{font-size:13px;padding:4px 8px;border:0.5px solid var(--line);background:transparent;border-radius:6px;cursor:pointer}' +
+        '#prof-mod .review-date{font-size:14.5px;color:var(--muted)}' +
+        '#prof-mod .review-notes{font-size:14.5px;color:var(--muted);line-height:1.5;margin-bottom:8px;white-space:pre-wrap}' +
+        '#prof-mod .doc-chip{font-size:13.5px;padding:3px 8px;background:var(--bg);border-radius:6px;display:inline-flex;align-items:center;gap:4px;color:var(--ink)}' +
+        '#prof-mod .more-btn{font-size:14.5px;padding:4px 8px;border:0.5px solid var(--line);background:transparent;border-radius:6px;cursor:pointer}' +
         '#prof-mod .more-menu{position:absolute;background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:4px;box-shadow:0 4px 12px rgba(0,0,0,0.08);z-index:50;min-width:140px}' +
-        '#prof-mod .more-menu button{display:block;width:100%;text-align:left;padding:7px 10px;background:transparent;border:none;cursor:pointer;border-radius:5px;font-size:13px}' +
+        '#prof-mod .more-menu button{display:block;width:100%;text-align:left;padding:7px 10px;background:transparent;border:none;cursor:pointer;border-radius:5px;font-size:14.5px}' +
         '#prof-mod .more-menu button:hover{background:var(--bg)}' +
         '#prof-mod .more-menu button.danger{color:var(--red)}' +
         // Attendance calendar
@@ -108,22 +108,22 @@ window.fkModules['profile'] = {
         '#prof-mod .att-day.att-today{background:linear-gradient(135deg,#F3992E,#E8722B);box-shadow:0 6px 16px rgba(232,114,43,.35)}' +
         '#prof-mod .att-day.att-today .att-num{color:#fff}' +
         '#prof-mod .att-day.att-today .att-flag{color:#fff}' +
-        '#prof-mod .att-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:11px}' +
+        '#prof-mod .att-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:12.5px}' +
         '#prof-mod .att-legend span{display:flex;align-items:center;gap:4px}' +
         '#prof-mod .att-legend .swatch{display:inline-block;width:10px;height:10px;border-radius:2px}' +
         '#prof-mod .att-rollup{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}' +
         '#prof-mod .att-tile{background:#FBF6EC;border:1px solid #EFE6D5;border-radius:14px;padding:16px 18px}' +
         '#prof-mod .att-tile .num{font-family:"Fraunces",Georgia,serif;font-size:30px;font-weight:700;line-height:1}' +
-        '#prof-mod .att-tile .lbl{font-size:12px;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}' +
+        '#prof-mod .att-tile .lbl{font-size:13.5px;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}' +
         // Profile photo control
         '#prof-mod .prof-photo-wrap{position:relative;width:64px;height:64px;flex:none}' +
         '#prof-mod .prof-photo-wrap .avatar-lg{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;overflow:hidden;background-size:cover;background-position:center}' +
         '#prof-mod .prof-photo-btn{position:absolute;right:-2px;bottom:-2px;width:24px;height:24px;border-radius:50%;border:1.5px solid var(--surface);background:var(--amber);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
-        '#prof-mod .prof-photo-btn i{font-size:13px}' +
+        '#prof-mod .prof-photo-btn i{font-size:14.5px}' +
         // Header tiles
         '#prof-mod .prof-tiles{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}' +
         '#prof-mod .prof-tile{background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}' +
-        '#prof-mod .prof-tile .t-lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}' +
+        '#prof-mod .prof-tile .t-lbl{font-size:12.5px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}' +
         '#prof-mod .prof-tile .t-val{font-family:"Fraunces",Georgia,serif;font-size:17px;font-weight:600;margin-top:3px;display:flex;align-items:center;gap:7px}' +
         '#prof-mod .prof-bar{height:6px;border-radius:99px;background:var(--line);margin-top:7px;overflow:hidden}' +
         '#prof-mod .prof-bar > i{display:block;height:100%;background:var(--amber);border-radius:99px}' +
@@ -131,19 +131,19 @@ window.fkModules['profile'] = {
         '#prof-mod .det-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 18px}' +
         '#prof-mod .det-field{display:flex;flex-direction:column;gap:5px}' +
         '#prof-mod .det-field.full{grid-column:1/-1}' +
-        '#prof-mod .det-field label{font-size:12px;color:var(--muted);font-weight:500}' +
+        '#prof-mod .det-field label{font-size:13.5px;color:var(--muted);font-weight:500}' +
         '#prof-mod .det-field input,#prof-mod .det-field select,#prof-mod .det-field textarea{width:100%;padding:10px 12px;border:0.5px solid var(--line);border-radius:8px;background:var(--surface);font-size:14px;color:var(--ink);font-family:inherit}' +
         '#prof-mod .det-field input:disabled{background:var(--bg);color:var(--muted)}' +
         '#prof-mod .det-actions{display:flex;gap:10px;margin-top:14px}' +
         '#prof-mod .det-btn{padding:10px 16px;border-radius:8px;border:0.5px solid var(--line);background:var(--surface);font-size:14px;cursor:pointer;color:var(--ink);font-weight:500}' +
         '#prof-mod .det-btn.primary{background:var(--amber);color:#fff;border-color:var(--amber)}' +
         '#prof-mod .det-btn:hover{filter:brightness(0.97)}' +
-        '#prof-mod .det-pending{background:var(--amber-soft);color:var(--amber-deep);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:12px;display:flex;align-items:center;gap:8px}' +
+        '#prof-mod .det-pending{background:var(--amber-soft);color:var(--amber-deep);border-radius:8px;padding:10px 14px;font-size:14.5px;margin-bottom:12px;display:flex;align-items:center;gap:8px}' +
         '#prof-mod .complete-item{display:flex;align-items:center;gap:10px;padding:9px 0;font-size:14px;border-bottom:0.5px solid var(--line)}' +
         '#prof-mod .complete-item:last-child{border-bottom:0}' +
         '#prof-mod .complete-item i.ok{color:var(--green)}' +
         '#prof-mod .complete-item i.no{color:var(--muted)}' +
-        '#prof-mod .complete-item .go{margin-left:auto;color:var(--amber-deep);cursor:pointer;font-size:13px}' +
+        '#prof-mod .complete-item .go{margin-left:auto;color:var(--amber-deep);cursor:pointer;font-size:14.5px}' +
         '#prof-mod .header-card{padding:26px 28px;gap:24px;border-radius:14px}' +
         '#prof-mod .prof-photo-wrap{width:84px;height:84px}' +
         '#prof-mod .prof-photo-wrap .avatar-lg{width:84px;height:84px;font-size:32px;font-weight:600}' +
@@ -154,7 +154,7 @@ window.fkModules['profile'] = {
         '#prof-mod .header-meta i{font-size:18px}' +
         '#prof-mod .prof-tiles{gap:14px;margin-top:18px}' +
         '#prof-mod .prof-tile{padding:14px 18px;min-width:175px;border-radius:12px}' +
-        '#prof-mod .prof-tile .t-lbl{font-size:13px;font-weight:600;letter-spacing:0.6px}' +
+        '#prof-mod .prof-tile .t-lbl{font-size:14.5px;font-weight:600;letter-spacing:0.6px}' +
         '#prof-mod .prof-tile .t-val{font-family:"Fraunces",Georgia,serif;font-size:28px;font-weight:600;margin-top:6px}' +
         '#prof-mod .prof-bar{height:8px;margin-top:10px}' +
         '#prof-mod .pill{font-size:15px;padding:5px 14px}' +
@@ -163,7 +163,7 @@ window.fkModules['profile'] = {
         '#prof-mod .sectab i{font-size:20px}' +
         '#prof-mod .sectab.on{color:var(--amber-deep);border-bottom-color:var(--amber)}' +
         '#prof-mod .sectab:hover{color:var(--ink)}' +
-        '#prof-mod .sectab .count{margin-left:2px;background:var(--amber-soft);color:var(--amber-deep);font-size:12px;font-weight:600;padding:1px 8px;border-radius:99px}' +
+        '#prof-mod .sectab .count{margin-left:2px;background:var(--amber-soft);color:var(--amber-deep);font-size:13.5px;font-weight:600;padding:1px 8px;border-radius:99px}' +
         '#prof-mod .sec-title,#prof-mod #profPanelTitle{font-family:"Fraunces",Georgia,serif;font-size:24px;font-weight:600;margin:0 0 4px}' +
         '#prof-mod .sec-sub,#prof-mod #profPanelSub{font-size:16px;color:var(--muted);margin:0 0 22px}' +
         '#prof-mod .two-col{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px}' +
@@ -221,12 +221,12 @@ window.fkModules['profile'] = {
         '#prof-mod .ob-ico.na{background:rgba(20,22,27,0.06);color:var(--muted)}' +
         '#prof-mod .ob-mid{flex:1;min-width:0}' +
         '#prof-mod .ob-title{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
-        '#prof-mod .ob-req{font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--amber-deep);background:var(--amber-soft);padding:2px 7px;border-radius:5px}' +
-        '#prof-mod .ob-opt{font-size:11px;font-weight:600;color:var(--muted);background:rgba(20,22,27,0.06);padding:2px 7px;border-radius:5px}' +
+        '#prof-mod .ob-req{font-size:12.5px;font-weight:700;letter-spacing:.4px;color:var(--amber-deep);background:var(--amber-soft);padding:2px 7px;border-radius:5px}' +
+        '#prof-mod .ob-opt{font-size:12.5px;font-weight:600;color:var(--muted);background:rgba(20,22,27,0.06);padding:2px 7px;border-radius:5px}' +
         '#prof-mod .ob-why{font-size:14px;color:var(--muted);margin-top:3px;line-height:1.45}' +
-        '#prof-mod .ob-redo-msg{font-size:13px;color:var(--red);background:var(--red-soft);border-radius:8px;padding:8px 11px;margin-top:8px}' +
+        '#prof-mod .ob-redo-msg{font-size:14.5px;color:var(--red);background:var(--red-soft);border-radius:8px;padding:8px 11px;margin-top:8px}' +
         '#prof-mod .ob-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex:none}' +
-        '#prof-mod .ob-chip{font-size:12px;font-weight:600;padding:4px 11px;border-radius:99px;white-space:nowrap}' +
+        '#prof-mod .ob-chip{font-size:13.5px;font-weight:600;padding:4px 11px;border-radius:99px;white-space:nowrap}' +
         '#prof-mod .ob-chip.todo{background:rgba(20,22,27,0.06);color:var(--muted)}' +
         '#prof-mod .ob-chip.sub{background:var(--amber-soft);color:var(--amber-deep)}' +
         '#prof-mod .ob-chip.ver{background:var(--green-soft);color:var(--green)}' +
@@ -234,8 +234,8 @@ window.fkModules['profile'] = {
         '#prof-mod .ob-chip.na{background:rgba(20,22,27,0.06);color:var(--muted)}' +
         '#prof-mod .ob-btn{padding:9px 16px;border-radius:9px;font-size:14px;font-weight:500;cursor:pointer;border:0.5px solid var(--line);background:var(--surface);color:var(--ink);white-space:nowrap}' +
         '#prof-mod .ob-btn.primary{background:var(--amber);color:#fff;border-color:var(--amber)}' +
-        '#prof-mod .ob-btn.ghost{border:none;background:none;color:var(--muted);padding:6px 4px;font-size:13px}' +
-        '#prof-mod .ob-filechip{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);background:var(--bg);border:0.5px solid var(--line);border-radius:7px;padding:5px 9px;margin-top:8px;text-decoration:none}' +
+        '#prof-mod .ob-btn.ghost{border:none;background:none;color:var(--muted);padding:6px 4px;font-size:14.5px}' +
+        '#prof-mod .ob-filechip{display:inline-flex;align-items:center;gap:6px;font-size:14.5px;color:var(--ink);background:var(--bg);border:0.5px solid var(--line);border-radius:7px;padding:5px 9px;margin-top:8px;text-decoration:none}' +
         '#prof-mod .ob-filechip i{font-size:15px;color:var(--muted)}' +
         '#prof-mod .ob-del{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px}' +
         '#prof-mod .ob-del:hover{color:var(--red)}' +
@@ -271,9 +271,9 @@ window.fkModules['profile'] = {
         '#profSetup .exit-head h2{margin:0;font-size:21px;font-weight:700;position:relative;display:flex;align-items:center;gap:9px}' +
         '#profSetup .exit-head .emeta{position:relative;display:flex;gap:18px;flex-wrap:wrap;font-size:14px;opacity:.95;margin-top:8px}' +
         '#profSetup .exit-head .emeta b{font-weight:600}' +
-        '#profSetup .fnf-badge{position:relative;display:inline-flex;align-items:center;gap:7px;margin-top:14px;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);border-radius:99px;padding:6px 13px;font-size:13px;font-weight:500}' +
+        '#profSetup .fnf-badge{position:relative;display:inline-flex;align-items:center;gap:7px;margin-top:14px;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);border-radius:99px;padding:6px 13px;font-size:14.5px;font-weight:500}' +
         '#profSetup .setup-top .ic.slate{background:var(--slate-soft,#EEF1F5);color:var(--slate,#475569)}' +
-        '#profSetup .own{font-size:11px;font-weight:700;letter-spacing:.3px;padding:2px 7px;border-radius:5px}' +
+        '#profSetup .own{font-size:12.5px;font-weight:700;letter-spacing:.3px;padding:2px 7px;border-radius:5px}' +
         '#profSetup .own.it{background:rgba(40,90,180,0.10);color:#2D5BAF}' +
         '#profSetup .own.finance{background:var(--amber-soft);color:var(--amber-deep)}' +
         '#profSetup .own.manager{background:#EEF1F5;color:#475569}' +
@@ -282,7 +282,7 @@ window.fkModules['profile'] = {
         '#profSetup .fnf-card{background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:12px 16px;margin:4px 0 12px}' +
         '#profSetup .fnf-line{display:flex;justify-content:space-between;font-size:14px;padding:7px 0;border-bottom:0.5px solid var(--line)}' +
         '#profSetup .fnf-line:last-child{border-bottom:none}#profSetup .fnf-line .v{font-weight:600}' +
-        '#profSetup .flag{font-size:12px;padding:2px 8px;border-radius:5px;font-weight:600;background:var(--amber-soft);color:var(--amber-deep)}' +
+        '#profSetup .flag{font-size:13.5px;padding:2px 8px;border-radius:5px;font-weight:600;background:var(--amber-soft);color:var(--amber-deep)}' +
         '#profSetup .flag.ok{background:var(--green-soft);color:var(--green)}' +
         '#profSetup .lv-head{position:relative;border-radius:16px;padding:24px 26px;margin-bottom:14px;color:#fff;overflow:hidden;background:linear-gradient(120deg,#3B6D11,#5E8B2A)}' +
         '#profSetup .lv-head .deco{position:absolute;right:-30px;top:-30px;width:160px;height:160px;border-radius:50%;background:rgba(255,255,255,0.10)}' +
@@ -294,11 +294,11 @@ window.fkModules['profile'] = {
         '#profSetup .lv-item:first-of-type{border-top:none}' +
         '#profSetup .doc{display:flex;align-items:center;gap:12px;padding:13px 0;border-top:0.5px solid var(--line)}' +
         '#profSetup .doc:first-of-type{border-top:none}#profSetup .doc i.f{font-size:22px;color:var(--slate,#475569)}' +
-        '#profSetup .doc .dn{flex:1}#profSetup .doc .dn .t{font-size:15px;font-weight:600}#profSetup .doc .dn .s{font-size:13px;color:var(--muted)}' +
+        '#profSetup .doc .dn{flex:1}#profSetup .doc .dn .t{font-size:15px;font-weight:600}#profSetup .doc .dn .s{font-size:14.5px;color:var(--muted)}' +
         '#profSetup .doc .dl{padding:8px 15px;border-radius:9px;font-size:14px;font-weight:500;border:0.5px solid var(--line);background:var(--surface);cursor:pointer;color:var(--ink);text-decoration:none;display:inline-flex;align-items:center;gap:6px}' +
         '#profSetup .doc .dl.ready{background:var(--green);color:#fff;border-color:var(--green)}' +
         '#profSetup .doc .dl.wait{color:var(--muted);cursor:default}' +
-        '#profSetup .exit-note{font-size:13px;color:var(--muted);background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:12px 15px;display:flex;gap:9px;align-items:flex-start}' +
+        '#profSetup .exit-note{font-size:14.5px;color:var(--muted);background:var(--bg);border:0.5px solid var(--line);border-radius:10px;padding:12px 15px;display:flex;gap:9px;align-items:flex-start}' +
         '#profSetup .exit-note i{color:var(--slate,#475569);font-size:17px;margin-top:1px}' +
       '</style>' +
       '<div id="prof-mod">' +
@@ -701,7 +701,7 @@ window.fkModules['profile'] = {
           html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:0.5px solid var(--line)">' +
             '<i class="ti ' + (done ? 'ti-circle-check' : 'ti-circle') + '" style="font-size:18px;color:' + (done ? 'var(--green)' : 'var(--muted)') + '"></i>' +
             '<div style="flex:1"><div style="font-size:14px;' + (done ? 'text-decoration:line-through;color:var(--muted)' : '') + '">' + esc(it.title) + '</div>' +
-              (it.body ? '<div style="font-size:12px;color:var(--muted);margin-top:2px;white-space:pre-wrap">' + esc(it.body) + '</div>' : '') +
+              (it.body ? '<div style="font-size:13.5px;color:var(--muted);margin-top:2px;white-space:pre-wrap">' + esc(it.body) + '</div>' : '') +
             '</div>' +
           '</div>';
         }
@@ -732,16 +732,16 @@ window.fkModules['profile'] = {
         };
         html += '<div class="info-block">' +
           '<div class="info-block-title">' + (data.salary ? 'Update salary' : 'Add salary') + '</div>' +
-          '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">This is the figure payroll uses to build payslips. Saving records a new effective-dated entry.</div>' +
-          '<label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Monthly CTC (' + esc(curr) + ')</label>' +
+          '<div style="font-size:13.5px;color:var(--muted);margin-bottom:10px">This is the figure payroll uses to build payslips. Saving records a new effective-dated entry.</div>' +
+          '<label style="font-size:13.5px;color:var(--muted);display:block;margin-bottom:5px">Monthly CTC (' + esc(curr) + ')</label>' +
           '<input id="salCtc" type="number" value="' + (s.monthly_ctc != null ? esc(s.monthly_ctc) : '') + '" placeholder="e.g. 50000" style="' + inp + '"/>' +
-          '<label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Effective from</label>' +
+          '<label style="font-size:13.5px;color:var(--muted);display:block;margin-bottom:5px">Effective from</label>' +
           '<input id="salEff" type="date" value="' + esc(eff || today) + '" style="' + inp + '"/>' +
-          '<div style="font-size:12px;font-weight:600;color:var(--muted);margin:6px 0 8px">Recurring deductions (optional)</div>' +
+          '<div style="font-size:13.5px;font-weight:600;color:var(--muted);margin:6px 0 8px">Recurring deductions (optional)</div>' +
           dedRow(1) + dedRow(2) + dedRow(3) +
           '<input id="salCur" type="hidden" value="' + esc(curr) + '"/>' +
           '<button id="salSaveBtn" class="header-action-btn" style="margin-top:6px"><i class="ti ti-device-floppy"></i> Save salary</button>' +
-          '<span id="salSaveMsg" style="margin-left:10px;font-size:13px"></span>' +
+          '<span id="salSaveMsg" style="margin-left:10px;font-size:14.5px"></span>' +
         '</div>';
       }
 
@@ -772,7 +772,7 @@ window.fkModules['profile'] = {
         // Note: editing personal info stays on profile.html for r0.16. The module
         // is read-only for personal info; we'll add edit forms in a later ship.
         if (viewer && viewer.is_self) {
-          html += '<div style="font-size:12px;color:var(--muted);margin:8px 0 14px">To edit personal details, use the legacy profile page for now.</div>';
+          html += '<div style="font-size:13.5px;color:var(--muted);margin:8px 0 14px">To edit personal details, use the legacy profile page for now.</div>';
         }
       }
 
@@ -882,7 +882,7 @@ window.fkModules['profile'] = {
         '<div class="review-card-head">' +
           '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
             '<span class="stage-chip">' + esc(reviewStageLabel(rv.review_type)) + '</span>' +
-            (rv.review_date ? '<span class="review-date"><i class="ti ti-calendar" style="font-size:13px;vertical-align:-2px"></i> ' + fmtDate(rv.review_date) + '</span>' : '') +
+            (rv.review_date ? '<span class="review-date"><i class="ti ti-calendar" style="font-size:14.5px;vertical-align:-2px"></i> ' + fmtDate(rv.review_date) + '</span>' : '') +
           '</div>' +
           '<div style="display:flex;align-items:center;gap:8px">' +
             '<span class="outcome-chip ' + outcomeClass(status) + '">' + esc(outcomeLabel(status)) + '</span>' +
@@ -890,7 +890,7 @@ window.fkModules['profile'] = {
           '</div>' +
         '</div>' +
         (rv.body ? '<div class="review-notes">' + esc(rv.body) + '</div>' : '') +
-        (docs.length ? '<div style="display:flex;flex-wrap:wrap;gap:6px">' + docs.map(f => '<span class="doc-chip rv-doc" data-fid="' + f.id + '"><i class="ti ti-paperclip" style="font-size:13px"></i>' + esc(f.filename) + '</span>').join('') + '</div>' : '') +
+        (docs.length ? '<div style="display:flex;flex-wrap:wrap;gap:6px">' + docs.map(f => '<span class="doc-chip rv-doc" data-fid="' + f.id + '"><i class="ti ti-paperclip" style="font-size:14.5px"></i>' + esc(f.filename) + '</span>').join('') + '</div>' : '') +
       '</div>';
     }
     function renderReviewsDrawer(data) {
@@ -1004,7 +1004,7 @@ window.fkModules['profile'] = {
         '<div class="info-block" id="rvAddBox" style="margin-top:14px">' +
           '<div class="info-block-title">Add review</div>' +
           '<div style="display:grid;gap:10px;grid-template-columns:1fr 1fr">' +
-            '<div><label style="font-size:12px;color:var(--muted)">Type</label>' +
+            '<div><label style="font-size:13.5px;color:var(--muted)">Type</label>' +
               '<select id="rvType" style="width:100%;padding:7px;border:0.5px solid var(--line);border-radius:6px">' +
                 '<option value="1_month">1 month</option>' +
                 '<option value="3_month">3 month</option>' +
@@ -1014,9 +1014,9 @@ window.fkModules['profile'] = {
                 '<option value="annual">Annual</option>' +
                 '<option value="ad_hoc">Ad-hoc</option>' +
               '</select></div>' +
-            '<div><label style="font-size:12px;color:var(--muted)">Date</label>' +
+            '<div><label style="font-size:13.5px;color:var(--muted)">Date</label>' +
               '<input id="rvDate" type="date" style="width:100%;padding:7px;border:0.5px solid var(--line);border-radius:6px" /></div>' +
-            '<div style="grid-column:span 2"><label style="font-size:12px;color:var(--muted)">Notes (optional)</label>' +
+            '<div style="grid-column:span 2"><label style="font-size:13.5px;color:var(--muted)">Notes (optional)</label>' +
               '<textarea id="rvNotes" style="width:100%;padding:7px;border:0.5px solid var(--line);border-radius:6px;min-height:60px"></textarea></div>' +
           '</div>' +
           '<div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">' +
@@ -1234,7 +1234,7 @@ window.fkModules['profile'] = {
           '<div class="att-tile"><div class="num" style="color:var(--red)">' + sick + '</div><div class="lbl">Sick</div></div>';
 
         if (!canSeeRollup) {
-          rollup.innerHTML = '<div style="color:var(--muted);font-size:12px;grid-column:1/-1">Payroll roll-up only visible to HR/Owner.</div>';
+          rollup.innerHTML = '<div style="color:var(--muted);font-size:13.5px;grid-column:1/-1">Payroll roll-up only visible to HR/Owner.</div>';
         }
       } catch (e) {
         console.error('[attendance]', e);
@@ -1509,7 +1509,7 @@ window.fkModules['profile'] = {
             '<input id="salEff" type="date" value="' + esc(eff || today) + '" style="' + inp + '"/>' +
             '<input id="salCur" type="hidden" value="' + esc(curr) + '"/>' +
             '<button id="salSaveBtn" class="btn btn-primary" style="margin-top:4px;padding:10px 18px"><i class="ti ti-device-floppy"></i> Save salary</button>' +
-            '<span id="salSaveMsg" style="margin-left:10px;font-size:13px"></span>' +
+            '<span id="salSaveMsg" style="margin-left:10px;font-size:14.5px"></span>' +
           '</div>';
         }
       }
@@ -1538,7 +1538,7 @@ window.fkModules['profile'] = {
         html += '<div class="stack" style="gap:8px;margin-top:8px">' + genPayslips.map(p =>
           '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:0.5px solid var(--line);border-radius:8px">' +
             '<div><div style="font-weight:500">' + esc(p.label) + '</div>' +
-            '<div style="font-size:12px;color:var(--muted)">Net \u20B9' + Number(p.net_pay || 0).toLocaleString('en-IN') + '</div></div>' +
+            '<div style="font-size:13.5px;color:var(--muted)">Net \u20B9' + Number(p.net_pay || 0).toLocaleString('en-IN') + '</div></div>' +
             '<button class="btn pay-view-slip" data-id="' + p.id + '" style="padding:9px 16px"><i class="ti ti-eye"></i> View</button>' +
           '</div>').join('') + '</div>';
       } else {
@@ -1603,9 +1603,9 @@ window.fkModules['profile'] = {
       ov.innerHTML = '<div style="background:var(--surface);border-radius:14px;padding:22px 24px;width:400px;max-width:92vw;box-shadow:0 10px 40px rgba(0,0,0,0.2)">' +
         '<h3 style="margin:0 0 6px;font-size:18px;font-weight:600">' + esc(o.title || 'Pick a date') + '</h3>' +
         (o.intro ? '<p style="margin:0 0 14px;font-size:14px;color:var(--muted)">' + esc(o.intro) + '</p>' : '<div style="height:8px"></div>') +
-        '<label style="font-size:13px;color:var(--muted)">' + esc(o.dateLabel || 'Date') + '</label>' +
+        '<label style="font-size:14.5px;color:var(--muted)">' + esc(o.dateLabel || 'Date') + '</label>' +
         '<input id="dmDate" type="date" lang="en-GB" style="width:100%;padding:11px 13px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;background:var(--surface);color:var(--ink);font-family:inherit;margin-top:5px" />' +
-        (o.withReason ? '<label style="font-size:13px;color:var(--muted);display:block;margin-top:14px">' + esc(o.reasonLabel || 'Reason (optional)') + '</label>' +
+        (o.withReason ? '<label style="font-size:14.5px;color:var(--muted);display:block;margin-top:14px">' + esc(o.reasonLabel || 'Reason (optional)') + '</label>' +
           '<textarea id="dmReason" rows="3" style="width:100%;padding:11px 13px;border:0.5px solid var(--line);border-radius:9px;font-size:15px;background:var(--surface);color:var(--ink);font-family:inherit;margin-top:5px;resize:vertical"></textarea>' : '') +
         '<div style="display:flex;gap:10px;margin-top:18px;justify-content:flex-end">' +
           '<button class="det-btn" id="dmCancel">Cancel</button>' +
@@ -2050,7 +2050,7 @@ window.fkModules['profile'] = {
             const done = isDone(n);
             h += '<div class="lv-item"><i class="ti ' + (done ? 'ti-circle-check' : 'ti-circle') + '" style="font-size:20px;color:' + (done ? 'var(--green)' : 'var(--muted)') + '"></i>' +
               '<div style="flex:1"><div style="font-weight:600">' + esc(n.title) + '</div>' +
-              (n.body ? '<div style="font-size:13px;color:var(--muted)">' + esc(n.body) + '</div>' : '') + '</div></div>';
+              (n.body ? '<div style="font-size:14.5px;color:var(--muted)">' + esc(n.body) + '</div>' : '') + '</div></div>';
           }
           h += '</div>';
         }
@@ -2086,7 +2086,7 @@ window.fkModules['profile'] = {
           '<div style="width:40px;height:40px;border-radius:10px;background:#475569;color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px"><i class="ti ti-door-exit"></i></div>' +
           '<div style="flex:1">' +
             '<div style="font-size:15px;font-weight:600">' + (left ? 'Exited' : 'Offboarding in progress') + '</div>' +
-            '<div style="font-size:13px;color:var(--muted)">Last working day ' + esc(fmtDate(u.last_working_day)) + ' \u00b7 ' + progress + '</div>' +
+            '<div style="font-size:14.5px;color:var(--muted)">Last working day ' + esc(fmtDate(u.last_working_day)) + ' \u00b7 ' + progress + '</div>' +
           '</div>' +
           '<div style="font-size:14px;color:#475569;font-weight:500;white-space:nowrap">Open in HR Insights \u2192</div>' +
         '</div>';

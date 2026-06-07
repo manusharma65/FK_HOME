@@ -17,8 +17,8 @@ window.fkModules['hr/reports'] = {
         '<style>' +
           '#rep-mod .report-card{border-top:0.5px solid var(--line);padding:16px 0}' +
           '#rep-mod .report-card:first-of-type{border-top:none;padding-top:4px}' +
-          '#rep-mod .snap{background:#FBFAF7;border:0.5px solid var(--line);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--muted);margin-bottom:8px}' +
-          '#rep-mod .pill{padding:3px 10px;border-radius:99px;font-size:12px;font-weight:500}' +
+          '#rep-mod .snap{background:#FBFAF7;border:0.5px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13.5px;color:var(--muted);margin-bottom:8px}' +
+          '#rep-mod .pill{padding:3px 10px;border-radius:99px;font-size:13.5px;font-weight:500}' +
           '#rep-mod .modal-err{display:none;color:var(--red);font-size:14px;margin:6px 0}' +
           '#rep-mod .modal-err.on{display:block}' +
         '</style>' +
@@ -150,21 +150,21 @@ window.fkModules['hr/reports'] = {
         '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;gap:12px;flex-wrap:wrap">' +
           '<div>' +
             '<div style="font-size:15px;font-weight:500;color:var(--ink)">' + escapeHtml(r.full_name) + ' <span style="color:var(--muted);font-weight:400">· ' + escapeHtml(r.dept_name || '—') + '</span></div>' +
-            '<div style="font-size:13px;color:var(--muted);margin-top:2px">' + fmtDate(r.for_date) + '</div>' +
+            '<div style="font-size:14.5px;color:var(--muted);margin-top:2px">' + fmtDate(r.for_date) + '</div>' +
           '</div>' +
           (dec
-            ? '<div style="display:flex;align-items:center;gap:8px"><span class="pill" style="background:' + dec.bg + ';color:' + dec.fg + '">' + dec.label + '</span>' + (r.reviewer_name ? '<span style="font-size:12px;color:var(--muted)">by ' + escapeHtml(r.reviewer_name) + '</span>' : '') + '</div>'
+            ? '<div style="display:flex;align-items:center;gap:8px"><span class="pill" style="background:' + dec.bg + ';color:' + dec.fg + '">' + dec.label + '</span>' + (r.reviewer_name ? '<span style="font-size:13.5px;color:var(--muted)">by ' + escapeHtml(r.reviewer_name) + '</span>' : '') + '</div>'
             : '<span class="pill" style="background:#FAEEDA;color:#854F0B">Awaiting review</span>') +
         '</div>' +
         '<div class="snap">' + snap + '</div>' +
         '<div style="font-size:14px;line-height:1.5;color:var(--ink);white-space:pre-wrap;margin-bottom:10px">' + notes + '</div>' +
         (r.decision === 'not_satisfactory' && r.comment
-          ? '<div style="background:#FCEBEB;border-left:3px solid #A32D2D;padding:8px 12px;font-size:13px;color:#7A1F1F;margin-bottom:10px;border-radius:0 6px 6px 0"><b>Reviewer note:</b> ' + escapeHtml(r.comment) + '</div>'
+          ? '<div style="background:#FCEBEB;border-left:3px solid #A32D2D;padding:8px 12px;font-size:14.5px;color:#7A1F1F;margin-bottom:10px;border-radius:0 6px 6px 0"><b>Reviewer note:</b> ' + escapeHtml(r.comment) + '</div>'
           : '') +
         '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-          '<button class="btn btn-danger" style="font-size:12px;padding:6px 12px" data-flag="' + r.id + '" data-name="' + escapeHtml(r.full_name) + '">Not satisfactory</button>' +
-          '<button class="btn" style="font-size:12px;padding:6px 12px" data-review="' + r.id + '" data-decision="satisfactory">Satisfactory</button>' +
-          '<button class="btn btn-primary" style="font-size:12px;padding:6px 12px" data-review="' + r.id + '" data-decision="good">Good</button>' +
+          '<button class="btn btn-danger" style="font-size:13.5px;padding:6px 12px" data-flag="' + r.id + '" data-name="' + escapeHtml(r.full_name) + '">Not satisfactory</button>' +
+          '<button class="btn" style="font-size:13.5px;padding:6px 12px" data-review="' + r.id + '" data-decision="satisfactory">Satisfactory</button>' +
+          '<button class="btn btn-primary" style="font-size:13.5px;padding:6px 12px" data-review="' + r.id + '" data-decision="good">Good</button>' +
         '</div>' +
       '</div>';
     }
