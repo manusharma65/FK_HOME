@@ -695,6 +695,11 @@
     border-radius:11px !important; padding:10px 22px !important; font-weight:600 !important;
     box-shadow:0 4px 12px rgba(232,114,43,.25); font-family:'Hanken Grotesk',sans-serif !important; cursor:pointer; }
   #moduleView .mw-add:hover, #moduleView .mw-form .save:hover, #moduleView .btn-primary:hover, #moduleView .btn.primary:hover { transform:translateY(-1px); }
+  /* Make bespoke pages read like Insights: Fraunces section/item headings + warm card boxes */
+  #moduleView h3, #moduleView h4 { font-family:'Fraunces',Georgia,serif; font-weight:600; }
+  #moduleView .mwc-title, #moduleView .ob-title, #moduleView .ob-grp-head, #moduleView .setup-top h3, #moduleView .rec-cand-name { font-family:'Fraunces',Georgia,serif !important; }
+  #moduleView .review-card, #moduleView .lv-card, #moduleView .rec-cand, #moduleView .setup, #moduleView .fnf-card {
+    border-radius:16px !important; border:1px solid var(--line) !important; box-shadow:0 2px 10px rgba(36,31,27,.04) !important; }
   /* Shared page hero — rendered by the loader for every module page */
   #moduleView .fk-page-hero { position:relative; overflow:hidden; border-radius:22px; padding:24px 28px; color:#fff; margin:6px 0 20px; background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%); }
   #moduleView .fk-page-hero:after { content:""; position:absolute; right:-60px; top:-90px; width:280px; height:280px; border-radius:50%; background:radial-gradient(circle at 30% 30%, rgba(243,153,46,.5), rgba(243,153,46,0) 70%); }
