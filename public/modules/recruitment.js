@@ -9,15 +9,21 @@ window.fkModules['recruitment'] = {
   render() {
     return '<div id="rec-mod" class="fk-mod">' +
       '<style>' +
-        '#rec-mod .rec-help{font-size:13px;color:var(--soft);background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:10px 13px;margin:12px 0 16px}' +
-        '#rec-mod .rec-open-card{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:15px 17px;margin-bottom:10px;cursor:pointer}' +
-        '#rec-mod .rec-open-card:hover{border-color:var(--ink)}' +
-        '#rec-mod .rec-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}' +
-        '#rec-mod .rec-chip{font-size:11px;background:var(--bg2,#F1EFE8);padding:3px 9px;border-radius:99px;color:var(--muted)}' +
+        '#rec-mod{font-family:"Hanken Grotesk",-apple-system,sans-serif}' +
+        '#rec-mod .rec-hero{position:relative;overflow:hidden;border-radius:22px;padding:24px 28px;color:#fff;margin:6px 0 18px;background:linear-gradient(115deg,#2A2421 0%,#3a2e25 48%,#7a3d18 100%);display:flex;align-items:center;justify-content:space-between;gap:16px}' +
+        '#rec-mod .rec-hero:after{content:"";position:absolute;right:-60px;top:-90px;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle at 30% 30%,rgba(243,153,46,.5),rgba(243,153,46,0) 70%)}' +
+        '#rec-mod .rec-hero h1{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:30px;margin:0;position:relative}' +
+        '#rec-mod .rec-hero-sub{margin:7px 0 0;color:#E8DDD2;font-size:14px;position:relative}' +
+        '#rec-mod .rec-help{font-size:13.5px;line-height:1.5;color:#5b524a;background:#FBF0DC;border:1px solid #F0E2CE;border-radius:14px;padding:14px 16px;margin:0 0 20px}' +
+        '#rec-mod .rec-open-card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:18px 22px;margin-bottom:14px;cursor:pointer;box-shadow:0 2px 10px rgba(36,31,27,.04);transition:transform .14s,box-shadow .14s}' +
+        '#rec-mod .rec-open-card:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(36,31,27,.08)}' +
+        '#rec-mod .rec-open-title{font-family:"Fraunces",Georgia,serif;font-size:18px;font-weight:600}' +
+        '#rec-mod .rec-chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}' +
+        '#rec-mod .rec-chip{font-size:11.5px;font-weight:600;background:#F2ECE2;padding:5px 12px;border-radius:99px;color:#5b524a}' +
         '#rec-mod .rec-chip.hired{background:#E1F5EE;color:#0F6E56}' +
-        '#rec-mod .rec-btn{padding:10px 15px;font-size:14px;border-radius:8px;border:0.5px solid var(--line);background:var(--surface);cursor:pointer}' +
-        '#rec-mod .rec-btn:hover{background:var(--hover,#F1EFE8)}' +
-        '#rec-mod .rec-btn.primary{background:var(--ink);color:var(--bg,#fff);border-color:var(--ink)}' +
+        '#rec-mod .rec-btn{padding:10px 22px;font-size:14px;font-weight:600;border-radius:11px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;font-family:inherit;transition:transform .12s,box-shadow .12s}' +
+        '#rec-mod .rec-btn:hover{transform:translateY(-1px)}' +
+        '#rec-mod .rec-btn.primary{background:linear-gradient(135deg,#F3992E,#E8722B);color:#fff;border:0;box-shadow:0 4px 12px rgba(232,114,43,.25);white-space:nowrap}' +
         '#rec-mod .rec-btn.danger{color:#A32D2D}' +
         '#rec-mod .rec-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px}' +
         '#rec-mod .rec-col{flex:1 1 0;min-width:120px;background:var(--bg2,#F4F2EC);border-radius:10px;padding:10px}' +
@@ -82,8 +88,7 @@ window.fkModules['recruitment'] = {
         const r = await fetch('/api/recruitment/openings', { credentials:'include' });
         if (r.status === 403) { $('recRoot').innerHTML = '<div class="rec-empty">Recruitment is for the HR team.</div>'; return; }
         const d = await r.json(); const ops = d.openings || [];
-        let html = '<div style="display:flex;justify-content:space-between;align-items:center">' +
-          '<h2 style="margin:0">Recruitment</h2>' +
+        let html = '<div class="rec-hero"><div><h1>Recruitment</h1><div class="rec-hero-sub">' + ops.length + ' open position' + (ops.length===1?'':'s') + '</div></div>' +
           '<button class="rec-btn primary" id="recNewOpening">+ New opening</button></div>' +
           '<div class="rec-help">Each open position holds its candidates on a board. Drag a candidate between columns as they progress; you\u2019ll be asked how the round went. Click a candidate for full details, files and notes.</div>';
         if (ops.length === 0) html += '<div class="rec-empty">No open positions yet. Create one to start tracking candidates.</div>';
@@ -94,7 +99,7 @@ window.fkModules['recruitment'] = {
           if (sc.hired) chips += '<span class="rec-chip hired">' + sc.hired + ' hired</span>';
           html += '<div class="rec-open-card" data-opening="' + o.id + '">' +
             '<div style="display:flex;justify-content:space-between;align-items:center">' +
-              '<div><div style="font-size:15px;font-weight:500">' + esc(o.title) + (o.status!=='open'?' <span style="font-size:12px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</div>' +
+              '<div><div class="rec-open-title">' + esc(o.title) + (o.status!=='open'?' <span style="font-size:12px;font-weight:400;color:var(--muted)">(closed)</span>':'') + '</div>' +
               '<div class="rec-cand-sub">' + (o.dept_name ? esc(o.dept_name)+' \u00b7 ' : '') + (o.active_count||0) + ' active candidate' + ((o.active_count==1)?'':'s') + '</div></div>' +
               '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--muted)"></i></div>' +
             (chips ? '<div class="rec-chips">' + chips + '</div>' : '') + '</div>';
@@ -305,9 +310,9 @@ window.fkModules['recruitment'] = {
         : '<div class="rec-empty-line">No company, salary, notice or contact yet \u2014 add them as you learn them.</div>';
       const kick = [d.opening && d.opening.title].filter(Boolean).join(' \u00b7 ') || 'Candidate';
       const stagePill = (STAGE_LABEL[m.stage]||m.stage||'') + (cand.moved_at?' \u00b7 '+ageLabel(cand.moved_at):'');
-      const hist = Array.isArray(m.history)&&m.history.length ? m.history.map(h=>(STAGE_LABEL[h.stage]||h.stage)+' '+new Date(h.at).toLocaleDateString()).join(' \u2192 ') : 'Sourced \u00b7 '+(cand.created_at?new Date(cand.created_at).toLocaleDateString():'');
-      const outcomes = Array.isArray(m.outcomes)&&m.outcomes.length ? m.outcomes.map(o=>'<div class="rec-note"><span style="color:var(--muted)">'+(STAGE_LABEL[o.stage]||o.stage)+':</span> '+esc(o.text)+'<div class="rec-note-meta">'+esc(o.by_name||'')+' \u00b7 '+new Date(o.at).toLocaleDateString()+'</div></div>').join('') : '';
-      const notes = Array.isArray(m.notes)&&m.notes.length ? m.notes.map(n=>'<div class="rec-note">'+esc(n.text)+'<div class="rec-note-meta">'+esc(n.by_name||'')+' \u00b7 '+new Date(n.at).toLocaleDateString()+'</div></div>').join('') : '<div class="rec-cand-sub">No notes yet.</div>';
+      const hist = Array.isArray(m.history)&&m.history.length ? m.history.map(h=>(STAGE_LABEL[h.stage]||h.stage)+' '+new Date(h.at).toLocaleDateString('en-GB')).join(' \u2192 ') : 'Sourced \u00b7 '+(cand.created_at?new Date(cand.created_at).toLocaleDateString('en-GB'):'');
+      const outcomes = Array.isArray(m.outcomes)&&m.outcomes.length ? m.outcomes.map(o=>'<div class="rec-note"><span style="color:var(--muted)">'+(STAGE_LABEL[o.stage]||o.stage)+':</span> '+esc(o.text)+'<div class="rec-note-meta">'+esc(o.by_name||'')+' \u00b7 '+new Date(o.at).toLocaleDateString('en-GB')+'</div></div>').join('') : '';
+      const notes = Array.isArray(m.notes)&&m.notes.length ? m.notes.map(n=>'<div class="rec-note">'+esc(n.text)+'<div class="rec-note-meta">'+esc(n.by_name||'')+' \u00b7 '+new Date(n.at).toLocaleDateString('en-GB')+'</div></div>').join('') : '<div class="rec-cand-sub">No notes yet.</div>';
       modalBare(
         '<div class="rec-chead">' +
           '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
