@@ -206,7 +206,7 @@
   .navgrp-h { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; user-select: none; transition: background .14s; }
   .navgrp-h:hover { background: rgba(255,255,255,0.05); }
   .navgrp-ico { width: 27px; height: 27px; border-radius: 8px; background: var(--accent); color: #14161B; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; box-shadow: 0 3px 8px rgba(var(--soft),0.35); }
-  .navgrp-lbl { flex: 1; font-size: 13px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: #F2F0EA; }
+  .navgrp-lbl { flex: 1; font-size: 15.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: #F2F0EA; }
   .navgrp-cnt { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.5); background: rgba(255,255,255,0.07); border-radius: 99px; padding: 1px 8px; }
   .navgrp-cnt:empty { display: none; }
   .navgrp-chev { color: rgba(255,255,255,0.42); font-size: 18px; transition: transform .22s; flex-shrink: 0; }
@@ -514,6 +514,21 @@
   .idle-notice.on { display: flex; }
   .idle-notice i { font-size: 19px; color: var(--amber-deep); }
   .idle-notice .txt { font-size: 15px; color: var(--amber-deep); }
+  .idle-notice #idleReasonInput {
+    flex: 1; min-width: 140px; font: inherit; font-size: 15px; color: var(--ink);
+    background: #fff; border: 1px solid var(--amber-warm); border-radius: 9px;
+    padding: 9px 12px; outline: none;
+  }
+  .idle-notice #idleReasonInput:focus { border-color: var(--amber-deep); }
+  .idle-notice .idle-save {
+    flex: none; font: inherit; font-size: 14.5px; font-weight: 600; cursor: pointer;
+    background: var(--amber-deep); color: #fff; border: 0; border-radius: 9px; padding: 9px 18px;
+  }
+  .idle-notice .idle-save:hover { filter: brightness(1.06); }
+  .idle-notice .idle-save:disabled { opacity: 0.6; cursor: default; }
+  .idle-notice.done { background: var(--green-soft); border-color: var(--green); }
+  .idle-notice.done .txt { color: var(--green); }
+  .idle-notice.done i, .idle-notice.done #idleReasonInput, .idle-notice.done .idle-save { display: none; }
 
   /* Late strip — actionable */
   .late-strip {
@@ -957,7 +972,9 @@
       <div class="home-zone" style="padding-top:4px">
         <div class="idle-notice" id="idleNotice">
           <i class="ti ti-mouse-2"></i>
-          <span class="txt" id="idleNoticeTxt">Your PC has been idle for 10+ minutes.</span>
+          <span class="txt" id="idleNoticeTxt">You've been away from your desk for 10+ minutes.</span>
+          <input type="text" id="idleReasonInput" maxlength="300" placeholder="What took you away? (e.g. helping in warehouse)" />
+          <button type="button" id="idleReasonSave" class="idle-save">Log it</button>
         </div>
         <div class="late-strip" id="lateStrip">
           <div class="l">
@@ -2237,6 +2254,36 @@ async function setStatus(s) {
   } catch (err) { alert('Network error'); }
 }
 
+// --- IDLE REASON (away from desk) ---
+document.addEventListener('click', async (e) => {
+  if (e.target && e.target.id === 'idleReasonSave') {
+    const notice = document.getElementById('idleNotice');
+    const inp = document.getElementById('idleReasonInput');
+    const btn = e.target;
+    const reason = (inp.value || '').trim();
+    if (!reason) { inp.focus(); return; }
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/attendance/idle-reason', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+        body: JSON.stringify({ reason })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        btn.disabled = false; btn.textContent = 'Log it';
+        document.getElementById('idleNoticeTxt').textContent = data.error || 'Could not save. Try again.';
+        return;
+      }
+      document.getElementById('idleNoticeTxt').textContent = 'Thanks — logged. Your manager won\u2019t be chased about this gap.';
+      notice.classList.add('done');
+      btn.textContent = 'Log it';
+    } catch (err) {
+      btn.disabled = false; btn.textContent = 'Log it';
+      document.getElementById('idleNoticeTxt').textContent = 'Network error. Try again.';
+    }
+  }
+});
+
 // --- RUNNING LATE ---
 function openLateModal() {
   document.getElementById('lateTime').value = '';
@@ -2780,12 +2827,18 @@ async function loadAttendanceToday() {
     document.getElementById('todayIdle').textContent = formatMinsShort(t.idle_minutes);
     document.getElementById('todayBreak').textContent = formatMinsShort(t.break_taken_minutes);
 
-    // Idle notice — passive, no button, no threat
+    // Idle notice — agent explains the away-from-desk gap (free text).
     const notice = document.getElementById('idleNotice');
     if (t.idle_banner) {
       const mins = Math.max(10, Math.floor(t.idle_minutes || 10));
       document.getElementById('idleNoticeTxt').textContent =
-        'Your PC has been idle for ' + mins + ' minutes.';
+        "You've been away from your desk for " + mins + " minutes.";
+      // only reset the field when transitioning into the banner, so we don't wipe typing
+      if (!notice.classList.contains('on')) {
+        notice.classList.remove('done');
+        const inp = document.getElementById('idleReasonInput');
+        if (inp) inp.value = '';
+      }
       notice.classList.add('on');
     } else {
       notice.classList.remove('on');
@@ -3118,6 +3171,10 @@ async function openChronicIdleModal() {
         '<div><div class="nm">' + escapeHtml(f.full_name) + '</div>' +
         '<div class="sub">' + formatDateShort(f.window_start) + ' – ' + formatDateShort(f.window_end) + '</div></div>' +
         '<div class="det">' + f.days_affected + ' days · ' + f.events_total + ' idle events · ' + f.total_idle_minutes + ' min total</div>' +
+        ((f.reasons && f.reasons.length)
+          ? '<div class="det" style="margin-top:4px;color:var(--ink)"><b>They explained:</b> ' +
+              f.reasons.slice(0, 5).map(function(x){ return escapeHtml(x); }).join(' · ') + '</div>'
+          : '<div class="det" style="margin-top:4px;color:var(--soft)">No reasons given for these gaps.</div>') +
         '<div class="acts">' +
           '<button class="ack-btn" onclick="decideChronic(' + f.id + ', \'acknowledge\')">Acknowledge</button>' +
           '<button class="dis-btn" onclick="decideChronic(' + f.id + ', \'dismiss\')">Dismiss</button>' +

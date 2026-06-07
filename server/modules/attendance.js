@@ -322,7 +322,39 @@ router.get('/today', async (req, res) => {
     res.json({ ...row, idle_banner: idleBanner });
   } catch (err) {
     console.error('[attendance/today] failed:', err.message);
-    res.status(500).json({ error: 'Could not load today\'s attendance' });
+    res.status(500).json({ error: 'Failed' });
+    return;
+  }
+});
+
+// POST /api/attendance/idle-reason
+// Agent explains the current/most-recent away-from-desk gap. Attaches the free
+// text to that idle_event and marks it acknowledged (suppresses the 20-min
+// manager escalation — explained idles don't need chasing). Returns ok.
+router.post('/idle-reason', async (req, res) => {
+  try {
+    const reason = ((req.body && req.body.reason) || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Tell us briefly what took you away.' });
+    if (reason.length > 300) return res.status(400).json({ error: 'Keep it under 300 characters.' });
+    const today = nowInLondon().date;
+    const r = await db.query(
+      `UPDATE idle_events
+          SET reason = $1,
+              agent_acknowledged_at = COALESCE(agent_acknowledged_at, NOW())
+        WHERE id = (
+          SELECT id FROM idle_events
+           WHERE user_id = $2 AND for_date = $3
+           ORDER BY (ended_at IS NULL) DESC, started_at DESC
+           LIMIT 1
+        )
+        RETURNING id`,
+      [reason, req.user.id, today]
+    );
+    if (!r.rowCount) return res.status(404).json({ error: 'No idle period to explain right now.' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[attendance/idle-reason] failed:', err.message);
+    res.status(500).json({ error: 'Could not save your note. Try again.' });
   }
 });
 
@@ -1042,7 +1074,12 @@ router.get('/hr/chronic-idle', requirePermission('hr.dashboard.view'), async (re
       `SELECT f.id, f.user_id, u.full_name, f.detected_at,
               f.window_start, f.window_end, f.days_affected,
               f.events_total, f.total_idle_minutes, f.status,
-              f.hr_note, f.hr_actioned_at
+              f.hr_note, f.hr_actioned_at,
+              (SELECT array_agg(ie.reason ORDER BY ie.started_at DESC)
+                 FROM idle_events ie
+                WHERE ie.user_id = f.user_id
+                  AND ie.reason IS NOT NULL
+                  AND ie.for_date BETWEEN f.window_start AND f.window_end) AS reasons
        FROM hr_chronic_idle_flags f
        JOIN users u ON u.id = f.user_id
        WHERE f.status = 'open'
