@@ -34,11 +34,11 @@ window.fkModules['hr-queue'] = {
           '#hrq-mod .hrq-title{font-family:"Fraunces",Georgia,serif;font-size:18px;font-weight:600}' +
           '#hrq-mod .hrq-body{font-size:13.5px;color:var(--muted);margin-top:3px}' +
           '#hrq-mod .hrq-owner{font-size:11.5px;font-weight:600;padding:5px 12px;border-radius:99px;flex:none;white-space:nowrap}' +
-          '#hrq-mod .hrq-actions{display:flex;gap:12px;margin-top:16px}' +
-          '#hrq-mod .hrq-btn{flex:1;padding:13px;font-size:14.5px;font-weight:600;border-radius:12px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;text-align:center;font-family:inherit;transition:transform .12s,box-shadow .12s}' +
+          '#hrq-mod .hrq-actions{display:flex;gap:10px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap}' +
+          '#hrq-mod .hrq-btn{padding:10px 22px;font-size:14px;font-weight:600;border-radius:11px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;text-align:center;font-family:inherit;transition:transform .12s,box-shadow .12s,background .12s}' +
           '#hrq-mod .hrq-btn:hover{transform:translateY(-1px)}' +
-          '#hrq-mod .hrq-btn.primary{background:linear-gradient(135deg,#F3992E,#E8722B);color:#fff;border:0;box-shadow:0 6px 16px rgba(232,114,43,.28)}' +
-          '#hrq-mod .hrq-btn.cover{background:#FFF8EC;border-color:#F2D9A6;color:#854F0B}' +
+          '#hrq-mod .hrq-btn.primary{background:linear-gradient(135deg,#F3992E,#E8722B);color:#fff;border:0;box-shadow:0 4px 12px rgba(232,114,43,.25)}' +
+          '#hrq-mod .hrq-btn.cover{background:var(--surface);border-color:var(--line);color:#5b524a}' +
           '#hrq-mod .pill.overdue{background:#FCEBEB;color:#A32D2D}' +
           '#hrq-mod .pill.due{background:#FAEEDA;color:#854F0B}' +
           '#hrq-mod .pill.mine{background:#E1F5EE;color:#0F6E56}' +
