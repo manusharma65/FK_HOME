@@ -48,13 +48,14 @@ const dailyRoutes = require('./server/modules/daily');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+const VERSION = 'r0.77';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 
 // Health check
-app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: 'r0.20.5' }));
+app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: VERSION }));
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -87,179 +88,91 @@ app.get('*', (req, res) => {
 });
 
 // ---- Cron jobs -----------------------------------------------------------
-// We use simple setInterval rather than node-cron to avoid adding deps.
-// All ticks are wrapped to never throw.
+// Simple setInterval scheduling (no node-cron dep). Every gated job checks
+// London wall-clock once a minute and runs at most once per day/week. All ticks
+// are wrapped so a throw can never take the process down.
+function londonParts() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const get = (t) => parts.find(p => p.type === t).value;
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, hhmm: `${get('hour')}:${get('minute')}`, weekday: get('weekday') };
+}
+
+// Run fn once per London date when the time is within [startHHMM, endHHMM).
+function scheduleDaily(label, startHHMM, endHHMM, fn) {
+  let lastRun = null;
+  setInterval(() => {
+    try {
+      const { date, hhmm } = londonParts();
+      if (hhmm >= startHHMM && hhmm < endHHMM && lastRun !== date) {
+        lastRun = date;
+        console.log(`[cron] ${label} @ ${date}`);
+        Promise.resolve().then(fn).catch(e => console.error(`[cron ${label}]`, e.message));
+      }
+    } catch (e) { console.error(`[cron ${label} check]`, e.message); }
+  }, 60 * 1000);
+}
+
+// Run fn once per matching weekday/date when within [startHHMM, endHHMM).
+function scheduleWeekly(label, weekday, startHHMM, endHHMM, fn) {
+  let lastRun = null;
+  setInterval(() => {
+    try {
+      const p = londonParts();
+      if (p.weekday === weekday && p.hhmm >= startHHMM && p.hhmm < endHHMM && lastRun !== p.date) {
+        lastRun = p.date;
+        console.log(`[cron] ${label} @ ${p.date}`);
+        Promise.resolve().then(fn).catch(e => console.error(`[cron ${label}]`, e.message));
+      }
+    } catch (e) { console.error(`[cron ${label} check]`, e.message); }
+  }, 60 * 1000);
+}
+
 function startCronJobs() {
-  // Every 5 minutes (300_000 ms) — late detection, idle escalation
+  // Frequent: every 5 minutes — late detection, idle escalation.
   setInterval(() => {
     attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron 5min]', e.message));
   }, 5 * 60 * 1000);
 
-  // Every 1 minute, check if we just crossed midnight London time. If so, run daily tick.
-  let lastMidnightRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-'); // dd/mm/yyyy -> yyyy-mm-dd
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      // Run between 00:00 and 00:05 London time, once per date
-      if (hhmm < '00:05' && lastMidnightRun !== londonDate) {
-        lastMidnightRun = londonDate;
-        console.log('[cron] daily midnight tick @', londonDate);
-        attendanceRoutes.tickDailyMidnight()
-          .then(() => dailyRoutes.freezeDay())        // freeze yesterday's record + ledger (writes via UPDATE; lock not affected)
-          .then(() => dailyRoutes.retentionCleanup())  // age off day detail past the window (scores kept)
-          .catch(e => console.error('[cron midnight]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron midnight check]', e.message);
-    }
-  }, 60 * 1000);
+  // Midnight: roll over the day, freeze yesterday's record + ledger, age off detail.
+  scheduleDaily('midnight', '00:00', '00:05', () =>
+    attendanceRoutes.tickDailyMidnight()
+      .then(() => dailyRoutes.freezeDay())
+      .then(() => dailyRoutes.retentionCleanup()));
 
-  // Weekly tick — Sunday 23:00 London. Same check pattern.
-  let lastWeeklyRun = null;
-  setInterval(() => {
-    try {
-      const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false
-      }).formatToParts(new Date());
-      const get = (t) => parts.find(p => p.type === t).value;
-      const isoDate = `${get('year')}-${get('month')}-${get('day')}`;
-      const hhmm = `${get('hour')}:${get('minute')}`;
-      const weekday = get('weekday');
-      if (weekday === 'Sunday' && hhmm >= '23:00' && hhmm < '23:30' && lastWeeklyRun !== isoDate) {
-        lastWeeklyRun = isoDate;
-        console.log('[cron] weekly Sunday tick @', isoDate);
-        attendanceRoutes.tickWeeklySunday()
-          .then(() => dailyRoutes.scoreLastWeek())   // score the week that just ended
-          .catch(e => console.error('[cron weekly]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron weekly check]', e.message);
-    }
-  }, 60 * 1000);
+  // 01:00 — monthly leave accrual on user anniversaries.
+  scheduleDaily('accrual 01:00', '01:00', '01:05', () => leaveEngine.tickMonthlyAccrual());
 
-  // r0.7 — Daily accrual tick at 01:00 London. Credits leave days on user anniversaries.
-  let lastAccrualRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '01:00' && hhmm < '01:05' && lastAccrualRun !== londonDate) {
-        lastAccrualRun = londonDate;
-        console.log('[cron] daily accrual tick @', londonDate);
-        leaveEngine.tickMonthlyAccrual().catch(e => console.error('[cron accrual]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron accrual check]', e.message);
-    }
-  }, 60 * 1000);
+  // 02:00 — nightly off-site pg_dump → Backblaze B2.
+  scheduleDaily('backup 02:00', '02:00', '02:05', () => backupEngine.tickNightlyBackup());
 
-  // r0.7 — Weekend pay calc Sunday 23:30 London (right after weekly Sunday tick at 23:00).
-  let lastWeekendPayRun = null;
-  setInterval(() => {
-    try {
-      const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false
-      }).formatToParts(new Date());
-      const get = (t) => parts.find(p => p.type === t).value;
-      const isoDate = `${get('year')}-${get('month')}-${get('day')}`;
-      const hhmm = `${get('hour')}:${get('minute')}`;
-      const weekday = get('weekday');
-      if (weekday === 'Sunday' && hhmm >= '23:30' && hhmm < '23:55' && lastWeekendPayRun !== isoDate) {
-        lastWeekendPayRun = isoDate;
-        console.log('[cron] weekly weekend-pay tick @', isoDate);
-        leaveEngine.tickWeeklyWeekendPay().catch(e => console.error('[cron weekend-pay]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron weekend-pay check]', e.message);
-    }
-  }, 60 * 1000);
+  // 03:00 — hard-purge soft-deleted files past retention.
+  scheduleDaily('file-purge 03:00', '03:00', '03:05', () => filesRoutes.tickHardPurge());
 
-  // r0.8 — Nightly backup at 02:00 London. Off-site pg_dump → Backblaze B2.
-  let lastBackupRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '02:00' && hhmm < '02:05' && lastBackupRun !== londonDate) {
-        lastBackupRun = londonDate;
-        console.log('[cron] nightly backup tick @', londonDate);
-        backupEngine.tickNightlyBackup().catch(e => console.error('[cron backup]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron backup check]', e.message);
-    }
-  }, 60 * 1000);
+  // 06:00 — task promotion + probation/birthday nudges.
+  scheduleDaily('task tick 06:00', '06:00', '06:05', async () => {
+    await lifecycle.tickTasks()
+      .then(r => console.log('[cron task tick] opened=' + r.opened + ' due=' + r.dued + ' overdue=' + r.overdued + ' renudged=' + r.reNudged))
+      .catch(e => console.error('[cron task tick]', e.message));
+    await lifecycle.tickProbationNudges()
+      .then(r => console.log('[cron probation nudge] nudged=' + r.nudged))
+      .catch(e => console.error('[cron probation nudge]', e.message));
+    await lifecycle.tickBirthdayNudges()
+      .then(r => console.log('[cron birthday nudge] nudged=' + r.nudged + ' candidates=' + r.candidates))
+      .catch(e => console.error('[cron birthday nudge]', e.message));
+  });
 
-  // r0.9 — Daily file hard-purge at 03:00 London. Removes soft-deleted files
-  // past 90-day retention from the bytea store.
-  let lastFilePurgeRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '03:00' && hhmm < '03:05' && lastFilePurgeRun !== londonDate) {
-        lastFilePurgeRun = londonDate;
-        console.log('[cron] daily file-purge tick @', londonDate);
-        filesRoutes.tickHardPurge().catch(e => console.error('[cron file-purge]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron file-purge check]', e.message);
-    }
-  }, 60 * 1000);
+  // Sunday 23:00 — close the week + score it.
+  scheduleWeekly('weekly Sunday 23:00', 'Sunday', '23:00', '23:30', () =>
+    attendanceRoutes.tickWeeklySunday().then(() => dailyRoutes.scoreLastWeek()));
 
-  // r0.10 — Daily task tick at 06:00 London. Promotes review tasks
-  // pending → open → due → overdue, fires notifications, re-nudges overdue.
-  let lastTaskTickRun = null;
-  setInterval(() => {
-    try {
-      const londonDate = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit'
-      }).format(new Date()).split('/').reverse().join('-');
-      const hhmm = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date());
-      if (hhmm >= '06:00' && hhmm < '06:05' && lastTaskTickRun !== londonDate) {
-        lastTaskTickRun = londonDate;
-        console.log('[cron] daily task tick @', londonDate);
-        lifecycle.tickTasks()
-          .then(r => console.log('[cron task tick] opened=' + r.opened + ' due=' + r.dued + ' overdue=' + r.overdued + ' renudged=' + r.reNudged))
-          .catch(e => console.error('[cron task tick]', e.message));
-        // r0.11 — Also run probation end nudge (fires when a user's
-        // probation_end_date arrives and they still need a decision).
-        lifecycle.tickProbationNudges()
-          .then(r => console.log('[cron probation nudge] nudged=' + r.nudged))
-          .catch(e => console.error('[cron probation nudge]', e.message));
-        // r0.14 — Birthday pre-notify: tell HR one day before each
-        // active employee's birthday (no task, just a notification).
-        lifecycle.tickBirthdayNudges()
-          .then(r => console.log('[cron birthday nudge] nudged=' + r.nudged + ' candidates=' + r.candidates))
-          .catch(e => console.error('[cron birthday nudge]', e.message));
-      }
-    } catch (e) {
-      console.error('[cron task tick check]', e.message);
-    }
-  }, 60 * 1000);
+  // Sunday 23:30 — weekend conditional-pay calc (right after the weekly tick).
+  scheduleWeekly('weekend-pay Sunday 23:30', 'Sunday', '23:30', '23:55', () =>
+    leaveEngine.tickWeeklyWeekendPay());
 
-  console.log('[boot] cron jobs scheduled (5min, midnight, 01:00 accrual, 02:00 backup, 03:00 file-purge, 06:00 task tick, Sun 23:00 weekly, Sun 23:30 weekend-pay)');
+  console.log('[boot] cron jobs scheduled (5min, 00:00, 01:00, 02:00, 03:00, 06:00, Sun 23:00, Sun 23:30)');
 }
 
 async function start() {
@@ -275,7 +188,7 @@ async function start() {
     // r0.33 — assign FK### Emp IDs to any staff without one. Idempotent.
     await require('./server/modules/emp-id').runEmpIdBackfillIfNeeded();
     app.listen(PORT, () => {
-      console.log(`[boot] FK Home r0.16.3 listening on port ${PORT}`);
+      console.log(`[boot] FK Home ${VERSION} listening on port ${PORT}`);
       startCronJobs();
       // Run one immediate 5-min tick on boot, in case the server was down for a while.
       attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron boot tick]', e.message));
