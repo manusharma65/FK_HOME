@@ -44,6 +44,7 @@ const recruitmentRoutes = require('./server/modules/recruitment');
 const leaveEngine = require('./server/modules/leave-engine');
 const backupEngine = require('./server/modules/backup');
 const lifecycle = require('./server/modules/lifecycle');
+const dailyRoutes = require('./server/modules/daily');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -75,6 +76,7 @@ app.use('/api/files', filesRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/recruitment', recruitmentRoutes);
+app.use('/api/daily', dailyRoutes);
 
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
@@ -107,7 +109,10 @@ function startCronJobs() {
       if (hhmm < '00:05' && lastMidnightRun !== londonDate) {
         lastMidnightRun = londonDate;
         console.log('[cron] daily midnight tick @', londonDate);
-        attendanceRoutes.tickDailyMidnight().catch(e => console.error('[cron midnight]', e.message));
+        attendanceRoutes.tickDailyMidnight()
+          .then(() => dailyRoutes.freezeDay())        // freeze yesterday's record + ledger (writes via UPDATE; lock not affected)
+          .then(() => dailyRoutes.retentionCleanup())  // age off day detail past the window (scores kept)
+          .catch(e => console.error('[cron midnight]', e.message));
       }
     } catch (e) {
       console.error('[cron midnight check]', e.message);
@@ -129,7 +134,9 @@ function startCronJobs() {
       if (weekday === 'Sunday' && hhmm >= '23:00' && hhmm < '23:30' && lastWeeklyRun !== isoDate) {
         lastWeeklyRun = isoDate;
         console.log('[cron] weekly Sunday tick @', isoDate);
-        attendanceRoutes.tickWeeklySunday().catch(e => console.error('[cron weekly]', e.message));
+        attendanceRoutes.tickWeeklySunday()
+          .then(() => dailyRoutes.scoreLastWeek())   // score the week that just ended
+          .catch(e => console.error('[cron weekly]', e.message));
       }
     } catch (e) {
       console.error('[cron weekly check]', e.message);

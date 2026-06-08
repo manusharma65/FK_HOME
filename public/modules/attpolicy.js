@@ -16,6 +16,24 @@ window.fkModules['system/attpolicy'] = {
     return '' +
       '<div id="pol-mod" class="fk-mod">' +
         '<div class="card" style="margin-bottom:16px">' +
+          '<div class="card-head"><div>' +
+            '<h2 style="margin:0">Conduct &amp; performance rules</h2>' +
+            '<span class="meta">How the daily record, weekly score and attendance record work. Published so everyone knows the lines.</span>' +
+          '</div></div>' +
+          '<div style="padding:18px;font-size:15px;line-height:1.6;color:#3f372f">' +
+            '<p style="margin:0 0 10px"><b>Weekly score</b> is built from your work: SLA/timeliness (40), hiring (20), accuracy (15), conduct (10), quality (15). On-time is the standard; a late-but-done item earns partial credit; a missed item earns none and caps the week at \u201cGood\u201d. HR is held to a high bar \u2014 <b>95%+ correct = Good</b> (the expected level), with Excellent and above reserved for near-flawless weeks.</p>' +
+            '<p style="margin:0 0 10px"><b>Levels &amp; raise brackets:</b> Poor (0% + plan) \u00b7 Average (up to 5%) \u00b7 Good (up to 10%) \u00b7 Excellent (up to 15%) \u00b7 Above Expectations (up to 20%).</p>' +
+            '<p style="margin:0 0 6px"><b>Attendance record</b> \u2014 separate from the score, accumulates and rolls off after 12 months:</p>' +
+            '<ul style="margin:0 0 10px 18px;padding:0">' +
+              '<li>Late, notice given \u2014 0.5 &nbsp;\u00b7&nbsp; Late, no notice \u2014 1</li>' +
+              '<li>Left early without approval \u2014 1 &nbsp;\u00b7&nbsp; Over-break \u2014 1 &nbsp;\u00b7&nbsp; Chronic idle \u2014 1</li>' +
+              '<li>Unauthorised absence \u2014 2 &nbsp;\u00b7&nbsp; No-show with no notice \u2014 3</li>' +
+              '<li>Approved leave, approved sick and excused events \u2014 0</li>' +
+            '</ul>' +
+            '<p style="margin:0"><b>Steps:</b> 4 points \u2192 coaching \u00b7 6 \u2192 written warning \u00b7 9 \u2192 formal review. A clean quarter is recognised.</p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="card" style="margin-bottom:16px">' +
           '<div class="card-head">' +
             '<div>' +
               '<h2 style="margin:0">Pattern anchor</h2>' +
