@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const { db } = require('../db');
 const { SESSION_COOKIE, createSession, destroySession, logAudit, logShift } = require('../auth');
 const attendance = require('./attendance');
+const { isMobileRequest } = require('./device');
 
 const router = express.Router();
 
@@ -33,7 +34,7 @@ router.post('/login', async (req, res) => {
     await logShift({ user_id: user.id, event_type: 'login', status_after: 'active', req });
     // r0.6: login = clock-in. Record/update attendance_day row.
     if (typeof attendance.recordLogin === 'function') {
-      attendance.recordLogin(user.id).catch(e => console.error('[recordLogin]', e.message));
+      attendance.recordLogin(user.id, isMobileRequest(req)).catch(e => console.error('[recordLogin]', e.message));
     }
 
     res.cookie(SESSION_COOKIE, token, {
@@ -61,7 +62,7 @@ router.post('/logout', async (req, res) => {
     await db.query(`UPDATE user_status SET status='offline', changed_at=NOW() WHERE user_id=$1`, [req.user.id]);
     // r0.6: logout = clock-out. Stamp last_logout on today's attendance_day row.
     if (typeof attendance.recordLogout === 'function') {
-      attendance.recordLogout(req.user.id).catch(e => console.error('[recordLogout]', e.message));
+      attendance.recordLogout(req.user.id, isMobileRequest(req)).catch(e => console.error('[recordLogout]', e.message));
     }
   }
   if (token) await destroySession(token);

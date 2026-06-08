@@ -1461,7 +1461,7 @@ async function tickWeeklySunday() {
 
 // Hook: when a user logs in, update attendance_day if status was 'pending'.
 // Called from auth.js login flow.
-async function recordLogin(userId) {
+async function recordLogin(userId, isMobile) {
   try {
     const now = nowInLondon();
     // Ensure today's row exists
@@ -1474,6 +1474,10 @@ async function recordLogin(userId) {
        ON CONFLICT (user_id, for_date) DO NOTHING`,
       [userId, now.date, expected, pol ? pol.start_time : null, pol ? pol.end_time : null]
     );
+
+    // Mobile login keeps the day row but never stamps the official arrival or
+    // flips the status — that's set on an office device. Keeps late-coming honest.
+    if (isMobile) return;
 
     // Now update first_login + status if applicable
     const ad = await db.query(
@@ -1529,9 +1533,14 @@ async function recordLogin(userId) {
 }
 
 // Hook: when user logs out, update last_logout for today.
-async function recordLogout(userId) {
+async function recordLogout(userId, isMobile) {
   try {
     const now = nowInLondon();
+    // A phone logout (or app close) must NOT stamp the clock-out — otherwise an
+    // early mobile sign-out shortens the day while the person is still at the
+    // desk. The real departure is the office logout, or the midnight finalise
+    // which fills last_logout from the day's last logout event.
+    if (isMobile) return;
     await db.query(
       `UPDATE attendance_day
        SET last_logout = NOW(), updated_at = NOW()

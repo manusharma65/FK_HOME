@@ -106,7 +106,12 @@ form.addEventListener('submit', async (e) => {
   btn.disabled = true; btn.textContent = 'Signing in…';
   try {
     const r = await fetch('/api/auth/login', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-fk-device': ((window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(pointer: coarse)').matches)) ? 'mobile' : 'desktop')
+      },
+      credentials: 'include',
       body: JSON.stringify({
         email: document.getElementById('email').value,
         password: document.getElementById('password').value

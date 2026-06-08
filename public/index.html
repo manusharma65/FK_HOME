@@ -2097,7 +2097,10 @@ function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;',
 function startHeartbeat() {
   setInterval(() => {
     if (document.hidden) return;
-    fetch('/api/me/heartbeat', { method: 'POST', credentials: 'include' }).catch(()=>{});
+    fetch('/api/me/heartbeat', {
+      method: 'POST', credentials: 'include',
+      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
+    }).catch(()=>{});
   }, 30000);
 }
 
@@ -2118,7 +2121,9 @@ async function maybeOfficeAutoActive() {
   try {
     if (isMobileDevice()) return;
     const cur = (me && me.status) || (dash && dash.status && dash.status.status);
-    const passive = ['active', 'idle', 'offline', null, undefined, ''];
+    // 'running_late' is included: arriving at the desk cancels the running-late
+    // notice and marks you active, so the notice and the real record agree.
+    const passive = ['active', 'idle', 'offline', 'running_late', null, undefined, ''];
     if (!passive.includes(cur)) return; // deliberate status — leave alone
     // Tell the server we're active now (clock-in already happened via heartbeat).
     await fetch('/api/me/status', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ status:'active' }) });
@@ -2768,7 +2773,7 @@ document.addEventListener('click', (e) => {
 
 // --- LOGOUT ---
 async function logout() {
-  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch(e) {}
+  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' } }); } catch(e) {}
   window.location.href = '/login.html';
 }
 

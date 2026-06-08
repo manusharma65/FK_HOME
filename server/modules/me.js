@@ -10,6 +10,7 @@ const express = require('express');
 const { db } = require('../db');
 const { requireAuth, logAudit, logShift } = require('../auth');
 const { notifyManagersOf, notifyEvent, getGroupMembers } = require('../notify');
+const { isMobileRequest } = require('./device');
 
 const router = express.Router();
 
@@ -415,22 +416,27 @@ router.post('/sick', async (req, res) => {
 // If we don't hear from a user for 10 min, they become idle.
 router.post('/heartbeat', async (req, res) => {
   try {
+    const mobile = isMobileRequest(req);
+    // On a phone we keep the session alive (last_active_at) but never flip the
+    // user to 'active' — presence and arrival are office-device actions, so a
+    // phone in someone's pocket can't show them "at work".
     await db.query(
       `INSERT INTO user_status (user_id, status, last_active_at, changed_at)
-       VALUES ($1, 'active', NOW(), NOW())
+       VALUES ($1, $2, NOW(), NOW())
        ON CONFLICT (user_id) DO UPDATE SET
          last_active_at = NOW(),
          status = CASE
+           WHEN $3::bool THEN user_status.status
            WHEN user_status.status IN ('idle','offline') THEN 'active'
            ELSE user_status.status
          END`,
-      [req.user.id]
+      [req.user.id, mobile ? 'offline' : 'active', mobile]
     );
     // r0.30 — login = clock-in. On the first heartbeat of the day, record
     // first_login + late_minutes + flip the day's status, so the calendar
     // (reads attendance_day) and the late count agree. Cheap no-op after the
-    // first write because first_login is already set.
-    try { await recordClockIn(req.user.id); } catch (e) { console.error('[clock-in]', e.message); }
+    // first write because first_login is already set. Mobile is gated inside.
+    try { await recordClockIn(req.user.id, mobile); } catch (e) { console.error('[clock-in]', e.message); }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Heartbeat failed' });
@@ -441,7 +447,7 @@ router.post('/heartbeat', async (req, res) => {
 // writes first_login/late_minutes/status if first_login is not yet set, and only
 // for days the user was expected to work (status 'pending'/'working'/late) — never
 // overrides on_leave/off_sick/off_holiday/off_pattern/off_cs_rota.
-async function recordClockIn(userId) {
+async function recordClockIn(userId, isMobile) {
   const today = londonToday();
   const ad = await db.query(
     `SELECT id, status, first_login, shift_start_local FROM attendance_day
@@ -469,6 +475,11 @@ async function recordClockIn(userId) {
   if (row.first_login) return;
   const offStatuses = ['on_leave','off_sick','off_holiday','off_pattern','off_cs_rota'];
   if (offStatuses.includes(row.status)) return;
+
+  // Mobile keeps you logged in but does NOT stamp the official arrival — that
+  // happens on an office device. The day row already exists (pending), so the
+  // calendar isn't blank; it just waits for the desk login to set the time.
+  if (isMobile) return;
 
   // Compute lateness vs shift start (London wall-clock).
   const now = nowLondonHHMM();
