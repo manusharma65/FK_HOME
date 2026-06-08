@@ -144,9 +144,44 @@ async function getReviewerFor(userId) {
   }
 }
 
+// ---------- HR area owner ----------
+// The active hr-team member who owns a given hr_area:
+//   'recruitment_judgement' (reviews/probation/appraisal/policy) = Tanu (senior)
+//   'daily_ops'             (attendance/leave/regularisation/payroll/onboarding) = Deepanshi
+// excludeIds keeps us from routing a person's own review back to them.
+async function getHrOwnerForArea(area, excludeIds) {
+  if (!area) return null;
+  const ex = (excludeIds || []).filter(Boolean);
+  try {
+    const r = await db.query(
+      `SELECT ug.user_id
+         FROM user_groups ug
+         JOIN groups g ON g.id = ug.group_id
+         JOIN users u ON u.id = ug.user_id
+        WHERE g.slug = 'hr-team' AND g.deleted_at IS NULL
+          AND u.deleted_at IS NULL AND u.employment_status = 'active'
+          AND u.hr_area = $1
+          AND ($2::int[] IS NULL OR ug.user_id <> ALL($2::int[]))
+        ORDER BY ug.user_id ASC
+        LIMIT 1`,
+      [area, ex.length ? ex : null]
+    );
+    return r.rows.length > 0 ? r.rows[0].user_id : null;
+  } catch (e) {
+    console.error('[lifecycle.getHrOwnerForArea] failed:', e.message);
+    return null;
+  }
+}
+
 // ---------- Orchestrator routing ----------
-// First active user in 'hr-team' group, skip the reviewer + the user themselves.
-async function getOrchestratorFor(userId, reviewerUserId) {
+// Route by hr_area first (so reviews land on the judgement owner, not whoever
+// sorts first). Fall back to the first active hr-team member so nothing is ever
+// dropped when an area owner isn't set.
+async function getOrchestratorFor(userId, reviewerUserId, area) {
+  if (area) {
+    const owner = await getHrOwnerForArea(area, [userId, reviewerUserId]);
+    if (owner) return owner;
+  }
   try {
     const r = await db.query(
       `SELECT ug.user_id
@@ -221,7 +256,9 @@ async function generateReviewSchedule(userId, opts) {
   if (!reviewerUserId) {
     console.warn('[lifecycle] no reviewer for user', userId);
   }
-  const orchestratorUserId = await getOrchestratorFor(userId, reviewerUserId);
+  // Reviews (probation / appraisal) are judgement work → route to the
+  // recruitment_judgement owner (Tanu), falling back to any HR member.
+  const orchestratorUserId = await getOrchestratorFor(userId, reviewerUserId, 'recruitment_judgement');
 
   const schedule = buildScheduleForHireDate(user.hire_date);
   const settings = await getSettings();

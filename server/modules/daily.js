@@ -239,6 +239,23 @@ async function ledgerStanding(userId) {
 }
 
 // ---------------------------------------------------------------- scoreWeek
+// Shift a deadline forward over the owner's EXCUSED-off days (approved leave,
+// sick, rostered/holiday off) to the end of their first working day back. An
+// unauthorised absence (no_show) does NOT pause it, and a day they actually
+// attended ends the walk — so an item already overdue before they went off is
+// not retroactively excused. Reads finalised attendance_day statuses. Capped.
+async function effectiveDue(userId, dueAt) {
+  let d = new Date(dueAt);
+  for (let i = 0; i < 21; i++) {
+    const ds = d.toISOString().slice(0, 10);
+    const r = await db.query(`SELECT status FROM attendance_day WHERE user_id = $1 AND for_date = $2`, [userId, ds]);
+    const st = r.rows[0] ? r.rows[0].status : null;
+    if (st && OFF_STATUSES.includes(st)) { d = new Date(d.getTime() + 86400000); continue; }
+    break; // working / present / no_show / unknown → the deadline lands here
+  }
+  return d;
+}
+
 async function scoreWeek(userId, weekStart) {
   const weekEnd = addDays(weekStart, 7); // exclusive
   // Deadline-bearing items due this week
@@ -251,16 +268,25 @@ async function scoreWeek(userId, weekStart) {
   );
   const tally = { sla: { e: 0, n: 0 }, hiring: { e: 0, n: 0 }, accuracy: { e: 0, n: 0 } };
   let anyNotDone = false;
+  const nowMs = Date.now();
   for (const t of items.rows) {
     const p = pillarFor(t.category);
     const bucket = tally[p];
-    bucket.n += 1;
-    if (t.status === 'done' && t.completed_at && new Date(t.completed_at) <= new Date(t.due_at)) {
-      bucket.e += 1;                       // on time
-    } else if (t.status === 'done') {
-      bucket.e += LATE_CREDIT;             // late but done
+    // Pause the deadline across the owner's excused-off days (leave/sick).
+    const effDue = await effectiveDue(userId, t.due_at);
+    if (t.status === 'done') {
+      bucket.n += 1;
+      if (t.completed_at && new Date(t.completed_at) <= effDue) {
+        bucket.e += 1;                       // on time vs the effective (paused) deadline
+      } else {
+        bucket.e += LATE_CREDIT;             // late but done
+      }
     } else {
-      anyNotDone = true;                   // not done = 0
+      // Not done. If the effective deadline is still ahead (they're off and
+      // haven't had a working day back yet), it's paused — don't count it.
+      if (effDue.getTime() > nowMs) continue;
+      bucket.n += 1;
+      anyNotDone = true;                     // genuinely not done = 0
     }
   }
   const ratio = (b) => (b.n === 0 ? 1 : b.e / b.n);
@@ -393,7 +419,7 @@ router.get('/me', async (req, res) => {
 });
 
 // Direct reports' days (HR today) — owner/manager only
-router.get('/team', requirePermission('attendance.view.any'), async (req, res) => {
+router.get('/team', requirePermission('*'), async (req, res) => {
   try {
     const date = req.query.date || londonDate();
     // HR execs report to the owner; scope by HR department for now.

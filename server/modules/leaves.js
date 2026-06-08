@@ -31,7 +31,12 @@ async function countWorkingDays(userId, startStr, endStr) {
     try {
       const expected = await attendance.computeExpectedStatus(userId, ds);
       if (expected === 'pending') days++;
-    } catch (e) { /* if we can't classify a day, don't count it */ }
+    } catch (e) {
+      // Don't silently drop the day on a classification error — fall back to a
+      // standard weekday so a config gap can never block leave entirely.
+      const dow = cur.getUTCDay();
+      if (dow !== 0 && dow !== 6) days++;
+    }
     cur.setUTCDate(cur.getUTCDate() + 1);
   }
   return days;
@@ -47,6 +52,21 @@ function businessDaysBetween(startStr, endStr) {
     cur.setUTCDate(cur.getUTCDate() + 1);
   }
   return days;
+}
+
+// Explain why a single day isn't bookable, for a clearer message than the generic one.
+const OFF_REASON = {
+  on_leave: 'you already have approved leave that day',
+  off_sick: 'you\u2019re recorded as off sick that day',
+  off_holiday: 'that\u2019s a public holiday',
+  off_pattern: 'that\u2019s a non-working day on your shift pattern',
+  off_cs_rota: 'that\u2019s a non-working day on your rota',
+};
+async function dayOffReason(userId, dateStr) {
+  try {
+    const st = await attendance.computeExpectedStatus(userId, dateStr);
+    return OFF_REASON[st] || null;
+  } catch (e) { return null; }
 }
 
 // Helpers for notification text
@@ -104,12 +124,12 @@ router.post('/request', async (req, res) => {
   let totalDays;
   if (is_half_day && start_date === end_date) {
     const wd = await countWorkingDays(req.user.id, start_date, end_date);
-    if (wd <= 0) return res.status(400).json({ error: "That day isn't a working day for you, so it can't be a half day." });
+    if (wd <= 0) { const why = await dayOffReason(req.user.id, start_date); return res.status(400).json({ error: why ? ("That can\u2019t be a half day \u2014 " + why + ".") : "That day isn't a working day for you, so it can't be a half day." }); }
     totalDays = 0.5;
   } else {
     totalDays = await countWorkingDays(req.user.id, start_date, end_date);
   }
-  if (totalDays <= 0) return res.status(400).json({ error: "No working days in that range for you — check your weekend / rota pattern." });
+  if (totalDays <= 0) { const why = await dayOffReason(req.user.id, start_date); return res.status(400).json({ error: why ? ("No working days in that range \u2014 " + why + ".") : "No working days in that range for you — check your weekend / rota pattern." }); }
 
   try {
     // r0.31 — block overlapping requests. A pending or approved leave that
@@ -235,12 +255,12 @@ router.put('/:id', async (req, res) => {
     let totalDays;
     if (is_half_day && start_date === end_date) {
       const wd = await countWorkingDays(req.user.id, start_date, end_date);
-      if (wd <= 0) return res.status(400).json({ error: "That day isn't a working day for you, so it can't be a half day." });
+      if (wd <= 0) { const why = await dayOffReason(req.user.id, start_date); return res.status(400).json({ error: why ? ("That can\u2019t be a half day \u2014 " + why + ".") : "That day isn't a working day for you, so it can't be a half day." }); }
       totalDays = 0.5;
     } else {
       totalDays = await countWorkingDays(req.user.id, start_date, end_date);
     }
-    if (totalDays <= 0) return res.status(400).json({ error: "No working days in that range for you — check your weekend / rota pattern." });
+    if (totalDays <= 0) { const why = await dayOffReason(req.user.id, start_date); return res.status(400).json({ error: why ? ("No working days in that range \u2014 " + why + ".") : "No working days in that range for you — check your weekend / rota pattern." }); }
 
     // Overlap check — exclude this request itself.
     const clash = await db.query(

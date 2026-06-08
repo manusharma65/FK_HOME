@@ -68,6 +68,14 @@ window.fkModules['hr/payroll'] = {
   },
 
   async mount(rootEl) {
+    // Document-level listeners must be tracked and removed, or they stack on
+    // every revisit (that was the "preview opens 3 tabs" bug). Clear any left
+    // over from a prior mount, then register through onDoc so unmount can undo.
+    const MOD = window.fkModules['hr-payroll'];
+    if (MOD._docHandlers) MOD._docHandlers.forEach(([t, f]) => document.removeEventListener(t, f));
+    MOD._docHandlers = [];
+    const onDoc = (type, fn) => { document.addEventListener(type, fn); MOD._docHandlers.push([type, fn]); };
+
     const esc = (s) => String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -135,7 +143,7 @@ window.fkModules['hr/payroll'] = {
     }
 
     // r0.15.2 — Event delegation for View buttons. Works even after re-renders.
-    document.addEventListener('click', function payrollClickHandler(ev) {
+    onDoc('click', function payrollClickHandler(ev) {
       const btn = ev.target.closest && ev.target.closest('.pr-view');
       if (!btn) return;
       ev.preventDefault();
@@ -211,13 +219,13 @@ window.fkModules['hr/payroll'] = {
       wrap.style.display = 'none';
       wrap.innerHTML = '';
     }
-    document.addEventListener('click', function (ev) {
+    onDoc('click', function (ev) {
       // close on X button
       if (ev.target.closest && ev.target.closest('#prDrillClose')) { closeDrill(); return; }
       // close on backdrop click (only when clicking the wrap itself, not inner card)
       if (ev.target.id === 'prDrillWrap') closeDrill();
     });
-    document.addEventListener('keydown', function (ev) {
+    onDoc('keydown', function (ev) {
       if (ev.key === 'Escape') {
         const wrap = document.getElementById('prDrillWrap');
         if (wrap && wrap.style.display !== 'none') closeDrill();
@@ -488,7 +496,7 @@ window.fkModules['hr/payroll'] = {
       };
     }
 
-    document.addEventListener('click', async function payrollGenHandler(ev) {
+    onDoc('click', async function payrollGenHandler(ev) {
       const t = ev.target.closest && ev.target.closest(
         '.pr-run,.pr-rerun,.pr-publishready,.pr-publish,.pr-edit,.pr-revoke,.pr-pview');
       if (!t) return;
@@ -561,6 +569,8 @@ window.fkModules['hr/payroll'] = {
   },
 
   unmount() {
+    const MOD = window.fkModules['hr-payroll'];
+    if (MOD._docHandlers) { MOD._docHandlers.forEach(([t, f]) => document.removeEventListener(t, f)); MOD._docHandlers = []; }
     const wrap = document.getElementById('prDrillWrap');
     if (wrap) { wrap.style.display = 'none'; wrap.innerHTML = ''; }
   }

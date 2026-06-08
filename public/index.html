@@ -1550,8 +1550,9 @@ function render() {
     show('navHrReports'); anyHR = true;
   }
   if (can('attendance.view.any') || can('attendance.view.dept')) {
-    show('navHrToday'); show('navHrAttendance'); anyHR = true;
+    show('navHrAttendance'); anyHR = true;
   }
+  if (can('*')) { show('navHrToday'); anyHR = true; }
   if (can('profile.view.any')) {
     show('navHrInsights'); anyHR = true;
   }
