@@ -105,6 +105,7 @@ router.get('/dashboard', async (req, res) => {
         avatar_colour: req.user.avatar_colour,
         date_of_birth: req.user.date_of_birth,
         departments: req.user.departments,
+        group_slugs: req.user.group_slugs,
       },
       status: statusRes.rows[0] || { status: 'active', status_note: null, status_until: null },
       leaves: {

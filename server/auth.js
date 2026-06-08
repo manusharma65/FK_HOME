@@ -31,6 +31,7 @@ async function attachUserToRequest(req, res, next) {
 
     const perms = await loadUserPermissions(row.user_id);
     const depts = await loadUserDepartments(row.user_id);
+    const groupSlugs = await loadUserGroups(row.user_id);
 
     req.user = {
       id: row.user_id,
@@ -44,7 +45,9 @@ async function attachUserToRequest(req, res, next) {
       token,
       permissions: perms,
       departments: depts,
+      group_slugs: groupSlugs,
       can(slug) { return this.permissions.has(slug); },
+      inGroup(slug) { return (this.group_slugs || []).includes(slug); },
       inDepartment(slug) { return this.departments.some(d => d.slug === slug); },
       isManagerOf(slug) { return this.departments.some(d => d.slug === slug && (d.role === 'manager' || d.role === 'lead')); },
     };
@@ -79,6 +82,16 @@ async function loadUserPermissions(userId) {
     [userId]
   );
   return new Set(r.rows.map(x => x.slug));
+}
+
+async function loadUserGroups(userId) {
+  const r = await db.query(
+    `SELECT g.slug FROM user_groups ug
+       JOIN groups g ON g.id = ug.group_id
+      WHERE ug.user_id = $1 AND g.deleted_at IS NULL`,
+    [userId]
+  );
+  return r.rows.map(x => x.slug);
 }
 
 async function loadUserDepartments(userId) {

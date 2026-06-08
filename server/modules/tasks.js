@@ -115,11 +115,7 @@ router.get('/mine', async (req, res) => {
     // so they never see coverage items. Managers/leads oversee too, so coverage is
     // genuinely peer-to-peer: it surfaces only to a NON-manager member of the absent
     // person's department (e.g. Tanu <-> Deepanshi), never to the owner or a manager.
-    const ownerChk = await db.query(
-      `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
-        WHERE ug.user_id = $1 AND g.slug = 'owner' AND g.deleted_at IS NULL LIMIT 1`,
-      [req.user.id]);
-    const callerIsOwner = ownerChk.rows.length > 0;
+    const callerIsOwner = req.user.inGroup('owner');
 
     let covering = { rows: [] };
     if (!callerIsOwner) {
@@ -519,7 +515,7 @@ router.post('/:id/handover', async (req, res) => {
     if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const t = cur.rows[0];
 
-    const isOwner = req.user.can('*');
+    const isOwner = req.user.inGroup('owner');
     const isMine = t.assignee_user_id === req.user.id;
     let isManager = false;
     if (!isOwner && !isMine) {
