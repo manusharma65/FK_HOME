@@ -132,10 +132,12 @@ window.fkModules['my-growth'] = {
 
     function updateTitle() {
       const isSelf = viewingUserId === me_.id;
-      $('mgTitle').textContent = isSelf ? 'My Growth' : viewingName + "\u2019s growth";
-      $('mgSub').textContent = isSelf ? 'How you\u2019re doing, and how you\u2019re developing.' : 'Viewing as ' + (me_.display_name || me_.full_name) + '.';
+      const heroH1 = el.querySelector('.fk-page-hero h1');
+      if (heroH1) heroH1.textContent = isSelf ? 'My Growth' : (viewingName + '\u2019s growth');
+      const tEl = $('mgTitle'); if (tEl) tEl.textContent = isSelf ? 'My Growth' : viewingName + '\u2019s growth';
+      const sEl = $('mgSub'); if (sEl) sEl.textContent = isSelf ? 'How you\u2019re doing, and how you\u2019re developing.' : 'Viewing as ' + (me_.display_name || me_.full_name) + '.';
       // The "request a correction" note only makes sense for your own page.
-      $('mgFixLink').parentElement.style.display = isSelf ? '' : 'none';
+      const fx = $('mgFixLink'); if (fx && fx.parentElement) fx.parentElement.style.display = isSelf ? '' : 'none';
     }
 
     async function loadSwitcher() {
