@@ -28,4 +28,4 @@ jobs:
           node-version: '20'
       - run: npm install
       - run: npm install --no-save supertest
-      - run: node --test test/*.test.js
+      - run: node --test --test-concurrency=1 test/*.test.js
