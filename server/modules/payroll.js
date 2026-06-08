@@ -931,6 +931,7 @@ function renderPayslipHtml(p) {
 }
 
 module.exports = router;
+module.exports.rollupForUser = rollupForUser;
 // Exposed for tests / reuse (router stays the primary export).
 module.exports.inrInWords = inrInWords;
 module.exports.splitSalary = splitSalary;
