@@ -419,8 +419,15 @@ router.get('/me', async (req, res) => {
 });
 
 // Direct reports' days (HR today) — owner/manager only
-router.get('/team', requirePermission('*'), async (req, res) => {
+router.get('/team', async (req, res) => {
   try {
+    // Owner-only (the founder's daily scan). Identified by the 'owner' GROUP,
+    // not a '*' permission — the owner's permission set holds real slugs, not a wildcard.
+    const og = await db.query(
+      `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+        WHERE ug.user_id = $1 AND g.slug = 'owner' AND g.deleted_at IS NULL LIMIT 1`,
+      [req.user.id]);
+    if (og.rows.length === 0) return res.status(403).json({ error: 'Owner only' });
     const date = req.query.date || londonDate();
     // HR execs report to the owner; scope by HR department for now.
     const people = await db.query(

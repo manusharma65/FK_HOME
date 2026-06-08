@@ -111,37 +111,51 @@ router.get('/mine', async (req, res) => {
     // change the assignee here — it stays theirs until I actually take one (via
     // /cover), so anything I don't touch simply remains theirs and "reverts" for
     // free when they're back. Live: keys off the leave/sick records + attendance.
-    const covering = await db.query(
-      `SELECT ${TASK_SELECT}, t.assignee_user_id,
-              ow.display_name AS owner_display_name, ow.full_name AS owner_full_name,
-              CASE
-                WHEN EXISTS (SELECT 1 FROM sick_log sk WHERE sk.user_id = t.assignee_user_id AND sk.deleted_at IS NULL
-                             AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN sk.start_date AND COALESCE(sk.end_date, (now() AT TIME ZONE 'Europe/London')::date)) THEN 'off sick'
-                WHEN EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.user_id = t.assignee_user_id AND lr.status = 'approved'
-                             AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN lr.start_date AND lr.end_date) THEN 'on leave'
-                ELSE 'absent'
-              END AS cover_reason
-         FROM tasks t ${TASK_JOINS}
-         JOIN users ow ON ow.id = t.assignee_user_id
-        WHERE t.assignee_user_id <> $1
-          AND t.status IN ('open','due','overdue','in_progress')
-          AND t.kind <> 'recruitment'
-          AND (t.request_status IS NULL OR t.request_status = 'accepted')
-          AND (
-            EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.user_id = t.assignee_user_id AND lr.status = 'approved'
-                    AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN lr.start_date AND lr.end_date)
-            OR EXISTS (SELECT 1 FROM sick_log sk WHERE sk.user_id = t.assignee_user_id AND sk.deleted_at IS NULL
-                       AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN sk.start_date AND COALESCE(sk.end_date, (now() AT TIME ZONE 'Europe/London')::date))
-            OR EXISTS (SELECT 1 FROM attendance_day ad WHERE ad.user_id = t.assignee_user_id
-                       AND ad.for_date = (now() AT TIME ZONE 'Europe/London')::date AND ad.status = 'no_show')
-          )
-          AND EXISTS (  -- I share a department with the absent owner (teammates only)
-            SELECT 1 FROM user_department_memberships m1
-              JOIN user_department_memberships m2 ON m2.department_id = m1.department_id
-             WHERE m1.user_id = $1 AND m2.user_id = t.assignee_user_id
-               AND m1.deleted_at IS NULL AND m2.deleted_at IS NULL )
-        ORDER BY CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1 ELSE 2 END, t.due_at ASC NULLS LAST`,
+    // The owner (founder) oversees the company — they are never a peer coverer,
+    // so they never see coverage items. Managers/leads oversee too, so coverage is
+    // genuinely peer-to-peer: it surfaces only to a NON-manager member of the absent
+    // person's department (e.g. Tanu <-> Deepanshi), never to the owner or a manager.
+    const ownerChk = await db.query(
+      `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+        WHERE ug.user_id = $1 AND g.slug = 'owner' AND g.deleted_at IS NULL LIMIT 1`,
       [req.user.id]);
+    const callerIsOwner = ownerChk.rows.length > 0;
+
+    let covering = { rows: [] };
+    if (!callerIsOwner) {
+      covering = await db.query(
+        `SELECT ${TASK_SELECT}, t.assignee_user_id,
+                ow.display_name AS owner_display_name, ow.full_name AS owner_full_name,
+                CASE
+                  WHEN EXISTS (SELECT 1 FROM sick_log sk WHERE sk.user_id = t.assignee_user_id AND sk.deleted_at IS NULL
+                               AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN sk.start_date AND COALESCE(sk.end_date, (now() AT TIME ZONE 'Europe/London')::date)) THEN 'off sick'
+                  WHEN EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.user_id = t.assignee_user_id AND lr.status = 'approved'
+                               AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN lr.start_date AND lr.end_date) THEN 'on leave'
+                  ELSE 'absent'
+                END AS cover_reason
+           FROM tasks t ${TASK_JOINS}
+           JOIN users ow ON ow.id = t.assignee_user_id
+          WHERE t.assignee_user_id <> $1
+            AND t.status IN ('open','due','overdue','in_progress')
+            AND t.kind <> 'recruitment'
+            AND (t.request_status IS NULL OR t.request_status = 'accepted')
+            AND (
+              EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.user_id = t.assignee_user_id AND lr.status = 'approved'
+                      AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN lr.start_date AND lr.end_date)
+              OR EXISTS (SELECT 1 FROM sick_log sk WHERE sk.user_id = t.assignee_user_id AND sk.deleted_at IS NULL
+                         AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN sk.start_date AND COALESCE(sk.end_date, (now() AT TIME ZONE 'Europe/London')::date))
+              OR EXISTS (SELECT 1 FROM attendance_day ad WHERE ad.user_id = t.assignee_user_id
+                         AND ad.for_date = (now() AT TIME ZONE 'Europe/London')::date AND ad.status = 'no_show')
+            )
+            AND EXISTS (  -- I'm a NON-manager member of the absent person's department (genuine peer)
+              SELECT 1 FROM user_department_memberships m1
+                JOIN user_department_memberships m2 ON m2.department_id = m1.department_id
+               WHERE m1.user_id = $1 AND m2.user_id = t.assignee_user_id
+                 AND (m1.role IS NULL OR m1.role NOT IN ('manager','lead'))
+                 AND m1.deleted_at IS NULL AND m2.deleted_at IS NULL )
+          ORDER BY CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1 ELSE 2 END, t.due_at ASC NULLS LAST`,
+        [req.user.id]);
+    }
 
     res.json({
       groups,
