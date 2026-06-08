@@ -34,7 +34,7 @@
 const express = require('express');
 const { db } = require('../db');
 const { requireAuth, logAudit } = require('../auth');
-const { notifyEvent } = require('../notify');
+const { notify, notifyEvent } = require('../notify');
 const lifecycle = require('./lifecycle');
 
 const router = express.Router();
@@ -106,10 +106,48 @@ router.get('/mine', async (req, res) => {
           AND t.request_status IN ('awaiting','declined')
         ORDER BY t.updated_at DESC`, [req.user.id]);
 
+    // Coverage: open tasks owned by a teammate who is OFF today (approved leave,
+    // sick, or unauthorised no-show), surfaced so I can pick them up. We do NOT
+    // change the assignee here — it stays theirs until I actually take one (via
+    // /cover), so anything I don't touch simply remains theirs and "reverts" for
+    // free when they're back. Live: keys off the leave/sick records + attendance.
+    const covering = await db.query(
+      `SELECT ${TASK_SELECT}, t.assignee_user_id,
+              ow.display_name AS owner_display_name, ow.full_name AS owner_full_name,
+              CASE
+                WHEN EXISTS (SELECT 1 FROM sick_log sk WHERE sk.user_id = t.assignee_user_id AND sk.deleted_at IS NULL
+                             AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN sk.start_date AND COALESCE(sk.end_date, (now() AT TIME ZONE 'Europe/London')::date)) THEN 'off sick'
+                WHEN EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.user_id = t.assignee_user_id AND lr.status = 'approved'
+                             AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN lr.start_date AND lr.end_date) THEN 'on leave'
+                ELSE 'absent'
+              END AS cover_reason
+         FROM tasks t ${TASK_JOINS}
+         JOIN users ow ON ow.id = t.assignee_user_id
+        WHERE t.assignee_user_id <> $1
+          AND t.status IN ('open','due','overdue','in_progress')
+          AND t.kind <> 'recruitment'
+          AND (t.request_status IS NULL OR t.request_status = 'accepted')
+          AND (
+            EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.user_id = t.assignee_user_id AND lr.status = 'approved'
+                    AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN lr.start_date AND lr.end_date)
+            OR EXISTS (SELECT 1 FROM sick_log sk WHERE sk.user_id = t.assignee_user_id AND sk.deleted_at IS NULL
+                       AND (now() AT TIME ZONE 'Europe/London')::date BETWEEN sk.start_date AND COALESCE(sk.end_date, (now() AT TIME ZONE 'Europe/London')::date))
+            OR EXISTS (SELECT 1 FROM attendance_day ad WHERE ad.user_id = t.assignee_user_id
+                       AND ad.for_date = (now() AT TIME ZONE 'Europe/London')::date AND ad.status = 'no_show')
+          )
+          AND EXISTS (  -- I share a department with the absent owner (teammates only)
+            SELECT 1 FROM user_department_memberships m1
+              JOIN user_department_memberships m2 ON m2.department_id = m1.department_id
+             WHERE m1.user_id = $1 AND m2.user_id = t.assignee_user_id
+               AND m1.deleted_at IS NULL AND m2.deleted_at IS NULL )
+        ORDER BY CASE t.status WHEN 'overdue' THEN 0 WHEN 'due' THEN 1 ELSE 2 END, t.due_at ASC NULLS LAST`,
+      [req.user.id]);
+
     res.json({
       groups,
       incoming_requests: incoming.rows,
       my_requests: mine.rows,
+      covering: covering.rows,
       total: r.rows.length + incoming.rows.length,
     });
   } catch (e) {
@@ -451,6 +489,59 @@ router.post('/:id/cover', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('[tasks/cover] failed:', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/tasks/:id/handover ----------
+// Hand an existing task to a colleague (deliberate reassign, no accept step).
+// Your own task → a teammate; owner/manager → within a dept they run. Doer scores.
+router.post('/:id/handover', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const toUserId = parseInt((req.body || {}).user_id, 10);
+  if (!Number.isFinite(id) || !Number.isFinite(toUserId)) return res.status(400).json({ error: 'Bad input' });
+  try {
+    const cur = await db.query(`SELECT * FROM tasks WHERE id=$1`, [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const t = cur.rows[0];
+
+    const isOwner = req.user.can('*');
+    const isMine = t.assignee_user_id === req.user.id;
+    let isManager = false;
+    if (!isOwner && !isMine) {
+      const managed = await deptsManagedBy(req.user.id);
+      isManager = !!t.department_id && managed.includes(t.department_id);
+    }
+    if (!isOwner && !isMine && !isManager) return res.status(403).json({ error: 'Not yours to hand over' });
+
+    const tgt = await db.query(
+      `SELECT id, display_name, full_name FROM users WHERE id=$1 AND deleted_at IS NULL AND employment_status='active'`, [toUserId]);
+    if (tgt.rows.length === 0) return res.status(400).json({ error: 'Unknown teammate' });
+    if (toUserId === t.assignee_user_id) return res.json({ ok: true }); // already theirs
+
+    // Non-owners can only hand to a teammate (shared department).
+    if (!isOwner) {
+      const shared = await db.query(
+        `SELECT 1 FROM user_department_memberships m1
+           JOIN user_department_memberships m2 ON m2.department_id = m1.department_id
+          WHERE m1.user_id = $1 AND m2.user_id = $2 AND m1.deleted_at IS NULL AND m2.deleted_at IS NULL LIMIT 1`,
+        [req.user.id, toUserId]);
+      if (shared.rows.length === 0) return res.status(403).json({ error: 'Can only hand over to a teammate' });
+    }
+
+    const hist = Array.isArray(t.reassign_history) ? t.reassign_history : [];
+    hist.push({ at: new Date().toISOString(), by: req.user.id, from: t.assignee_user_id, to: toUserId, act: 'handed_over' });
+    await db.query(
+      `UPDATE tasks SET assignee_user_id=$1, assigned_by_user_id=COALESCE(assigned_by_user_id,$2),
+              reassign_history=$3, updated_at=NOW() WHERE id=$4`,
+      [toUserId, req.user.id, JSON.stringify(hist), id]);
+    await notify({ userIds: [toUserId], type: 'task_handover', title: 'A task was handed to you',
+      body: t.title, action_url: '#my-work', related_user_id: req.user.id });
+    await logAudit({ req, module: 'tasks', action: 'task.handed_over', target_type: 'task', target_id: id,
+      after: { from: t.assignee_user_id, to: toUserId } });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[tasks/handover] failed:', e.message);
     res.status(500).json({ error: 'Failed' });
   }
 });

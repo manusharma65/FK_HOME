@@ -157,6 +157,7 @@ window.fkModules['my-work'] = {
                           recruitment:'#993C1D', review:'#534AB7', onboarding:'#534AB7', probation:'#534AB7' };
 
     let editingId = null;
+    let assignablePeople = [];
 
     function actionsFor(t) {
       // Quick Start/Done on the row, plus a proper Open button for the full card
@@ -167,6 +168,7 @@ window.fkModules['my-work'] = {
       } else {
         html += '<button class="mw-act go" data-act="start" data-id="'+t.id+'">Start</button>';
       }
+      html += '<button class="mw-act" data-handover="'+t.id+'">Hand over</button>';
       html += '<button class="mw-act" data-open="'+t.id+'">Open</button>';
       return html;
     }
@@ -187,6 +189,19 @@ window.fkModules['my-work'] = {
         '<i class="ti '+icon+' ico" style="color:'+colour+'"></i>' +
         '<div class="mid"><div class="t1">'+esc(t.title)+'</div>'+(sub?'<div class="t2">'+sub+'</div>':'')+'</div>' +
         pillHtml + actionsFor(t) + '</div>';
+    }
+
+    function coveringHtml(t) {
+      const owner = t.owner_display_name || t.owner_full_name || 'a colleague';
+      const reason = t.cover_reason || 'off';
+      const isOverdue = t.status === 'overdue';
+      return '<div class="mw-row" data-row="'+t.id+'" data-title="'+esc(t.title)+'" data-cat="'+esc(t.category||'')+'">' +
+        '<i class="ti ti-users ico" style="color:#B5701E"></i>' +
+        '<div class="mid"><div class="t1">'+esc(t.title)+'</div>' +
+          '<div class="t2">Covering for '+esc(owner)+' \u00b7 '+esc(reason)+'</div></div>' +
+        (isOverdue ? '<span class="pill overdue">overdue</span>' : '') +
+        '<button class="mw-act go" data-cover="'+t.id+'">I\u2019ll do it</button>' +
+        '<button class="mw-act" data-open="'+t.id+'">Open</button></div>';
     }
 
     function incomingHtml(t) {
@@ -233,6 +248,7 @@ window.fkModules['my-work'] = {
         const r = await fetch('/api/tasks/assignable', { credentials:'include' });
         if (!r.ok) return;
         const d = await r.json();
+        assignablePeople = d.people || [];
         const sel = $('mwAssignee');
         let html = '<option value="">Myself</option>';
         for (const p of (d.people||[])) {
@@ -277,11 +293,13 @@ window.fkModules['my-work'] = {
         $('mwReqIncoming').innerHTML = incoming.length
           ? '<div class="mw-glabel"><span>Requests for you</span></div>' + incoming.map(incomingHtml).join('') : '';
 
+        const covering = data.covering || [];
         const totalMain = (groups.needs_action||[]).length+(groups.recurring||[]).length+(groups.in_progress||[]).length;
-        if (totalMain === 0 && incoming.length === 0) {
+        if (totalMain === 0 && incoming.length === 0 && covering.length === 0) {
           $('mwBody').innerHTML='<div class="mw-empty">Nothing on your plate right now. Use \u201cAdd task\u201d to log work.</div>';
         } else {
           let html='';
+          if (covering.length) html += '<div class="mw-glabel"><span>Covering while they\u2019re off</span></div>'+covering.map(coveringHtml).join('');
           for (const [k,label] of GROUPS) {
             const rows=groups[k]||[];
             if(!rows.length) continue;
@@ -358,6 +376,16 @@ window.fkModules['my-work'] = {
       const editBtn=e.target.closest('[data-edit]');
       const cancelBtn=e.target.closest('[data-cancel]');
       if (openBtn) { openCard(openBtn.getAttribute('data-open')); return; }
+      const coverBtn=e.target.closest('[data-cover]');
+      if (coverBtn) {
+        const id=coverBtn.getAttribute('data-cover'); coverBtn.disabled=true;
+        try { const r=await fetch('/api/tasks/'+id+'/cover',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include'});
+          if(!r.ok){ alert('Could not take this on'); coverBtn.disabled=false; return; } await load(); await loadDone();
+        } catch(e2){ alert('Network error'); coverBtn.disabled=false; }
+        return;
+      }
+      const handoverBtn=e.target.closest('[data-handover]');
+      if (handoverBtn) { openHandover(handoverBtn.getAttribute('data-handover'), handoverBtn); return; }
       // clicking the row body (not a button) also opens the card
       if (rowEl && !startBtn && !e.target.closest('button')) { openCard(rowEl.getAttribute('data-row')); return; }
       const declineBtn=e.target.closest('[data-declineassign]');
@@ -390,6 +418,41 @@ window.fkModules['my-work'] = {
         } catch(e2){ alert('Network error'); }
       }
     }
+    function closeHandover() {
+      const pop = document.getElementById('mwHandoverPop');
+      if (pop) pop.remove();
+      document.removeEventListener('click', outsideHandover);
+    }
+    function outsideHandover(ev) {
+      const pop = document.getElementById('mwHandoverPop');
+      if (!pop) { document.removeEventListener('click', outsideHandover); return; }
+      if (!pop.contains(ev.target)) closeHandover();
+    }
+    function openHandover(taskId, anchorEl) {
+      closeHandover();
+      if (!assignablePeople.length) { alert('No teammates available to hand over to.'); return; }
+      const pop = document.createElement('div');
+      pop.id = 'mwHandoverPop';
+      pop.style.cssText = 'position:absolute;z-index:1000;background:var(--surface,#fff);border:1px solid var(--line,#e5e5e5);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.14);padding:6px;min-width:210px;max-height:280px;overflow:auto';
+      pop.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:6px 8px">Hand over to\u2026</div>' +
+        assignablePeople.map(p => '<button class="mw-act" style="display:block;width:100%;text-align:left;margin:2px 0" data-hoto="'+p.id+'" data-task="'+taskId+'">'+esc(p.display_name||p.full_name)+(p.dept_name?' <span style="color:var(--muted)">('+esc(p.dept_name)+')</span>':'')+'</button>').join('');
+      document.body.appendChild(pop);
+      const rect = anchorEl.getBoundingClientRect();
+      pop.style.top = (window.scrollY + rect.bottom + 4) + 'px';
+      pop.style.left = (window.scrollX + Math.max(8, rect.left)) + 'px';
+      pop.addEventListener('click', async (ev) => {
+        const b = ev.target.closest('[data-hoto]'); if (!b) return;
+        const to = parseInt(b.getAttribute('data-hoto'), 10); const tid = b.getAttribute('data-task');
+        b.disabled = true;
+        try {
+          const r = await fetch('/api/tasks/'+tid+'/handover', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ user_id: to }) });
+          if (!r.ok) { const e = await r.json().catch(()=>({})); alert(e.error || 'Could not hand over'); b.disabled = false; return; }
+          closeHandover(); await load();
+        } catch (e2) { alert('Network error'); b.disabled = false; }
+      });
+      setTimeout(() => document.addEventListener('click', outsideHandover), 0);
+    }
+
     $('mwBody').addEventListener('click', rowAction);
     $('mwDoneList').addEventListener('click', rowAction);
 

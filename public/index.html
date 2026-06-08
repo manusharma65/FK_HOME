@@ -791,10 +791,7 @@
         <span>HR today</span>
         <span class="count" id="hrTodayCount" style="display:none">0</span>
       </div>
-      <div class="nav-item" id="navHrQueue" data-route="#hr-queue" style="display:none" onclick="location.hash='#hr-queue'">
-        <i class="ti ti-inbox"></i>
-        <span>HR Queue</span>
-      </div>
+      <!-- HR Queue retired (r0.75): HR work now lives in My Work + Approvals -->
       <div class="nav-item" id="navRecruitment" data-route="#recruitment" style="display:none" onclick="location.hash='#recruitment'">
         <i class="ti ti-user-search"></i>
         <span>Recruitment</span>
@@ -1445,7 +1442,6 @@
 </script>
 <script src="/modules/leaves-time.js"></script>
 <script src="/modules/my-work.js"></script>
-<script src="/modules/hr-queue.js"></script>
 <script src="/modules/recruitment.js"></script>
 <script src="/modules/team-work.js"></script>
 <script>
@@ -1527,12 +1523,8 @@ function render() {
 
   // HR section — show items based on permissions
   let anyHR = false;
-  // HR Queue — the shared HR working queue (hr-team members + owner)
-  if (can('*') || can('leaves.approve.any') || can('leaves.approve.dept')
-      || can('attendance.regularise.approve.any') || can('attendance.regularise.approve.dept')
-      || can('profile.view.any')) {
-    show('navHrQueue'); anyHR = true;
-  }
+  // HR Queue retired (r0.75) — work runs through My Work (auto-routed + coverage)
+  // and the Approvals page. Nav item and module removed.
   // Recruitment — HR team + owner
   if (can('*') || can('profile.view.any') || can('admin.users.edit') || can('admin.users.view')) {
     show('navRecruitment'); anyHR = true;
