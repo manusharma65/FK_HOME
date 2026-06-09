@@ -114,4 +114,51 @@ router.get('/test', async (req, res) => {
     </body></html>`);
 });
 
+// Send a plain-text email AS the given mailbox. The real composer will build on
+// this; for now it powers the send proof. Returns the sent message id.
+async function sendPlain(fromEmail, to, subject, text) {
+  const gmail = gmailFor(fromEmail);
+  const mime = [
+    `From: ${fromEmail}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    '',
+    text,
+  ].join('\r\n');
+  const raw = Buffer.from(mime).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const r = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+  return r.data.id;
+}
+
+const pageWrap = (inner) => `<!doctype html><html><head><meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1"><title>FK Home — Send test</title></head>
+  <body style="font-family:system-ui,sans-serif;max-width:680px;margin:30px auto;padding:0 16px;color:#2E2620;background:#FAF4EA">
+  <h1 style="font-size:22px">Mail send test</h1>${inner}</body></html>`;
+
+// Send proof — emails YOU, from YOU. Self-contained, spams nobody.
+// Visiting the page explains it; the actual send only fires with ?go=1.
+router.get('/sendtest', async (req, res) => {
+  const me = req.user.email;
+  const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  if (req.query.go !== '1') {
+    return res.send(pageWrap(`
+      <p style="font-size:14px">This sends one test email <strong>to yourself</strong> (${esc(me)}), from yourself, through FK Home. Nobody else is emailed.</p>
+      <p><a href="/api/mail/sendtest?go=1" style="display:inline-block;background:#C2613B;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600">Send the test email</a></p>`));
+  }
+  try {
+    const id = await sendPlain(me, me, 'FK Home — send test',
+      'This message was sent from FK Home through the Gmail API at ' + new Date().toISOString() +
+      '. If it reached your inbox, sending works end to end.');
+    res.send(pageWrap(`
+      <div style="background:#E3F0DA;color:#2F6B1E;padding:12px 14px;border-radius:8px;font-weight:600">✓ Sent. Check your inbox (and your Sent folder) for "FK Home — send test".</div>
+      <p style="font-size:12px;color:#9A8B79;margin-top:12px">Message id: ${esc(id)}</p>`));
+  } catch (e) {
+    res.send(pageWrap(`
+      <div style="background:#F8DCD6;color:#9A2A1E;padding:12px 14px;border-radius:8px"><strong>Send failed.</strong><br>${esc(e.message)}</div>`));
+  }
+});
+
 module.exports = router;
