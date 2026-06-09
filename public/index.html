@@ -119,6 +119,20 @@
   /* ---------- SIDEBAR ---------- */
   .sidebar { background: var(--nav); padding: 18px 12px; }
   .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 18px; }
+  /* r0.88 — interim: slim the main nav to icons while in Mail (full icon-rail shell is a later, separate change) */
+  .app.mail-focus { grid-template-columns: 64px 1fr; }
+  .app.mail-focus .sidebar { padding: 14px 7px; overflow: hidden; }
+  .app.mail-focus .sidebar .brand { justify-content: center; padding: 4px 0 14px; }
+  .app.mail-focus .sidebar .brand img { height: 30px; }
+  .app.mail-focus .sidebar .user-pill { justify-content: center; padding: 6px; }
+  .app.mail-focus .sidebar .user-pill > div:not(.avatar) { display: none; }
+  .app.mail-focus .sidebar .late-btn { justify-content: center; padding: 10px 0; }
+  .app.mail-focus .sidebar .late-btn span { display: none; }
+  .app.mail-focus .sidebar .nav-item { justify-content: center; padding: 11px 0; }
+  .app.mail-focus .sidebar .nav-item span { display: none; }
+  .app.mail-focus .sidebar .nav-item .count { display: none; }
+  .app.mail-focus .sidebar .navgrp { display: none; }
+  .app.mail-focus .sidebar .sidebar-break { display: none; }
   .brand-mark {
     width: 28px; height: 28px; background: var(--amber); border-radius: 7px;
     color: var(--nav); font-weight: 600; font-size: 15px;

@@ -117,6 +117,8 @@ window.fkModules['mail'] = {
     #mail-mod .aisum .x{font-size:14.5px;color:#39335A;margin-top:2px;line-height:1.5}
     #mail-mod .aisum .ai-sumbtn{margin-top:6px;background:#6F57A0;color:#fff;border:none;border-radius:8px;padding:7px 13px;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer} #mail-mod .aisum .ai-sumbtn:hover{background:#4A3A78} #mail-mod .aisum .ai-sumbtn:disabled{opacity:.6}
     #mail-mod .mr-body{font-size:15px;line-height:1.74;margin:16px 0 6px;white-space:pre-wrap;word-wrap:break-word} #mail-mod .mr-body.html{white-space:normal} #mail-mod .mr-body.html img{max-width:100%;height:auto}
+    #mail-mod .mailframe{width:100%;border:none;background:#fff;border-radius:12px;min-height:120px;margin:16px 0 6px;display:block}
+    #mail-mod .navtog{width:34px;height:34px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;flex:none;margin-right:10px} #mail-mod .navtog:hover{background:#fff}
     #mail-mod .body-acts{display:flex;gap:10px;margin:18px 0 4px}
     #mail-mod .composer{margin:8px 0 0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--surface);display:none} #mail-mod .composer.show{display:block}
     #mail-mod .cm-top{padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted);background:var(--canvas,#F4EFE7)} #mail-mod .cm-top b{color:#2B2017;font-weight:600}
@@ -154,7 +156,7 @@ window.fkModules['mail'] = {
       </div>
     </aside>
     <section class="list">
-      <div class="lhd"><button class="expand" id="expandBtn" title="Show menu"><i class="ti ti-layout-sidebar-left-expand"></i></button><div><h2 id="listTitle">Inbox</h2><div class="sub" id="mailSub">Loading…</div></div></div>
+      <div class="lhd"><button class="navtog" id="navToggle" title="Show / hide the full FK menu"><i class="ti ti-menu-2"></i></button><button class="expand" id="expandBtn" title="Show mailboxes"><i class="ti ti-layout-sidebar-left-expand"></i></button><div><h2 id="listTitle">Inbox</h2><div class="sub" id="mailSub">Loading…</div></div></div>
       <div class="srch"><i class="ti ti-search"></i><input id="srch" placeholder="Search your mail"></div>
       <div class="mbar"><label class="selall"><input type="checkbox" id="selAll"> Select all</label>
         <div class="barbtns" id="barBtns"><button class="bb" id="bArchive"><i class="ti ti-archive" style="font-size:15px"></i> Archive</button><button class="bb danger" id="bTrash"><i class="ti ti-trash" style="font-size:15px"></i> Delete</button></div>
@@ -191,6 +193,23 @@ window.fkModules['mail'] = {
     }));
     $('#collapseBtn').addEventListener('click', () => mwrap.classList.add('collapsed'));
     $('#expandBtn').addEventListener('click', () => mwrap.classList.remove('collapsed'));
+
+    // Slim the main FK sidebar to icons while in Mail so the two nav columns don't
+    // fight for space. Restores the full sidebar when you leave Mail. Toggle to override.
+    const appEl = document.querySelector('.app');
+    if (appEl) {
+      appEl.classList.add('mail-focus');
+      if (window.__fkMailFocusOff) window.removeEventListener('hashchange', window.__fkMailFocusOff);
+      window.__fkMailFocusOff = function () {
+        if ((location.hash || '').indexOf('mail') === -1) {
+          appEl.classList.remove('mail-focus');
+          window.removeEventListener('hashchange', window.__fkMailFocusOff);
+          window.__fkMailFocusOff = null;
+        }
+      };
+      window.addEventListener('hashchange', window.__fkMailFocusOff);
+      $('#navToggle').addEventListener('click', () => appEl.classList.toggle('mail-focus'));
+    }
     $('#mboxsw').addEventListener('click', (e) => { e.stopPropagation(); $('#swmenu').classList.toggle('show'); });
     document.addEventListener('click', () => { const s = $('#swmenu'); if (s) s.classList.remove('show'); });
 
@@ -296,7 +315,10 @@ window.fkModules['mail'] = {
         if (messages.find(x => x.id === id)) messages.find(x => x.id === id).unread = false;
         const f = parseFrom(m.from);
         const plain = m.text || String(m.html || '').replace(/<[^>]+>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
-        const bodyHtml = m.text ? '<div class="mr-body">' + esc(m.text) + '</div>' : '<div class="mr-body html">' + String(m.html || '').replace(/<script[\s\S]*?<\/script>/gi, '') + '</div>';
+        const hasHtml = !!(m.html && m.html.trim());
+        const bodyHtml = hasHtml
+          ? '<iframe class="mailframe" id="mailFrame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="Email"></iframe>'
+          : '<div class="mr-body">' + esc(m.text || '(no content)') + '</div>';
         const initials = (f.name || f.email).slice(0, 2).toUpperCase();
         readEl.innerHTML =
           '<div class="mr-pad"><div class="mr-top"><div class="mr-h">' + esc(m.subject) + '</div>' +
@@ -305,11 +327,12 @@ window.fkModules['mail'] = {
               '<button class="ib danger" id="aDel" title="Delete"><i class="ti ti-trash"></i></button>' +
               '<div class="labmenu" id="labMenu"></div></div></div>' +
             '<div class="chips" id="chips"></div>' +
-            '<div id="noteSlot"></div>' +
             '<div class="mr-from"><div class="mr-av">' + esc(initials) + '</div><div><div class="mr-nm">' + esc(f.name) + '</div><div class="mr-em">' + esc(f.email) + '</div></div><div class="mr-when">' + esc(shortDate(m.date)) + '</div></div>' +
             '<div class="aisum" id="aiSum"></div>' + bodyHtml +
+            '<div id="noteSlot"></div>' +
             '<div class="body-acts"><button class="btn btn-send" id="bReply"><i class="ti ti-arrow-back-up" style="font-size:16px"></i> Reply</button>' +
-              '<button class="btn btn-ghost" id="bFwd"><i class="ti ti-arrow-forward-up" style="font-size:16px"></i> Forward</button></div>' +
+              '<button class="btn btn-ghost" id="bFwd"><i class="ti ti-arrow-forward-up" style="font-size:16px"></i> Forward</button>' +
+              '<button class="btn btn-ghost" id="bNote"><i class="ti ti-note" style="font-size:16px"></i> Note</button></div>' +
             '<div class="composer" id="composer"><div class="cm-top" id="cmTopLabel">Reply to <b>' + esc(f.name) + '</b></div>' +
               '<div class="ai-row" id="aiRow"><button class="ai-draft" id="aiDraftBtn"><i class="ti ti-sparkles" style="font-size:15px"></i> AI draft</button><input class="ai-instr" id="aiInstr" placeholder="…or tell the AI what to say"></div>' +
               '<input class="cm-to" id="cmTo" placeholder="Forward to (email address)">' +
@@ -319,6 +342,18 @@ window.fkModules['mail'] = {
             '</div></div>';
 
         renderChips(id); renderNote(id, plain);
+
+        if (hasHtml) {
+          const fr = $('#mailFrame');
+          if (fr) {
+            const safe = String(m.html || '').replace(/<script[\s\S]*?<\/script>/gi, '');
+            fr.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank">' +
+              '<style>body{margin:0;padding:2px 2px 6px;font-family:-apple-system,system-ui,sans-serif;color:#2B2017;font-size:15px;line-height:1.6;word-wrap:break-word}img{max-width:100%;height:auto}a{color:#9A4A2B}table{max-width:100%}</style>' +
+              '</head><body>' + safe + '</body></html>';
+            const fit = () => { try { fr.style.height = (fr.contentDocument.documentElement.scrollHeight + 12) + 'px'; } catch (e) {} };
+            fr.addEventListener('load', () => { fit(); setTimeout(fit, 400); setTimeout(fit, 1200); });
+          }
+        }
 
         // labels menu
         const labMenu = $('#labMenu');
@@ -348,6 +383,7 @@ window.fkModules['mail'] = {
         const showForward = () => { mode = 'forward'; cmTo.classList.add('show'); aiRow.classList.add('hide'); cmTo.value = ''; cmTopLabel.innerHTML = 'Forward this message'; cmBody.value = '\n\n---------- Forwarded message ----------\nFrom: ' + (m.from || '') + '\nDate: ' + (m.date || '') + '\nSubject: ' + (m.subject || '') + '\n\n' + plain; openComposer(); };
         $('#bReply').addEventListener('click', showReply);
         $('#bFwd').addEventListener('click', showForward);
+        $('#bNote').addEventListener('click', () => editNote(id, notesMap[id] || ''));
         $('#cmCancel').addEventListener('click', () => composer.classList.remove('show'));
 
         $('#aiDraftBtn').addEventListener('click', async () => {
@@ -403,8 +439,7 @@ window.fkModules['mail'] = {
         root.querySelector('#noteEdit').addEventListener('click', () => editNote(id, note));
         root.querySelector('#noteDel').addEventListener('click', async () => { try { await j('/api/mail/note/' + id, { method: 'DELETE' }); delete notesMap[id]; renderNote(id); renderRows(); toast('Note deleted'); } catch (e) { toast(e.message); } });
       } else {
-        slot.innerHTML = '<button class="addnote" id="noteAdd"><i class="ti ti-note"></i> Add a private note</button>';
-        root.querySelector('#noteAdd').addEventListener('click', () => editNote(id, ''));
+        slot.innerHTML = '';
       }
     }
     function editNote(id, current) {
