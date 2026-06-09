@@ -1,28 +1,58 @@
-# r0.81 — Mail send proof (+ version label fix)
+# r0.81 — Team review (owner-only combined view)
 
-Branch: **r10-test**. Adds sending to the mail engine and proves it safely.
-Also bumps the stale boot label (logs said r0.77; now r0.81).
+Branch: **r10-test** (FK Home).
+(Note: r0.80 = the Gmail read-only mail engine from a separate chat. This is a
+different, frontend-only ship — no file overlap with the mail work.)
+
+## What & why
+You were flipping between two pages — **HR today** (live daily scan) and
+**Reports** (30-day review queue). This adds ONE owner-only page, **Team review**,
+with two tabs:
+  * **Today**     — the live scan (was HR today)
+  * **To review** — the 30-day Good / Satisfactory / Not-satisfactory queue (was Reports)
+
+It REUSES the existing hr/today and hr/reports modules unchanged — no logic was
+rewritten or duplicated, so nothing about how they work can drift.
+
+## Access (important)
+- **You (owner):** see only **Team review**. HR today and Reports are hidden from
+  your nav (folded into the tabs).
+- **Managers / HR:** unchanged — they keep their **Reports** page exactly as
+  before (team-scoped review). They never had HR today. Nothing is removed from
+  them.
 
 ## Files
-- server/modules/mail.js — adds sendPlain() + GET /api/mail/sendtest (self-send proof)
-- server.js — VERSION label r0.77 → r0.81
+```
+public/modules/team-review.js   ← new combined module (tabs, reuses both views)
+public/index.html               ← nav: add owner-only "Team review"; hide Reports
+                                   from the owner only (managers keep it); load script
+R0_81_DEPLOY_NOTES.md
+```
+No server changes. No database changes. No package.json change.
 
-No package changes (googleapis already installed). No DB/variable changes.
+## Verified
+- Module syntax OK; combined module renders both tabs, mounts Today eagerly and
+  To-review lazily on click (jsdom smoke test passed).
+- Route `#hr/team-review` resolves via the existing loader (same mechanism as
+  `hr/insights`), so no route whitelist change is needed.
 
-## Deploy (branch-guarded — HALTS if not on r10-test)
+## Deploy (branch-guarded, r10-test)
 ```bash
-cd ~/Downloads && unzip -o fkhome-r0.81-mail-send.zip && \
-cd ~/Documents/GitHub/campaignpulse-setup && git checkout r10-test && \
-BR=$(git branch --show-current); if [ "$BR" != "r10-test" ]; then echo "STOP wrong branch: $BR"; else \
-  cp -R ~/Downloads/fkhome-r0.81-mail-send/server/. server/ && \
-  cp ~/Downloads/fkhome-r0.81-mail-send/server.js . && \
-  cp ~/Downloads/fkhome-r0.81-mail-send/R0_81_DEPLOY_NOTES.md . && \
-  git add server/ server.js R0_*_DEPLOY_NOTES.md && \
-  git commit -m "r0.81 — mail send proof + version label fix" && \
-  git push origin r10-test; fi
+cd ~/Documents/GitHub/campaignpulse-setup
+BR=$(git branch --show-current)
+if [ "$BR" != "r10-test" ]; then echo "STOP: on $BR, not r10-test"; else
+  STEM=fkhome-r0.81-team-review
+  cp -R ~/Downloads/$STEM/public/. public/
+  cp ~/Downloads/$STEM/R0_81_DEPLOY_NOTES.md .
+  git add public/ R0_81_DEPLOY_NOTES.md
+  git commit -m "r0.81 — Team review (owner-only combined HR today + Reports)"
+  git push origin r10-test
+fi
 ```
 
-## Verify (log in first)
-Visit /api/mail/sendtest → click "Send the test email" → green = sent.
-Then check your own inbox + Sent folder for "FK Home — send test".
-It emails only you, from you. Read AND send now both proven.
+## After deploy
+Log into FK Home as yourself:
+- Nav shows **Team review**; **HR today** and **Reports** are gone from your nav.
+- Open it → **Today** tab shows the live scan; **To review** tab shows the 30-day
+  queue with the Good/Satisfactory/Not-satisfactory buttons (and they still work).
+- (Optional) If you have a manager/HR login handy, confirm they still see **Reports**.

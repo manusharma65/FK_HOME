@@ -791,6 +791,10 @@
         <span>HR today</span>
         <span class="count" id="hrTodayCount" style="display:none">0</span>
       </div>
+      <div class="nav-item" id="navTeamReview" data-route="#hr/team-review" style="display:none" onclick="location.hash='#hr/team-review'">
+        <i class="ti ti-clipboard-check"></i>
+        <span>Team review</span>
+      </div>
       <!-- HR Queue retired (r0.75): HR work now lives in My Work + Approvals -->
       <div class="nav-item" id="navRecruitment" data-route="#recruitment" style="display:none" onclick="location.hash='#recruitment'">
         <i class="ti ti-user-search"></i>
@@ -840,10 +844,6 @@
         <i class="ti ti-message-2"></i>
         <span>Team chat</span>
         <span class="count" id="chatUnreadCount" style="display:none">0</span>
-      </div>
-      <div class="nav-item" data-route="#mail" onclick="location.hash='#mail'">
-        <i class="ti ti-mail"></i>
-        <span>Mail</span>
       </div>
 
         </div>
@@ -1430,6 +1430,7 @@
 <script src="/modules/my-growth.js"></script>
 <script src="/modules/today.js"></script>
 <script src="/modules/hr-today.js"></script>
+<script src="/modules/team-review.js"></script>
 <script>
 (function(){
   function setHrBadge(){
@@ -1448,7 +1449,6 @@
 <script src="/modules/my-work.js"></script>
 <script src="/modules/recruitment.js"></script>
 <script src="/modules/team-work.js"></script>
-<script src="/modules/mail.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1544,13 +1544,13 @@ function render() {
   if (can('leaves.approve.any') || can('leaves.approve.dept') || can('attendance.regularise.approve.any') || can('attendance.regularise.approve.dept')) {
     show('navHrApprovals'); anyHR = true;
   }
-  if (can('leaves.approve.any') || can('leaves.approve.dept') || can('attendance.view.any') || can('attendance.view.dept')) {
+  if (!isOwner && (can('leaves.approve.any') || can('leaves.approve.dept') || can('attendance.view.any') || can('attendance.view.dept'))) {
     show('navHrReports'); anyHR = true;
   }
   if (can('attendance.view.any') || can('attendance.view.dept')) {
     show('navHrAttendance'); anyHR = true;
   }
-  if (isOwner) { show('navHrToday'); anyHR = true; }
+  if (isOwner) { show('navTeamReview'); anyHR = true; }
   if (can('profile.view.any')) {
     show('navHrInsights'); anyHR = true;
   }
@@ -2102,10 +2102,7 @@ function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;',
 function startHeartbeat() {
   setInterval(() => {
     if (document.hidden) return;
-    fetch('/api/me/heartbeat', {
-      method: 'POST', credentials: 'include',
-      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
-    }).catch(()=>{});
+    fetch('/api/me/heartbeat', { method: 'POST', credentials: 'include' }).catch(()=>{});
   }, 30000);
 }
 
@@ -2126,9 +2123,7 @@ async function maybeOfficeAutoActive() {
   try {
     if (isMobileDevice()) return;
     const cur = (me && me.status) || (dash && dash.status && dash.status.status);
-    // 'running_late' is included: arriving at the desk cancels the running-late
-    // notice and marks you active, so the notice and the real record agree.
-    const passive = ['active', 'idle', 'offline', 'running_late', null, undefined, ''];
+    const passive = ['active', 'idle', 'offline', null, undefined, ''];
     if (!passive.includes(cur)) return; // deliberate status — leave alone
     // Tell the server we're active now (clock-in already happened via heartbeat).
     await fetch('/api/me/status', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify({ status:'active' }) });
@@ -2778,7 +2773,7 @@ document.addEventListener('click', (e) => {
 
 // --- LOGOUT ---
 async function logout() {
-  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' } }); } catch(e) {}
+  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch(e) {}
   window.location.href = '/login.html';
 }
 
