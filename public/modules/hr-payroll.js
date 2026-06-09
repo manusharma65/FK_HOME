@@ -71,7 +71,7 @@ window.fkModules['hr/payroll'] = {
     // Document-level listeners must be tracked and removed, or they stack on
     // every revisit (that was the "preview opens 3 tabs" bug). Clear any left
     // over from a prior mount, then register through onDoc so unmount can undo.
-    const MOD = window.fkModules['hr-payroll'];
+    const MOD = window.fkModules['hr/payroll'];
     if (MOD._docHandlers) MOD._docHandlers.forEach(([t, f]) => document.removeEventListener(t, f));
     MOD._docHandlers = [];
     const onDoc = (type, fn) => { document.addEventListener(type, fn); MOD._docHandlers.push([type, fn]); };
@@ -569,7 +569,7 @@ window.fkModules['hr/payroll'] = {
   },
 
   unmount() {
-    const MOD = window.fkModules['hr-payroll'];
+    const MOD = window.fkModules['hr/payroll'];
     if (MOD._docHandlers) { MOD._docHandlers.forEach(([t, f]) => document.removeEventListener(t, f)); MOD._docHandlers = []; }
     const wrap = document.getElementById('prDrillWrap');
     if (wrap) { wrap.style.display = 'none'; wrap.innerHTML = ''; }
