@@ -1,76 +1,66 @@
-# r0.79 — Office-device clock-in/out (mobile can't fake attendance)
+# r0.79 — Monthly score rollup + director sign-off
 
-Branch: **r10-test** (FK Home). Closes the hole where a mobile login stamped the
-official arrival, so someone could open the app on their phone before the shift
-bell and be recorded "on time" regardless of when they reached the office.
+Branch: **r10-test** (FK Home).
 
-## The problem this fixes
-Arrival (`first_login`) was written by the first login OR heartbeat of the day
-from **any** device — no device check anywhere. So:
-- A phone login at 11:55 (12:00 start) stamped you **on time**, locked; the later
-  desk login was a no-op.
-- Filing a "running late" notice from your phone *also* stamped you on time,
-  because you had to log in on the phone to file it — notice said late, the
-  attendance record said on time, and the record won.
-- A mobile logout stamped an early clock-out, shortening the day.
+## Why
+Weekly scoring existed, but there was no real monthly score — "This month's
+score" in My Growth was actually just showing the latest *weekly* band, and the
+monthly design (weekly bands → monthly band → annual raise) was never built.
+Averaging weeks would let a see-saw worker (great one week, bad the next) read
+"Good", which hides the gap. This ship fixes that with strict rules.
 
-## What changed (gate the WRITE, not the screen)
+## The monthly rules (server/modules/daily.js → monthlyBandFromWeeks)
+A month's band is derived from that month's weekly bands:
+1. Base = rounded average of the weekly bands.
+2. **Strict floor** — ONE Poor week caps the whole month at **Average**.
+3. **All-weeks gate** — "Excellent" needs *every* week (and >=4 weeks) at
+   Excellent-or-above; "Above Expectations" needs every week at Above
+   Expectations; otherwise capped at **Good**. A partial month (<4 weeks) can't
+   reach the top bands.
+4. **Director sign-off** — "Excellent" / "Above Expectations" need the **owner**
+   to approve. Until then the effective (paying) band is **Good**.
 
-1. **New `server/modules/device.js`** — `isMobileRequest(req)`. Reads the
-   client's `x-fk-device` hint; falls back to the user-agent if it's missing.
+Same 5 bands and 0/5/10/15/20% raise caps as the rest of the company — unchanged.
 
-2. **`me.js`** — heartbeat now passes the device flag to `recordClockIn`, which
-   **skips the arrival stamp on mobile** (the day row is still ensured, so the
-   calendar isn't blank — it just waits for the desk login to set the time).
-   Mobile heartbeats also no longer flip you to "active", so a phone in a pocket
-   can't show you at work.
-
-3. **`attendance.js`** — `recordLogin` ensures the day row but **does not stamp
-   arrival on mobile**; `recordLogout` **ignores mobile** so a phone sign-out
-   can't clock you out early.
-
-4. **`auth.js`** — login and logout pass `isMobileRequest(req)` into the two
-   functions above.
-
-5. **Client** — `login.html`, and `index.html` (heartbeat + logout) now send
-   `x-fk-device: mobile|desktop`. Arriving at an office device clears a lingering
-   **running-late** status to active, so the notice and the real record agree.
-
-Net: the official arrival and departure are set by an **office device**. Mobile
-keeps you logged in and can file a running-late notice, but it no longer touches
-the attendance record.
-
-## Known edge (by design)
-Someone working **only** from a phone all day gets no auto clock-in (status stays
-"pending"). Genuine WFH staff are on a laptop/desktop (counts as office device),
-so this only affects literal phone-only days — fixable via the existing
-**Request a correction** flow in Leaves & time.
-
-## Files in this zip
-server/modules/device.js (new), server/modules/me.js,
-server/modules/attendance.js, server/modules/auth.js,
-public/index.html, public/login.html
-
-## Deploy (branch-guarded — HALTS if not on r10-test)
-```bash
-cd ~/Downloads && unzip -o fkhome-r0.79-mobile-clockin.zip && \
-cd ~/Documents/GitHub/campaignpulse-setup && git checkout r10-test && \
-BR=$(git branch --show-current); if [ "$BR" != "r10-test" ]; then echo "STOP wrong branch: $BR"; else \
-  cp -R ~/Downloads/fkhome-r0.79-mobile-clockin/server/. server/ && \
-  cp -R ~/Downloads/fkhome-r0.79-mobile-clockin/public/. public/ && \
-  cp ~/Downloads/fkhome-r0.79-mobile-clockin/R0_79_DEPLOY_NOTES.md . && \
-  git add server/ public/ R0_*_DEPLOY_NOTES.md && \
-  git commit -m "r0.79 — office-device clock-in/out (mobile can't stamp arrival/departure)" && \
-  git push origin r10-test; fi
+## What's in the ship
 ```
+server/schema/36-monthly-scores.sql   ← new monthly_scores table (+ approval state)
+server/modules/daily.js               ← monthlyBandFromWeeks + computeMonth + 3 endpoints:
+                                          GET  /api/daily/month
+                                          POST /api/daily/month/approve   (OWNER only)
+                                          GET  /api/daily/month/pending   (owner panel feed)
+public/modules/my-growth.js           ← real monthly band in the headline tile,
+                                          a "This month" breakdown with the rule reasons,
+                                          and owner Approve/Reject buttons when pending
+test/scoring.test.js                  ← + monthly rule tests + approval test
+test/helpers/db.js                    ← resets monthly_scores between tests
+```
+Approval is locked to the **owner** group on both the server and the UI.
 
-## Verify after deploy (hard-refresh)
-1. **Phone:** open FK Home on your phone before your shift start. Your attendance
-   for today should stay **pending** — no arrival time, not marked on time.
-2. **Desk:** then log in on your office computer. Arrival stamps now, lateness
-   computed against the real desk-login time; "Welcome in" banner shows once.
-3. **Running late from phone → arrive at desk:** file a running-late notice on the
-   phone, then log in at the desk — status flips to active and the late record
-   matches the desk arrival.
-4. **Mobile logout:** signing out on the phone does not set a clock-out.
-5. Desktop behaviour unchanged: login = clock-in, logout = clock-out as before.
+**Verified:** all scoring tests pass against a real Postgres 16, including the new
+migration, the strict-floor / all-weeks-gate / partial-month rules, and the
+approve-flow (effective stays Good until the owner signs off, then becomes the
+real band).
+
+## NOT in this ship (still open, by design)
+- **Annual rollup** (months → year-end raise %) — next.
+- A dedicated owner "all months awaiting sign-off" panel (the endpoint exists;
+  for now you approve from each person's My Growth).
+- The Excel CS/Sales trackers still use averaging — mirror the strict logic there
+  separately if you want it identical everywhere.
+
+## Deploy (branch-guarded, r10-test)
+```bash
+cd ~/Documents/GitHub/campaignpulse-setup
+BR=$(git branch --show-current)
+if [ "$BR" != "r10-test" ]; then echo "STOP: on $BR, not r10-test"; else
+  STEM=fkhome-r0.79-monthly-score
+  cp -R ~/Downloads/$STEM/server/. server/
+  cp -R ~/Downloads/$STEM/public/. public/
+  cp -R ~/Downloads/$STEM/test/. test/
+  cp ~/Downloads/$STEM/R0_79_DEPLOY_NOTES.md .
+  git add server/ public/ test/ R0_79_DEPLOY_NOTES.md
+  git commit -m "r0.79 — monthly score rollup + director sign-off"
+  git push origin r10-test
+fi
+```

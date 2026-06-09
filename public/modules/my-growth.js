@@ -177,8 +177,12 @@ window.fkModules['my-growth'] = {
       try { const r = await fetch('/api/daily/score?user_id=' + viewingUserId, { credentials:'include' }); if(!r.ok) throw 0; data = await r.json(); }
       catch(e){ if(lvl) lvl.innerHTML = '<span class="l">Could not load score.</span>'; return; }
       const cur = data.current, raise = data.raiseBands || {}, W = data.weights || {};
-      $('mgScore').textContent = cur ? cur.band : '\u2014';
-      if (cur) $('mgScore').style.fontSize = '20px';
+      // Monthly rollup — the real "this month" headline + a breakdown below.
+      let month = null;
+      try { const rm = await fetch('/api/daily/month?user_id=' + viewingUserId, { credentials:'include' }); if (rm.ok) month = await rm.json(); } catch(e){}
+      const monthBand = (month && month.effective_band) ? month.effective_band : (cur ? cur.band : '\u2014');
+      $('mgScore').textContent = monthBand;
+      $('mgScore').style.fontSize = '20px';
       if (!cur) {
         lvl.innerHTML = '<span class="l">No weekly score yet \u2014 your first one appears next Monday.</span>';
       } else {
@@ -187,6 +191,40 @@ window.fkModules['my-growth'] = {
           return '<div class="lstep ' + (on?'on':'dim') + '"><div class="ln">' + b.replace('Above Expectations','Above') + '</div><div class="lp">' + (raise[b]||'') + '</div></div>';
         }).join('');
         lvl.innerHTML = '<div class="ladder">' + steps + '</div><div class="levmsg">You\u2019re at <b>' + esc(cur.band) + '</b>. At review this maps to a raise of <b>' + esc(raise[cur.band]||'') + '</b>.</div>';
+      }
+      // ---- Monthly rollup breakdown (strict floor + all-weeks gate + director sign-off)
+      if (month && month.computed_band) {
+        const canApprove = (me_.group_slugs || []).includes('owner');
+        const pend = month.approval_status === 'pending';
+        const wkBands = (month.weeks || []).map(b => (b || '').split(' ')[0]).join(' \u00b7 ') || '\u2014';
+        let mhtml = '<div class="levmsg" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">'
+          + '<b>This month:</b> ' + esc(month.effective_band || '\u2014');
+        if (month.computed_band !== month.effective_band) {
+          mhtml += ' <span class="l">(computed ' + esc(month.computed_band) + ' \u2014 ' + (pend ? 'pending director approval' : 'not approved') + ')</span>';
+        }
+        mhtml += '<div class="l" style="margin-top:6px">Weeks: ' + esc(wkBands) + '</div>';
+        (month.reasons || []).forEach(r => { mhtml += '<div class="l" style="color:#B5701E;margin-top:4px">' + esc(r) + '</div>'; });
+        if (pend && canApprove) {
+          mhtml += '<div style="margin-top:10px;display:flex;gap:8px">'
+            + '<button class="mgApprove" data-d="approved" style="font-family:inherit;font-weight:700;font-size:13px;padding:8px 14px;border-radius:9px;border:none;background:var(--orange,#E8722B);color:#fff;cursor:pointer">Approve ' + esc(month.computed_band) + '</button>'
+            + '<button class="mgApprove" data-d="rejected" style="font-family:inherit;font-size:13px;padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:#fff;cursor:pointer">Reject</button>'
+            + '</div>';
+        }
+        mhtml += '</div>';
+        lvl.innerHTML += mhtml;
+        if (pend && canApprove) {
+          lvl.querySelectorAll('.mgApprove').forEach(btn => btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+              const rr = await fetch('/api/daily/month/approve', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                body: JSON.stringify({ user_id: viewingUserId, month: month.month_start, decision: btn.dataset.d })
+              });
+              if (rr.ok) loadScore();
+              else btn.disabled = false;
+            } catch (e) { btn.disabled = false; }
+          }));
+        }
       }
       if (!cur) { wk.innerHTML = '<span class="l">\u2014</span>'; }
       else {
