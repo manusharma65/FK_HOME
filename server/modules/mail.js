@@ -11,6 +11,7 @@
 const express = require('express');
 const { google } = require('googleapis');
 const { requireAuth } = require('../auth');
+const { db } = require('../db');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -43,14 +44,14 @@ function header(headers, name) {
   return h ? h.value : '';
 }
 
-// Pull the most recent inbox messages (metadata only) for a mailbox.
-async function listInbox(userEmail, max = 12) {
+// Pull recent messages (metadata only) for a mailbox section.
+async function listInbox(userEmail, box = 'inbox', max = 20) {
   const gmail = gmailFor(userEmail);
-  const list = await gmail.users.messages.list({
-    userId: 'me',
-    maxResults: max,
-    labelIds: ['INBOX'],
-  });
+  const params = { userId: 'me', maxResults: max };
+  if (box === 'sent') params.labelIds = ['SENT'];
+  else if (box === 'archive') params.q = '-in:inbox -in:sent -in:trash -in:spam -in:drafts';
+  else params.labelIds = ['INBOX'];
+  const list = await gmail.users.messages.list(params);
   const ids = (list.data.messages || []).map(m => m.id);
   const items = await Promise.all(ids.map(async (id) => {
     const msg = await gmail.users.messages.get({
@@ -75,8 +76,9 @@ async function listInbox(userEmail, max = 12) {
 // JSON endpoint — the future inbox screen will read from this.
 router.get('/inbox', async (req, res) => {
   try {
-    const items = await listInbox(req.user.email);
-    res.json({ mailbox: req.user.email, count: items.length, messages: items });
+    const box = ['inbox', 'sent', 'archive'].includes(req.query.box) ? req.query.box : 'inbox';
+    const items = await listInbox(req.user.email, box);
+    res.json({ mailbox: req.user.email, box, count: items.length, messages: items });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -249,7 +251,7 @@ router.post('/trash', async (req, res) => {
 async function callClaude(prompt, maxTokens) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { const e = new Error('AI is not set up yet (no API key).'); e.code = 'NO_KEY'; throw e; }
-  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+  const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
@@ -278,6 +280,85 @@ router.post('/ai/draft', async (req, res) => {
     if (instruction) prompt += ' Follow this instruction when writing the reply: ' + instruction + '.';
     prompt += '\n\nThe email you are replying to:\n' + original + '\n\nWrite only the reply body.';
     res.json({ draft: await callClaude(prompt, 600) });
+  } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
+});
+
+// ---- Personal labels (stored in FK Home) ----
+router.get('/labels', async (req, res) => {
+  try {
+    const r = await db.query('SELECT id, name, colour FROM mail_labels WHERE user_id=$1 ORDER BY name', [req.user.id]);
+    res.json({ labels: r.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.post('/labels', async (req, res) => {
+  try {
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 40);
+    const colour = String((req.body && req.body.colour) || '#6F57A0').slice(0, 9);
+    if (!name) return res.status(400).json({ error: 'Label needs a name.' });
+    const r = await db.query('INSERT INTO mail_labels (user_id, name, colour) VALUES ($1,$2,$3) RETURNING id, name, colour', [req.user.id, name, colour]);
+    res.json({ label: r.rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.delete('/labels/:id', async (req, res) => {
+  try {
+    await db.query('DELETE FROM mail_labels WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Map of messageId -> [labelId,...] for this user (for chips + counts).
+router.get('/labelmap', async (req, res) => {
+  try {
+    const r = await db.query('SELECT message_id, label_id FROM mail_message_labels WHERE user_id=$1', [req.user.id]);
+    const map = {};
+    for (const row of r.rows) { (map[row.message_id] = map[row.message_id] || []).push(row.label_id); }
+    res.json({ map });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Apply / remove a label on a message.
+router.post('/message/:id/label', async (req, res) => {
+  try {
+    const labelId = parseInt((req.body && req.body.labelId), 10);
+    const on = !!(req.body && req.body.on);
+    if (!labelId) return res.status(400).json({ error: 'Missing label.' });
+    const own = await db.query('SELECT 1 FROM mail_labels WHERE id=$1 AND user_id=$2', [labelId, req.user.id]);
+    if (!own.rows.length) return res.status(404).json({ error: 'Label not found.' });
+    if (on) await db.query('INSERT INTO mail_message_labels (label_id, user_id, message_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [labelId, req.user.id, req.params.id]);
+    else await db.query('DELETE FROM mail_message_labels WHERE label_id=$1 AND user_id=$2 AND message_id=$3', [labelId, req.user.id, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- Pinned private notes (stored in FK Home) ----
+router.get('/notes', async (req, res) => {
+  try {
+    const r = await db.query('SELECT message_id, body FROM mail_notes WHERE user_id=$1', [req.user.id]);
+    const map = {};
+    for (const row of r.rows) map[row.message_id] = row.body;
+    res.json({ map });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.put('/note/:id', async (req, res) => {
+  try {
+    const body = String((req.body && req.body.body) || '').trim().slice(0, 2000);
+    if (!body) { await db.query('DELETE FROM mail_notes WHERE user_id=$1 AND message_id=$2', [req.user.id, req.params.id]); return res.json({ ok: true, body: '' }); }
+    await db.query('INSERT INTO mail_notes (user_id, message_id, body) VALUES ($1,$2,$3) ON CONFLICT (user_id, message_id) DO UPDATE SET body=$3, updated_at=NOW()', [req.user.id, req.params.id, body]);
+    res.json({ ok: true, body });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.delete('/note/:id', async (req, res) => {
+  try {
+    await db.query('DELETE FROM mail_notes WHERE user_id=$1 AND message_id=$2', [req.user.id, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// AI spell/grammar polish — on demand, one call, returns corrected text only.
+router.post('/ai/polish', async (req, res) => {
+  try {
+    const text = String((req.body && req.body.text) || '').slice(0, 6000);
+    if (!text.trim()) return res.json({ polished: '' });
+    const prompt = 'Correct the spelling, grammar and punctuation of this email reply written in British English. Keep the meaning, tone and line breaks; do not add or remove content or add any commentary. Reply with only the corrected text.\n\n' + text;
+    res.json({ polished: await callClaude(prompt, 800) });
   } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
 });
 
