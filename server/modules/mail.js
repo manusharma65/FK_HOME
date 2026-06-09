@@ -161,4 +161,67 @@ router.get('/sendtest', async (req, res) => {
   }
 });
 
+// ---- Reading a full message + sending real replies (r0.82) ----
+
+function decodeB64(data) {
+  return Buffer.from((data || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+}
+
+// Walk a Gmail payload tree and pull out plain + html bodies.
+function extractBodies(payload) {
+  let text = '', html = '';
+  (function walk(p) {
+    if (!p) return;
+    const mime = p.mimeType || '';
+    if (mime === 'text/plain' && p.body && p.body.data) text += decodeB64(p.body.data);
+    else if (mime === 'text/html' && p.body && p.body.data) html += decodeB64(p.body.data);
+    if (p.parts) p.parts.forEach(walk);
+  })(payload);
+  return { text, html };
+}
+
+// Send a real message AS the mailbox, with optional reply threading.
+async function sendMail(fromEmail, { to, subject, text, inReplyTo, references, threadId }) {
+  const gmail = gmailFor(fromEmail);
+  const lines = [
+    `From: ${fromEmail}`, `To: ${to}`, `Subject: ${subject}`,
+    'MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"',
+  ];
+  if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
+  if (references) lines.push(`References: ${references}`);
+  const mime = lines.join('\r\n') + '\r\n\r\n' + (text || '');
+  const raw = Buffer.from(mime).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const requestBody = { raw };
+  if (threadId) requestBody.threadId = threadId;
+  const r = await gmail.users.messages.send({ userId: 'me', requestBody });
+  return r.data.id;
+}
+
+// Full message for the reading pane (and mark it read).
+router.get('/message/:id', async (req, res) => {
+  try {
+    const gmail = gmailFor(req.user.email);
+    const m = await gmail.users.messages.get({ userId: 'me', id: req.params.id, format: 'full' });
+    const h = (m.data.payload && m.data.payload.headers) || [];
+    const { text, html } = extractBodies(m.data.payload);
+    try { await gmail.users.messages.modify({ userId: 'me', id: req.params.id, requestBody: { removeLabelIds: ['UNREAD'] } }); } catch (e) {}
+    res.json({
+      id: req.params.id, threadId: m.data.threadId,
+      from: header(h, 'From'), to: header(h, 'To'),
+      subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'),
+      messageId: header(h, 'Message-ID'), text, html,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send / reply from the composer.
+router.post('/send', async (req, res) => {
+  try {
+    const { to, subject, text, inReplyTo, references, threadId } = req.body || {};
+    if (!to || !text) return res.status(400).json({ error: 'Need at least a recipient and a message.' });
+    const id = await sendMail(req.user.email, { to, subject: subject || '(no subject)', text, inReplyTo, references, threadId });
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
