@@ -224,4 +224,24 @@ router.post('/send', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Archive (remove from Inbox) one or many — Gmail's "archive".
+router.post('/archive', async (req, res) => {
+  try {
+    const ids = (req.body && req.body.ids) || [];
+    const gmail = gmailFor(req.user.email);
+    await Promise.all(ids.map(id => gmail.users.messages.modify({ userId: 'me', id, requestBody: { removeLabelIds: ['INBOX'] } })));
+    res.json({ ok: true, count: ids.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete one or many — sends to Gmail Trash (recoverable for 30 days, like Gmail).
+router.post('/trash', async (req, res) => {
+  try {
+    const ids = (req.body && req.body.ids) || [];
+    const gmail = gmailFor(req.user.email);
+    await Promise.all(ids.map(id => gmail.users.messages.trash({ userId: 'me', id })));
+    res.json({ ok: true, count: ids.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
