@@ -10,13 +10,15 @@
 window.fkModules = window.fkModules || {};
 
 window.fkModules['mail'] = {
-  title: 'Mail',
+  title: 'My Mail',
+  noHero: true,
 
   render() {
     return `
 <div id="mail-mod" class="fk-mod">
   <style>
-    #mail-mod{display:flex;flex-direction:column;height:calc(100vh - 96px);min-height:520px}
+    #mail-mod{display:flex;flex-direction:column;height:calc(100vh - 92px);min-height:520px;font-family:var(--body,'Hanken Grotesk',-apple-system,sans-serif)}
+    #mail-mod h2{font-family:var(--body,'Hanken Grotesk',sans-serif)!important;letter-spacing:-.01em}
     #mail-mod .msplit{flex:1;min-height:0;display:grid;grid-template-columns:380px 1fr;
       border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--surface)}
     #mail-mod .mlist{border-right:1px solid var(--line);overflow:auto;background:var(--canvas,#F4EFE7)}
