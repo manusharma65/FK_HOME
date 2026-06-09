@@ -45,6 +45,7 @@ const leaveEngine = require('./server/modules/leave-engine');
 const backupEngine = require('./server/modules/backup');
 const lifecycle = require('./server/modules/lifecycle');
 const dailyRoutes = require('./server/modules/daily');
+const mailRoutes = require('./server/modules/mail');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -78,6 +79,7 @@ app.use('/api/profile', profileRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/recruitment', recruitmentRoutes);
 app.use('/api/daily', dailyRoutes);
+app.use('/api/mail', mailRoutes);
 
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));

@@ -15,6 +15,7 @@
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.6",
     "express": "^4.19.2",
+    "googleapis": "^173.0.0",
     "multer": "^2.0.0",
     "pg": "^8.11.5"
   }
