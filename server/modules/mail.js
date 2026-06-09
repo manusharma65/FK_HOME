@@ -244,4 +244,41 @@ router.post('/trash', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ---- AI layer (r0.85): summary + draft, via the Anthropic API ----
+// Needs ANTHROPIC_API_KEY set in Railway. Model overridable via ANTHROPIC_MODEL.
+async function callClaude(prompt, maxTokens) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) { const e = new Error('AI is not set up yet (no API key).'); e.code = 'NO_KEY'; throw e; }
+  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error((data && data.error && data.error.message) || 'AI request failed.');
+  return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+}
+
+router.post('/ai/summary', async (req, res) => {
+  try {
+    const text = String((req.body && req.body.text) || '').slice(0, 6000);
+    if (!text.trim()) return res.json({ summary: '' });
+    const prompt = 'Summarise this email in one or two short sentences of plain British English. Focus on what the sender wants and any action needed. Reply with only the summary, no preamble.\n\nEmail:\n' + text;
+    res.json({ summary: await callClaude(prompt, 160) });
+  } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
+});
+
+router.post('/ai/draft', async (req, res) => {
+  try {
+    const original = String((req.body && req.body.original) || '').slice(0, 6000);
+    const instruction = String((req.body && req.body.instruction) || '').slice(0, 500);
+    const who = req.user.full_name || req.user.email;
+    let prompt = 'You are drafting an email reply on behalf of ' + who + ' at FK Sports, a UK sports and fitness retailer. Write a warm, professional, concise reply in plain British English. Do not include a subject line. Sign off as ' + who + '.';
+    if (instruction) prompt += ' Follow this instruction when writing the reply: ' + instruction + '.';
+    prompt += '\n\nThe email you are replying to:\n' + original + '\n\nWrite only the reply body.';
+    res.json({ draft: await callClaude(prompt, 600) });
+  } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
+});
+
 module.exports = router;
