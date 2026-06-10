@@ -49,10 +49,10 @@ const mailRoutes = require('./server/modules/mail');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r0.88';
+const VERSION = 'r0.89';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '30mb' }));
 app.use(cookieParser());
 
 // Health check

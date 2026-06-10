@@ -171,32 +171,71 @@ function decodeB64(data) {
 
 // Walk a Gmail payload tree and pull out plain + html bodies.
 function extractBodies(payload) {
-  let text = '', html = '';
+  let text = '', html = ''; const attachments = [];
   (function walk(p) {
     if (!p) return;
     const mime = p.mimeType || '';
-    if (mime === 'text/plain' && p.body && p.body.data) text += decodeB64(p.body.data);
+    const fn = p.filename || '';
+    if (fn && p.body && p.body.attachmentId) {
+      attachments.push({ filename: fn, mimeType: mime, attachmentId: p.body.attachmentId, size: p.body.size || 0 });
+    } else if (mime === 'text/plain' && p.body && p.body.data) text += decodeB64(p.body.data);
     else if (mime === 'text/html' && p.body && p.body.data) html += decodeB64(p.body.data);
     if (p.parts) p.parts.forEach(walk);
   })(payload);
-  return { text, html };
+  return { text, html, attachments };
 }
 
-// Send a real message AS the mailbox, with optional reply threading.
-async function sendMail(fromEmail, { to, subject, text, inReplyTo, references, threadId }) {
+const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64 = (str) => Buffer.from(str, 'utf8').toString('base64');
+
+// Build a raw RFC822 message: plain, or text+html alternative, with optional attachments.
+function buildRaw(fromEmail, { to, subject, text, html, inReplyTo, references, attachments }) {
+  const atts = attachments || [];
+  const headers = [`From: ${fromEmail}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0'];
+  if (inReplyTo) headers.push(`In-Reply-To: ${inReplyTo}`);
+  if (references) headers.push(`References: ${references}`);
+  const bodyBlock = () => {
+    if (html) {
+      const alt = 'alt_' + Math.random().toString(36).slice(2);
+      return { ctype: `multipart/alternative; boundary="${alt}"`,
+        content:
+          `--${alt}\r\nContent-Type: text/plain; charset="UTF-8"\r\nContent-Transfer-Encoding: base64\r\n\r\n${b64(text || '')}\r\n\r\n` +
+          `--${alt}\r\nContent-Type: text/html; charset="UTF-8"\r\nContent-Transfer-Encoding: base64\r\n\r\n${b64(html)}\r\n\r\n` +
+          `--${alt}--` };
+    }
+    return { ctype: 'text/plain; charset="UTF-8"\r\nContent-Transfer-Encoding: base64', content: b64(text || '') };
+  };
+  let mime;
+  if (atts.length) {
+    const mixed = 'mix_' + Math.random().toString(36).slice(2);
+    const body = bodyBlock();
+    let parts = `--${mixed}\r\nContent-Type: ${body.ctype}\r\n\r\n${body.content}\r\n\r\n`;
+    for (const a of atts) {
+      const clean = String(a.dataB64 || '').replace(/\s+/g, '');
+      parts += `--${mixed}\r\nContent-Type: ${a.mimeType || 'application/octet-stream'}; name="${a.filename}"\r\n` +
+        `Content-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="${a.filename}"\r\n\r\n${clean}\r\n\r\n`;
+    }
+    parts += `--${mixed}--`;
+    mime = headers.concat([`Content-Type: multipart/mixed; boundary="${mixed}"`]).join('\r\n') + '\r\n\r\n' + parts;
+  } else {
+    const body = bodyBlock();
+    mime = headers.concat([`Content-Type: ${body.ctype}`]).join('\r\n') + '\r\n\r\n' + body.content;
+  }
+  return b64url(Buffer.from(mime, 'utf8'));
+}
+
+// Send (or draft) a real message AS the mailbox, with optional reply threading.
+async function sendMail(fromEmail, opts) {
   const gmail = gmailFor(fromEmail);
-  const lines = [
-    `From: ${fromEmail}`, `To: ${to}`, `Subject: ${subject}`,
-    'MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"',
-  ];
-  if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
-  if (references) lines.push(`References: ${references}`);
-  const mime = lines.join('\r\n') + '\r\n\r\n' + (text || '');
-  const raw = Buffer.from(mime).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const raw = buildRaw(fromEmail, opts);
   const requestBody = { raw };
-  if (threadId) requestBody.threadId = threadId;
+  if (opts.threadId) requestBody.threadId = opts.threadId;
+  if (opts.draft) {
+    const r = await gmail.users.drafts.create({ userId: 'me', requestBody: { message: requestBody } });
+    return { draftId: r.data.id };
+  }
   const r = await gmail.users.messages.send({ userId: 'me', requestBody });
-  return r.data.id;
+  return { id: r.data.id };
 }
 
 // Full message for the reading pane (and mark it read).
@@ -205,25 +244,45 @@ router.get('/message/:id', async (req, res) => {
     const gmail = gmailFor(req.user.email);
     const m = await gmail.users.messages.get({ userId: 'me', id: req.params.id, format: 'full' });
     const h = (m.data.payload && m.data.payload.headers) || [];
-    const { text, html } = extractBodies(m.data.payload);
+    const { text, html, attachments } = extractBodies(m.data.payload);
     try { await gmail.users.messages.modify({ userId: 'me', id: req.params.id, requestBody: { removeLabelIds: ['UNREAD'] } }); } catch (e) {}
     res.json({
       id: req.params.id, threadId: m.data.threadId,
       from: header(h, 'From'), to: header(h, 'To'),
       subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'),
-      messageId: header(h, 'Message-ID'), text, html,
+      messageId: header(h, 'Message-ID'), text, html, attachments,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Send / reply from the composer.
+// Download a single attachment (returns base64url data).
+router.get('/message/:id/attachment/:attId', async (req, res) => {
+  try {
+    const gmail = gmailFor(req.user.email);
+    const a = await gmail.users.messages.attachments.get({ userId: 'me', messageId: req.params.id, id: req.params.attId });
+    res.json({ data: a.data.data });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send / reply / forward from the composer (text, optional html, attachments, or save as draft).
 router.post('/send', async (req, res) => {
   try {
-    const { to, subject, text, inReplyTo, references, threadId } = req.body || {};
-    if (!to || !text) return res.status(400).json({ error: 'Need at least a recipient and a message.' });
-    const id = await sendMail(req.user.email, { to, subject: subject || '(no subject)', text, inReplyTo, references, threadId });
-    res.json({ ok: true, id });
+    const { to, subject, text, html, inReplyTo, references, threadId, attachments, draft } = req.body || {};
+    if (!draft && (!to || !(text || html))) return res.status(400).json({ error: 'Need at least a recipient and a message.' });
+    const out = await sendMail(req.user.email, { to: to || '', subject: subject || '(no subject)', text, html, inReplyTo, references, threadId, attachments, draft });
+    res.json({ ok: true, ...out });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// AI "Focus today" — triage the visible inbox into what needs action today.
+router.post('/ai/focus', async (req, res) => {
+  try {
+    const items = (req.body && req.body.items) || [];
+    if (!items.length) return res.json({ focus: '' });
+    const list = items.slice(0, 40).map((m, i) => `${i + 1}. From ${m.from} — ${m.subject} — ${m.snippet}`).join('\n');
+    const prompt = 'These are the recent emails in my inbox. In one or two short sentences of plain British English, tell me what genuinely needs a reply or action today and what can wait. Be specific and brief; refer to senders by name.\n\n' + list;
+    res.json({ focus: await callClaude(prompt, 220) });
+  } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
 });
 
 // Archive (remove from Inbox) one or many — Gmail's "archive".
