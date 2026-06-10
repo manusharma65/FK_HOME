@@ -757,7 +757,7 @@ router.get('/reports/pending', async (req, res) => {
   if (!Number.isInteger(days) || days < 1 || days > 1825) days = filterUserId ? 365 : 30;
 
   try {
-    const cols = `dr.id, dr.user_id, dr.for_date, dr.notes,
+    const cols = `dr.id, dr.user_id, dr.for_date, dr.notes, dr.auto_submitted, dr.submitted_at,
                     dr.snapshot_first_login, dr.snapshot_last_logout,
                     dr.snapshot_active_min, dr.snapshot_idle_min, dr.snapshot_break_min,
                     dr.created_at, dr.updated_at,

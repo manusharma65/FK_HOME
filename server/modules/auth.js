@@ -8,9 +8,24 @@ const { isMobileRequest } = require('./device');
 
 const router = express.Router();
 
+// ---- Login brute-force throttle (in-memory; FK Home runs as a single instance).
+// Keyed by client IP + email. After MAX_FAILS bad attempts inside WINDOW_MS the
+// pair is locked for LOCK_MS. Successful login clears it.
+const LOGIN_FAILS = new Map();
+const MAX_FAILS = 8, WINDOW_MS = 15 * 60 * 1000, LOCK_MS = 15 * 60 * 1000;
+function throttleKey(req, email) { return (req.ip || '?') + '|' + String(email || '').toLowerCase().trim(); }
+function lockSecondsLeft(key) { const e = LOGIN_FAILS.get(key); return (e && e.until && e.until > Date.now()) ? Math.ceil((e.until - Date.now()) / 1000) : 0; }
+function noteLoginFail(key) { const now = Date.now(); let e = LOGIN_FAILS.get(key); if (!e || now - e.first > WINDOW_MS) e = { n: 0, first: now, until: 0 }; e.n += 1; if (e.n >= MAX_FAILS) e.until = now + LOCK_MS; LOGIN_FAILS.set(key, e); }
+function clearLoginFail(key) { LOGIN_FAILS.delete(key); }
+const _throttleSweep = setInterval(() => { const now = Date.now(); for (const [k, e] of LOGIN_FAILS) { if ((!e.until || e.until < now) && now - e.first > WINDOW_MS) LOGIN_FAILS.delete(k); } }, 10 * 60 * 1000);
+if (_throttleSweep.unref) _throttleSweep.unref();
+
 router.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+  const tkey = throttleKey(req, email);
+  const wait = lockSecondsLeft(tkey);
+  if (wait) return res.status(429).json({ error: 'Too many attempts. Try again in ' + Math.ceil(wait / 60) + ' min.' });
   try {
     const r = await db.query(
       `SELECT id, email, password_hash, full_name, display_name, employment_status, must_change_password, deleted_at
@@ -18,16 +33,19 @@ router.post('/login', async (req, res) => {
       [email.trim()]
     );
     if (r.rows.length === 0) {
+      noteLoginFail(tkey);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     const user = r.rows[0];
-    if (user.deleted_at) return res.status(401).json({ error: 'Invalid email or password' });
+    if (user.deleted_at) { noteLoginFail(tkey); return res.status(401).json({ error: 'Invalid email or password' }); }
     if (user.employment_status !== 'active') return res.status(403).json({ error: 'Account is not active' });
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
+      noteLoginFail(tkey);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
+    clearLoginFail(tkey);
 
     const { token, expiresAt } = await createSession(user.id, req);
     await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
@@ -39,7 +57,7 @@ router.post('/login', async (req, res) => {
 
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: process.env.NODE_ENV !== 'development',
       sameSite: 'lax',
       expires: expiresAt,
     });

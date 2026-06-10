@@ -133,7 +133,7 @@ async function assessDay(userId, dateStr) {
     [userId, dateStr]
   );
   const rep = await db.query(
-    `SELECT manual_items, submitted_at, locked_at
+    `SELECT manual_items, submitted_at, locked_at, notes
        FROM daily_reports WHERE user_id = $1 AND for_date = $2`,
     [userId, dateStr]
   );
@@ -173,6 +173,7 @@ async function assessDay(userId, dateStr) {
     attendance: a,
     off: isOff,
     submitted: !!r.submitted_at,
+    notes: r.notes || '',
     flags,
   };
 }
@@ -468,12 +469,29 @@ router.post('/manual-item', async (req, res) => {
 router.post('/submit', async (req, res) => {
   try {
     const today = londonDate();
-    const cur = await db.query(`SELECT id, locked_at FROM daily_reports WHERE user_id = $1 AND for_date = $2`, [req.user.id, today]);
-    if (cur.rows[0] && cur.rows[0].locked_at) return res.status(409).json({ error: 'Day locked' });
-    if (cur.rows[0]) {
-      await db.query(`UPDATE daily_reports SET submitted_at = NOW(), auto_submitted = FALSE, updated_at = NOW() WHERE id = $1`, [cur.rows[0].id]);
+    const notes = String((req.body && req.body.notes) || '').trim().slice(0, 2000);
+    const cur = await db.query(`SELECT id, locked_at, manual_items FROM daily_reports WHERE user_id = $1 AND for_date = $2`, [req.user.id, today]);
+    const row = cur.rows[0];
+    if (row && row.locked_at) return res.status(409).json({ error: 'Day locked' });
+    // Block a completely empty day: needs a written note, a logged item, or some auto-tracked work.
+    const itemCount = (row && Array.isArray(row.manual_items)) ? row.manual_items.length : 0;
+    let didCount = 0;
+    if (!notes && itemCount === 0) {
+      const t = await db.query(
+        `SELECT COUNT(*)::int AS n FROM tasks
+          WHERE completed_by_user_id = $1 AND status = 'done'
+            AND (completed_at AT TIME ZONE 'Europe/London')::date = $2::date`,
+        [req.user.id, today]
+      );
+      didCount = t.rows[0] ? t.rows[0].n : 0;
+    }
+    if (!notes && itemCount === 0 && didCount === 0) {
+      return res.status(400).json({ error: 'Add a quick note about your day before submitting.' });
+    }
+    if (row) {
+      await db.query(`UPDATE daily_reports SET submitted_at = NOW(), auto_submitted = FALSE, notes = $2, updated_at = NOW() WHERE id = $1`, [row.id, notes]);
     } else {
-      await db.query(`INSERT INTO daily_reports (user_id, for_date, notes, submitted_at) VALUES ($1, $2, '', NOW())`, [req.user.id, today]);
+      await db.query(`INSERT INTO daily_reports (user_id, for_date, notes, submitted_at) VALUES ($1, $2, $3, NOW())`, [req.user.id, today, notes]);
     }
     res.json({ ok: true });
   } catch (e) { console.error('[daily/submit]', e.message); res.status(500).json({ error: 'Failed' }); }
@@ -534,164 +552,9 @@ router.post('/recognition', requirePermission('attendance.view.any'), async (req
   } catch (e) { console.error('[daily/recognition]', e.message); res.status(500).json({ error: 'Failed' }); }
 });
 
-// ============================================================================
-// MONTHLY ROLLUP
-// The month is NOT a flat average of weekly bands — that would let a see-saw
-// worker (great one week, bad the next) read "Good". Instead:
-//   1) base = rounded average of the month's weekly bands
-//   2) STRICT FLOOR: any 'Poor' week caps the month at 'Average'
-//   3) ALL-WEEKS GATE: 'Excellent' needs EVERY week (and >=4 weeks) at
-//      Excellent-or-above; 'Above Expectations' needs every week at Above
-//      Expectations; otherwise the month is capped at 'Good'
-//   4) 'Excellent' / 'Above Expectations' require DIRECTOR (owner) approval;
-//      until signed off the effective (paying) band is 'Good'.
-// ----------------------------------------------------------------------------
-
-function monthStartOf(dateStr) { return String(dateStr).slice(0, 8) + '01'; }
-
-// Pure: derive a monthly band from an array of weekly band names.
-function monthlyBandFromWeeks(bands) {
-  const idx = (bands || []).map(b => BAND_ORDER.indexOf(b)).filter(i => i >= 0);
-  if (!idx.length) return { computed: null, reasons: ['No weekly scores yet this month.'], weekCount: 0, avgBand: null };
-
-  const reasons = [];
-  const avg = idx.reduce((a, b) => a + b, 0) / idx.length;
-  const avgBand = BAND_ORDER[Math.round(avg)];
-  let band = avgBand;
-
-  // 2) strict floor — one Poor week caps the whole month at Average
-  if (idx.some(i => i === 0) && BAND_ORDER.indexOf(band) > BAND_ORDER.indexOf('Average')) {
-    band = 'Average';
-    reasons.push('A Poor week caps the whole month at Average.');
-  }
-
-  // 3) all-weeks gate for the top bands (needs a full month of >=4 weeks)
-  const wk = idx.length;
-  const allAbove = wk >= 4 && idx.every(i => i === BAND_ORDER.indexOf('Above Expectations'));
-  const allExcellentPlus = wk >= 4 && idx.every(i => i >= BAND_ORDER.indexOf('Excellent'));
-  let gateCap = 'Good';
-  if (allAbove) gateCap = 'Above Expectations';
-  else if (allExcellentPlus) gateCap = 'Excellent';
-  if (BAND_ORDER.indexOf(band) > BAND_ORDER.indexOf(gateCap)) {
-    band = gateCap;
-    reasons.push(wk < 4
-      ? 'Top bands need a full month (4 weeks) — capped at Good.'
-      : 'Every week must hit the band to earn Excellent/Above — capped at Good.');
-  }
-
-  return { computed: band, reasons, weekCount: wk, avgBand };
-}
-
-// Recompute one person's month from weekly_scores and persist it (idempotent).
-// Approval state is preserved while the computed top band is unchanged.
-async function computeMonth(userId, monthStart) {
-  const ms = monthStartOf(monthStart);
-  const nextMonth = addMonths(ms, 1);
-  const wk = await db.query(
-    `SELECT band FROM weekly_scores
-      WHERE user_id = $1 AND week_start >= $2 AND week_start < $3
-      ORDER BY week_start`,
-    [userId, ms, nextMonth]
-  );
-  const bands = wk.rows.map(r => r.band);
-  const { computed, reasons, weekCount } = monthlyBandFromWeeks(bands);
-  const needsApproval = computed === 'Excellent' || computed === 'Above Expectations';
-
-  const prev = await db.query(`SELECT approval_status, approved_band FROM monthly_scores WHERE user_id = $1 AND month_start = $2`, [userId, ms]);
-  const p = prev.rows[0];
-
-  let approvalStatus = 'n/a';
-  let effective = computed;
-  if (needsApproval) {
-    if (p && p.approval_status === 'approved' && p.approved_band === computed) {
-      approvalStatus = 'approved';
-      effective = computed;
-    } else if (p && p.approval_status === 'rejected' && p.approved_band === computed) {
-      approvalStatus = 'rejected';
-      effective = 'Good';
-    } else {
-      approvalStatus = 'pending';
-      effective = 'Good'; // pays at Good until the director signs off
-    }
-  }
-
-  await db.query(
-    `INSERT INTO monthly_scores (user_id, month_start, computed_band, effective_band, week_count, reasons, needs_approval, approval_status, computed_at)
-     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,NOW())
-     ON CONFLICT (user_id, month_start) DO UPDATE SET
-       computed_band = EXCLUDED.computed_band, effective_band = EXCLUDED.effective_band,
-       week_count = EXCLUDED.week_count, reasons = EXCLUDED.reasons,
-       needs_approval = EXCLUDED.needs_approval, approval_status = EXCLUDED.approval_status,
-       computed_at = NOW()`,
-    [userId, ms, computed, effective, weekCount, JSON.stringify(reasons), needsApproval, approvalStatus]
-  );
-
-  return { month_start: ms, computed_band: computed, effective_band: effective, week_count: weekCount, weeks: bands, reasons, needs_approval: needsApproval, approval_status: approvalStatus };
-}
-
-// addMonths helper for 'YYYY-MM-01' strings
-function addMonths(dateStr, n) {
-  const [y, m] = String(dateStr).slice(0, 7).split('-').map(Number);
-  const d = new Date(Date.UTC(y, (m - 1) + n, 1));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-01`;
-}
-
-// GET current (or ?month=) monthly score for a user
-router.get('/month', async (req, res) => {
-  try {
-    let uid = req.user.id;
-    if (req.query.user_id && String(req.query.user_id) !== String(req.user.id)) {
-      const perms = req.user.permissions || [];
-      if (!perms.includes('attendance.view.any')) return res.status(403).json({ error: 'Forbidden' });
-      uid = parseInt(req.query.user_id, 10);
-    }
-    const month = monthStartOf(req.query.month || londonDate());
-    const m = await computeMonth(uid, month);
-    res.json({ user_id: uid, ...m });
-  } catch (e) { console.error('[daily/month]', e.message); res.status(500).json({ error: 'Failed' }); }
-});
-
-// Director (owner) signs off / rejects an Excellent or Above-Expectations month
-router.post('/month/approve', requirePermission('attendance.view.any'), async (req, res) => {
-  if (!req.user.inGroup || !req.user.inGroup('owner')) return res.status(403).json({ error: 'Only the director can sign off Excellent / Above Expectations.' });
-  const { user_id, month, decision, note } = req.body || {};
-  if (!user_id || !month || !['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'Bad input' });
-  try {
-    const ms = monthStartOf(month);
-    const cur = await computeMonth(user_id, ms); // ensure row is fresh
-    if (!cur.needs_approval) return res.status(400).json({ error: 'This month does not need approval.' });
-    const effective = decision === 'approved' ? cur.computed_band : 'Good';
-    await db.query(
-      `UPDATE monthly_scores SET approval_status = $1, approved_band = $2, effective_band = $3,
-         approved_by = $4, approved_at = NOW(), approval_note = $5
-       WHERE user_id = $6 AND month_start = $7`,
-      [decision, cur.computed_band, effective, req.user.id, note || null, user_id, ms]
-    );
-    await logAudit(req.user.id, 'monthly_score.' + decision, { user_id, month: ms, band: cur.computed_band });
-    res.json({ ok: true, effective_band: effective });
-  } catch (e) { console.error('[daily/month/approve]', e.message); res.status(500).json({ error: 'Failed' }); }
-});
-
-// Owner panel: every month currently awaiting director sign-off
-router.get('/month/pending', requirePermission('attendance.view.any'), async (req, res) => {
-  try {
-    const month = monthStartOf(req.query.month || londonDate());
-    const users = await db.query(`SELECT id FROM users WHERE employment_status = 'active' AND left_date IS NULL`);
-    for (const u of users.rows) await computeMonth(u.id, month);
-    const pend = await db.query(
-      `SELECT ms.user_id, u.full_name, ms.month_start, ms.computed_band, ms.week_count
-         FROM monthly_scores ms JOIN users u ON u.id = ms.user_id
-        WHERE ms.month_start = $1 AND ms.approval_status = 'pending'
-        ORDER BY u.full_name`, [month]);
-    res.json({ month, pending: pend.rows });
-  } catch (e) { console.error('[daily/month/pending]', e.message); res.status(500).json({ error: 'Failed' }); }
-});
-
 module.exports = router;
 module.exports.assessDay = assessDay;
 module.exports.scoreWeek = scoreWeek;
-module.exports.monthlyBandFromWeeks = monthlyBandFromWeeks;
-module.exports.computeMonth = computeMonth;
 module.exports.freezeDay = freezeDay;
 module.exports.scoreLastWeek = scoreLastWeek;
 module.exports.retentionCleanup = retentionCleanup;

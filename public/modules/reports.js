@@ -145,7 +145,10 @@ window.fkModules['hr/reports'] = {
         ' · Active <b>' + fmtMins(r.snapshot_active_min) + '</b>' +
         ' · Idle <b>' + fmtMins(r.snapshot_idle_min) + '</b>' +
         ' · Break <b>' + fmtMins(r.snapshot_break_min) + '</b>';
-      const notes = r.notes ? escapeHtml(r.notes) : '<span style="color:var(--soft);font-style:italic">(no notes written)</span>';
+      const notes = r.notes ? escapeHtml(r.notes)
+        : ((r.auto_submitted || !r.submitted_at)
+            ? '<span style="color:var(--red,#A32D2D);font-style:italic">No report submitted \u2014 auto-filled at midnight</span>'
+            : '<span style="color:var(--soft);font-style:italic">(no written note)</span>');
       return '<div class="report-card">' +
         '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;gap:12px;flex-wrap:wrap">' +
           '<div>' +
@@ -161,10 +164,10 @@ window.fkModules['hr/reports'] = {
         (r.decision === 'not_satisfactory' && r.comment
           ? '<div style="background:#FCEBEB;border-left:3px solid #A32D2D;padding:8px 12px;font-size:14.5px;color:#7A1F1F;margin-bottom:10px;border-radius:0 6px 6px 0"><b>Reviewer note:</b> ' + escapeHtml(r.comment) + '</div>'
           : '') +
-        '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-          '<button class="btn btn-danger" style="font-size:13.5px;padding:6px 12px" data-flag="' + r.id + '" data-name="' + escapeHtml(r.full_name) + '">Not satisfactory</button>' +
-          '<button class="btn" style="font-size:13.5px;padding:6px 12px" data-review="' + r.id + '" data-decision="satisfactory">Satisfactory</button>' +
-          '<button class="btn btn-primary" style="font-size:13.5px;padding:6px 12px" data-review="' + r.id + '" data-decision="good">Good</button>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button class="btn btn-danger" style="flex:none;font-size:14px;padding:10px 18px" data-flag="' + r.id + '" data-name="' + escapeHtml(r.full_name) + '">Not satisfactory</button>' +
+          '<button class="btn" style="flex:none;font-size:14px;padding:10px 18px" data-review="' + r.id + '" data-decision="satisfactory">Satisfactory</button>' +
+          '<button class="btn btn-primary" style="flex:none;font-size:14px;padding:10px 18px" data-review="' + r.id + '" data-decision="good">Good</button>' +
         '</div>' +
       '</div>';
     }

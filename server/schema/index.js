@@ -30,18 +30,23 @@ async function runMigrations() {
       continue;
     }
 
+    const client = await db.getClient();
     try {
-      await db.query(sql);
+      await client.query('BEGIN');
+      await client.query(sql);
       if (existing.rows.length > 0) {
-        await db.query('UPDATE schema_migrations SET checksum=$1, applied_at=NOW() WHERE filename=$2', [checksum, file]);
-        console.log(`[schema] ${file} — re-applied (checksum changed)`);
+        await client.query('UPDATE schema_migrations SET checksum=$1, applied_at=NOW() WHERE filename=$2', [checksum, file]);
       } else {
-        await db.query('INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)', [file, checksum]);
-        console.log(`[schema] ${file} — applied`);
+        await client.query('INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)', [file, checksum]);
       }
+      await client.query('COMMIT');
+      console.log(`[schema] ${file} — ${existing.rows.length > 0 ? 're-applied (checksum changed)' : 'applied'}`);
     } catch (err) {
-      console.error(`[schema] FAILED on ${file}: ${err.message}`);
+      await client.query('ROLLBACK').catch(() => {});
+      console.error(`[schema] FAILED on ${file} (rolled back): ${err.message}`);
       throw err;
+    } finally {
+      client.release();
     }
   }
 }

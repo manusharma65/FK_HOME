@@ -226,14 +226,10 @@ async function computeExpectedStatus(userId, dateStr) {
 }
 
 // Format an HH:MM string + a date into a TIMESTAMPTZ at the given timezone.
-// We do this in JS using offset arithmetic to avoid PG version pain. Returns ISO string.
+// Returns a string Postgres parses as timestamptz, e.g. "2026-06-10 09:00:00 Europe/London".
+// Honours the shift's tz (defaults to Europe/London) so non-UK shifts compare correctly.
 function buildLocalTimestamp(dateStr, hhmm, tz) {
-  // Trust 'Europe/London' default for now. tz only affects display.
-  // For policy comparison we treat the dates as London local.
-  // Build a Date with that local time then convert to ISO.
-  // Approach: format = `YYYY-MM-DDTHH:MM:00` then assume Europe/London.
-  // To keep this simple and robust, return the local wall-clock string and let SQL handle TZ.
-  return `${dateStr} ${hhmm}:00 Europe/London`;
+  return `${dateStr} ${hhmm}:00 ${tz || 'Europe/London'}`;
 }
 
 // Local-time "now" in London as YYYY-MM-DD HH:MM (used by cron tasks).

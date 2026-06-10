@@ -48,6 +48,9 @@ window.fkModules['today'] = {
           '#today-mod .pendpill.done{background:#EAF1EA;color:#3E7D4F}' +
           '#today-mod .btn-submit{font-family:inherit;font-weight:700;font-size:15px;padding:13px 26px;border-radius:11px;border:none;background:var(--orange,#E8722B);color:#fff;cursor:pointer}' +
           '#today-mod .btn-submit:disabled{opacity:.5;cursor:default}' +
+          '#today-mod .td-notes{width:100%;box-sizing:border-box;min-height:62px;border:1px solid var(--line);border-radius:11px;padding:11px 13px;font:inherit;font-size:14.5px;line-height:1.5;resize:vertical;outline:none;margin-bottom:13px}' +
+          '#today-mod .td-notes:disabled{background:#F7F2E9;color:#7a6f60}' +
+          '#today-mod .td-err{font-size:13.5px;color:var(--red,#A32D2D);font-weight:600}' +
           '#today-mod .empty{color:var(--muted);font-size:14.5px;padding:6px 0}' +
           '@media(max-width:620px){#today-mod .att-grid{grid-template-columns:repeat(2,1fr)}}' +
         '</style>' +
@@ -81,9 +84,11 @@ window.fkModules['today'] = {
         '</div>' +
 
         '<div class="card">' +
+          '<textarea id="tdNotes" class="td-notes" placeholder="How did today go? A line or two about what you worked on. (Optional if you have logged items above.)" maxlength="2000"></textarea>' +
           '<div class="submitbar">' +
             '<span class="pendpill" id="tdPend">Not submitted</span>' +
             '<div class="txt">Glance over your day and submit. If you forget, it submits itself at midnight \u2014 and on days off, nothing\u2019s expected.</div>' +
+            '<span class="td-err" id="tdErr"></span>' +
             '<button class="btn-submit" id="tdSubmit">Submit my day</button>' +
           '</div>' +
         '</div>' +
@@ -141,10 +146,11 @@ window.fkModules['today'] = {
       $('tdAttNote').textContent = note;
 
       // Submit state
-      const pend = $('tdPend'), btn = $('tdSubmit');
-      if (day.submitted) { pend.textContent = 'Submitted'; pend.classList.add('done'); btn.disabled = true; btn.textContent = 'Submitted'; }
-      else if (day.off) { pend.textContent = 'Day off'; pend.classList.add('done'); btn.disabled = true; }
-      else { pend.textContent = 'Not submitted'; pend.classList.remove('done'); btn.disabled = false; btn.textContent = 'Submit my day'; }
+      const pend = $('tdPend'), btn = $('tdSubmit'); const notesEl = $('tdNotes');
+      if (notesEl && day.notes != null && !notesEl.value) notesEl.value = day.notes;
+      if (day.submitted) { pend.textContent = 'Submitted'; pend.classList.add('done'); btn.disabled = true; btn.textContent = 'Submitted'; if (notesEl) notesEl.disabled = true; }
+      else if (day.off) { pend.textContent = 'Day off'; pend.classList.add('done'); btn.disabled = true; if (notesEl) notesEl.disabled = true; }
+      else { pend.textContent = 'Not submitted'; pend.classList.remove('done'); btn.disabled = false; btn.textContent = 'Submit my day'; if (notesEl) notesEl.disabled = false; }
     }
 
     $('tdAdd').addEventListener('click', async () => {
@@ -154,8 +160,14 @@ window.fkModules['today'] = {
       catch(e){} finally { $('tdAdd').disabled = false; }
     });
     $('tdSubmit').addEventListener('click', async () => {
+      const errEl = $('tdErr'); if (errEl) errEl.textContent = '';
       $('tdSubmit').disabled = true;
-      try { await fetch('/api/daily/submit', { method:'POST', credentials:'include' }); await load(); }
+      try {
+        const notes = $('tdNotes') ? $('tdNotes').value.trim() : '';
+        const r = await fetch('/api/daily/submit', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ notes }) });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); if (errEl) errEl.textContent = d.error || 'Could not submit.'; $('tdSubmit').disabled = false; return; }
+        await load();
+      }
       catch(e){ $('tdSubmit').disabled = false; }
     });
 

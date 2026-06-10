@@ -49,7 +49,7 @@ const mailRoutes = require('./server/modules/mail');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r0.93';
+const VERSION = 'r0.94';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -102,14 +102,29 @@ function londonParts() {
   return { date: `${get('year')}-${get('month')}-${get('day')}`, hhmm: `${get('hour')}:${get('minute')}`, weekday: get('weekday') };
 }
 
-// Run fn once per London date when the time is within [startHHMM, endHHMM).
-function scheduleDaily(label, startHHMM, endHHMM, fn) {
-  let lastRun = null;
+// Last-run date per job, persisted in system_state so a restart neither
+// re-runs a completed job nor permanently skips one whose window was missed.
+const cronLastRun = {};
+async function loadCronState() {
+  try {
+    const r = await db.query("SELECT key, value FROM system_state WHERE key LIKE 'cron:%'");
+    for (const row of r.rows) cronLastRun[row.key.slice(5)] = row.value;
+  } catch (e) { console.error('[cron] loadState', e.message); }
+}
+function saveCronRun(label, date) {
+  cronLastRun[label] = date; // in-memory guard updates immediately
+  db.query("INSERT INTO system_state (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2", ['cron:' + label, date])
+    .catch(e => console.error('[cron] saveState', e.message));
+}
+
+// Run fn once per London date, at or after startHHMM. No end bound — if the
+// server was down through the usual minute, it runs as soon as it's back.
+function scheduleDaily(label, startHHMM, fn) {
   setInterval(() => {
     try {
       const { date, hhmm } = londonParts();
-      if (hhmm >= startHHMM && hhmm < endHHMM && lastRun !== date) {
-        lastRun = date;
+      if (hhmm >= startHHMM && cronLastRun[label] !== date) {
+        saveCronRun(label, date);
         console.log(`[cron] ${label} @ ${date}`);
         Promise.resolve().then(fn).catch(e => console.error(`[cron ${label}]`, e.message));
       }
@@ -117,14 +132,13 @@ function scheduleDaily(label, startHHMM, endHHMM, fn) {
   }, 60 * 1000);
 }
 
-// Run fn once per matching weekday/date when within [startHHMM, endHHMM).
-function scheduleWeekly(label, weekday, startHHMM, endHHMM, fn) {
-  let lastRun = null;
+// Run fn once on the given weekday, at or after startHHMM.
+function scheduleWeekly(label, weekday, startHHMM, fn) {
   setInterval(() => {
     try {
       const p = londonParts();
-      if (p.weekday === weekday && p.hhmm >= startHHMM && p.hhmm < endHHMM && lastRun !== p.date) {
-        lastRun = p.date;
+      if (p.weekday === weekday && p.hhmm >= startHHMM && cronLastRun[label] !== p.date) {
+        saveCronRun(label, p.date);
         console.log(`[cron] ${label} @ ${p.date}`);
         Promise.resolve().then(fn).catch(e => console.error(`[cron ${label}]`, e.message));
       }
@@ -139,22 +153,22 @@ function startCronJobs() {
   }, 5 * 60 * 1000);
 
   // Midnight: roll over the day, freeze yesterday's record + ledger, age off detail.
-  scheduleDaily('midnight', '00:00', '00:05', () =>
+  scheduleDaily('midnight', '00:00', () =>
     attendanceRoutes.tickDailyMidnight()
       .then(() => dailyRoutes.freezeDay())
       .then(() => dailyRoutes.retentionCleanup()));
 
   // 01:00 — monthly leave accrual on user anniversaries.
-  scheduleDaily('accrual 01:00', '01:00', '01:05', () => leaveEngine.tickMonthlyAccrual());
+  scheduleDaily('accrual 01:00', '01:00', () => leaveEngine.tickMonthlyAccrual());
 
   // 02:00 — nightly off-site pg_dump → Backblaze B2.
-  scheduleDaily('backup 02:00', '02:00', '02:05', () => backupEngine.tickNightlyBackup());
+  scheduleDaily('backup 02:00', '02:00', () => backupEngine.tickNightlyBackup());
 
   // 03:00 — hard-purge soft-deleted files past retention.
-  scheduleDaily('file-purge 03:00', '03:00', '03:05', () => filesRoutes.tickHardPurge());
+  scheduleDaily('file-purge 03:00', '03:00', () => filesRoutes.tickHardPurge());
 
   // 06:00 — task promotion + probation/birthday nudges.
-  scheduleDaily('task tick 06:00', '06:00', '06:05', async () => {
+  scheduleDaily('task tick 06:00', '06:00', async () => {
     await lifecycle.tickTasks()
       .then(r => console.log('[cron task tick] opened=' + r.opened + ' due=' + r.dued + ' overdue=' + r.overdued + ' renudged=' + r.reNudged))
       .catch(e => console.error('[cron task tick]', e.message));
@@ -167,11 +181,11 @@ function startCronJobs() {
   });
 
   // Sunday 23:00 — close the week + score it.
-  scheduleWeekly('weekly Sunday 23:00', 'Sunday', '23:00', '23:30', () =>
+  scheduleWeekly('weekly Sunday 23:00', 'Sunday', '23:00', () =>
     attendanceRoutes.tickWeeklySunday().then(() => dailyRoutes.scoreLastWeek()));
 
   // Sunday 23:30 — weekend conditional-pay calc (right after the weekly tick).
-  scheduleWeekly('weekend-pay Sunday 23:30', 'Sunday', '23:30', '23:55', () =>
+  scheduleWeekly('weekend-pay Sunday 23:30', 'Sunday', '23:30', () =>
     leaveEngine.tickWeeklyWeekendPay());
 
   console.log('[boot] cron jobs scheduled (5min, 00:00, 01:00, 02:00, 03:00, 06:00, Sun 23:00, Sun 23:30)');
@@ -189,6 +203,7 @@ async function start() {
     await leaveEngine.runBackfillIfNeeded();
     // r0.33 — assign FK### Emp IDs to any staff without one. Idempotent.
     await require('./server/modules/emp-id').runEmpIdBackfillIfNeeded();
+    await loadCronState();
     app.listen(PORT, () => {
       console.log(`[boot] FK Home ${VERSION} listening on port ${PORT}`);
       startCronJobs();

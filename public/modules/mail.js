@@ -174,9 +174,25 @@ window.fkModules['mail'] = {
     <div class="cwrap" id="cwrap">
       <div class="cwin">
         <div class="chead"><span id="cTitle">New message</span><button class="cx" id="cClose" title="Close"><i class="ti ti-x"></i></button></div>
+        <div class="caibar">
+          <div class="caitop"><i class="ti ti-sparkles"></i><input id="cAiInstr" class="caiinstr" placeholder="Tell AI what to write\u2026 e.g. ask Kemballs for an updated freight quote"><button class="caibtn" id="cAiWrite"><i class="ti ti-sparkles" style="font-size:14px"></i> Write</button></div>
+          <div class="caichips">
+            <button class="caichip" id="cAiPolish">Polish</button>
+            <button class="caichip" id="cAiFix">Fix grammar</button>
+            <button class="caichip" id="cAiFormal">More formal</button>
+            <button class="caichip" id="cAiFriendly">Friendlier</button>
+            <button class="caichip" id="cAiFirmer">Firmer</button>
+            <button class="caichip" id="cAiShorter">Shorten</button>
+            <button class="caichip" id="cAiExpand">Expand</button>
+            <button class="caichip" id="cAiSubject">Suggest subject</button>
+          </div>
+          <div class="caictx" id="cAiCtx"></div>
+          <div class="caierr" id="cAiErr"></div>
+        </div>
         <div class="cbody">
-          <div class="crow"><input id="cTo" class="cfield" placeholder="To" list="mailContacts" autocomplete="off"><button class="cccbtn" id="cCcBtn">Cc</button></div>
+          <div class="crow"><input id="cTo" class="cfield" placeholder="To" list="mailContacts" autocomplete="off"><button class="cccbtn" id="cCcBtn">Cc</button><button class="cccbtn" id="cBccBtn">Bcc</button></div>
           <input id="cCc" class="cfield" placeholder="Cc" list="mailContacts" autocomplete="off" style="display:none">
+          <input id="cBcc" class="cfield" placeholder="Bcc" list="mailContacts" autocomplete="off" style="display:none">
           <input id="cSubj" class="cfield" placeholder="Subject">
           <div id="cBody" class="cedit" contenteditable="true" data-ph="Write your message…"></div>
           <div id="cAtts" class="cm-atts"></div>
@@ -201,8 +217,20 @@ window.fkModules['mail'] = {
       #mail-mod .composebtn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin:0 0 12px;padding:12px;border:none;border-radius:12px;background:var(--orange,#E8722B);color:#fff;font-family:inherit;font-weight:700;font-size:15px;cursor:pointer;box-shadow:0 2px 8px rgba(232,114,43,.28)}
       #mail-mod .composebtn:hover{filter:brightness(1.05)} #mail-mod .composebtn i{font-size:18px}
       #mail-mod .msig{display:flex;align-items:center;gap:9px;margin-top:auto;padding:10px;border-radius:9px;color:var(--muted);cursor:pointer;font-size:13.5px} #mail-mod .msig:hover{background:#EFE7D8;color:#3A322A} #mail-mod .msig i{font-size:16px}
-      #mail-mod .cwrap{position:absolute;right:22px;bottom:0;z-index:60;display:none} #mail-mod .cwrap.show{display:block}
-      #mail-mod .cwin{width:540px;max-width:calc(100vw - 44px);background:var(--surface,#fff);border:1px solid var(--line);border-radius:14px 14px 0 0;box-shadow:0 24px 60px rgba(58,40,24,.28);overflow:hidden;display:flex;flex-direction:column;max-height:80vh}
+      #mail-mod .cwrap{position:absolute;inset:0;z-index:60;display:none;align-items:flex-start;justify-content:center;background:rgba(40,28,18,.46);padding:38px 18px;overflow:auto} #mail-mod .cwrap.show{display:flex}
+      #mail-mod .cwin{width:720px;max-width:100%;margin:auto;background:var(--surface,#fff);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 80px rgba(58,40,24,.34);overflow:hidden;display:flex;flex-direction:column;max-height:calc(100vh - 76px)}
+      #mail-mod .caibar{background:linear-gradient(180deg,#F6EFE3,#FCF8F1);border-bottom:1px solid var(--line2,#F0E8DA);padding:11px 15px}
+      #mail-mod .caitop{display:flex;gap:8px;align-items:center}
+      #mail-mod .caitop>.ti-sparkles{color:var(--orange,#E8722B);font-size:18px;flex:none}
+      #mail-mod .caiinstr{flex:1;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px;outline:none;background:#fff;color:inherit}
+      #mail-mod .caibtn{border:none;border-radius:9px;padding:9px 14px;font:inherit;font-weight:700;font-size:13px;cursor:pointer;background:var(--orange,#E8722B);color:#fff;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+      #mail-mod .caibtn:disabled{opacity:.55;cursor:default}
+      #mail-mod .caichips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+      #mail-mod .caichip{border:1px solid var(--line);background:#fff;border-radius:99px;padding:5px 11px;font:inherit;font-size:12.5px;font-weight:600;color:#5b5249;cursor:pointer}
+      #mail-mod .caichip:hover{border-color:var(--orange,#E8722B);color:var(--orange,#E8722B)}
+      #mail-mod .caichip:disabled{opacity:.5;cursor:default}
+      #mail-mod .caictx{font-size:12px;color:var(--muted);margin-top:8px}
+      #mail-mod .caierr{font-size:12.5px;color:#A32D2D;margin-top:7px}
       #mail-mod .chead{display:flex;align-items:center;background:#2A2018;color:#fff;padding:11px 15px;font-size:14.5px;font-weight:600} #mail-mod .chead span{flex:1}
       #mail-mod .cx{background:none;border:none;color:#C9BBA8;font-size:18px;cursor:pointer;display:flex} #mail-mod .cx:hover{color:#fff}
       #mail-mod .cbody{padding:4px 15px 8px;overflow:auto;display:flex;flex-direction:column}
@@ -400,15 +428,7 @@ window.fkModules['mail'] = {
             '<div class="aisum" id="aiSum"></div>' + attsHtml + bodyHtml +
             '<div id="noteSlot"></div>' +
             '<div class="body-acts"><button class="btn btn-send" id="bReply"><i class="ti ti-arrow-back-up" style="font-size:16px"></i> Reply</button><button class="btn btn-ghost" id="bReplyAll"><i class="ti ti-arrow-back-up-double" style="font-size:16px"></i> Reply all</button><button class="btn btn-ghost" id="bFwd"><i class="ti ti-arrow-forward-up" style="font-size:16px"></i> Forward</button><button class="btn btn-ghost" id="bNote"><i class="ti ti-note" style="font-size:16px"></i> Note</button></div>' +
-            '<div class="composer" id="composer"><div class="cm-top" id="cmTopLabel">Reply to <b>' + esc(f.name) + '</b></div>' +
-              '<div class="ai-row" id="aiRow"><button class="ai-draft" id="aiDraftBtn"><i class="ti ti-sparkles" style="font-size:15px"></i> AI draft</button><input class="ai-instr" id="aiInstr" placeholder="…or tell the AI what to say"></div>' +
-              '<input class="cm-to" id="cmTo" placeholder="To" list="mailContacts" autocomplete="off">' +
-              '<input class="cm-to" id="cmCc" placeholder="Cc" list="mailContacts" autocomplete="off">' +
-              '<div class="cm-body" id="cmBody" contenteditable="true" data-ph="Write your message…"></div>' +
-              '<div class="cm-atts" id="cmAtts"></div>' +
-              '<div class="cm-foot"><div class="tools"><button class="tool" id="tBold" title="Bold"><i class="ti ti-bold"></i></button><button class="tool" id="tItalic" title="Italic"><i class="ti ti-italic"></i></button><button class="tool" id="tClip" title="Attach a file"><i class="ti ti-paperclip"></i></button></div>' +
-                '<span class="cm-note" id="cmNote"></span><button class="polish" id="polishBtn"><i class="ti ti-spell-check" style="font-size:15px"></i> Polish</button><button class="btn btn-ghost" id="cmDraft">Save draft</button><button class="btn btn-ghost" id="cmCancel">Cancel</button><button class="btn btn-send" id="cmSend"><i class="ti ti-send" style="font-size:15px"></i> Send</button></div>' +
-            '</div></div>';
+            '</div>';
 
         renderChips(id); renderNote(id);
 
@@ -459,56 +479,21 @@ window.fkModules['mail'] = {
         $('#aArch').addEventListener('click', () => act('/api/mail/archive', thIds, 'archived'));
         $('#aDel').addEventListener('click', () => act('/api/mail/trash', thIds, 'deleted'));
 
-        // composer
-        const composer = $('#composer'), cmTo = $('#cmTo'), cmCc = $('#cmCc'), cmBody = $('#cmBody'), cmTopLabel = $('#cmTopLabel'), cmNote = $('#cmNote'), cmSend = $('#cmSend'), aiRow = $('#aiRow'), cmAtts = $('#cmAtts');
-        let mode = 'reply';
+        // Reply / reply-all / forward open the centered composer (full AI) with context.
         const sigBlock = signature ? ('\n\n' + signature) : '';
         const myEmail = ((window.fkUser && window.fkUser.email) || '').toLowerCase();
         const splitAddrs = (s) => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
         const emailOf = (a) => { const mm = String(a).match(/<([^>]+)>/); return (mm ? mm[1] : a).trim().toLowerCase(); };
-        pendingAtts = [];
-        const renderAtts = () => { cmAtts.innerHTML = pendingAtts.map((a, i) => '<span class="cm-att"><i class="ti ti-paperclip" style="font-size:13px"></i> ' + esc(a.filename) + ' <i class="ti ti-x x" data-i="' + i + '"></i></span>').join(''); cmAtts.querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { pendingAtts.splice(parseInt(x.dataset.i, 10), 1); renderAtts(); })); };
-        attTarget = renderAtts;
-        const openComposer = () => { composer.classList.add('show'); if (composer.scrollIntoView) composer.scrollIntoView({ behavior: 'smooth', block: 'center' }); setTimeout(() => cmBody.focus(), 250); };
-        const showReply = () => { mode = 'reply'; cmTo.classList.remove('show'); cmCc.classList.remove('show'); aiRow.classList.remove('hide'); cmTopLabel.innerHTML = 'Reply to <b>' + esc(f.name) + '</b>'; cmBody.innerText = sigBlock; openComposer(); };
-        const showReplyAll = () => {
-          mode = 'replyall'; aiRow.classList.remove('hide');
+        const reSubj = /^re:/i.test(m.subject) ? m.subject : 'Re: ' + m.subject;
+        const fwdSubj = /^fwd:/i.test(m.subject) ? m.subject : 'Fwd: ' + m.subject;
+        $('#bReply').addEventListener('click', () => openCompose({ mode: 'reply', title: 'Reply', to: f.email, subject: reSubj, body: sigBlock, original: plain, inReplyTo: m.messageId, references: m.messageId, threadId: m.threadId }));
+        $('#bReplyAll').addEventListener('click', () => {
           const seen = {}; const toUniq = [m.from].concat(splitAddrs(m.to)).filter(a => { const e = emailOf(a); if (!e || e === myEmail || seen[e]) return false; seen[e] = 1; return true; });
           const ccList = splitAddrs(m.cc).filter(a => { const e = emailOf(a); return e && e !== myEmail && !seen[e]; });
-          cmTo.value = toUniq.join(', '); cmTo.classList.add('show');
-          cmCc.value = ccList.join(', '); cmCc.classList.toggle('show', ccList.length > 0);
-          cmTopLabel.innerHTML = 'Reply to all'; cmBody.innerText = sigBlock; openComposer();
-        };
-        const showForward = () => { mode = 'forward'; cmTo.classList.add('show'); cmCc.classList.remove('show'); aiRow.classList.add('hide'); cmTo.value = ''; cmTopLabel.innerHTML = 'Forward this message'; cmBody.innerText = sigBlock + '\n\n---------- Forwarded message ----------\nFrom: ' + (m.from || '') + '\nDate: ' + (m.date || '') + '\nSubject: ' + (m.subject || '') + '\n\n' + plain; openComposer(); };
-        $('#bReply').addEventListener('click', showReply);
-        $('#bReplyAll').addEventListener('click', showReplyAll);
-        $('#bFwd').addEventListener('click', showForward);
+          openCompose({ mode: 'replyall', title: 'Reply all', to: toUniq.join(', '), cc: ccList.join(', '), subject: reSubj, body: sigBlock, original: plain, inReplyTo: m.messageId, references: m.messageId, threadId: m.threadId });
+        });
+        $('#bFwd').addEventListener('click', () => openCompose({ mode: 'forward', title: 'Forward', to: '', subject: fwdSubj, body: sigBlock + '\n\n---------- Forwarded message ----------\nFrom: ' + (m.from || '') + '\nDate: ' + (m.date || '') + '\nSubject: ' + (m.subject || '') + '\n\n' + plain, original: plain }));
         $('#bNote').addEventListener('click', () => editNote(id, notesMap[id] || ''));
-        $('#cmCancel').addEventListener('click', () => { composer.classList.remove('show'); pendingAtts = []; renderAtts(); });
-        $('#tBold').addEventListener('click', () => { cmBody.focus(); document.execCommand('bold'); });
-        $('#tItalic').addEventListener('click', () => { cmBody.focus(); document.execCommand('italic'); });
-        $('#tClip').addEventListener('click', () => { attTarget = renderAtts; attInput.click(); });
-
-        $('#aiDraftBtn').addEventListener('click', async () => { const btn = $('#aiDraftBtn'); btn.disabled = true; cmNote.textContent = 'AI is writing…'; try { const out = await post('/api/mail/ai/draft', { original: plain, instruction: $('#aiInstr').value.trim() }); cmBody.innerText = out.draft || ''; cmNote.textContent = 'Drafted by AI — edit before sending.'; } catch (e) { cmNote.textContent = e.code === 'NO_KEY' ? 'AI needs a one-time key set up first.' : e.message; } btn.disabled = false; });
-        $('#polishBtn').addEventListener('click', async () => { const btn = $('#polishBtn'); if (!cmBody.innerText.trim()) { cmNote.textContent = 'Write something first.'; return; } btn.disabled = true; cmNote.textContent = 'Polishing…'; try { const out = await post('/api/mail/ai/polish', { text: cmBody.innerText }); if (out.polished) cmBody.innerText = out.polished; cmNote.textContent = 'Spelling & grammar polished.'; } catch (e) { cmNote.textContent = e.code === 'NO_KEY' ? 'AI needs a one-time key set up first.' : e.message; } btn.disabled = false; });
-
-        async function doSend(asDraft) {
-          const text = cmBody.innerText.trim(); const html = cmBody.innerHTML;
-          const to = (mode === 'forward' || mode === 'replyall') ? cmTo.value.trim() : f.email;
-          const cc = (mode === 'replyall' && cmCc.classList.contains('show')) ? cmCc.value.trim() : '';
-          if (!asDraft && (mode === 'forward' || mode === 'replyall') && !to) { cmNote.textContent = 'Enter at least one recipient.'; return; }
-          if (!asDraft && !text) { cmNote.textContent = 'Write a message first.'; return; }
-          const subject = mode === 'forward' ? (/^fwd:/i.test(m.subject) ? m.subject : 'Fwd: ' + m.subject) : (/^re:/i.test(m.subject) ? m.subject : 'Re: ' + m.subject);
-          cmSend.disabled = true; cmNote.textContent = asDraft ? 'Saving…' : 'Sending…';
-          try {
-            const body = { to, cc, subject, text, html, attachments: pendingAtts, draft: !!asDraft };
-            if (mode === 'reply' || mode === 'replyall') { body.inReplyTo = m.messageId; body.references = m.messageId; body.threadId = m.threadId; }
-            await post('/api/mail/send', body);
-            cmNote.textContent = ''; composer.classList.remove('show'); pendingAtts = []; renderAtts(); toast(asDraft ? 'Draft saved' : mode === 'forward' ? 'Forwarded' : 'Sent');
-          } catch (e) { cmNote.textContent = e.message; } cmSend.disabled = false;
-        }
-        cmSend.addEventListener('click', () => doSend(false));
-        $('#cmDraft').addEventListener('click', () => doSend(true));
 
         // AI summary on demand
         const sumEl = $('#aiSum'); const sumIcon = '<div class="ic"><i class="ti ti-sparkles"></i></div>';
@@ -541,17 +526,19 @@ window.fkModules['mail'] = {
     function fillContacts() { const dl = $('#mailContacts'); if (!dl) return; dl.innerHTML = contacts.map(c => { const v = (c.name && c.name.trim()) ? (c.name + ' <' + c.email + '>') : c.email; return '<option value="' + esc(v) + '">' + esc(c.email) + '</option>'; }).join(''); }
 
     // ---- Floating composer (new email + continue draft) ----
-    const cwrap = $('#cwrap'), cTo = $('#cTo'), cCc = $('#cCc'), cCcBtn = $('#cCcBtn'), cSubj = $('#cSubj'), cBody = $('#cBody'), cAtts = $('#cAtts'), cNote = $('#cNote'), cSend = $('#cSend'), cDraftBtn = $('#cDraft');
+    const cwrap = $('#cwrap'), cTo = $('#cTo'), cCc = $('#cCc'), cBcc = $('#cBcc'), cCcBtn = $('#cCcBtn'), cBccBtn = $('#cBccBtn'), cSubj = $('#cSubj'), cBody = $('#cBody'), cAtts = $('#cAtts'), cNote = $('#cNote'), cSend = $('#cSend'), cDraftBtn = $('#cDraft'), cAiErr = $('#cAiErr');
     const renderComposeAtts = () => { cAtts.innerHTML = composeAtts.map((a, i) => '<span class="cm-att"><i class="ti ti-paperclip" style="font-size:13px"></i> ' + esc(a.filename) + ' <i class="ti ti-x x" data-i="' + i + '"></i></span>').join(''); cAtts.querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { composeAtts.splice(parseInt(x.dataset.i, 10), 1); renderComposeAtts(); })); };
     function closeCompose() { cwrap.classList.remove('show'); composeCfg = null; composeAtts = []; renderComposeAtts(); cNote.textContent = ''; }
     function openCompose(cfg) {
       composeCfg = cfg || { mode: 'new' }; composeAtts = (cfg && cfg.attachments) || []; renderComposeAtts();
       $('#cTitle').textContent = (cfg && cfg.title) || 'New message';
-      cTo.value = (cfg && cfg.to) || ''; cCc.value = (cfg && cfg.cc) || ''; cSubj.value = (cfg && cfg.subject) || '';
-      cCc.style.display = (cfg && cfg.cc) ? 'block' : 'none';
+      cTo.value = (cfg && cfg.to) || ''; cCc.value = (cfg && cfg.cc) || ''; cBcc.value = ''; cSubj.value = (cfg && cfg.subject) || '';
+      cCc.style.display = (cfg && cfg.cc) ? 'block' : 'none'; cBcc.style.display = 'none';
       if (cfg && cfg.bodyHtml != null) cBody.innerHTML = cfg.bodyHtml;
       else cBody.innerText = (cfg && cfg.body != null) ? cfg.body : (signature ? ('\n\n' + signature) : '');
-      cNote.textContent = ''; cwrap.classList.add('show'); setTimeout(() => (cTo.value ? cBody : cTo).focus(), 60);
+      cNote.textContent = ''; cAiErr.textContent = ''; $('#cAiInstr').value = '';
+      $('#cAiCtx').textContent = (cfg && cfg.original) ? 'AI can see the message you\u2019re replying to, so Write and the tone tools stay on topic.' : '';
+      cwrap.classList.add('show'); setTimeout(() => (cTo.value ? cBody : cTo).focus(), 60);
     }
     async function openDraft(id) {
       const meta = messages.find(x => x.id === id); toast('Opening draft…');
@@ -562,19 +549,50 @@ window.fkModules['mail'] = {
       } catch (e) { toast('Could not open draft.'); }
     }
     cCcBtn.addEventListener('click', () => { const show = cCc.style.display === 'none'; cCc.style.display = show ? 'block' : 'none'; if (show) cCc.focus(); });
+    cBccBtn.addEventListener('click', () => { const show = cBcc.style.display === 'none'; cBcc.style.display = show ? 'block' : 'none'; if (show) cBcc.focus(); });
     $('#cClose').addEventListener('click', closeCompose);
     $('#cBold').addEventListener('click', () => { cBody.focus(); document.execCommand('bold'); });
     $('#cItalic').addEventListener('click', () => { cBody.focus(); document.execCommand('italic'); });
     $('#cClip').addEventListener('click', () => { attTarget = renderComposeAtts; pendingAtts = composeAtts; attInput.click(); });
+
+    // ---- Compose AI ----
+    const aiErrMsg = (e) => (e && e.code === 'NO_KEY') ? 'AI isn\u2019t switched on yet \u2014 add the API key in Railway.' : ((e && e.message) || 'AI failed, try again.');
+    async function aiWrite() {
+      const btn = $('#cAiWrite'); const instr = $('#cAiInstr').value.trim();
+      cAiErr.textContent = ''; btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="ti ti-loader-2"></i> Writing…';
+      try { const out = await post('/api/mail/ai/compose', { mode: 'write', instruction: instr, original: (composeCfg && composeCfg.original) || '' }); if (out.result) cBody.innerText = out.result; }
+      catch (e) { cAiErr.textContent = aiErrMsg(e); }
+      btn.disabled = false; btn.innerHTML = old;
+    }
+    async function aiAction(mode, btn) {
+      cAiErr.textContent = '';
+      if (mode !== 'write' && !cBody.innerText.trim()) { cAiErr.textContent = 'Write something first, then I can ' + mode + ' it.'; return; }
+      const chips = cwrap.querySelectorAll('.caichip, .caibtn'); chips.forEach(c => c.disabled = true);
+      const old = btn.textContent; btn.textContent = '…';
+      try {
+        const out = await post('/api/mail/ai/compose', { mode, text: cBody.innerText, original: (composeCfg && composeCfg.original) || '' });
+        if (mode === 'subject') { if (out.result) cSubj.value = out.result.trim().replace(/^["']|["']$/g, ''); }
+        else if (out.result) cBody.innerText = out.result;
+      } catch (e) { cAiErr.textContent = aiErrMsg(e); }
+      chips.forEach(c => c.disabled = false); btn.textContent = old;
+    }
+    $('#cAiWrite').addEventListener('click', aiWrite);
+    [['cAiPolish', 'polish'], ['cAiFix', 'fix'], ['cAiFormal', 'formal'], ['cAiFriendly', 'friendly'], ['cAiFirmer', 'firmer'], ['cAiShorter', 'shorter'], ['cAiExpand', 'expand'], ['cAiSubject', 'subject']].forEach(([id, mode]) => { const b = $('#' + id); if (b) b.addEventListener('click', () => aiAction(mode, b)); });
+
     async function composeSend(asDraft) {
-      const to = cTo.value.trim(); const cc = cCc.style.display !== 'none' ? cCc.value.trim() : '';
+      const to = cTo.value.trim();
+      const cc = cCc.style.display !== 'none' ? cCc.value.trim() : '';
+      const bcc = cBcc.style.display !== 'none' ? cBcc.value.trim() : '';
       const text = cBody.innerText.trim(); const html = cBody.innerHTML;
       if (!asDraft && !to) { cNote.textContent = 'Enter at least one recipient.'; return; }
       if (!asDraft && !text) { cNote.textContent = 'Write a message first.'; return; }
       cSend.disabled = true; cDraftBtn.disabled = true; cNote.textContent = asDraft ? 'Saving…' : 'Sending…';
       try {
-        const body = { to, cc, subject: cSubj.value.trim() || '(no subject)', text, html, attachments: composeAtts, draft: !!asDraft };
-        if (composeCfg && composeCfg.draftId && !asDraft) body.draftId = composeCfg.draftId;
+        const body = { to, cc, bcc, subject: cSubj.value.trim() || '(no subject)', text, html, attachments: composeAtts, draft: !!asDraft };
+        if (composeCfg) {
+          if (composeCfg.draftId && !asDraft) body.draftId = composeCfg.draftId;
+          if (composeCfg.inReplyTo) { body.inReplyTo = composeCfg.inReplyTo; body.references = composeCfg.references; body.threadId = composeCfg.threadId; }
+        }
         await post('/api/mail/send', body);
         toast(asDraft ? 'Draft saved' : 'Sent'); closeCompose();
         if (box === 'drafts' || (box === 'sent' && !asDraft)) loadBox(false);

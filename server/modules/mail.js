@@ -182,12 +182,13 @@ const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').
 const b64 = (str) => Buffer.from(str, 'utf8').toString('base64');
 
 // Build a raw RFC822 message: plain, or text+html alternative, with optional attachments.
-function buildRaw(fromEmail, { to, cc, subject, text, html, inReplyTo, references, attachments }) {
+function buildRaw(fromEmail, { to, cc, bcc, subject, text, html, inReplyTo, references, attachments }) {
   const atts = attachments || [];
   // Strip CR/LF from header values so a newline can't inject extra headers.
   const hv = (s) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').trim();
   const headers = [`From: ${fromEmail}`, `To: ${hv(to)}`];
   if (cc) headers.push(`Cc: ${hv(cc)}`);
+  if (bcc) headers.push(`Bcc: ${hv(bcc)}`);
   headers.push(`Subject: ${hv(subject)}`, 'MIME-Version: 1.0');
   if (inReplyTo) headers.push(`In-Reply-To: ${hv(inReplyTo)}`);
   if (references) headers.push(`References: ${hv(references)}`);
@@ -279,9 +280,9 @@ router.get('/message/:id/attachment/:attId', async (req, res) => {
 // Send / reply / forward / compose-new (text, optional html, cc, attachments, or save as draft).
 router.post('/send', async (req, res) => {
   try {
-    const { to, cc, subject, text, html, inReplyTo, references, threadId, attachments, draft, draftId } = req.body || {};
+    const { to, cc, bcc, subject, text, html, inReplyTo, references, threadId, attachments, draft, draftId } = req.body || {};
     if (!draft && (!to || !(text || html))) return res.status(400).json({ error: 'Need at least a recipient and a message.' });
-    const out = await sendMail(req.user.email, { to: to || '', cc: cc || '', subject: subject || '(no subject)', text, html, inReplyTo, references, threadId, attachments, draft });
+    const out = await sendMail(req.user.email, { to: to || '', cc: cc || '', bcc: bcc || '', subject: subject || '(no subject)', text, html, inReplyTo, references, threadId, attachments, draft });
     if (!draft && draftId) { try { await gmailFor(req.user.email).users.drafts.delete({ userId: 'me', id: draftId }); } catch (e) {} }
     res.json({ ok: true, ...out });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -450,6 +451,44 @@ router.post('/ai/polish', async (req, res) => {
     if (!text.trim()) return res.json({ polished: '' });
     const prompt = 'Correct the spelling, grammar and punctuation of this email reply written in British English. Keep the meaning, tone and line breaks; do not add or remove content or add any commentary. Reply with only the corrected text.\n\n' + text;
     res.json({ polished: await callClaude(prompt, 800) });
+  } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
+});
+
+// Unified compose AI — one endpoint, many modes. Used by the compose modal.
+router.post('/ai/compose', async (req, res) => {
+  try {
+    const mode = String((req.body && req.body.mode) || 'polish');
+    const text = String((req.body && req.body.text) || '').slice(0, 8000);
+    const original = String((req.body && req.body.original) || '').slice(0, 6000);
+    const instruction = String((req.body && req.body.instruction) || '').slice(0, 800);
+    const who = req.user.full_name || req.user.email;
+    const ctx = original ? ('\n\nFor context, here is the email being replied to:\n' + original) : '';
+    const british = ' in plain British English';
+    let prompt, max = 800;
+    if (mode === 'write') {
+      prompt = 'You are writing an email on behalf of ' + who + ' at FK Sports, a UK sports and fitness retailer. Write a warm, professional, concise email' + british + '. Do not include a subject line or a "Subject:" prefix. Sign off as ' + who + '. What to write: ' + (instruction || 'Write a suitable email for the context.') + ctx + '\n\nWrite only the email body.';
+      max = 700;
+    } else if (mode === 'subject') {
+      prompt = 'Suggest one short, clear email subject line (8 words max) for this email body. Reply with only the subject line — no quotes, no "Subject:" prefix.\n\n' + text;
+      max = 40;
+    } else if (mode === 'fix') {
+      prompt = 'Correct only the spelling, grammar and punctuation of this email' + british + '. Keep the meaning, tone and line breaks; do not add, remove or rephrase content, and add no commentary. Reply with only the corrected text.\n\n' + text;
+      max = 900;
+    } else if (mode === 'formal') {
+      prompt = 'Rewrite this email to be more formal and professional' + british + '. Keep all facts and intent. Reply with only the rewritten body.\n\n' + text;
+    } else if (mode === 'friendly') {
+      prompt = 'Rewrite this email to be warmer and friendlier while staying professional' + british + '. Keep all facts and intent. Reply with only the rewritten body.\n\n' + text;
+    } else if (mode === 'firmer') {
+      prompt = 'Rewrite this email to be firmer and more assertive while staying polite and professional' + british + '. Keep all facts and intent. Reply with only the rewritten body.\n\n' + text;
+    } else if (mode === 'shorter') {
+      prompt = 'Make this email more concise without losing key information' + british + '. Reply with only the shortened body.\n\n' + text;
+      max = 600;
+    } else if (mode === 'expand') {
+      prompt = 'Add a little more detail and courtesy to this email while keeping it professional and concise' + british + '. Reply with only the expanded body.\n\n' + text;
+    } else { // polish
+      prompt = 'Polish this email so it reads clearly and professionally' + british + ': improve flow and word choice and fix any grammar, but keep the meaning, tone and intent, and add no new content or commentary. Reply with only the polished body.\n\n' + text;
+    }
+    res.json({ result: await callClaude(prompt, max) });
   } catch (e) { res.status(e.code === 'NO_KEY' ? 503 : 500).json({ error: e.message, code: e.code }); }
 });
 
