@@ -123,6 +123,7 @@
      dark icon rail) and let the module fill the whole content area, flush, no gaps. */
   .app.mail-focus { grid-template-columns: 1fr; height: 100vh; }
   .app.mail-focus .sidebar { display: none; }
+  .app.mail-focus .topbar { display: none; }
   .app.mail-focus .content { padding: 0 !important; display: flex; flex-direction: column; min-height: 0; }
   .app.mail-focus #moduleView { flex: 1; min-height: 0; padding: 0 !important; display: flex; }
   .brand-mark {
@@ -796,6 +797,10 @@
       <div class="navgrp g-hr" id="grpHR" style="display:none">
         <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-users"></i></span><span class="navgrp-lbl">HR</span><span class="navgrp-cnt" id="cntHR"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
         <div class="navgrp-items">
+      <div class="nav-item" id="navTeamReview" data-route="#hr/team-review" style="display:none" onclick="location.hash='#hr/team-review'">
+        <i class="ti ti-clipboard-check"></i>
+        <span>Team review</span>
+      </div>
       <div class="nav-item" id="navHrToday" data-route="#hr/today" style="display:none" onclick="location.hash='#hr/today'">
         <i class="ti ti-checkup-list"></i>
         <span>HR today</span>
@@ -1436,6 +1441,7 @@
 <script src="/modules/my-growth.js"></script>
 <script src="/modules/today.js"></script>
 <script src="/modules/hr-today.js"></script>
+<script src="/modules/team-review.js"></script>
 <script>
 (function(){
   function setHrBadge(){
@@ -1551,12 +1557,14 @@ function render() {
     show('navHrApprovals'); anyHR = true;
   }
   if (can('leaves.approve.any') || can('leaves.approve.dept') || can('attendance.view.any') || can('attendance.view.dept')) {
-    show('navHrReports'); anyHR = true;
+    if (isOwner) { show('navTeamReview'); }   // owner: one consolidated results page (Reports + HR today as tabs)
+    else { show('navHrReports'); }            // managers/HR: their existing Reports page, unchanged
+    anyHR = true;
   }
   if (can('attendance.view.any') || can('attendance.view.dept')) {
     show('navHrAttendance'); anyHR = true;
   }
-  if (isOwner) { show('navHrToday'); anyHR = true; }
+  // HR today is no longer a separate owner item — it lives as a tab inside Team review.
   if (can('profile.view.any')) {
     show('navHrInsights'); anyHR = true;
   }

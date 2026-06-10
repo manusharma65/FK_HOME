@@ -1,69 +1,82 @@
-// FK Home — Team review (r0.81)
+// FK Home — Team review module (r0.90)
 // ----------------------------------------------------------------------------
-// Owner-only combined view: the live "Today" scan (HR today) and the 30-day
-// "To review" queue (Reports) in one page with tabs, so the owner doesn't flip
-// between two nav entries. It REUSES the existing hr/today and hr/reports
-// modules wholesale — their render()+mount() do the real work — so there is no
-// duplicated logic to drift. Managers keep their own Reports page unchanged.
+// Owner-only consolidation: one place to see results. Reuses the existing
+// Reports module (daily-report review queue — the landing/default tab) and the
+// HR today module (daily oversight scan — secondary, lazy-mounted only if its
+// tab is opened, so its data call never fires unless wanted).
+//
+// Both sub-modules are root-scoped (el.querySelector) with unique container ids
+// (#rep-mod, #hrt-mod), so mounting them into separate panels is collision-free.
+//
+// Nav: shown to the owner only; replaces the owner's separate "HR today" and
+// "Reports" items. Managers/HR keep their own "Reports" page, untouched.
 // ----------------------------------------------------------------------------
 
 window.fkModules = window.fkModules || {};
 
 window.fkModules['hr/team-review'] = {
   title: 'Team review',
+  noHero: true,
 
   render() {
     return '' +
       '<div id="tr-mod" class="fk-mod">' +
         '<style>' +
-          '#tr-mod .tr-tabs{display:flex;gap:8px;margin:0 0 18px;border-bottom:1px solid var(--line,#e7dfd2)}' +
-          '#tr-mod .tr-tab{font-family:inherit;font-size:14.5px;font-weight:600;color:var(--muted,#8a8078);' +
-            'background:none;border:none;padding:10px 4px;margin-right:18px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}' +
-          '#tr-mod .tr-tab.on{color:var(--ink,#2a241e);border-bottom-color:var(--orange,#E8722B)}' +
-          '#tr-mod .tr-panel{display:none}' +
-          '#tr-mod .tr-panel.on{display:block}' +
+          '#tr-mod h1,#tr-mod h2,#tr-mod h3{font-family:var(--body,"Hanken Grotesk",-apple-system,sans-serif)!important}' +
+          '#tr-mod .tr-head{margin:0 0 14px}' +
+          '#tr-mod .tr-head h2{font-size:26px;font-weight:700;margin:0;letter-spacing:-.01em}' +
+          '#tr-mod .tr-head .meta{font-size:14px;color:var(--muted);margin-top:3px}' +
+          '#tr-mod .tr-tabs{display:flex;gap:6px;margin:0 0 20px;border-bottom:1px solid var(--line)}' +
+          '#tr-mod .tr-tab{font-family:inherit;font-size:14.5px;font-weight:600;padding:11px 18px;border:none;background:none;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;align-items:center;gap:8px}' +
+          '#tr-mod .tr-tab i{font-size:17px}' +
+          '#tr-mod .tr-tab:hover{color:var(--ink)}' +
+          '#tr-mod .tr-tab.on{color:var(--orange,#E8722B);border-bottom-color:var(--orange,#E8722B)}' +
+          '#tr-mod .tr-panel-load{padding:24px;text-align:center;color:var(--muted);font-size:14px}' +
         '</style>' +
-        '<div class="tr-tabs">' +
-          '<button class="tr-tab on" data-tab="today">Today</button>' +
-          '<button class="tr-tab" data-tab="review">To review</button>' +
+        '<div class="tr-head">' +
+          '<h2>Team review</h2>' +
+          '<div class="meta">Everything your team submits, in one place. Reports are what they\u2019ve done; HR today is the live daily scan if you want it.</div>' +
         '</div>' +
-        '<div class="tr-panel on" id="tr-today"></div>' +
-        '<div class="tr-panel" id="tr-review"></div>' +
+        '<div class="tr-tabs">' +
+          '<button class="tr-tab on" data-tab="reports"><i class="ti ti-notes"></i> Reports</button>' +
+          '<button class="tr-tab" data-tab="today"><i class="ti ti-checkup-list"></i> HR today</button>' +
+        '</div>' +
+        '<div class="tr-panel" id="trReports"><div class="tr-panel-load">Loading reports\u2026</div></div>' +
+        '<div class="tr-panel" id="trToday" style="display:none"></div>' +
       '</div>';
   },
 
   async mount(el) {
-    const today = el.querySelector('#tr-today');
-    const review = el.querySelector('#tr-review');
-    const mToday = window.fkModules['hr/today'];
-    const mReview = window.fkModules['hr/reports'];
+    const reportsMod = window.fkModules['hr/reports'];
+    const todayMod = window.fkModules['hr/today'];
+    const pReports = el.querySelector('#trReports');
+    const pToday = el.querySelector('#trToday');
+    let todayMounted = false;
 
-    const mounted = { today: false, review: false };
-
-    // Inject a sub-module's render() HTML and run its mount() once, lazily.
-    async function ensure(key, host, mod) {
-      if (mounted[key] || !mod) return;
-      try {
-        host.innerHTML = (typeof mod.render === 'function') ? mod.render() : '';
-        if (typeof mod.mount === 'function') await mod.mount(host);
-        mounted[key] = true;
-      } catch (e) {
-        host.innerHTML = '<div class="empty">Could not load this view.</div>';
-      }
+    // Landing tab: Reports (the results).
+    if (reportsMod) {
+      pReports.innerHTML = reportsMod.render();
+      try { await reportsMod.mount(pReports); } catch (e) { pReports.innerHTML = '<div class="tr-panel-load" style="color:var(--red)">Could not load reports.</div>'; }
+    } else {
+      pReports.innerHTML = '<div class="tr-panel-load" style="color:var(--red)">Reports module not available.</div>';
     }
 
-    // First tab eagerly
-    await ensure('today', today, mToday);
-
-    el.querySelectorAll('.tr-tab').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const tab = btn.dataset.tab;
-        el.querySelectorAll('.tr-tab').forEach(b => b.classList.toggle('on', b === btn));
-        el.querySelectorAll('.tr-panel').forEach(p => p.classList.remove('on'));
-        el.querySelector('#tr-' + tab).classList.add('on');
-        if (tab === 'today') await ensure('today', today, mToday);
-        else await ensure('review', review, mReview);
-      });
-    });
-  },
+    el.querySelectorAll('.tr-tab').forEach(tab => tab.addEventListener('click', async () => {
+      el.querySelectorAll('.tr-tab').forEach(t => t.classList.remove('on'));
+      tab.classList.add('on');
+      const which = tab.dataset.tab;
+      pReports.style.display = which === 'reports' ? 'block' : 'none';
+      pToday.style.display = which === 'today' ? 'block' : 'none';
+      // Lazy-mount HR today only the first time its tab is opened.
+      if (which === 'today' && !todayMounted) {
+        todayMounted = true;
+        if (todayMod) {
+          pToday.innerHTML = todayMod.render();
+          try { await todayMod.mount(pToday); } catch (e) { pToday.innerHTML = '<div class="tr-panel-load" style="color:var(--red)">Could not load HR today.</div>'; }
+        } else {
+          pToday.innerHTML = '<div class="tr-panel-load" style="color:var(--red)">HR today module not available.</div>';
+        }
+      }
+    }));
+  }
 };
