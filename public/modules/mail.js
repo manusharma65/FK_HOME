@@ -220,6 +220,13 @@ window.fkModules['mail'] = {
       #mail-mod .sigf{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}
       #mail-mod .cm-cc{display:none} #mail-mod .cm-cc.show{display:block}
       #mail-mod .loadmore{display:block;width:100%;margin:6px 0 12px;padding:11px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:#5b5249;font:inherit;font-weight:600;font-size:13.5px;cursor:pointer} #mail-mod .loadmore:hover{background:#fff} #mail-mod .loadmore:disabled{opacity:.6;cursor:default}
+      #mail-mod .thct{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#E5DAC8;color:#6b5d49;font-size:11px;font-weight:700;margin:0 7px;flex:none} #mail-mod .mrow.unread .thct{background:#D8C8AE}
+      #mail-mod #thwrap{margin:8px 0 2px}
+      #mail-mod .thtoggle{display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 13px;font-family:inherit;font-size:13.5px;font-weight:600;color:#5b5249;cursor:pointer} #mail-mod .thtoggle:hover{background:#fff} #mail-mod .thtoggle.on{background:#F1ECF8;border-color:#DED3EE;color:#4A3A78} #mail-mod .thtoggle i{font-size:16px} #mail-mod .thtoggle:disabled{opacity:.7}
+      #mail-mod .thlist{display:none;margin-top:11px} #mail-mod .thlist.show{display:block}
+      #mail-mod .thmsg{background:var(--surface);border:1px solid var(--line2,#F0E8DA);border-left:3px solid #DED3EE;border-radius:10px;padding:11px 14px;margin-bottom:9px}
+      #mail-mod .thm-h{display:flex;align-items:center;gap:10px;margin-bottom:5px} #mail-mod .thm-nm{font-weight:700;font-size:13.5px} #mail-mod .thm-dt{font-size:11.5px;color:var(--soft);margin-left:auto}
+      #mail-mod .thm-b{font-size:13.5px;line-height:1.55;color:#3A322A;max-height:260px;overflow:auto}
     </style>
   </div>
 </div>`;
@@ -330,7 +337,7 @@ window.fkModules['mail'] = {
         if (box === 'sent') who = 'To: ' + who; else if (box === 'drafts') who = 'Draft · ' + who;
         const dots = lids.length ? '<div class="rdots">' + lids.map(id => { const l = labelById(id); return l ? '<span class="ld" style="background:' + esc(l.colour) + '"></span>' : ''; }).join('') + '</div>' : '';
         const pn = note ? '<div class="pn"><i class="ti ti-note" style="font-size:12px"></i> ' + esc(note) + '</div>' : '';
-        return '<div class="mrow' + (m.unread ? ' unread' : '') + (m.id === selectedId ? ' on' : '') + (sel.has(m.id) ? ' sel' : '') + '" data-id="' + m.id + '"><input type="checkbox" class="mcheck"' + (sel.has(m.id) ? ' checked' : '') + ' data-id="' + m.id + '"><div class="mc"><div class="mr1">' + (m.unread ? '<span class="un"></span>' : '') + '<span class="who">' + esc(who) + '</span><span class="tm">' + esc(shortDate(m.date)) + '</span></div><div class="msub">' + esc(m.subject) + '</div><div class="msnip">' + esc(m.snippet) + '</div>' + dots + pn + '</div></div>';
+        return '<div class="mrow' + (m.unread ? ' unread' : '') + (m.id === selectedId ? ' on' : '') + (sel.has(m.id) ? ' sel' : '') + '" data-id="' + m.id + '"><input type="checkbox" class="mcheck"' + (sel.has(m.id) ? ' checked' : '') + ' data-id="' + m.id + '"><div class="mc"><div class="mr1">' + (m.unread ? '<span class="un"></span>' : '') + '<span class="who">' + esc(who) + '</span>' + (m.count > 1 ? '<span class="thct" title="' + m.count + ' messages">' + m.count + '</span>' : '') + '<span class="tm">' + esc(shortDate(m.date)) + '</span></div><div class="msub">' + esc(m.subject) + '</div><div class="msnip">' + esc(m.snippet) + '</div>' + dots + pn + '</div></div>';
       }).join('') + (nextPageTok ? '<button class="loadmore" id="loadMore">Load older ' + noun + 's</button>' : '');
       rowsEl.querySelectorAll('.mrow').forEach(el => el.addEventListener('click', (ev) => { if (ev.target.classList.contains('mcheck')) return; if (box === 'drafts') openDraft(el.dataset.id); else openMessage(el.dataset.id); }));
       rowsEl.querySelectorAll('.mcheck').forEach(cb => cb.addEventListener('click', (ev) => { ev.stopPropagation(); const id = cb.dataset.id; if (cb.checked) sel.add(id); else sel.delete(id); cb.closest('.mrow').classList.toggle('sel', cb.checked); selAll.checked = sel.size === visible().length && visible().length > 0; updateBar(); }));
@@ -356,8 +363,9 @@ window.fkModules['mail'] = {
         toast(ids.length + ' ' + verb);
       } catch (e) { toast(e.message); }
     }
-    $('#bArchive').addEventListener('click', () => { if (sel.size) act('/api/mail/archive', [...sel], 'archived'); });
-    $('#bTrash').addEventListener('click', () => { if (sel.size) act('/api/mail/trash', [...sel], 'deleted'); });
+    function expandIds() { const out = []; sel.forEach(rid => { const r = messages.find(x => x.id === rid); ((r && r.msgIds && r.msgIds.length) ? r.msgIds : [rid]).forEach(x => out.push(x)); }); return out; }
+    $('#bArchive').addEventListener('click', () => { if (sel.size) act('/api/mail/archive', expandIds(), 'archived'); });
+    $('#bTrash').addEventListener('click', () => { if (sel.size) act('/api/mail/trash', expandIds(), 'deleted'); });
 
     // Compose attachments (shared picker)
     attInput.addEventListener('change', async () => {
@@ -388,6 +396,7 @@ window.fkModules['mail'] = {
             '<div class="mr-acts"><button class="ib" id="aTag" title="Labels"><i class="ti ti-tag"></i></button><button class="ib" id="aArch" title="Archive"><i class="ti ti-archive"></i></button><button class="ib danger" id="aDel" title="Delete"><i class="ti ti-trash"></i></button><div class="labmenu" id="labMenu"></div></div></div>' +
             '<div class="chips" id="chips"></div>' +
             '<div class="mr-from"><div class="mr-av">' + esc(initials) + '</div><div><div class="mr-nm">' + esc(f.name) + '</div><div class="mr-em">' + esc(f.email) + '</div></div><div class="mr-when">' + esc(shortDate(m.date)) + '</div></div>' +
+            '<div id="thwrap"></div>' +
             '<div class="aisum" id="aiSum"></div>' + attsHtml + bodyHtml +
             '<div id="noteSlot"></div>' +
             '<div class="body-acts"><button class="btn btn-send" id="bReply"><i class="ti ti-arrow-back-up" style="font-size:16px"></i> Reply</button><button class="btn btn-ghost" id="bReplyAll"><i class="ti ti-arrow-back-up-double" style="font-size:16px"></i> Reply all</button><button class="btn btn-ghost" id="bFwd"><i class="ti ti-arrow-forward-up" style="font-size:16px"></i> Forward</button><button class="btn btn-ghost" id="bNote"><i class="ti ti-note" style="font-size:16px"></i> Note</button></div>' +
@@ -402,6 +411,31 @@ window.fkModules['mail'] = {
             '</div></div>';
 
         renderChips(id); renderNote(id);
+
+        // Conversation: surface earlier messages in the thread, on demand.
+        const row = messages.find(x => x.id === id) || {};
+        const thId = m.threadId || row.threadId; const thCount = row.count || 1;
+        if (thCount > 1 && thId) {
+          const tw = $('#thwrap');
+          tw.innerHTML = '<button class="thtoggle" id="thToggle"><i class="ti ti-messages"></i> Show ' + (thCount - 1) + ' earlier message' + (thCount - 1 === 1 ? '' : 's') + ' in this conversation</button><div class="thlist" id="thList"></div>';
+          let loaded = false;
+          $('#thToggle').addEventListener('click', async () => {
+            const tl = $('#thList'), btn = $('#thToggle');
+            if (loaded) { const open = tl.classList.toggle('show'); btn.classList.toggle('on', open); return; }
+            btn.disabled = true; btn.innerHTML = '<i class="ti ti-loader-2"></i> Loading conversation…';
+            try {
+              const data = await j('/api/mail/thread/' + encodeURIComponent(thId));
+              const older = (data.messages || []).filter(mm => mm.id !== id);
+              tl.innerHTML = older.map(mm => {
+                const ff = parseFrom(mm.from);
+                const pl = (mm.text || String(mm.html || '').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
+                return '<div class="thmsg"><div class="thm-h"><span class="thm-nm">' + esc(ff.name) + '</span><span class="thm-dt">' + esc(shortDate(mm.date)) + '</span></div><div class="thm-b">' + esc(pl).replace(/\n/g, '<br>') + '</div></div>';
+              }).join('') || '<div class="thmsg"><div class="thm-b" style="color:var(--muted)">No earlier messages.</div></div>';
+              loaded = true; tl.classList.add('show'); btn.classList.add('on');
+            } catch (e) { tl.innerHTML = '<div class="thmsg"><div class="thm-b" style="color:#A32D2D">Could not load the conversation.</div></div>'; loaded = true; tl.classList.add('show'); }
+            btn.disabled = false; btn.innerHTML = '<i class="ti ti-messages"></i> Earlier messages in this conversation';
+          });
+        }
 
         // attachments: download incoming
         readEl.querySelectorAll('.att[data-att]').forEach(el => el.addEventListener('click', async () => {
@@ -421,8 +455,9 @@ window.fkModules['mail'] = {
           labMenu.querySelectorAll('[data-l]').forEach(it => it.addEventListener('click', async (ev) => { ev.stopPropagation(); const lid = parseInt(it.dataset.l, 10); const on = !it.classList.contains('on'); try { await post('/api/mail/message/' + id + '/label', { labelId: lid, on }); labelMap[id] = labelMap[id] || []; if (on) labelMap[id].push(lid); else labelMap[id] = labelMap[id].filter(x => x !== lid); it.classList.toggle('on', on); renderChips(id); renderLabels(); } catch (e2) { toast(e2.message); } }));
         });
         document.addEventListener('click', () => labMenu.classList.remove('show'));
-        $('#aArch').addEventListener('click', () => act('/api/mail/archive', [id], 'archived'));
-        $('#aDel').addEventListener('click', () => act('/api/mail/trash', [id], 'deleted'));
+        const thIds = (row.msgIds && row.msgIds.length) ? row.msgIds : [id];
+        $('#aArch').addEventListener('click', () => act('/api/mail/archive', thIds, 'archived'));
+        $('#aDel').addEventListener('click', () => act('/api/mail/trash', thIds, 'deleted'));
 
         // composer
         const composer = $('#composer'), cmTo = $('#cmTo'), cmCc = $('#cmCc'), cmBody = $('#cmBody'), cmTopLabel = $('#cmTopLabel'), cmNote = $('#cmNote'), cmSend = $('#cmSend'), aiRow = $('#aiRow'), cmAtts = $('#cmAtts');

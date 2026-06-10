@@ -44,42 +44,46 @@ function header(headers, name) {
   return h ? h.value : '';
 }
 
-// Pull recent messages (metadata only) for a mailbox section.
+// Pull recent items for a mailbox section. Inbox/Sent/Archive are grouped by
+// conversation (thread); Drafts are listed individually.
 async function listInbox(userEmail, opts = {}) {
   const { box = 'inbox', q = '', pageToken = '', max = 25 } = opts;
   const gmail = gmailFor(userEmail);
-  let ids = [], draftMap = {}, nextPageToken = null;
   if (box === 'drafts') {
     const dl = await gmail.users.drafts.list(Object.assign({ userId: 'me', maxResults: max }, pageToken ? { pageToken } : {}));
+    const draftMap = {}, ids = [];
     (dl.data.drafts || []).forEach(d => { if (d.message && d.message.id) { ids.push(d.message.id); draftMap[d.message.id] = d.id; } });
-    nextPageToken = dl.data.nextPageToken || null;
-  } else {
-    const params = { userId: 'me', maxResults: max };
-    if (pageToken) params.pageToken = pageToken;
-    const boxQ = box === 'inbox' ? 'in:inbox' : box === 'sent' ? 'in:sent' : box === 'archive' ? '-in:inbox -in:sent -in:trash -in:spam -in:drafts' : 'in:inbox';
-    if (q) params.q = q + ' ' + boxQ;
-    else if (box === 'sent') params.labelIds = ['SENT'];
-    else if (box === 'archive') params.q = boxQ;
-    else params.labelIds = ['INBOX'];
-    const list = await gmail.users.messages.list(params);
-    ids = (list.data.messages || []).map(m => m.id);
-    nextPageToken = list.data.nextPageToken || null;
+    const items = await Promise.all(ids.map(async (id) => {
+      const msg = await gmail.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] });
+      const h = msg.data.payload && msg.data.payload.headers;
+      return { id, threadId: msg.data.threadId, draftId: draftMap[id] || null, count: 1, msgIds: [id], from: header(h, 'From'), to: header(h, 'To'), subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'), snippet: msg.data.snippet || '', unread: (msg.data.labelIds || []).includes('UNREAD') };
+    }));
+    return { messages: items, nextPageToken: dl.data.nextPageToken || null };
   }
-  const items = await Promise.all(ids.map(async (id) => {
-    const msg = await gmail.users.messages.get({
-      userId: 'me', id, format: 'metadata',
-      metadataHeaders: ['From', 'To', 'Subject', 'Date'],
-    });
-    const h = msg.data.payload && msg.data.payload.headers;
+  const params = { userId: 'me', maxResults: max };
+  if (pageToken) params.pageToken = pageToken;
+  const boxQ = box === 'sent' ? 'in:sent' : box === 'archive' ? '-in:inbox -in:sent -in:trash -in:spam -in:drafts' : 'in:inbox';
+  if (q) params.q = q + ' ' + boxQ;
+  else if (box === 'sent') params.labelIds = ['SENT'];
+  else if (box === 'archive') params.q = boxQ;
+  else params.labelIds = ['INBOX'];
+  const list = await gmail.users.threads.list(params);
+  const threads = list.data.threads || [];
+  const items = await Promise.all(threads.map(async (t) => {
+    const tg = await gmail.users.threads.get({ userId: 'me', id: t.id, format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] });
+    const msgs = tg.data.messages || [];
+    const latest = msgs[msgs.length - 1] || {};
+    const h = latest.payload && latest.payload.headers;
     return {
-      id, draftId: draftMap[id] || null,
+      id: latest.id, threadId: t.id, draftId: null,
+      count: msgs.length, msgIds: msgs.map(mm => mm.id),
       from: header(h, 'From'), to: header(h, 'To'),
       subject: header(h, 'Subject') || '(no subject)',
-      date: header(h, 'Date'), snippet: msg.data.snippet || '',
-      unread: (msg.data.labelIds || []).includes('UNREAD'),
+      date: header(h, 'Date'), snippet: latest.snippet || t.snippet || '',
+      unread: msgs.some(mm => (mm.labelIds || []).includes('UNREAD')),
     };
   }));
-  return { messages: items, nextPageToken };
+  return { messages: items, nextPageToken: list.data.nextPageToken || null };
 }
 
 // JSON endpoint for the inbox screen — supports box, server-side search (q), paging.
@@ -246,6 +250,20 @@ router.get('/message/:id', async (req, res) => {
       subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'),
       messageId: header(h, 'Message-ID'), text, html, attachments,
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Full conversation (all messages in a thread) for the inline thread view.
+router.get('/thread/:id', async (req, res) => {
+  try {
+    const gmail = gmailFor(req.user.email);
+    const tg = await gmail.users.threads.get({ userId: 'me', id: req.params.id, format: 'full' });
+    const msgs = (tg.data.messages || []).map(mm => {
+      const h = (mm.payload && mm.payload.headers) || [];
+      const { text, html, attachments } = extractBodies(mm.payload);
+      return { id: mm.id, from: header(h, 'From'), to: header(h, 'To'), cc: header(h, 'Cc'), subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'), messageId: header(h, 'Message-ID'), text, html, attachments, unread: (mm.labelIds || []).includes('UNREAD') };
+    });
+    res.json({ threadId: req.params.id, messages: msgs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
