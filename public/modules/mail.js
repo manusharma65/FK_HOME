@@ -85,7 +85,7 @@ window.fkModules['mail'] = {
     /* Read */
     #mail-mod .mread{overflow:auto;background:var(--canvas,#F4EFE7);display:flex;flex-direction:column}
     #mail-mod .mr-empty{margin:auto;color:var(--muted);font-size:15px;text-align:center;padding:40px}
-    #mail-mod .mr-pad{padding:24px 34px 52px;max-width:none;width:100%}
+    #mail-mod .mr-pad{padding:28px 44px 56px;max-width:920px;margin:0 auto;width:100%;box-sizing:border-box}
     #mail-mod .mr-top{display:flex;align-items:flex-start;gap:14px}
     #mail-mod .mr-h{font-size:24px;font-weight:700;line-height:1.25;flex:1}
     #mail-mod .mr-acts{display:flex;gap:7px;flex:none;position:relative}
@@ -473,7 +473,7 @@ window.fkModules['mail'] = {
         }));
 
         // HTML email render
-        if (hasHtml) { const fr = $('#mailFrame'); if (fr) { const safe = String(m.html || '').replace(/<script[\s\S]*?<\/script>/gi, ''); fr.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;padding:2px 2px 6px;font-family:\'Hanken Grotesk\',-apple-system,system-ui,sans-serif;color:#2B2017;font-size:15px;line-height:1.74;word-wrap:break-word}img{max-width:100%;height:auto}a{color:#9A4A2B}table{max-width:100%}</style></head><body>' + safe + '</body></html>'; const fit = () => { try { fr.style.height = (fr.contentDocument.documentElement.scrollHeight + 12) + 'px'; } catch (e) {} }; fr.addEventListener('load', () => { fit(); setTimeout(fit, 400); setTimeout(fit, 1200); }); } }
+        if (hasHtml) { const fr = $('#mailFrame'); if (fr) { const safe = String(m.html || '').replace(/<script[\s\S]*?<\/script>/gi, ''); fr.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;padding:6px 10px 14px;font-family:\'Hanken Grotesk\',-apple-system,system-ui,sans-serif;color:#2B2017;font-size:15px;line-height:1.74;word-wrap:break-word}img{max-width:100%;height:auto}a{color:#9A4A2B}table{max-width:100%}</style></head><body>' + safe + '</body></html>'; const fit = () => { try { fr.style.height = (fr.contentDocument.documentElement.scrollHeight + 12) + 'px'; } catch (e) {} }; fr.addEventListener('load', () => { fit(); setTimeout(fit, 400); setTimeout(fit, 1200); }); } }
 
         // labels menu
         const labMenu = $('#labMenu');
