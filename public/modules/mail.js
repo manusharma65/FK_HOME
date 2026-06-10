@@ -177,6 +177,7 @@ window.fkModules['mail'] = {
         <div class="caibar">
           <div class="caitop"><i class="ti ti-sparkles"></i><input id="cAiInstr" class="caiinstr" placeholder="Tell AI what to write\u2026 e.g. ask Kemballs for an updated freight quote"><button class="caibtn" id="cAiWrite"><i class="ti ti-sparkles" style="font-size:14px"></i> Write</button></div>
           <div class="caichips">
+            <span class="cailbl">Improve</span>
             <button class="caichip" id="cAiPolish">Polish</button>
             <button class="caichip" id="cAiFix">Fix grammar</button>
             <button class="caichip" id="cAiFormal">More formal</button>
@@ -218,19 +219,21 @@ window.fkModules['mail'] = {
       #mail-mod .composebtn:hover{filter:brightness(1.05)} #mail-mod .composebtn i{font-size:18px}
       #mail-mod .msig{display:flex;align-items:center;gap:9px;margin-top:auto;padding:10px;border-radius:9px;color:var(--muted);cursor:pointer;font-size:13.5px} #mail-mod .msig:hover{background:#EFE7D8;color:#3A322A} #mail-mod .msig i{font-size:16px}
       #mail-mod .cwrap{position:absolute;inset:0;z-index:60;display:none;align-items:flex-start;justify-content:center;background:rgba(40,28,18,.46);padding:38px 18px;overflow:auto} #mail-mod .cwrap.show{display:flex}
-      #mail-mod .cwin{width:720px;max-width:100%;margin:auto;background:var(--surface,#fff);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 80px rgba(58,40,24,.34);overflow:hidden;display:flex;flex-direction:column;max-height:calc(100vh - 76px)}
-      #mail-mod .caibar{background:linear-gradient(180deg,#F6EFE3,#FCF8F1);border-bottom:1px solid var(--line2,#F0E8DA);padding:11px 15px}
-      #mail-mod .caitop{display:flex;gap:8px;align-items:center}
-      #mail-mod .caitop>.ti-sparkles{color:var(--orange,#E8722B);font-size:18px;flex:none}
-      #mail-mod .caiinstr{flex:1;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px;outline:none;background:#fff;color:inherit}
-      #mail-mod .caibtn{border:none;border-radius:9px;padding:9px 14px;font:inherit;font-weight:700;font-size:13px;cursor:pointer;background:var(--orange,#E8722B);color:#fff;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+      #mail-mod .cwin{width:800px;max-width:100%;margin:auto;background:var(--surface,#fff);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 80px rgba(58,40,24,.34);overflow:hidden;display:flex;flex-direction:column;max-height:calc(100vh - 76px)}
+      #mail-mod .caibar{background:linear-gradient(180deg,#F2EFFA,#FBFAFE);border-bottom:1px solid #E7E0F3;padding:12px 18px}
+      #mail-mod .caitop{display:flex;gap:9px;align-items:center}
+      #mail-mod .caitop>.ti-sparkles{color:#6F57A0;font-size:19px;flex:none}
+      #mail-mod .caiinstr{flex:1;border:1px solid #DED3EE;border-radius:9px;padding:10px 12px;font:inherit;font-size:14px;outline:none;background:#fff;color:inherit}
+      #mail-mod .caiinstr:focus{border-color:#6F57A0}
+      #mail-mod .caibtn{border:none;border-radius:9px;padding:10px 16px;font:inherit;font-weight:700;font-size:13.5px;cursor:pointer;background:#6F57A0;color:#fff;white-space:nowrap;display:inline-flex;align-items:center;gap:6px} #mail-mod .caibtn:hover{background:#4A3A78}
       #mail-mod .caibtn:disabled{opacity:.55;cursor:default}
-      #mail-mod .caichips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
-      #mail-mod .caichip{border:1px solid var(--line);background:#fff;border-radius:99px;padding:5px 11px;font:inherit;font-size:12.5px;font-weight:600;color:#5b5249;cursor:pointer}
-      #mail-mod .caichip:hover{border-color:var(--orange,#E8722B);color:var(--orange,#E8722B)}
+      #mail-mod .caichips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}
+      #mail-mod .cailbl{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#8678A8;margin-right:3px}
+      #mail-mod .caichip{border:1px solid #DED3EE;background:#fff;border-radius:99px;padding:5px 12px;font:inherit;font-size:12.5px;font-weight:600;color:#5b5249;cursor:pointer}
+      #mail-mod .caichip:hover{border-color:#6F57A0;color:#6F57A0;background:#F4F1FB}
       #mail-mod .caichip:disabled{opacity:.5;cursor:default}
-      #mail-mod .caictx{font-size:12px;color:var(--muted);margin-top:8px}
-      #mail-mod .caierr{font-size:12.5px;color:#A32D2D;margin-top:7px}
+      #mail-mod .caictx{font-size:12px;color:#7d7184;margin-top:9px}
+      #mail-mod .caierr{font-size:12.5px;color:#A32D2D;margin-top:8px}
       #mail-mod .chead{display:flex;align-items:center;background:#2A2018;color:#fff;padding:11px 15px;font-size:14.5px;font-weight:600} #mail-mod .chead span{flex:1}
       #mail-mod .cx{background:none;border:none;color:#C9BBA8;font-size:18px;cursor:pointer;display:flex} #mail-mod .cx:hover{color:#fff}
       #mail-mod .cbody{padding:4px 15px 8px;overflow:auto;display:flex;flex-direction:column}
@@ -238,7 +241,7 @@ window.fkModules['mail'] = {
       #mail-mod .cfield{border:none;border-bottom:1px solid var(--line2,#F0E8DA);padding:11px 2px;font:inherit;font-size:14.5px;outline:none;background:none;width:100%;color:inherit}
       #mail-mod .crow .cfield{flex:1;border-bottom:none}
       #mail-mod .cccbtn{background:none;border:none;color:var(--soft);font:inherit;font-size:13px;font-weight:600;cursor:pointer;padding:4px 6px} #mail-mod .cccbtn:hover{color:var(--orange)}
-      #mail-mod .cedit{min-height:190px;padding:13px 2px;font-size:15px;line-height:1.6;outline:none;overflow:auto;white-space:pre-wrap} #mail-mod .cedit:empty:before{content:attr(data-ph);color:var(--soft)}
+      #mail-mod .cedit{min-height:250px;padding:14px 2px;font-size:15px;line-height:1.6;outline:none;overflow:auto;white-space:pre-wrap} #mail-mod .cedit:empty:before{content:attr(data-ph);color:var(--soft)}
       #mail-mod .cfoot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line2,#F0E8DA);flex-wrap:wrap}
       #mail-mod .cfoot .tools{display:flex;gap:4px} #mail-mod .cfoot .cm-note{flex:1;font-size:12px;color:var(--muted)}
       #mail-mod .sigwrap{position:absolute;inset:0;background:rgba(40,28,18,.42);z-index:70;display:none;align-items:center;justify-content:center} #mail-mod .sigwrap.show{display:flex}
@@ -254,7 +257,7 @@ window.fkModules['mail'] = {
       #mail-mod .thlist{display:none;margin-top:11px} #mail-mod .thlist.show{display:block}
       #mail-mod .thmsg{background:var(--surface);border:1px solid var(--line2,#F0E8DA);border-left:3px solid #DED3EE;border-radius:10px;padding:11px 14px;margin-bottom:9px}
       #mail-mod .thm-h{display:flex;align-items:center;gap:10px;margin-bottom:5px} #mail-mod .thm-nm{font-weight:700;font-size:13.5px} #mail-mod .thm-dt{font-size:11.5px;color:var(--soft);margin-left:auto}
-      #mail-mod .thm-b{font-size:13.5px;line-height:1.55;color:#3A322A;max-height:260px;overflow:auto}
+      #mail-mod .thm-b{font-size:15px;line-height:1.74;color:#2B2017;max-height:320px;overflow:auto}
     </style>
   </div>
 </div>`;
@@ -272,6 +275,12 @@ window.fkModules['mail'] = {
     const SWATCHES = ['#6F57A0', '#2D6FB0', '#2E8C6F', '#9A4E8A', '#C2613B', '#B0892D'];
 
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    // Gmail snippets arrive HTML-entity-encoded (e.g. I&#39;m). Decode, then escape only the unsafe chars so it shows as clean text.
+    const deEntity = (s) => String(s == null ? '' : s)
+      .replace(/&#(\d+);/g, (_, n) => { try { return String.fromCharCode(+n); } catch (e) { return _; } })
+      .replace(/&#x([0-9a-f]+);/gi, (_, n) => { try { return String.fromCharCode(parseInt(n, 16)); } catch (e) { return _; } })
+      .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+    const escSnip = (s) => deEntity(s).replace(/[<>"]/g, c => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     const parseFrom = (from) => { const m = String(from || '').match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>/); return m ? { name: m[1].trim() || m[2], email: m[2].trim() } : { name: from || '', email: (from || '').trim() }; };
     const shortDate = (d) => { try { return new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return d || ''; } };
     const fmtSize = (b) => !b ? '' : b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(0) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
@@ -365,7 +374,7 @@ window.fkModules['mail'] = {
         if (box === 'sent') who = 'To: ' + who; else if (box === 'drafts') who = 'Draft · ' + who;
         const dots = lids.length ? '<div class="rdots">' + lids.map(id => { const l = labelById(id); return l ? '<span class="ld" style="background:' + esc(l.colour) + '"></span>' : ''; }).join('') + '</div>' : '';
         const pn = note ? '<div class="pn"><i class="ti ti-note" style="font-size:12px"></i> ' + esc(note) + '</div>' : '';
-        return '<div class="mrow' + (m.unread ? ' unread' : '') + (m.id === selectedId ? ' on' : '') + (sel.has(m.id) ? ' sel' : '') + '" data-id="' + m.id + '"><input type="checkbox" class="mcheck"' + (sel.has(m.id) ? ' checked' : '') + ' data-id="' + m.id + '"><div class="mc"><div class="mr1">' + (m.unread ? '<span class="un"></span>' : '') + '<span class="who">' + esc(who) + '</span>' + (m.count > 1 ? '<span class="thct" title="' + m.count + ' messages">' + m.count + '</span>' : '') + '<span class="tm">' + esc(shortDate(m.date)) + '</span></div><div class="msub">' + esc(m.subject) + '</div><div class="msnip">' + esc(m.snippet) + '</div>' + dots + pn + '</div></div>';
+        return '<div class="mrow' + (m.unread ? ' unread' : '') + (m.id === selectedId ? ' on' : '') + (sel.has(m.id) ? ' sel' : '') + '" data-id="' + m.id + '"><input type="checkbox" class="mcheck"' + (sel.has(m.id) ? ' checked' : '') + ' data-id="' + m.id + '"><div class="mc"><div class="mr1">' + (m.unread ? '<span class="un"></span>' : '') + '<span class="who">' + esc(who) + '</span>' + (m.count > 1 ? '<span class="thct" title="' + m.count + ' messages">' + m.count + '</span>' : '') + '<span class="tm">' + esc(shortDate(m.date)) + '</span></div><div class="msub">' + esc(m.subject) + '</div><div class="msnip">' + escSnip(m.snippet) + '</div>' + dots + pn + '</div></div>';
       }).join('') + (nextPageTok ? '<button class="loadmore" id="loadMore">Load older ' + noun + 's</button>' : '');
       rowsEl.querySelectorAll('.mrow').forEach(el => el.addEventListener('click', (ev) => { if (ev.target.classList.contains('mcheck')) return; if (box === 'drafts') openDraft(el.dataset.id); else openMessage(el.dataset.id); }));
       rowsEl.querySelectorAll('.mcheck').forEach(cb => cb.addEventListener('click', (ev) => { ev.stopPropagation(); const id = cb.dataset.id; if (cb.checked) sel.add(id); else sel.delete(id); cb.closest('.mrow').classList.toggle('sel', cb.checked); selAll.checked = sel.size === visible().length && visible().length > 0; updateBar(); }));
@@ -416,7 +425,7 @@ window.fkModules['mail'] = {
         const plain = m.text || String(m.html || '').replace(/<[^>]+>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
         const hasHtml = !!(m.html && m.html.trim());
         const bodyHtml = hasHtml ? '<iframe class="mailframe" id="mailFrame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="Email"></iframe>' : '<div class="mr-body">' + esc(m.text || '(no content)') + '</div>';
-        const initials = (f.name || f.email).slice(0, 2).toUpperCase();
+        const initials = (() => { const src = String(f.name || f.email || '').trim(); const parts = src.split(/\s+/).filter(Boolean); return (parts.length >= 2 ? (parts[0][0] + parts[1][0]) : src.slice(0, 2)).toUpperCase(); })();
         const atts = m.attachments || [];
         const attsHtml = atts.length ? '<div class="atts">' + atts.map((a, i) => '<div class="att" data-att="' + i + '"><div class="ai"><i class="ti ti-paperclip"></i></div><div><div class="an">' + esc(a.filename) + '</div><div class="az">' + esc(fmtSize(a.size)) + '</div></div></div>').join('') + '</div>' : '';
         readEl.innerHTML =
@@ -464,7 +473,7 @@ window.fkModules['mail'] = {
         }));
 
         // HTML email render
-        if (hasHtml) { const fr = $('#mailFrame'); if (fr) { const safe = String(m.html || '').replace(/<script[\s\S]*?<\/script>/gi, ''); fr.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;padding:2px 2px 6px;font-family:-apple-system,system-ui,sans-serif;color:#2B2017;font-size:15px;line-height:1.6;word-wrap:break-word}img{max-width:100%;height:auto}a{color:#9A4A2B}table{max-width:100%}</style></head><body>' + safe + '</body></html>'; const fit = () => { try { fr.style.height = (fr.contentDocument.documentElement.scrollHeight + 12) + 'px'; } catch (e) {} }; fr.addEventListener('load', () => { fit(); setTimeout(fit, 400); setTimeout(fit, 1200); }); } }
+        if (hasHtml) { const fr = $('#mailFrame'); if (fr) { const safe = String(m.html || '').replace(/<script[\s\S]*?<\/script>/gi, ''); fr.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;padding:2px 2px 6px;font-family:\'Hanken Grotesk\',-apple-system,system-ui,sans-serif;color:#2B2017;font-size:15px;line-height:1.74;word-wrap:break-word}img{max-width:100%;height:auto}a{color:#9A4A2B}table{max-width:100%}</style></head><body>' + safe + '</body></html>'; const fit = () => { try { fr.style.height = (fr.contentDocument.documentElement.scrollHeight + 12) + 'px'; } catch (e) {} }; fr.addEventListener('load', () => { fit(); setTimeout(fit, 400); setTimeout(fit, 1200); }); } }
 
         // labels menu
         const labMenu = $('#labMenu');
