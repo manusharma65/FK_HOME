@@ -45,76 +45,65 @@ function header(headers, name) {
 }
 
 // Pull recent messages (metadata only) for a mailbox section.
-async function listInbox(userEmail, box = 'inbox', max = 20) {
+async function listInbox(userEmail, opts = {}) {
+  const { box = 'inbox', q = '', pageToken = '', max = 25 } = opts;
   const gmail = gmailFor(userEmail);
-  const params = { userId: 'me', maxResults: max };
-  if (box === 'sent') params.labelIds = ['SENT'];
-  else if (box === 'archive') params.q = '-in:inbox -in:sent -in:trash -in:spam -in:drafts';
-  else params.labelIds = ['INBOX'];
-  const list = await gmail.users.messages.list(params);
-  const ids = (list.data.messages || []).map(m => m.id);
+  let ids = [], draftMap = {}, nextPageToken = null;
+  if (box === 'drafts') {
+    const dl = await gmail.users.drafts.list(Object.assign({ userId: 'me', maxResults: max }, pageToken ? { pageToken } : {}));
+    (dl.data.drafts || []).forEach(d => { if (d.message && d.message.id) { ids.push(d.message.id); draftMap[d.message.id] = d.id; } });
+    nextPageToken = dl.data.nextPageToken || null;
+  } else {
+    const params = { userId: 'me', maxResults: max };
+    if (pageToken) params.pageToken = pageToken;
+    const boxQ = box === 'inbox' ? 'in:inbox' : box === 'sent' ? 'in:sent' : box === 'archive' ? '-in:inbox -in:sent -in:trash -in:spam -in:drafts' : 'in:inbox';
+    if (q) params.q = q + ' ' + boxQ;
+    else if (box === 'sent') params.labelIds = ['SENT'];
+    else if (box === 'archive') params.q = boxQ;
+    else params.labelIds = ['INBOX'];
+    const list = await gmail.users.messages.list(params);
+    ids = (list.data.messages || []).map(m => m.id);
+    nextPageToken = list.data.nextPageToken || null;
+  }
   const items = await Promise.all(ids.map(async (id) => {
     const msg = await gmail.users.messages.get({
-      userId: 'me',
-      id,
-      format: 'metadata',
-      metadataHeaders: ['From', 'Subject', 'Date'],
+      userId: 'me', id, format: 'metadata',
+      metadataHeaders: ['From', 'To', 'Subject', 'Date'],
     });
     const h = msg.data.payload && msg.data.payload.headers;
     return {
-      id,
-      from: header(h, 'From'),
+      id, draftId: draftMap[id] || null,
+      from: header(h, 'From'), to: header(h, 'To'),
       subject: header(h, 'Subject') || '(no subject)',
-      date: header(h, 'Date'),
-      snippet: msg.data.snippet || '',
+      date: header(h, 'Date'), snippet: msg.data.snippet || '',
       unread: (msg.data.labelIds || []).includes('UNREAD'),
     };
   }));
-  return items;
+  return { messages: items, nextPageToken };
 }
 
-// JSON endpoint — the future inbox screen will read from this.
+// JSON endpoint for the inbox screen — supports box, server-side search (q), paging.
 router.get('/inbox', async (req, res) => {
   try {
-    const box = ['inbox', 'sent', 'archive'].includes(req.query.box) ? req.query.box : 'inbox';
-    const items = await listInbox(req.user.email, box);
-    res.json({ mailbox: req.user.email, box, count: items.length, messages: items });
+    const box = ['inbox', 'sent', 'archive', 'drafts'].includes(req.query.box) ? req.query.box : 'inbox';
+    const q = String(req.query.q || '').slice(0, 200).trim();
+    const pageToken = String(req.query.pageToken || '');
+    const out = await listInbox(req.user.email, { box, q, pageToken });
+    res.json({ mailbox: req.user.email, box, count: out.messages.length, messages: out.messages, nextPageToken: out.nextPageToken });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Friendly read-only proof page — visit /api/mail/test while logged in.
-router.get('/test', async (req, res) => {
-  let body, ok = false, items = [];
+// Colleague address book for compose autocomplete.
+router.get('/contacts', async (req, res) => {
   try {
-    items = await listInbox(req.user.email);
-    ok = true;
-  } catch (e) {
-    body = e.message;
-  }
-  const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const rows = items.map(m => `
-    <div style="padding:12px 14px;border-bottom:1px solid #EFE6D6;${m.unread ? 'background:#FFFDF9' : ''}">
-      <div style="display:flex;justify-content:space-between;gap:10px">
-        <strong style="font-size:14px;color:#3A2D22">${m.unread ? '● ' : ''}${esc(m.from)}</strong>
-        <span style="font-size:12px;color:#9A8B79;white-space:nowrap">${esc(m.date)}</span>
-      </div>
-      <div style="font-size:13px;color:#3A2D22;margin-top:2px">${esc(m.subject)}</div>
-      <div style="font-size:12px;color:#8A7E72;margin-top:2px">${esc(m.snippet)}</div>
-    </div>`).join('');
-  const banner = ok
-    ? `<div style="background:#E3F0DA;color:#2F6B1E;padding:12px 14px;border-radius:8px;font-weight:600">✓ Connected. Reading mailbox: ${esc(req.user.email)} — ${items.length} recent message(s).</div>`
-    : `<div style="background:#F8DCD6;color:#9A2A1E;padding:12px 14px;border-radius:8px"><strong>Not connected yet.</strong><br>${esc(body)}</div>`;
-  res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>FK Home — Mail test</title></head>
-    <body style="font-family:system-ui,sans-serif;max-width:680px;margin:30px auto;padding:0 16px;color:#2E2620;background:#FAF4EA">
-      <h1 style="font-size:22px">Mail connection test</h1>
-      ${banner}
-      <div style="margin-top:16px;background:#fff;border:1px solid #E7DAC7;border-radius:12px;overflow:hidden">${rows || (ok ? '<div style="padding:14px;color:#8A7E72">Inbox is empty.</div>' : '')}</div>
-      <p style="font-size:12px;color:#9A8B79;margin-top:14px">Read-only. Nothing is sent, changed, or deleted. This is a temporary proof page.</p>
-    </body></html>`);
+    const r = await db.query("SELECT full_name, display_name, email FROM users WHERE deleted_at IS NULL AND email IS NOT NULL AND email <> '' ORDER BY full_name");
+    res.json({ contacts: r.rows.map(u => ({ name: u.display_name || u.full_name, email: u.email })) });
+  } catch (e) { res.status(500).json({ error: e.message, contacts: [] }); }
 });
+
+// Friendly read-only proof page — visit /api/mail/test while logged in.
 
 // Send a plain-text email AS the given mailbox. The real composer will build on
 // this; for now it powers the send proof. Returns the sent message id.
@@ -189,11 +178,15 @@ const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').
 const b64 = (str) => Buffer.from(str, 'utf8').toString('base64');
 
 // Build a raw RFC822 message: plain, or text+html alternative, with optional attachments.
-function buildRaw(fromEmail, { to, subject, text, html, inReplyTo, references, attachments }) {
+function buildRaw(fromEmail, { to, cc, subject, text, html, inReplyTo, references, attachments }) {
   const atts = attachments || [];
-  const headers = [`From: ${fromEmail}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0'];
-  if (inReplyTo) headers.push(`In-Reply-To: ${inReplyTo}`);
-  if (references) headers.push(`References: ${references}`);
+  // Strip CR/LF from header values so a newline can't inject extra headers.
+  const hv = (s) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').trim();
+  const headers = [`From: ${fromEmail}`, `To: ${hv(to)}`];
+  if (cc) headers.push(`Cc: ${hv(cc)}`);
+  headers.push(`Subject: ${hv(subject)}`, 'MIME-Version: 1.0');
+  if (inReplyTo) headers.push(`In-Reply-To: ${hv(inReplyTo)}`);
+  if (references) headers.push(`References: ${hv(references)}`);
   const bodyBlock = () => {
     if (html) {
       const alt = 'alt_' + Math.random().toString(36).slice(2);
@@ -212,8 +205,9 @@ function buildRaw(fromEmail, { to, subject, text, html, inReplyTo, references, a
     let parts = `--${mixed}\r\nContent-Type: ${body.ctype}\r\n\r\n${body.content}\r\n\r\n`;
     for (const a of atts) {
       const clean = String(a.dataB64 || '').replace(/\s+/g, '');
-      parts += `--${mixed}\r\nContent-Type: ${a.mimeType || 'application/octet-stream'}; name="${a.filename}"\r\n` +
-        `Content-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="${a.filename}"\r\n\r\n${clean}\r\n\r\n`;
+      const fn = String(a.filename || 'attachment').replace(/[\r\n"]+/g, '_');
+      parts += `--${mixed}\r\nContent-Type: ${a.mimeType || 'application/octet-stream'}; name="${fn}"\r\n` +
+        `Content-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="${fn}"\r\n\r\n${clean}\r\n\r\n`;
     }
     parts += `--${mixed}--`;
     mime = headers.concat([`Content-Type: multipart/mixed; boundary="${mixed}"`]).join('\r\n') + '\r\n\r\n' + parts;
@@ -248,7 +242,7 @@ router.get('/message/:id', async (req, res) => {
     try { await gmail.users.messages.modify({ userId: 'me', id: req.params.id, requestBody: { removeLabelIds: ['UNREAD'] } }); } catch (e) {}
     res.json({
       id: req.params.id, threadId: m.data.threadId,
-      from: header(h, 'From'), to: header(h, 'To'),
+      from: header(h, 'From'), to: header(h, 'To'), cc: header(h, 'Cc'),
       subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'),
       messageId: header(h, 'Message-ID'), text, html, attachments,
     });
@@ -264,13 +258,33 @@ router.get('/message/:id/attachment/:attId', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Send / reply / forward from the composer (text, optional html, attachments, or save as draft).
+// Send / reply / forward / compose-new (text, optional html, cc, attachments, or save as draft).
 router.post('/send', async (req, res) => {
   try {
-    const { to, subject, text, html, inReplyTo, references, threadId, attachments, draft } = req.body || {};
+    const { to, cc, subject, text, html, inReplyTo, references, threadId, attachments, draft, draftId } = req.body || {};
     if (!draft && (!to || !(text || html))) return res.status(400).json({ error: 'Need at least a recipient and a message.' });
-    const out = await sendMail(req.user.email, { to: to || '', subject: subject || '(no subject)', text, html, inReplyTo, references, threadId, attachments, draft });
+    const out = await sendMail(req.user.email, { to: to || '', cc: cc || '', subject: subject || '(no subject)', text, html, inReplyTo, references, threadId, attachments, draft });
+    if (!draft && draftId) { try { await gmailFor(req.user.email).users.drafts.delete({ userId: 'me', id: draftId }); } catch (e) {} }
     res.json({ ok: true, ...out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Per-user email signature (stored in FK Home, appended in the composer).
+router.get('/signature', async (req, res) => {
+  try {
+    const r = await db.query('SELECT signature FROM mail_settings WHERE user_id = $1', [req.user.id]);
+    res.json({ signature: (r.rows[0] && r.rows[0].signature) || '' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.put('/signature', async (req, res) => {
+  try {
+    const sig = String((req.body && req.body.signature) || '').slice(0, 4000);
+    await db.query(
+      `INSERT INTO mail_settings (user_id, signature, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET signature = EXCLUDED.signature, updated_at = NOW()`,
+      [req.user.id, sig]
+    );
+    res.json({ ok: true, signature: sig });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -69,7 +69,7 @@ window.fkModules['mail'] = {
     #mail-mod .barbtns{margin-left:auto;display:none;gap:8px} #mail-mod .barbtns.show{display:flex}
     #mail-mod .bb{font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 12px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:#5b5249;cursor:pointer;display:inline-flex;align-items:center;gap:6px} #mail-mod .bb:hover{background:#fff} #mail-mod .bb.danger:hover{background:#FBECEC;color:#A32D2D;border-color:#E9C9C9}
     #mail-mod .scroll{overflow:auto;padding:4px 12px 16px}
-    #mail-mod .mrow{display:flex;gap:11px;background:var(--surface,#fff);border:1px solid #EFE7D8;border-radius:13px;padding:12px 14px;margin-bottom:9px;cursor:pointer;box-shadow:0 1px 2px rgba(58,40,24,.05),0 4px 14px rgba(58,40,24,.05);transition:box-shadow .12s,transform .12s}
+    #mail-mod .mrow{display:flex;gap:11px;background:var(--surface,#fff);border:1px solid var(--line2,#F0E8DA);border-radius:12px;padding:11px 13px;margin-bottom:7px;cursor:pointer;box-shadow:0 1px 2px rgba(58,40,24,.04);transition:box-shadow .12s,transform .12s}
     #mail-mod .mrow:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(58,40,24,.08),0 16px 36px rgba(58,40,24,.10)}
     #mail-mod .mrow.on{box-shadow:0 0 0 2px var(--orange,#E8722B),0 16px 36px rgba(58,40,24,.10)} #mail-mod .mrow.sel{background:#FFF7F0;border-color:#F0CDB4}
     #mail-mod .mcheck{width:18px;height:18px;margin-top:3px;accent-color:var(--orange);cursor:pointer;flex:none}
@@ -85,7 +85,7 @@ window.fkModules['mail'] = {
     /* Read */
     #mail-mod .mread{overflow:auto;background:var(--canvas,#F4EFE7);display:flex;flex-direction:column}
     #mail-mod .mr-empty{margin:auto;color:var(--muted);font-size:15px;text-align:center;padding:40px}
-    #mail-mod .mr-pad{padding:22px 28px 40px;max-width:880px;width:100%}
+    #mail-mod .mr-pad{padding:24px 34px 52px;max-width:none;width:100%}
     #mail-mod .mr-top{display:flex;align-items:flex-start;gap:14px}
     #mail-mod .mr-h{font-size:24px;font-weight:700;line-height:1.25;flex:1}
     #mail-mod .mr-acts{display:flex;gap:7px;flex:none;position:relative}
@@ -146,16 +146,19 @@ window.fkModules['mail'] = {
     </nav>
     <aside class="mnav" id="mnav">
       <div class="mnav-hd"><span class="t">Mail</span><button class="collapse" id="collapseBtn" title="Collapse"><i class="ti ti-layout-sidebar-left-collapse"></i></button></div>
+      <button class="composebtn" id="composeBtn"><i class="ti ti-pencil-plus"></i> Compose</button>
       <div class="mboxsw" id="mboxsw"><div><div class="d1">Mailbox</div><div class="d2">Personal <span class="pill">you</span></div></div><i class="ti ti-chevron-down cv"></i>
         <div class="swmenu" id="swmenu"><div class="it">Personal <span class="tag">you</span></div><div class="it dim">Customer Service <span class="tag">coming soon</span></div></div>
       </div>
       <div class="msec">Mailbox</div>
       <div class="mni on" data-box="inbox"><i class="ti ti-inbox lead"></i> Inbox <span class="ct" id="ctInbox"></span></div>
       <div class="mni" data-box="sent"><i class="ti ti-send lead"></i> Sent</div>
+      <div class="mni" data-box="drafts"><i class="ti ti-file-text lead"></i> Drafts <span class="ct" id="ctDrafts"></span></div>
       <div class="mni" data-box="archive"><i class="ti ti-archive lead"></i> Archive</div>
       <div class="msec">My labels <i class="ti ti-plus add" id="addLabel" title="New label"></i></div>
       <div id="labelList"></div>
       <div class="newlab" id="newLab"><input id="newLabName" placeholder="Label name" maxlength="40"><div class="swatches" id="swatches"></div><div class="nb"><button id="newLabCancel">Cancel</button><button class="ok" id="newLabAdd">Add label</button></div></div>
+      <div class="msig" id="sigBtn"><i class="ti ti-signature"></i> Email signature</div>
     </aside>
     <section class="list">
       <div class="lhd"><button class="expand" id="expandBtn" title="Show mailboxes"><i class="ti ti-layout-sidebar-left-expand"></i></button><div><h2 id="listTitle">Inbox</h2><div class="sub" id="mailSub">Loading…</div></div></div>
@@ -167,6 +170,57 @@ window.fkModules['mail'] = {
     <section class="mread" id="mailRead"><div class="mr-empty">Select a message to read it here.</div></section>
     <div class="toast" id="mailToast"></div>
     <input type="file" id="attInput" multiple style="display:none">
+    <datalist id="mailContacts"></datalist>
+    <div class="cwrap" id="cwrap">
+      <div class="cwin">
+        <div class="chead"><span id="cTitle">New message</span><button class="cx" id="cClose" title="Close"><i class="ti ti-x"></i></button></div>
+        <div class="cbody">
+          <div class="crow"><input id="cTo" class="cfield" placeholder="To" list="mailContacts" autocomplete="off"><button class="cccbtn" id="cCcBtn">Cc</button></div>
+          <input id="cCc" class="cfield" placeholder="Cc" list="mailContacts" autocomplete="off" style="display:none">
+          <input id="cSubj" class="cfield" placeholder="Subject">
+          <div id="cBody" class="cedit" contenteditable="true" data-ph="Write your message…"></div>
+          <div id="cAtts" class="cm-atts"></div>
+        </div>
+        <div class="cfoot">
+          <div class="tools"><button class="tool" id="cBold" title="Bold"><i class="ti ti-bold"></i></button><button class="tool" id="cItalic" title="Italic"><i class="ti ti-italic"></i></button><button class="tool" id="cClip" title="Attach a file"><i class="ti ti-paperclip"></i></button></div>
+          <span class="cm-note" id="cNote"></span>
+          <button class="btn btn-ghost" id="cDraft">Save draft</button>
+          <button class="btn btn-send" id="cSend"><i class="ti ti-send" style="font-size:15px"></i> Send</button>
+        </div>
+      </div>
+    </div>
+    <div class="sigwrap" id="sigwrap">
+      <div class="sigbox">
+        <div class="sighd">Email signature</div>
+        <div class="sigsub">Added to the bottom of new emails, replies and forwards.</div>
+        <textarea id="sigText" placeholder="e.g.&#10;Bobby&#10;FK Sports UK"></textarea>
+        <div class="sigf"><button class="btn btn-ghost" id="sigCancel">Cancel</button><button class="btn btn-send" id="sigSave">Save signature</button></div>
+      </div>
+    </div>
+    <style>
+      #mail-mod .composebtn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin:0 0 12px;padding:12px;border:none;border-radius:12px;background:var(--orange,#E8722B);color:#fff;font-family:inherit;font-weight:700;font-size:15px;cursor:pointer;box-shadow:0 2px 8px rgba(232,114,43,.28)}
+      #mail-mod .composebtn:hover{filter:brightness(1.05)} #mail-mod .composebtn i{font-size:18px}
+      #mail-mod .msig{display:flex;align-items:center;gap:9px;margin-top:auto;padding:10px;border-radius:9px;color:var(--muted);cursor:pointer;font-size:13.5px} #mail-mod .msig:hover{background:#EFE7D8;color:#3A322A} #mail-mod .msig i{font-size:16px}
+      #mail-mod .cwrap{position:absolute;right:22px;bottom:0;z-index:60;display:none} #mail-mod .cwrap.show{display:block}
+      #mail-mod .cwin{width:540px;max-width:calc(100vw - 44px);background:var(--surface,#fff);border:1px solid var(--line);border-radius:14px 14px 0 0;box-shadow:0 24px 60px rgba(58,40,24,.28);overflow:hidden;display:flex;flex-direction:column;max-height:80vh}
+      #mail-mod .chead{display:flex;align-items:center;background:#2A2018;color:#fff;padding:11px 15px;font-size:14.5px;font-weight:600} #mail-mod .chead span{flex:1}
+      #mail-mod .cx{background:none;border:none;color:#C9BBA8;font-size:18px;cursor:pointer;display:flex} #mail-mod .cx:hover{color:#fff}
+      #mail-mod .cbody{padding:4px 15px 8px;overflow:auto;display:flex;flex-direction:column}
+      #mail-mod .crow{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line2,#F0E8DA)}
+      #mail-mod .cfield{border:none;border-bottom:1px solid var(--line2,#F0E8DA);padding:11px 2px;font:inherit;font-size:14.5px;outline:none;background:none;width:100%;color:inherit}
+      #mail-mod .crow .cfield{flex:1;border-bottom:none}
+      #mail-mod .cccbtn{background:none;border:none;color:var(--soft);font:inherit;font-size:13px;font-weight:600;cursor:pointer;padding:4px 6px} #mail-mod .cccbtn:hover{color:var(--orange)}
+      #mail-mod .cedit{min-height:190px;padding:13px 2px;font-size:15px;line-height:1.6;outline:none;overflow:auto;white-space:pre-wrap} #mail-mod .cedit:empty:before{content:attr(data-ph);color:var(--soft)}
+      #mail-mod .cfoot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line2,#F0E8DA);flex-wrap:wrap}
+      #mail-mod .cfoot .tools{display:flex;gap:4px} #mail-mod .cfoot .cm-note{flex:1;font-size:12px;color:var(--muted)}
+      #mail-mod .sigwrap{position:absolute;inset:0;background:rgba(40,28,18,.42);z-index:70;display:none;align-items:center;justify-content:center} #mail-mod .sigwrap.show{display:flex}
+      #mail-mod .sigbox{width:460px;max-width:calc(100vw - 40px);background:var(--surface,#fff);border-radius:16px;padding:22px;box-shadow:0 24px 60px rgba(58,40,24,.3)}
+      #mail-mod .sighd{font-size:19px;font-weight:700} #mail-mod .sigsub{font-size:13px;color:var(--muted);margin:3px 0 12px}
+      #mail-mod .sigbox textarea{width:100%;min-height:120px;border:1px solid var(--line);border-radius:11px;padding:12px;font:inherit;font-size:14.5px;outline:none;resize:vertical;box-sizing:border-box}
+      #mail-mod .sigf{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}
+      #mail-mod .cm-cc{display:none} #mail-mod .cm-cc.show{display:block}
+      #mail-mod .loadmore{display:block;width:100%;margin:6px 0 12px;padding:11px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:#5b5249;font:inherit;font-weight:600;font-size:13.5px;cursor:pointer} #mail-mod .loadmore:hover{background:#fff} #mail-mod .loadmore:disabled{opacity:.6;cursor:default}
+    </style>
   </div>
 </div>`;
   },
@@ -179,6 +233,7 @@ window.fkModules['mail'] = {
     let messages = [], box = 'inbox', selectedId = null, sel = new Set(), summaryCache = {}, focusCache = {};
     let labels = [], labelMap = {}, notesMap = {}, labelFilter = null, query = '';
     let pendingAtts = [], attTarget = null;
+    let nextPageTok = null, contacts = [], signature = '', composeAtts = [], composeCfg = null, searchTimer = null;
     const SWATCHES = ['#6F57A0', '#2D6FB0', '#2E8C6F', '#9A4E8A', '#C2613B', '#B0892D'];
 
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -240,39 +295,66 @@ window.fkModules['mail'] = {
     }
 
     // List
-    async function loadBox() {
-      sel.clear(); selAll.checked = false; updateBar();
-      listTitle.textContent = box === 'sent' ? 'Sent' : box === 'archive' ? 'Archive' : 'Inbox';
-      $('#focusStrip').style.display = box === 'inbox' ? 'flex' : 'none';
-      if (box === 'inbox') { $('#focusBody').innerHTML = focusCache.inbox ? '<div class="fx">' + esc(focusCache.inbox) + '</div>' : '<button class="fbtn">What needs me today?</button>'; const fb = $('#focusBody .fbtn'); if (fb) fb.addEventListener('click', runFocus); }
-      rowsEl.innerHTML = '<div class="loading">Loading…</div>';
+    async function loadBox(append) {
+      if (!append) {
+        sel.clear(); selAll.checked = false; updateBar(); nextPageTok = null;
+        listTitle.textContent = box === 'sent' ? 'Sent' : box === 'archive' ? 'Archive' : box === 'drafts' ? 'Drafts' : 'Inbox';
+        $('#focusStrip').style.display = box === 'inbox' ? 'flex' : 'none';
+        if (box === 'inbox') { $('#focusBody').innerHTML = focusCache.inbox ? '<div class="fx">' + esc(focusCache.inbox) + '</div>' : '<button class="fbtn">What needs me today?</button>'; const fb = $('#focusBody .fbtn'); if (fb) fb.addEventListener('click', runFocus); }
+        rowsEl.innerHTML = '<div class="loading">Loading…</div>';
+      }
       try {
-        const data = await j('/api/mail/inbox?box=' + box); messages = data.messages || [];
-        if (box === 'inbox') $('#ctInbox').textContent = messages.length || '';
-        renderRows(); const vis = visible();
-        if (vis.length) openMessage(vis[0].id); else { readEl.innerHTML = '<div class="mr-empty">Nothing here.</div>'; }
-      } catch (e) { rowsEl.innerHTML = '<div class="errbox">' + esc(e.message) + '</div>'; subEl.textContent = ''; }
+        const url = '/api/mail/inbox?box=' + box + (query ? '&q=' + encodeURIComponent(query) : '') + (append && nextPageTok ? '&pageToken=' + encodeURIComponent(nextPageTok) : '');
+        const data = await j(url);
+        const incoming = data.messages || [];
+        messages = append ? messages.concat(incoming) : incoming;
+        nextPageTok = data.nextPageToken || null;
+        if (box === 'inbox' && !query) $('#ctInbox').textContent = messages.length ? (messages.length + (nextPageTok ? '+' : '')) : '';
+        renderRows();
+        if (!append) {
+          if (box === 'drafts') { selectedId = null; readEl.innerHTML = '<div class="mr-empty">' + (visible().length ? 'Select a draft to continue editing.' : 'No drafts.') + '</div>'; }
+          else { const vis = visible(); if (vis.length) openMessage(vis[0].id); else { selectedId = null; readEl.innerHTML = '<div class="mr-empty">' + (query ? 'No matches for &ldquo;' + esc(query) + '&rdquo;.' : 'Nothing here.') + '</div>'; } }
+        }
+      } catch (e) { if (!append) { rowsEl.innerHTML = '<div class="errbox">' + esc(e.message) + '</div>'; subEl.textContent = ''; } else { toast(e.message); } }
     }
-    function visible() { let ms = messages; if (labelFilter) ms = ms.filter(m => (labelMap[m.id] || []).includes(labelFilter)); if (query) { const q = query.toLowerCase(); ms = ms.filter(m => (m.from + ' ' + m.subject + ' ' + m.snippet).toLowerCase().includes(q)); } return ms; }
+    function visible() { let ms = messages; if (labelFilter) ms = ms.filter(m => (labelMap[m.id] || []).includes(labelFilter)); return ms; }
     function renderRows() {
       const ms = visible(); const unread = ms.filter(m => m.unread).length;
-      subEl.textContent = ms.length + ' message' + (ms.length === 1 ? '' : 's') + (unread ? ' · ' + unread + ' unread' : '');
-      if (!ms.length) { rowsEl.innerHTML = '<div class="loading">No matching messages.</div>'; return; }
+      const noun = box === 'drafts' ? 'draft' : 'message';
+      subEl.textContent = ms.length + ' ' + noun + (ms.length === 1 ? '' : 's') + (box === 'inbox' && unread ? ' · ' + unread + ' unread' : '') + (nextPageTok ? '+' : '');
+      if (!ms.length) { rowsEl.innerHTML = '<div class="loading">' + (query ? 'No matching messages.' : 'Nothing here.') + '</div>'; return; }
+      const recipBox = (box === 'sent' || box === 'drafts');
       rowsEl.innerHTML = ms.map(m => {
         const f = parseFrom(m.from); const note = notesMap[m.id]; const lids = labelMap[m.id] || [];
+        let who = recipBox ? (parseFrom(m.to).name || '(no recipient)') : f.name;
+        if (box === 'sent') who = 'To: ' + who; else if (box === 'drafts') who = 'Draft · ' + who;
         const dots = lids.length ? '<div class="rdots">' + lids.map(id => { const l = labelById(id); return l ? '<span class="ld" style="background:' + esc(l.colour) + '"></span>' : ''; }).join('') + '</div>' : '';
         const pn = note ? '<div class="pn"><i class="ti ti-note" style="font-size:12px"></i> ' + esc(note) + '</div>' : '';
-        return '<div class="mrow' + (m.unread ? ' unread' : '') + (m.id === selectedId ? ' on' : '') + (sel.has(m.id) ? ' sel' : '') + '" data-id="' + m.id + '"><input type="checkbox" class="mcheck"' + (sel.has(m.id) ? ' checked' : '') + ' data-id="' + m.id + '"><div class="mc"><div class="mr1">' + (m.unread ? '<span class="un"></span>' : '') + '<span class="who">' + esc(f.name) + '</span><span class="tm">' + esc(shortDate(m.date)) + '</span></div><div class="msub">' + esc(m.subject) + '</div><div class="msnip">' + esc(m.snippet) + '</div>' + dots + pn + '</div></div>';
-      }).join('');
-      rowsEl.querySelectorAll('.mrow').forEach(el => el.addEventListener('click', (ev) => { if (ev.target.classList.contains('mcheck')) return; openMessage(el.dataset.id); }));
+        return '<div class="mrow' + (m.unread ? ' unread' : '') + (m.id === selectedId ? ' on' : '') + (sel.has(m.id) ? ' sel' : '') + '" data-id="' + m.id + '"><input type="checkbox" class="mcheck"' + (sel.has(m.id) ? ' checked' : '') + ' data-id="' + m.id + '"><div class="mc"><div class="mr1">' + (m.unread ? '<span class="un"></span>' : '') + '<span class="who">' + esc(who) + '</span><span class="tm">' + esc(shortDate(m.date)) + '</span></div><div class="msub">' + esc(m.subject) + '</div><div class="msnip">' + esc(m.snippet) + '</div>' + dots + pn + '</div></div>';
+      }).join('') + (nextPageTok ? '<button class="loadmore" id="loadMore">Load older ' + noun + 's</button>' : '');
+      rowsEl.querySelectorAll('.mrow').forEach(el => el.addEventListener('click', (ev) => { if (ev.target.classList.contains('mcheck')) return; if (box === 'drafts') openDraft(el.dataset.id); else openMessage(el.dataset.id); }));
       rowsEl.querySelectorAll('.mcheck').forEach(cb => cb.addEventListener('click', (ev) => { ev.stopPropagation(); const id = cb.dataset.id; if (cb.checked) sel.add(id); else sel.delete(id); cb.closest('.mrow').classList.toggle('sel', cb.checked); selAll.checked = sel.size === visible().length && visible().length > 0; updateBar(); }));
+      const lm = rowsEl.querySelector('#loadMore'); if (lm) lm.addEventListener('click', () => { lm.disabled = true; lm.textContent = 'Loading…'; loadBox(true); });
     }
     function updateBar() { barBtns.classList.toggle('show', sel.size > 0); }
     selAll.addEventListener('change', () => { sel.clear(); if (selAll.checked) visible().forEach(m => sel.add(m.id)); renderRows(); updateBar(); });
-    srchEl.addEventListener('input', () => { query = srchEl.value.trim(); renderRows(); });
+    srchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { const q = srchEl.value.trim(); if (q === query) return; query = q; loadBox(false); }, 380); });
 
     async function act(url, ids, verb) {
-      try { await post(url, { ids }); messages = messages.filter(m => !ids.includes(m.id)); if (ids.includes(selectedId)) { selectedId = null; readEl.innerHTML = '<div class="mr-empty">Select a message to read it here.</div>'; } ids.forEach(id => sel.delete(id)); selAll.checked = false; renderRows(); updateBar(); toast(ids.length + ' ' + verb); } catch (e) { toast(e.message); }
+      try {
+        await post(url, { ids });
+        const idx = messages.findIndex(m => m.id === selectedId);
+        const wasOpen = ids.includes(selectedId);
+        messages = messages.filter(m => !ids.includes(m.id));
+        ids.forEach(id => sel.delete(id)); selAll.checked = false;
+        renderRows(); updateBar();
+        if (wasOpen) {
+          const vis = visible();
+          const next = vis.length ? vis[Math.min(Math.max(idx, 0), vis.length - 1)] : null;
+          if (next) openMessage(next.id); else { selectedId = null; readEl.innerHTML = '<div class="mr-empty">Select a message to read it here.</div>'; }
+        }
+        toast(ids.length + ' ' + verb);
+      } catch (e) { toast(e.message); }
     }
     $('#bArchive').addEventListener('click', () => { if (sel.size) act('/api/mail/archive', [...sel], 'archived'); });
     $('#bTrash').addEventListener('click', () => { if (sel.size) act('/api/mail/trash', [...sel], 'deleted'); });
@@ -308,10 +390,11 @@ window.fkModules['mail'] = {
             '<div class="mr-from"><div class="mr-av">' + esc(initials) + '</div><div><div class="mr-nm">' + esc(f.name) + '</div><div class="mr-em">' + esc(f.email) + '</div></div><div class="mr-when">' + esc(shortDate(m.date)) + '</div></div>' +
             '<div class="aisum" id="aiSum"></div>' + attsHtml + bodyHtml +
             '<div id="noteSlot"></div>' +
-            '<div class="body-acts"><button class="btn btn-send" id="bReply"><i class="ti ti-arrow-back-up" style="font-size:16px"></i> Reply</button><button class="btn btn-ghost" id="bFwd"><i class="ti ti-arrow-forward-up" style="font-size:16px"></i> Forward</button><button class="btn btn-ghost" id="bNote"><i class="ti ti-note" style="font-size:16px"></i> Note</button></div>' +
+            '<div class="body-acts"><button class="btn btn-send" id="bReply"><i class="ti ti-arrow-back-up" style="font-size:16px"></i> Reply</button><button class="btn btn-ghost" id="bReplyAll"><i class="ti ti-arrow-back-up-double" style="font-size:16px"></i> Reply all</button><button class="btn btn-ghost" id="bFwd"><i class="ti ti-arrow-forward-up" style="font-size:16px"></i> Forward</button><button class="btn btn-ghost" id="bNote"><i class="ti ti-note" style="font-size:16px"></i> Note</button></div>' +
             '<div class="composer" id="composer"><div class="cm-top" id="cmTopLabel">Reply to <b>' + esc(f.name) + '</b></div>' +
               '<div class="ai-row" id="aiRow"><button class="ai-draft" id="aiDraftBtn"><i class="ti ti-sparkles" style="font-size:15px"></i> AI draft</button><input class="ai-instr" id="aiInstr" placeholder="…or tell the AI what to say"></div>' +
-              '<input class="cm-to" id="cmTo" placeholder="Forward to (email address)">' +
+              '<input class="cm-to" id="cmTo" placeholder="To" list="mailContacts" autocomplete="off">' +
+              '<input class="cm-to" id="cmCc" placeholder="Cc" list="mailContacts" autocomplete="off">' +
               '<div class="cm-body" id="cmBody" contenteditable="true" data-ph="Write your message…"></div>' +
               '<div class="cm-atts" id="cmAtts"></div>' +
               '<div class="cm-foot"><div class="tools"><button class="tool" id="tBold" title="Bold"><i class="ti ti-bold"></i></button><button class="tool" id="tItalic" title="Italic"><i class="ti ti-italic"></i></button><button class="tool" id="tClip" title="Attach a file"><i class="ti ti-paperclip"></i></button></div>' +
@@ -342,15 +425,28 @@ window.fkModules['mail'] = {
         $('#aDel').addEventListener('click', () => act('/api/mail/trash', [id], 'deleted'));
 
         // composer
-        const composer = $('#composer'), cmTo = $('#cmTo'), cmBody = $('#cmBody'), cmTopLabel = $('#cmTopLabel'), cmNote = $('#cmNote'), cmSend = $('#cmSend'), aiRow = $('#aiRow'), cmAtts = $('#cmAtts');
+        const composer = $('#composer'), cmTo = $('#cmTo'), cmCc = $('#cmCc'), cmBody = $('#cmBody'), cmTopLabel = $('#cmTopLabel'), cmNote = $('#cmNote'), cmSend = $('#cmSend'), aiRow = $('#aiRow'), cmAtts = $('#cmAtts');
         let mode = 'reply';
+        const sigBlock = signature ? ('\n\n' + signature) : '';
+        const myEmail = ((window.fkUser && window.fkUser.email) || '').toLowerCase();
+        const splitAddrs = (s) => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
+        const emailOf = (a) => { const mm = String(a).match(/<([^>]+)>/); return (mm ? mm[1] : a).trim().toLowerCase(); };
         pendingAtts = [];
         const renderAtts = () => { cmAtts.innerHTML = pendingAtts.map((a, i) => '<span class="cm-att"><i class="ti ti-paperclip" style="font-size:13px"></i> ' + esc(a.filename) + ' <i class="ti ti-x x" data-i="' + i + '"></i></span>').join(''); cmAtts.querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { pendingAtts.splice(parseInt(x.dataset.i, 10), 1); renderAtts(); })); };
         attTarget = renderAtts;
-        const openComposer = () => { composer.classList.add('show'); composer.scrollIntoView({ behavior: 'smooth', block: 'center' }); setTimeout(() => cmBody.focus(), 250); };
-        const showReply = () => { mode = 'reply'; cmTo.classList.remove('show'); aiRow.classList.remove('hide'); cmTopLabel.innerHTML = 'Reply to <b>' + esc(f.name) + '</b>'; cmBody.innerText = ''; openComposer(); };
-        const showForward = () => { mode = 'forward'; cmTo.classList.add('show'); aiRow.classList.add('hide'); cmTo.value = ''; cmTopLabel.innerHTML = 'Forward this message'; cmBody.innerText = '\n\n---------- Forwarded message ----------\nFrom: ' + (m.from || '') + '\nDate: ' + (m.date || '') + '\nSubject: ' + (m.subject || '') + '\n\n' + plain; openComposer(); };
+        const openComposer = () => { composer.classList.add('show'); if (composer.scrollIntoView) composer.scrollIntoView({ behavior: 'smooth', block: 'center' }); setTimeout(() => cmBody.focus(), 250); };
+        const showReply = () => { mode = 'reply'; cmTo.classList.remove('show'); cmCc.classList.remove('show'); aiRow.classList.remove('hide'); cmTopLabel.innerHTML = 'Reply to <b>' + esc(f.name) + '</b>'; cmBody.innerText = sigBlock; openComposer(); };
+        const showReplyAll = () => {
+          mode = 'replyall'; aiRow.classList.remove('hide');
+          const seen = {}; const toUniq = [m.from].concat(splitAddrs(m.to)).filter(a => { const e = emailOf(a); if (!e || e === myEmail || seen[e]) return false; seen[e] = 1; return true; });
+          const ccList = splitAddrs(m.cc).filter(a => { const e = emailOf(a); return e && e !== myEmail && !seen[e]; });
+          cmTo.value = toUniq.join(', '); cmTo.classList.add('show');
+          cmCc.value = ccList.join(', '); cmCc.classList.toggle('show', ccList.length > 0);
+          cmTopLabel.innerHTML = 'Reply to all'; cmBody.innerText = sigBlock; openComposer();
+        };
+        const showForward = () => { mode = 'forward'; cmTo.classList.add('show'); cmCc.classList.remove('show'); aiRow.classList.add('hide'); cmTo.value = ''; cmTopLabel.innerHTML = 'Forward this message'; cmBody.innerText = sigBlock + '\n\n---------- Forwarded message ----------\nFrom: ' + (m.from || '') + '\nDate: ' + (m.date || '') + '\nSubject: ' + (m.subject || '') + '\n\n' + plain; openComposer(); };
         $('#bReply').addEventListener('click', showReply);
+        $('#bReplyAll').addEventListener('click', showReplyAll);
         $('#bFwd').addEventListener('click', showForward);
         $('#bNote').addEventListener('click', () => editNote(id, notesMap[id] || ''));
         $('#cmCancel').addEventListener('click', () => { composer.classList.remove('show'); pendingAtts = []; renderAtts(); });
@@ -362,16 +458,18 @@ window.fkModules['mail'] = {
         $('#polishBtn').addEventListener('click', async () => { const btn = $('#polishBtn'); if (!cmBody.innerText.trim()) { cmNote.textContent = 'Write something first.'; return; } btn.disabled = true; cmNote.textContent = 'Polishing…'; try { const out = await post('/api/mail/ai/polish', { text: cmBody.innerText }); if (out.polished) cmBody.innerText = out.polished; cmNote.textContent = 'Spelling & grammar polished.'; } catch (e) { cmNote.textContent = e.code === 'NO_KEY' ? 'AI needs a one-time key set up first.' : e.message; } btn.disabled = false; });
 
         async function doSend(asDraft) {
-          const text = cmBody.innerText.trim(); const html = cmBody.innerHTML; const to = mode === 'forward' ? cmTo.value.trim() : f.email;
-          if (!asDraft && mode === 'forward' && !to) { cmNote.textContent = 'Enter an address to forward to.'; return; }
+          const text = cmBody.innerText.trim(); const html = cmBody.innerHTML;
+          const to = (mode === 'forward' || mode === 'replyall') ? cmTo.value.trim() : f.email;
+          const cc = (mode === 'replyall' && cmCc.classList.contains('show')) ? cmCc.value.trim() : '';
+          if (!asDraft && (mode === 'forward' || mode === 'replyall') && !to) { cmNote.textContent = 'Enter at least one recipient.'; return; }
           if (!asDraft && !text) { cmNote.textContent = 'Write a message first.'; return; }
           const subject = mode === 'forward' ? (/^fwd:/i.test(m.subject) ? m.subject : 'Fwd: ' + m.subject) : (/^re:/i.test(m.subject) ? m.subject : 'Re: ' + m.subject);
           cmSend.disabled = true; cmNote.textContent = asDraft ? 'Saving…' : 'Sending…';
           try {
-            const body = { to, subject, text, html, attachments: pendingAtts, draft: !!asDraft };
-            if (mode === 'reply') { body.inReplyTo = m.messageId; body.references = m.messageId; body.threadId = m.threadId; }
+            const body = { to, cc, subject, text, html, attachments: pendingAtts, draft: !!asDraft };
+            if (mode === 'reply' || mode === 'replyall') { body.inReplyTo = m.messageId; body.references = m.messageId; body.threadId = m.threadId; }
             await post('/api/mail/send', body);
-            cmNote.textContent = ''; composer.classList.remove('show'); pendingAtts = []; renderAtts(); toast(asDraft ? 'Draft saved' : mode === 'forward' ? 'Forwarded' : 'Reply sent');
+            cmNote.textContent = ''; composer.classList.remove('show'); pendingAtts = []; renderAtts(); toast(asDraft ? 'Draft saved' : mode === 'forward' ? 'Forwarded' : 'Sent');
           } catch (e) { cmNote.textContent = e.message; } cmSend.disabled = false;
         }
         cmSend.addEventListener('click', () => doSend(false));
@@ -404,9 +502,65 @@ window.fkModules['mail'] = {
       root.querySelector('#noteSave').addEventListener('click', async () => { const body = ta.value.trim(); try { const out = await j('/api/mail/note/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) }); if (out.body) notesMap[id] = out.body; else delete notesMap[id]; renderNote(id); renderRows(); toast('Note saved'); } catch (e) { toast(e.message); } });
     }
 
+    // ---- Contacts (autocomplete) ----
+    function fillContacts() { const dl = $('#mailContacts'); if (!dl) return; dl.innerHTML = contacts.map(c => { const v = (c.name && c.name.trim()) ? (c.name + ' <' + c.email + '>') : c.email; return '<option value="' + esc(v) + '">' + esc(c.email) + '</option>'; }).join(''); }
+
+    // ---- Floating composer (new email + continue draft) ----
+    const cwrap = $('#cwrap'), cTo = $('#cTo'), cCc = $('#cCc'), cCcBtn = $('#cCcBtn'), cSubj = $('#cSubj'), cBody = $('#cBody'), cAtts = $('#cAtts'), cNote = $('#cNote'), cSend = $('#cSend'), cDraftBtn = $('#cDraft');
+    const renderComposeAtts = () => { cAtts.innerHTML = composeAtts.map((a, i) => '<span class="cm-att"><i class="ti ti-paperclip" style="font-size:13px"></i> ' + esc(a.filename) + ' <i class="ti ti-x x" data-i="' + i + '"></i></span>').join(''); cAtts.querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { composeAtts.splice(parseInt(x.dataset.i, 10), 1); renderComposeAtts(); })); };
+    function closeCompose() { cwrap.classList.remove('show'); composeCfg = null; composeAtts = []; renderComposeAtts(); cNote.textContent = ''; }
+    function openCompose(cfg) {
+      composeCfg = cfg || { mode: 'new' }; composeAtts = (cfg && cfg.attachments) || []; renderComposeAtts();
+      $('#cTitle').textContent = (cfg && cfg.title) || 'New message';
+      cTo.value = (cfg && cfg.to) || ''; cCc.value = (cfg && cfg.cc) || ''; cSubj.value = (cfg && cfg.subject) || '';
+      cCc.style.display = (cfg && cfg.cc) ? 'block' : 'none';
+      if (cfg && cfg.bodyHtml != null) cBody.innerHTML = cfg.bodyHtml;
+      else cBody.innerText = (cfg && cfg.body != null) ? cfg.body : (signature ? ('\n\n' + signature) : '');
+      cNote.textContent = ''; cwrap.classList.add('show'); setTimeout(() => (cTo.value ? cBody : cTo).focus(), 60);
+    }
+    async function openDraft(id) {
+      const meta = messages.find(x => x.id === id); toast('Opening draft…');
+      try {
+        const m = await j('/api/mail/message/' + encodeURIComponent(id));
+        const hasHtml = !!(m.html && m.html.trim());
+        openCompose({ mode: 'draft', title: 'Draft', to: m.to || '', cc: m.cc || '', subject: (m.subject && m.subject !== '(no subject)') ? m.subject : '', bodyHtml: hasHtml ? m.html : null, body: hasHtml ? null : (m.text || ''), draftId: meta && meta.draftId });
+      } catch (e) { toast('Could not open draft.'); }
+    }
+    cCcBtn.addEventListener('click', () => { const show = cCc.style.display === 'none'; cCc.style.display = show ? 'block' : 'none'; if (show) cCc.focus(); });
+    $('#cClose').addEventListener('click', closeCompose);
+    $('#cBold').addEventListener('click', () => { cBody.focus(); document.execCommand('bold'); });
+    $('#cItalic').addEventListener('click', () => { cBody.focus(); document.execCommand('italic'); });
+    $('#cClip').addEventListener('click', () => { attTarget = renderComposeAtts; pendingAtts = composeAtts; attInput.click(); });
+    async function composeSend(asDraft) {
+      const to = cTo.value.trim(); const cc = cCc.style.display !== 'none' ? cCc.value.trim() : '';
+      const text = cBody.innerText.trim(); const html = cBody.innerHTML;
+      if (!asDraft && !to) { cNote.textContent = 'Enter at least one recipient.'; return; }
+      if (!asDraft && !text) { cNote.textContent = 'Write a message first.'; return; }
+      cSend.disabled = true; cDraftBtn.disabled = true; cNote.textContent = asDraft ? 'Saving…' : 'Sending…';
+      try {
+        const body = { to, cc, subject: cSubj.value.trim() || '(no subject)', text, html, attachments: composeAtts, draft: !!asDraft };
+        if (composeCfg && composeCfg.draftId && !asDraft) body.draftId = composeCfg.draftId;
+        await post('/api/mail/send', body);
+        toast(asDraft ? 'Draft saved' : 'Sent'); closeCompose();
+        if (box === 'drafts' || (box === 'sent' && !asDraft)) loadBox(false);
+      } catch (e) { cNote.textContent = e.message; }
+      cSend.disabled = false; cDraftBtn.disabled = false;
+    }
+    cSend.addEventListener('click', () => composeSend(false));
+    cDraftBtn.addEventListener('click', () => composeSend(true));
+    $('#composeBtn').addEventListener('click', () => openCompose({ mode: 'new' }));
+
+    // ---- Signature editor ----
+    const sigwrap = $('#sigwrap');
+    $('#sigBtn').addEventListener('click', () => { $('#sigText').value = signature || ''; sigwrap.classList.add('show'); setTimeout(() => $('#sigText').focus(), 50); });
+    $('#sigCancel').addEventListener('click', () => sigwrap.classList.remove('show'));
+    $('#sigSave').addEventListener('click', async () => { const v = $('#sigText').value; try { const out = await j('/api/mail/signature', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signature: v }) }); signature = (out && out.signature != null) ? out.signature : v; sigwrap.classList.remove('show'); toast('Signature saved'); } catch (e) { toast(e.message); } });
+
     // Boot
     try { await refreshLabels(); } catch (e) {}
     try { notesMap = (await j('/api/mail/notes')).map || {}; } catch (e) {}
+    try { const cd = await j('/api/mail/contacts'); contacts = cd.contacts || []; fillContacts(); } catch (e) {}
+    try { const sg = await j('/api/mail/signature'); signature = (sg && sg.signature) || ''; } catch (e) {}
     await loadBox();
   }
 };
