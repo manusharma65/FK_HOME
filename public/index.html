@@ -121,7 +121,7 @@
   .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 18px; }
   /* r0.89 — Mail goes full-bleed: hide the FK sidebar (the Mail module draws its own
      dark icon rail) and let the module fill the whole content area, flush, no gaps. */
-  .app.mail-focus { grid-template-columns: 0 1fr; }
+  .app.mail-focus { grid-template-columns: 1fr; height: 100vh; }
   .app.mail-focus .sidebar { display: none; }
   .app.mail-focus .content { padding: 0 !important; display: flex; flex-direction: column; min-height: 0; }
   .app.mail-focus #moduleView { flex: 1; min-height: 0; padding: 0 !important; display: flex; }

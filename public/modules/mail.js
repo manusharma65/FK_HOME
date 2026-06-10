@@ -288,7 +288,11 @@ window.fkModules['mail'] = {
       selectedId = id; renderRows();
       readEl.innerHTML = '<div class="loading">Opening…</div>';
       try {
-        const m = await j('/api/mail/message/' + encodeURIComponent(id));
+        const m = await Promise.race([
+          j('/api/mail/message/' + encodeURIComponent(id)),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('The server did not respond in 20 seconds.')), 20000))
+        ]);
+        console.log('[mail] opened', id, '→', m && m.subject, '| attachments:', (m && m.attachments || []).length);
         if (messages.find(x => x.id === id)) messages.find(x => x.id === id).unread = false;
         const f = parseFrom(m.from);
         const plain = m.text || String(m.html || '').replace(/<[^>]+>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
@@ -379,7 +383,12 @@ window.fkModules['mail'] = {
         function paintButton() { sumEl.className = 'aisum show'; sumEl.innerHTML = sumIcon + '<div style="flex:1"><div class="t">AI summary</div><button class="ai-sumbtn" id="aiSumBtn">Summarise this email</button></div>'; $('#aiSumBtn').addEventListener('click', runSummary); }
         async function runSummary() { const btn = $('#aiSumBtn'); if (btn) { btn.textContent = 'Summarising…'; btn.disabled = true; } try { const out = await post('/api/mail/ai/summary', { text: plain }); summaryCache[id] = out.summary || ''; if (summaryCache[id]) paintSummary(summaryCache[id]); else sumEl.innerHTML = sumIcon + '<div style="flex:1"><div class="t">AI summary</div><div class="x">Nothing much to summarise.</div></div>'; } catch (e) { sumEl.innerHTML = sumIcon + '<div style="flex:1"><div class="t">AI summary</div><div class="x" style="color:#A32D2D">' + esc(e.code === 'NO_KEY' ? 'AI needs a one-time key set up first.' : e.message) + '</div></div>'; } }
         if (summaryCache[id]) paintSummary(summaryCache[id]); else if (plain.length > 120) paintButton();
-      } catch (e) { readEl.innerHTML = '<div class="errbox">' + esc(e.message) + '</div>'; }
+      } catch (e) {
+        console.error('[mail] openMessage failed for', id, e);
+        const msg = (e && e.message) ? e.message : (String(e) || 'Unknown error');
+        readEl.innerHTML = '<div class="errbox"><b>Couldn\u2019t open this email.</b><br><span style="color:var(--muted)">' + esc(msg) + '</span><br><br><button class="btn btn-ghost" id="retryOpen"><i class="ti ti-refresh" style="font-size:15px"></i> Try again</button></div>';
+        const rb = root.querySelector('#retryOpen'); if (rb) rb.addEventListener('click', () => openMessage(id));
+      }
     }
 
     function renderChips(id) { const el = root.querySelector('#chips'); if (!el) return; const lids = labelMap[id] || []; el.innerHTML = lids.map(lid => { const l = labelById(lid); return l ? '<span class="chip2" style="background:' + esc(l.colour) + '">' + esc(l.name) + '</span>' : ''; }).join(''); }
