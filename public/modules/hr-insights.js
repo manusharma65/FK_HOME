@@ -19,7 +19,7 @@ window.fkModules['hr/insights'] = {
           '<span class="card-meta" id="insProbCount">—</span>' +
         '</div>' +
         '<div style="overflow-x:auto">' +
-          '<table class="data-table" id="insProbTable" style="width:100%;border-collapse:collapse">' +
+          '<table class="data-table fk-stack" id="insProbTable" style="width:100%;border-collapse:collapse">' +
             '<thead><tr>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Person</th>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Status</th>' +
@@ -38,7 +38,7 @@ window.fkModules['hr/insights'] = {
           '<span class="card-meta" id="insOverdueCount">—</span>' +
         '</div>' +
         '<div style="overflow-x:auto">' +
-          '<table class="data-table" style="width:100%;border-collapse:collapse">' +
+          '<table class="data-table fk-stack" style="width:100%;border-collapse:collapse">' +
             '<thead><tr>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Task</th>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Assignee</th>' +
@@ -57,7 +57,7 @@ window.fkModules['hr/insights'] = {
           '<span class="card-meta" id="insOnbCount">—</span>' +
         '</div>' +
         '<div style="overflow-x:auto">' +
-          '<table class="data-table" style="width:100%;border-collapse:collapse">' +
+          '<table class="data-table fk-stack" style="width:100%;border-collapse:collapse">' +
             '<thead><tr>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Person</th>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Hire date</th>' +
@@ -75,7 +75,7 @@ window.fkModules['hr/insights'] = {
           '<span class="card-meta" id="insExitCount">—</span>' +
         '</div>' +
         '<div style="overflow-x:auto">' +
-          '<table class="data-table" style="width:100%;border-collapse:collapse">' +
+          '<table class="data-table fk-stack" style="width:100%;border-collapse:collapse">' +
             '<thead><tr>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Person</th>' +
               '<th style="text-align:left;padding:8px 10px;font-size:14.5px;color:var(--muted)">Last working day</th>' +
@@ -139,14 +139,14 @@ window.fkModules['hr/insights'] = {
             }
           }
           return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.hash=\'#profile/' + p.id + '\'">' +
-            '<td style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
+            '<td class="cell-head" style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
               '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13.5px;font-weight:500">' + esc(p.initials || '') + '</span>' +
               '<span class="nm">' + esc(p.display_name || p.full_name) + '</span>' +
             '</div></td>' +
-            '<td style="padding:8px 10px"><span class="chip ' + s.cls + '">' + esc(s.label) + '</span></td>' +
-            '<td style="padding:8px 10px;color:var(--muted)">' + fmtDate(p.hire_date) + '</td>' +
-            '<td style="padding:8px 10px">' + endLbl + '</td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.hash=\'#profile/' + p.id + '\'">View</button></td>' +
+            '<td data-label="Status" style="padding:8px 10px"><span class="chip ' + s.cls + '">' + esc(s.label) + '</span></td>' +
+            '<td data-label="Hire date" style="padding:8px 10px;color:var(--muted)">' + fmtDate(p.hire_date) + '</td>' +
+            '<td data-label="Probation ends" style="padding:8px 10px">' + endLbl + '</td>' +
+            '<td class="action-col" style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.hash=\'#profile/' + p.id + '\'">View</button></td>' +
           '</tr>';
         }).join('');
       }
@@ -163,15 +163,15 @@ window.fkModules['hr/insights'] = {
           const colour = t.assignee_avatar_colour || '#888780';
           const days = t.days_overdue || 0;
           return '<tr style="border-top:0.5px solid var(--line)">' +
-            '<td style="padding:8px 10px;font-weight:500">' + esc(t.title) +
+            '<td class="cell-head" style="padding:8px 10px;font-weight:500">' + esc(t.title) +
               (t.reason === 'orchestrator' ? ' <span style="font-size:12.5px;color:var(--muted)">(orchestrator)</span>' : '') + '</td>' +
-            '<td style="padding:8px 10px"><div style="display:flex;gap:8px;align-items:center">' +
+            '<td data-label="Assignee" style="padding:8px 10px"><div style="display:flex;gap:8px;align-items:center">' +
               '<span style="width:22px;height:22px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:500">' + esc(t.assignee_initials || '') + '</span>' +
               '<span>' + esc(assigneeName) + '</span>' +
             '</div></td>' +
-            '<td style="padding:8px 10px"><span style="color:var(--muted);font-size:14.5px">' + esc(relatedName) + '</span></td>' +
-            '<td style="padding:8px 10px"><span style="color:var(--red);font-weight:500">' + days + ' day' + (days === 1 ? '' : 's') + '</span></td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="location.hash=\'#profile/' + t.related_user_id + '/reviews\'">Open</button></td>' +
+            '<td data-label="About" style="padding:8px 10px"><span style="color:var(--muted);font-size:14.5px">' + esc(relatedName) + '</span></td>' +
+            '<td data-label="Overdue" style="padding:8px 10px"><span style="color:var(--red);font-weight:500">' + days + ' day' + (days === 1 ? '' : 's') + '</span></td>' +
+            '<td class="action-col" style="padding:8px 10px;text-align:right"><button class="btn" onclick="location.hash=\'#profile/' + t.related_user_id + '/reviews\'">Open</button></td>' +
           '</tr>';
         }).join('');
       }
@@ -186,18 +186,18 @@ window.fkModules['hr/insights'] = {
           const colour = o.avatar_colour || '#888780';
           const pct = o.total_items > 0 ? Math.round(o.done_items * 100 / o.total_items) : 0;
           return '<tr style="cursor:pointer;border-top:0.5px solid var(--line)" onclick="location.hash=\'#profile/' + o.id + '/onboarding\'">' +
-            '<td style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
+            '<td class="cell-head" style="padding:8px 10px"><div style="display:flex;gap:10px;align-items:center">' +
               '<span style="width:28px;height:28px;border-radius:50%;background:' + colour + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13.5px;font-weight:500">' + esc(o.initials || '') + '</span>' +
               '<span>' + esc(o.display_name || o.full_name) + '</span>' +
             '</div></td>' +
-            '<td style="padding:8px 10px;color:var(--muted)">' + fmtDate(o.hire_date) + '</td>' +
-            '<td style="padding:8px 10px"><div style="display:flex;align-items:center;gap:10px">' +
+            '<td data-label="Hire date" style="padding:8px 10px;color:var(--muted)">' + fmtDate(o.hire_date) + '</td>' +
+            '<td data-label="Progress" style="padding:8px 10px"><div style="display:flex;align-items:center;gap:10px">' +
               '<div style="width:120px;height:8px;background:var(--line);border-radius:99px;overflow:hidden">' +
                 '<div style="height:100%;width:' + pct + '%;background:#3B6D11"></div>' +
               '</div>' +
               '<span style="font-size:13.5px;color:var(--muted)">' + o.done_items + '/' + o.total_items + '</span>' +
             '</div></td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.hash=\'#profile/' + o.id + '/onboarding\'">Open</button></td>' +
+            '<td class="action-col" style="padding:8px 10px;text-align:right"><button class="btn" onclick="event.stopPropagation();location.hash=\'#profile/' + o.id + '/onboarding\'">Open</button></td>' +
           '</tr>';
         }).join('');
       }
@@ -225,11 +225,11 @@ window.fkModules['hr/insights'] = {
           const fnf = days >= 0 ? '<span class="chip ' + (days <= 2 ? 'red' : 'amber') + '">' + days + 'd to last day</span>' : '<span class="chip red">past last day</span>';
           const pct = e.total > 0 ? Math.round(e.done * 100 / e.total) : 0;
           return '<tr style="border-top:0.5px solid var(--line)">' +
-            '<td style="padding:8px 10px;font-weight:500">' + esc(e.name || '') + (e.emp_id ? ' <span style="color:var(--muted);font-size:13.5px">' + esc(e.emp_id) + '</span>' : '') + '</td>' +
-            '<td style="padding:8px 10px;color:var(--muted)">' + fmtDate(e.last_working_day) + '</td>' +
-            '<td style="padding:8px 10px">' + e.done + '/' + e.total + ' (' + pct + '%)</td>' +
-            '<td style="padding:8px 10px">' + fnf + '</td>' +
-            '<td style="padding:8px 10px;text-align:right"><button class="btn btn-primary" data-manage-exit="' + e.id + '">Manage</button></td>' +
+            '<td class="cell-head" style="padding:8px 10px;font-weight:500">' + esc(e.name || '') + (e.emp_id ? ' <span style="color:var(--muted);font-size:13.5px">' + esc(e.emp_id) + '</span>' : '') + '</td>' +
+            '<td data-label="Last day" style="padding:8px 10px;color:var(--muted)">' + fmtDate(e.last_working_day) + '</td>' +
+            '<td data-label="Cleared" style="padding:8px 10px">' + e.done + '/' + e.total + ' (' + pct + '%)</td>' +
+            '<td data-label="Full &amp; Final" style="padding:8px 10px">' + fnf + '</td>' +
+            '<td class="action-col" style="padding:8px 10px;text-align:right"><button class="btn btn-primary" data-manage-exit="' + e.id + '">Manage</button></td>' +
           '</tr>';
         }).join('');
         exitBody.querySelectorAll('[data-manage-exit]').forEach(function (b) {

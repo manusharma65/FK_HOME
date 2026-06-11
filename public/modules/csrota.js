@@ -103,26 +103,27 @@ window.fkModules['system/csrota'] = {
           dateSet.add(dt);
         }
         const dates = Array.from(dateSet).sort();
-        let html = '<table style="font-size:14px"><thead><tr><th>Agent</th>';
+        let html = '<table style="font-size:14px" class="fk-stack"><thead><tr><th>Agent</th>';
         for (const dt of dates) {
           const day = new Date(dt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' });
           html += '<th style="text-align:center;text-transform:none;letter-spacing:0">' + day + '</th>';
         }
         html += '</tr></thead><tbody>';
         for (const name of Object.keys(userMap).sort()) {
-          html += '<tr><td><span class="nm">' + escapeHtml(name) + '</span></td>';
+          html += '<tr><td class="cell-head"><span class="nm">' + escapeHtml(name) + '</span></td>';
           for (const dt of dates) {
             const v = userMap[name][dt] || '—';
             let cls = 'muted';
             if (v === 'working') cls = 'green';
             else if (v === 'leave') cls = 'amber';
             const label = v === 'working' ? 'W' : v === 'off' ? '—' : v === 'leave' ? 'L' : v[0].toUpperCase();
-            html += '<td style="text-align:center"><span class="chip ' + cls + '" style="margin:0">' + label + '</span></td>';
+            const dlbl = new Date(dt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' });
+            html += '<td style="text-align:center" data-label="' + dlbl + '"><span class="chip ' + cls + '" style="margin:0">' + label + '</span></td>';
           }
           html += '</tr>';
         }
         html += '</tbody></table>';
-        box.innerHTML = '<div class="mtable-scroll">' + html + '</div>';
+        box.innerHTML = html;
       } catch (e) {
         box.innerHTML = '<p style="text-align:center;color:var(--red);font-size:15px;padding:18px">Failed to load.</p>';
       }

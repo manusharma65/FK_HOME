@@ -723,6 +723,10 @@
     #moduleView table.fk-stack tr.loading-row td::before { display:none; }
     /* Wide matrices (e.g. CS rota) scroll sideways instead of stacking */
     #moduleView .mtable-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    /* Fixed-column summary grids collapse so they stop squashing on a phone */
+    #mg-mod .stat-grid, #lt-mod .stat-grid { grid-template-columns: 1fr 1fr !important; }
+    #usr-mod .r2 { grid-template-columns: 1fr !important; }
+    #rec-mod .rec-grid { grid-template-columns: 1fr !important; }
   }
   #moduleView .card-meta { font-weight:600; }
   /* Shared pill buttons — the standard action button across pages */
