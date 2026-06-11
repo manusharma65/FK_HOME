@@ -25,8 +25,16 @@ async function runMigrations() {
     const checksum = simpleHash(sql);
     const existing = await db.query('SELECT checksum FROM schema_migrations WHERE filename = $1', [file]);
 
-    if (existing.rows.length > 0 && existing.rows[0].checksum === checksum) {
-      console.log(`[schema] ${file} — already applied`);
+    if (existing.rows.length > 0) {
+      if (existing.rows[0].checksum === checksum) {
+        console.log(`[schema] ${file} — already applied`);
+      } else {
+        // Migrations are APPEND-ONLY. A shipped .sql whose content changed is
+        // deliberately NOT re-run: re-running a non-idempotent migration (seeds,
+        // UPDATE/DELETE, CREATE without IF NOT EXISTS) could duplicate or damage
+        // live data. To change the schema, add a NEW migration file.
+        console.warn(`[schema] ${file} — content CHANGED since it was applied; NOT re-running (append-only). To change schema, add a new migration file.`);
+      }
       continue;
     }
 
@@ -34,13 +42,9 @@ async function runMigrations() {
     try {
       await client.query('BEGIN');
       await client.query(sql);
-      if (existing.rows.length > 0) {
-        await client.query('UPDATE schema_migrations SET checksum=$1, applied_at=NOW() WHERE filename=$2', [checksum, file]);
-      } else {
-        await client.query('INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)', [file, checksum]);
-      }
+      await client.query('INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)', [file, checksum]);
       await client.query('COMMIT');
-      console.log(`[schema] ${file} — ${existing.rows.length > 0 ? 're-applied (checksum changed)' : 'applied'}`);
+      console.log(`[schema] ${file} — applied`);
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error(`[schema] FAILED on ${file} (rolled back): ${err.message}`);

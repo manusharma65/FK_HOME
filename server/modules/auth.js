@@ -13,6 +13,9 @@ const router = express.Router();
 // pair is locked for LOCK_MS. Successful login clears it.
 const LOGIN_FAILS = new Map();
 const MAX_FAILS = 8, WINDOW_MS = 15 * 60 * 1000, LOCK_MS = 15 * 60 * 1000;
+// Fixed hash used for a constant-time compare when the email is unknown/deleted,
+// so an attacker can't tell a real account from a missing one by response time.
+const DUMMY_HASH = bcrypt.hashSync('fk-home-dummy-password', 10);
 function throttleKey(req, email) { return (req.ip || '?') + '|' + String(email || '').toLowerCase().trim(); }
 function lockSecondsLeft(key) { const e = LOGIN_FAILS.get(key); return (e && e.until && e.until > Date.now()) ? Math.ceil((e.until - Date.now()) / 1000) : 0; }
 function noteLoginFail(key) { const now = Date.now(); let e = LOGIN_FAILS.get(key); if (!e || now - e.first > WINDOW_MS) e = { n: 0, first: now, until: 0 }; e.n += 1; if (e.n >= MAX_FAILS) e.until = now + LOCK_MS; LOGIN_FAILS.set(key, e); }
@@ -32,18 +35,21 @@ router.post('/login', async (req, res) => {
        FROM users WHERE LOWER(email) = LOWER($1)`,
       [email.trim()]
     );
-    if (r.rows.length === 0) {
+    const user = r.rows[0];
+
+    // Constant-time + uniform-response login (no account enumeration):
+    // unknown/deleted email still runs a bcrypt compare against a dummy hash so
+    // timing matches a real account; and an inactive account is only revealed
+    // AFTER a correct password — without the password, active vs inactive both 401.
+    const hashToCheck = (user && !user.deleted_at) ? user.password_hash : DUMMY_HASH;
+    const ok = await bcrypt.compare(password, hashToCheck);
+
+    if (!user || user.deleted_at || !ok) {
       noteLoginFail(tkey);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
-    const user = r.rows[0];
-    if (user.deleted_at) { noteLoginFail(tkey); return res.status(401).json({ error: 'Invalid email or password' }); }
-    if (user.employment_status !== 'active') return res.status(403).json({ error: 'Account is not active' });
-
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) {
-      noteLoginFail(tkey);
-      return res.status(401).json({ error: 'Invalid email or password' });
+    if (user.employment_status !== 'active') {
+      return res.status(403).json({ error: 'Account is not active' });
     }
     clearLoginFail(tkey);
 

@@ -24,7 +24,7 @@ const path = require('path');
 const fs = require('fs');
 const cookieParser = require('cookie-parser');
 
-const { initDb } = require('./server/db');
+const { initDb, db } = require('./server/db');
 const { runMigrations } = require('./server/schema');
 const { seedInitialData } = require('./server/schema/seed');
 const { attachUserToRequest } = require('./server/auth');
@@ -50,7 +50,7 @@ const mailRoutes = require('./server/modules/mail');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r0.98';
+const VERSION = 'r0.99';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -145,14 +145,36 @@ function scheduleDaily(label, startHHMM, fn) {
   }, 60 * 1000);
 }
 
-// Run fn once on the given weekday, at or after startHHMM.
+// Calendar-date of the most recent <weekday> occurrence whose startHHMM has
+// already passed (London). Returns a 'YYYY-MM-DD' string. Used so a weekly job
+// missed across a whole day still runs once when the server is back, instead of
+// silently waiting a full week.
+const _WD = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+function subtractDays(dateStr, n) {
+  const d = new Date(dateStr + 'T12:00:00Z'); // noon UTC: immune to DST/tz shifts
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+function lastDueWeekdayDate(p, weekday, startHHMM) {
+  const todayIdx = _WD.indexOf(p.weekday);
+  const targetIdx = _WD.indexOf(weekday);
+  if (todayIdx < 0 || targetIdx < 0) return null;
+  let back = (todayIdx - targetIdx + 7) % 7;        // days since the most recent <weekday>
+  if (back === 0 && p.hhmm < startHHMM) back = 7;   // it's the day but before the time → last week's
+  return subtractDays(p.date, back);
+}
+
+// Run fn once per scheduled weekly occurrence, at or after startHHMM. If the
+// most recent occurrence was missed (server down that day), it runs on the next
+// tick the server is up — then records that occurrence's date so it won't repeat.
 function scheduleWeekly(label, weekday, startHHMM, fn) {
   setInterval(() => {
     try {
       const p = londonParts();
-      if (p.weekday === weekday && p.hhmm >= startHHMM && cronLastRun[label] !== p.date) {
-        saveCronRun(label, p.date);
-        console.log(`[cron] ${label} @ ${p.date}`);
+      const due = lastDueWeekdayDate(p, weekday, startHHMM);
+      if (due && (!cronLastRun[label] || cronLastRun[label] < due)) {
+        saveCronRun(label, due);
+        console.log(`[cron] ${label} @ ${p.date} (for ${weekday} ${startHHMM}, due ${due})`);
         Promise.resolve().then(fn).catch(e => console.error(`[cron ${label}]`, e.message));
       }
     } catch (e) { console.error(`[cron ${label} check]`, e.message); }
