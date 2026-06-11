@@ -696,6 +696,34 @@
   #moduleView .data-table td { padding:14px 12px; border-top:1px solid var(--line); font-size:14.5px; vertical-align:middle; }
   #moduleView .data-table tbody tr:first-child td { border-top:0; }
   #moduleView .data-table tr:hover td { background: rgba(232,114,43,.05); }
+  /* Mobile: any table tagged .fk-stack collapses to stacked cards (one card per
+     row, label:value lines). cell-head = card title (full width), cell-block =
+     full-width wrapping value, action-col = full-width buttons, bal-row/loading
+     rows are not their own cards. Desktop is untouched. */
+  @media (max-width: 768px) {
+    #moduleView table.fk-stack thead { display: none; }
+    #moduleView table.fk-stack tbody,
+    #moduleView table.fk-stack tr,
+    #moduleView table.fk-stack td { display: block; width: auto; }
+    #moduleView table.fk-stack tr { background:#FBFAF7; border:0.5px solid var(--line); border-radius:14px; padding:11px 14px; margin-bottom:10px; }
+    #moduleView table.fk-stack td { display:flex; justify-content:space-between; align-items:baseline; gap:14px; padding:5px 0; border:none !important; text-align:right; font-size:14px; }
+    #moduleView table.fk-stack td::before { content:attr(data-label); font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); font-weight:600; text-align:left; flex:none; white-space:nowrap; }
+    #moduleView table.fk-stack td:not([data-label])::before { display:none; }
+    #moduleView table.fk-stack td.cell-head { display:block; text-align:left; padding:0 0 8px; }
+    #moduleView table.fk-stack td.cell-block { display:block; text-align:left; }
+    #moduleView table.fk-stack td.cell-block::before { display:block; margin-bottom:3px; }
+    #moduleView table.fk-stack td.action-col { display:flex; gap:8px; text-align:left; padding-top:11px; }
+    #moduleView table.fk-stack td.action-col::before { display:none; }
+    #moduleView table.fk-stack td.action-col button { flex:1; padding:11px 14px; font-size:14px; margin:0 !important; }
+    #moduleView table.fk-stack tr.bal-row,
+    #moduleView table.fk-stack tr.loading-row { background:none; border:none; border-radius:0; padding:0; margin:0; }
+    #moduleView table.fk-stack tr.bal-row td,
+    #moduleView table.fk-stack tr.loading-row td { display:block; text-align:left; padding:0; }
+    #moduleView table.fk-stack tr.bal-row td::before,
+    #moduleView table.fk-stack tr.loading-row td::before { display:none; }
+    /* Wide matrices (e.g. CS rota) scroll sideways instead of stacking */
+    #moduleView .mtable-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  }
   #moduleView .card-meta { font-weight:600; }
   /* Shared pill buttons — the standard action button across pages */
   .fk-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:10px 22px; font-family:'Hanken Grotesk',sans-serif; font-size:14px; font-weight:600; border-radius:11px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; transition:transform .12s, box-shadow .12s, background .12s; }

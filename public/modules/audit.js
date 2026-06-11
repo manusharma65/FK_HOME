@@ -27,7 +27,7 @@ window.fkModules['system/audit'] = {
               '<option value="admin">admin</option>' +
             '</select>' +
           '</div>' +
-          '<table>' +
+          '<table class="fk-stack">' +
             '<thead><tr><th>When</th><th>Who</th><th>Module · Action</th><th>Target</th></tr></thead>' +
             '<tbody id="audBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>' +
           '</table>' +
@@ -64,10 +64,10 @@ window.fkModules['system/audit'] = {
         }
         tbody.innerHTML = entries.map(e =>
           '<tr class="audit-row">' +
-            '<td style="color:var(--muted);white-space:nowrap">' + formatWhen(e.occurred_at) + '</td>' +
-            '<td>' + escapeHtml(e.actor_name || '—') + '</td>' +
-            '<td><span class="mod">' + escapeHtml(e.module) + '</span> · <span class="act">' + escapeHtml(e.action) + '</span></td>' +
-            '<td class="det">' + escapeHtml(e.target_type || '') + (e.target_id ? ' #' + e.target_id : '') +
+            '<td data-label="When" style="color:var(--muted);white-space:nowrap">' + formatWhen(e.occurred_at) + '</td>' +
+            '<td data-label="Who">' + escapeHtml(e.actor_name || '—') + '</td>' +
+            '<td data-label="Action"><span class="mod">' + escapeHtml(e.module) + '</span> · <span class="act">' + escapeHtml(e.action) + '</span></td>' +
+            '<td class="det cell-block" data-label="Target">' + escapeHtml(e.target_type || '') + (e.target_id ? ' #' + e.target_id : '') +
               (e.details ? ' · ' + escapeHtml(e.details) : '') + '</td>' +
           '</tr>'
         ).join('');

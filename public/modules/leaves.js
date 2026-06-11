@@ -42,7 +42,7 @@ window.fkModules['hr/leaves'] = {
             '</div>' +
             '<span class="meta" id="lvMeta">—</span>' +
           '</div>' +
-          '<table>' +
+          '<table class="fk-stack">' +
             '<thead><tr><th>Who</th><th>Type</th><th>Dates</th><th>Days</th><th>Reason</th><th></th></tr></thead>' +
             '<tbody id="lvBody"><tr class="loading-row"><td colspan="6">Loading…</td></tr></tbody>' +
           '</table>' +
@@ -104,14 +104,14 @@ window.fkModules['hr/leaves'] = {
           : '<span style="font-size:13.5px;color:var(--muted)">no balance</span>';
         return '' +
           '<tr class="lv-toprow" data-id="' + lr.id + '">' +
-            '<td>' +
+            '<td class="cell-head">' +
               '<div class="name-cell"><span class="avatar" style="background:' + (lr.user_avatar_colour || '#F1EFE8') + '">' + escapeHtml(lr.user_initials || '—') + '</span>' +
               '<div><div class="nm" style="font-weight:500">' + name + '</div>' + disclose + '</div></div>' +
             '</td>' +
-            '<td><span class="chip">' + escapeHtml(lr.request_type || 'annual') + '</span></td>' +
-            '<td>' + fmtRange(lr.start_date, lr.end_date) + '</td>' +
-            '<td>' + fmtDays(lr.total_days) + '</td>' +
-            '<td style="color:var(--muted);max-width:280px">' + escapeHtml(lr.reason || '—') + '</td>' +
+            '<td data-label="Type"><span class="chip">' + escapeHtml(lr.request_type || 'annual') + '</span></td>' +
+            '<td data-label="Dates">' + fmtRange(lr.start_date, lr.end_date) + '</td>' +
+            '<td data-label="Days">' + fmtDays(lr.total_days) + '</td>' +
+            '<td class="cell-block" data-label="Reason" style="color:var(--muted);max-width:280px">' + escapeHtml(lr.reason || '—') + '</td>' +
             '<td class="action-col">' +
               '<button class="btn" data-reject="' + lr.id + '">Reject</button> ' +
               '<button class="btn btn-primary" data-approve="' + lr.id + '">Approve</button>' +

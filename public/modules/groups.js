@@ -19,7 +19,7 @@ window.fkModules['system/groups'] = {
               '<span class="meta">Group permissions are read-only in this view. Coming soon: full group editor.</span>' +
             '</div>' +
           '</div>' +
-          '<table>' +
+          '<table class="fk-stack">' +
             '<thead><tr><th>Group</th><th>Description</th><th>Members</th><th>Permissions</th></tr></thead>' +
             '<tbody id="grpBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>' +
           '</table>' +
@@ -48,11 +48,11 @@ window.fkModules['system/groups'] = {
       }
       tbody.innerHTML = groups.map(g =>
         '<tr>' +
-          '<td><div class="nm">' + escapeHtml(g.name) + '</div>' +
+          '<td class="cell-head"><div class="nm">' + escapeHtml(g.name) + '</div>' +
             (g.is_system ? '<span class="chip muted" style="margin-top:3px">system</span>' : '') + '</td>' +
-          '<td style="color:var(--muted);font-size:15px">' + escapeHtml(g.description || '') + '</td>' +
-          '<td>' + (g.member_count != null ? g.member_count : 0) + '</td>' +
-          '<td>' +
+          '<td class="cell-block" data-label="Description" style="color:var(--muted);font-size:15px">' + escapeHtml(g.description || '') + '</td>' +
+          '<td data-label="Members">' + (g.member_count != null ? g.member_count : 0) + '</td>' +
+          '<td class="cell-block" data-label="Permissions">' +
             (g.permissions || []).slice(0, 5).map(p =>
               '<span class="chip" style="font-family:ui-monospace,monospace;font-size:13.5px">' + escapeHtml(p) + '</span>').join('') +
             ((g.permissions || []).length > 5 ?

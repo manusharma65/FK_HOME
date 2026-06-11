@@ -27,7 +27,7 @@ window.fkModules['system/holidays'] = {
             '</div>' +
             '<button class="btn btn-primary" id="holAddBtn"><i class="ti ti-plus"></i> Add holiday</button>' +
           '</div>' +
-          '<table>' +
+          '<table class="fk-stack">' +
             '<thead><tr><th>Date</th><th>Name</th><th>CS works?</th><th></th></tr></thead>' +
             '<tbody id="holBody"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>' +
           '</table>' +
@@ -88,9 +88,9 @@ window.fkModules['system/holidays'] = {
         }
         tbody.innerHTML = rows.map(h =>
           '<tr>' +
-            '<td>' + dateOnly(h.holiday_date) + '</td>' +
-            '<td>' + escapeHtml(h.name) + '</td>' +
-            '<td>' + (h.office_closed_for_cs ? '<span class="chip muted">CS off</span>' : '<span class="chip amber">CS works</span>') + '</td>' +
+            '<td data-label="Date">' + dateOnly(h.holiday_date) + '</td>' +
+            '<td data-label="Name">' + escapeHtml(h.name) + '</td>' +
+            '<td data-label="CS">' + (h.office_closed_for_cs ? '<span class="chip muted">CS off</span>' : '<span class="chip amber">CS works</span>') + '</td>' +
             '<td class="action-col"><button class="btn btn-danger" data-del="' + h.id + '" data-name="' + escapeHtml(h.name) + '">Delete</button></td>' +
           '</tr>'
         ).join('');

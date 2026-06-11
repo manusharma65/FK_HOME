@@ -122,7 +122,7 @@ window.fkModules['system/csrota'] = {
           html += '</tr>';
         }
         html += '</tbody></table>';
-        box.innerHTML = html;
+        box.innerHTML = '<div class="mtable-scroll">' + html + '</div>';
       } catch (e) {
         box.innerHTML = '<p style="text-align:center;color:var(--red);font-size:15px;padding:18px">Failed to load.</p>';
       }

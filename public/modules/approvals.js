@@ -89,7 +89,7 @@ window.fkModules = window.fkModules || {};
               '</div>' +
               '<span class="meta" id="lvMeta">\u2014</span>' +
             '</div>' +
-            '<table>' +
+            '<table class="fk-stack">' +
               '<thead><tr><th>Who</th><th>Type</th><th>Dates</th><th>Days</th><th>Reason</th><th></th></tr></thead>' +
               '<tbody id="lvBody"><tr class="loading-row"><td colspan="6">Loading\u2026</td></tr></tbody>' +
             '</table>' +
@@ -103,7 +103,7 @@ window.fkModules = window.fkModules || {};
               '</div>' +
               '<span class="meta" id="regMeta">\u2014</span>' +
             '</div>' +
-            '<table>' +
+            '<table class="fk-stack">' +
               '<thead><tr><th>Who</th><th>Date</th><th>Reason</th><th>Times</th><th></th></tr></thead>' +
               '<tbody id="regBody"><tr class="loading-row"><td colspan="5">Loading\u2026</td></tr></tbody>' +
             '</table>' +
@@ -117,7 +117,7 @@ window.fkModules = window.fkModules || {};
               '</div>' +
               '<span class="meta" id="dcMeta">\u2014</span>' +
             '</div>' +
-            '<table>' +
+            '<table class="fk-stack">' +
               '<thead><tr><th>Who</th><th>Change</th><th>Requested by</th><th></th></tr></thead>' +
               '<tbody id="dcBody"><tr class="loading-row"><td colspan="4">Loading\u2026</td></tr></tbody>' +
             '</table>' +
@@ -180,14 +180,14 @@ window.fkModules = window.fkModules || {};
             : '<span style="font-size:14.5px;color:var(--muted)">no balance</span>';
           return '' +
             '<tr class="lv-toprow" data-id="' + lr.id + '">' +
-              '<td>' +
+              '<td class="cell-head">' +
                 '<div class="name-cell"><span class="avatar" style="background:' + (lr.user_avatar_colour || '#F1EFE8') + '">' + escapeHtml(lr.user_initials || '\u2014') + '</span>' +
                 '<div><div class="nm" style="font-weight:500">' + name + '</div>' + disclose + '</div></div>' +
               '</td>' +
-              '<td><span class="chip">' + escapeHtml(lr.request_type || 'annual') + '</span></td>' +
-              '<td>' + fmtRange(lr.start_date, lr.end_date) + '</td>' +
-              '<td>' + fmtDays(lr.total_days) + '</td>' +
-              '<td style="color:var(--muted);max-width:280px">' + escapeHtml(lr.reason || '\u2014') + '</td>' +
+              '<td data-label="Type"><span class="chip">' + escapeHtml(lr.request_type || 'annual') + '</span></td>' +
+              '<td data-label="Dates">' + fmtRange(lr.start_date, lr.end_date) + '</td>' +
+              '<td data-label="Days">' + fmtDays(lr.total_days) + '</td>' +
+              '<td class="cell-block" data-label="Reason" style="color:var(--muted);max-width:280px">' + escapeHtml(lr.reason || '\u2014') + '</td>' +
               '<td class="action-col">' +
                 '<button class="ap-btn" data-reject="' + lr.id + '">Reject</button>' +
                 '<button class="ap-btn ap-btn-primary" data-approve="' + lr.id + '">Approve</button>' +
@@ -276,10 +276,10 @@ window.fkModules = window.fkModules || {};
               (row.requested_first_login && row.requested_last_logout ? ' \u00b7 ' : '') +
               (row.requested_last_logout ? 'Out: ' + fmtTime(row.requested_last_logout) : '') || '\u2014';
             return '<tr>' +
-              '<td><span class="nm">' + escapeHtml(row.full_name) + '</span></td>' +
-              '<td>' + dateOnly(row.for_date) + '</td>' +
-              '<td style="color:var(--muted)">' + escapeHtml(row.reason) + '</td>' +
-              '<td style="color:var(--muted)">' + times + '</td>' +
+              '<td class="cell-head"><span class="nm">' + escapeHtml(row.full_name) + '</span></td>' +
+              '<td data-label="Date">' + dateOnly(row.for_date) + '</td>' +
+              '<td class="cell-block" data-label="Reason" style="color:var(--muted)">' + escapeHtml(row.reason) + '</td>' +
+              '<td data-label="Times" style="color:var(--muted)">' + times + '</td>' +
               '<td class="action-col">' +
                 '<button class="ap-btn ap-btn-danger" data-decide="' + row.id + '" data-action="deny">Deny</button>' +
                 '<button class="ap-btn ap-btn-primary" data-decide="' + row.id + '" data-action="approve">Approve</button>' +
@@ -343,9 +343,9 @@ window.fkModules = window.fkModules || {};
               return '<div>' + lbl + ': ' + oldv + ' \u2192 <strong>' + newv + '</strong></div>';
             }).join('');
             return '<tr>' +
-              '<td style="font-weight:500">' + escapeHtml(row.user_name || '') + '</td>' +
-              '<td>' + chg + '</td>' +
-              '<td style="color:var(--muted)">' + escapeHtml(row.requested_by_name || '') + '</td>' +
+              '<td class="cell-head" style="font-weight:500">' + escapeHtml(row.user_name || '') + '</td>' +
+              '<td class="cell-block" data-label="Change">' + chg + '</td>' +
+              '<td data-label="Requested by" style="color:var(--muted)">' + escapeHtml(row.requested_by_name || '') + '</td>' +
               '<td class="action-col">' +
                 '<button class="ap-btn ap-btn-danger" data-dc="' + row.id + '" data-action="reject">Deny</button>' +
                 '<button class="ap-btn ap-btn-primary" data-dc="' + row.id + '" data-action="approve">Approve</button>' +

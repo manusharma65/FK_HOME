@@ -21,7 +21,7 @@ window.fkModules['hr/regularisations'] = {
             '</div>' +
             '<span class="meta" id="regMeta">—</span>' +
           '</div>' +
-          '<table>' +
+          '<table class="fk-stack">' +
             '<thead><tr><th>Who</th><th>Date</th><th>Reason</th><th>Times</th><th></th></tr></thead>' +
             '<tbody id="regBody"><tr class="loading-row"><td colspan="5">Loading…</td></tr></tbody>' +
           '</table>' +
@@ -61,10 +61,10 @@ window.fkModules['hr/regularisations'] = {
             (row.requested_first_login && row.requested_last_logout ? ' · ' : '') +
             (row.requested_last_logout ? 'Out: ' + fmtTime(row.requested_last_logout) : '') || '—';
           return '<tr>' +
-            '<td><span class="nm">' + escapeHtml(row.full_name) + '</span></td>' +
-            '<td>' + dateOnly(row.for_date) + '</td>' +
-            '<td style="color:var(--muted)">' + escapeHtml(row.reason) + '</td>' +
-            '<td style="font-size:14px;color:var(--muted)">' + times + '</td>' +
+            '<td class="cell-head"><span class="nm">' + escapeHtml(row.full_name) + '</span></td>' +
+            '<td data-label="Date">' + dateOnly(row.for_date) + '</td>' +
+            '<td class="cell-block" data-label="Reason" style="color:var(--muted)">' + escapeHtml(row.reason) + '</td>' +
+            '<td data-label="Times" style="font-size:14px;color:var(--muted)">' + times + '</td>' +
             '<td class="action-col">' +
               '<button class="btn btn-primary" data-decide="' + row.id + '" data-action="approve">Approve</button> ' +
               '<button class="btn btn-danger" data-decide="' + row.id + '" data-action="deny">Deny</button>' +
