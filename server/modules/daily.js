@@ -315,9 +315,22 @@ async function scoreWeek(userId, weekStart) {
   const ov = prev.rows[0] && prev.rows[0].quality_override != null ? Number(prev.rows[0].quality_override) : null;
   const qualityPts = ov != null ? ov : QUALITY_NEUTRAL;
 
+  // Confirmed manual items (owner/HR-approved off-system work) count as completed
+  // work items — each raises correctness like a task finished on time. Capped/day.
+  const mrep = await db.query(
+    `SELECT manual_items FROM daily_reports
+       WHERE user_id = $1 AND for_date >= $2::date AND for_date < $3::date`,
+    [userId, weekStart, weekEnd]
+  );
+  let confirmedManual = 0;
+  for (const row of mrep.rows) {
+    const mi = Array.isArray(row.manual_items) ? row.manual_items : [];
+    confirmedManual += Math.min(MANUAL_DAILY_CAP, mi.filter(i => i.counted).length);
+  }
+
   // Correctness % across the work pillars (volume-weighted)
-  const totN = tally.sla.n + tally.hiring.n + tally.accuracy.n;
-  const totE = tally.sla.e + tally.hiring.e + tally.accuracy.e;
+  const totN = tally.sla.n + tally.hiring.n + tally.accuracy.n + confirmedManual;
+  const totE = tally.sla.e + tally.hiring.e + tally.accuracy.e + confirmedManual;
   const correctness = totN === 0 ? 100 : (totE / totN) * 100;
 
   // Band: HR is driven by correctness; cap at Good if anything was dropped;
@@ -328,7 +341,7 @@ async function scoreWeek(userId, weekStart) {
   if (hadAbsence) band = dropOneBand(band);
 
   const total = slaPts + hiringPts + accPts + conductPts + qualityPts;
-  const manualCounted = Math.min(MANUAL_DAILY_CAP * 7, 0); // counted manual items are added at freeze; placeholder roll-up
+  const manualCounted = confirmedManual; // owner/HR-confirmed manual items this week
 
   await db.query(
     `INSERT INTO weekly_scores
@@ -454,8 +467,10 @@ router.post('/manual-item', async (req, res) => {
     const cur = await db.query(`SELECT manual_items, locked_at FROM daily_reports WHERE user_id = $1 AND for_date = $2`, [req.user.id, today]);
     if (cur.rows[0] && cur.rows[0].locked_at) return res.status(409).json({ error: 'Day locked' });
     const items = (cur.rows[0] && Array.isArray(cur.rows[0].manual_items)) ? cur.rows[0].manual_items : [];
-    const counted = items.filter(i => i.counted).length < MANUAL_DAILY_CAP;
-    items.push({ category: (category || 'admin'), note: note.trim(), counted, at: new Date().toISOString() });
+    // Confirm-to-count: a self-reported item is PENDING (counted:false) until an
+    // owner/HR reviewer confirms it. Pending items score nothing.
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    items.push({ id, category: (category || 'admin'), note: note.trim(), counted: false, status: 'pending', at: new Date().toISOString() });
     if (cur.rows[0]) {
       await db.query(`UPDATE daily_reports SET manual_items = $1::jsonb, updated_at = NOW() WHERE user_id = $2 AND for_date = $3`, [JSON.stringify(items), req.user.id, today]);
     } else {
@@ -463,6 +478,36 @@ router.post('/manual-item', async (req, res) => {
     }
     res.json({ ok: true, items });
   } catch (e) { console.error('[daily/manual-item]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// Owner: confirm or reject a person's pending manual item. Confirmed items count
+// toward the score (capped per day); rejected items are removed. Self-reported
+// items score nothing until confirmed here.
+router.post('/manual-item/confirm', async (req, res) => {
+  if (!req.user.inGroup('owner')) return res.status(403).json({ error: 'Owner only' });
+  const { user_id, date, id, action } = req.body || {};
+  if (!user_id || !date || !id || !['confirm', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'user_id, date, id and action (confirm|reject) required' });
+  }
+  try {
+    const cur = await db.query(`SELECT manual_items FROM daily_reports WHERE user_id = $1 AND for_date = $2`, [user_id, date]);
+    if (!cur.rows[0]) return res.status(404).json({ error: 'No report for that day' });
+    let items = Array.isArray(cur.rows[0].manual_items) ? cur.rows[0].manual_items : [];
+    const item = items.find(i => i.id === id);
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+    if (action === 'reject') {
+      items = items.filter(i => i.id !== id);
+    } else {
+      const alreadyCounted = items.filter(i => i.counted).length;
+      if (!item.counted && alreadyCounted >= MANUAL_DAILY_CAP) {
+        return res.status(409).json({ error: 'Daily cap reached (' + MANUAL_DAILY_CAP + ' confirmed items)' });
+      }
+      item.counted = true; item.status = 'confirmed';
+      item.confirmed_by = req.user.id; item.confirmed_at = new Date().toISOString();
+    }
+    await db.query(`UPDATE daily_reports SET manual_items = $1::jsonb, updated_at = NOW() WHERE user_id = $2 AND for_date = $3`, [JSON.stringify(items), user_id, date]);
+    res.json({ ok: true, items });
+  } catch (e) { console.error('[daily/manual-item/confirm]', e.message); res.status(500).json({ error: 'Failed' }); }
 });
 
 // Submit my day
@@ -552,6 +597,90 @@ router.post('/recognition', requirePermission('attendance.view.any'), async (req
   } catch (e) { console.error('[daily/recognition]', e.message); res.status(500).json({ error: 'Failed' }); }
 });
 
+// ---- Monthly rollup (HR) -------------------------------------------------
+// Derive a month's band from its weekly bands by the locked strict rules
+// (see server/schema/36-monthly-scores.sql). Pure function.
+//   * base = rounded average of the weekly bands
+//   * STRICT FLOOR: any 'Poor' week caps the month at 'Average'
+//   * ALL-WEEKS GATE: a top band (Excellent/Above) needs >=4 weeks AND every
+//     week at that level, else cap at 'Good'
+function monthlyBandFromWeeks(weeks) {
+  const bands = (weeks || []).filter(b => BAND_ORDER.indexOf(b) >= 0);
+  if (bands.length === 0) return { computed: 'Average', base: 'Average', reasons: ['No weekly scores this month'], weekCount: 0 };
+  const idxs = bands.map(b => BAND_ORDER.indexOf(b));
+  const baseIdx = Math.round(idxs.reduce((a, b) => a + b, 0) / idxs.length);
+  let idx = baseIdx;
+  const reasons = [];
+  if (bands.includes('Poor') && idx > BAND_ORDER.indexOf('Average')) {
+    idx = BAND_ORDER.indexOf('Average');
+    reasons.push('A Poor week caps the month at Average');
+  }
+  if (idx >= BAND_ORDER.indexOf('Excellent')) {
+    if (bands.length < 4) {
+      idx = BAND_ORDER.indexOf('Good');
+      reasons.push('Partial month (under 4 weeks) cannot reach the top bands — capped at Good');
+    } else {
+      const need = BAND_ORDER[idx]; // 'Excellent' or 'Above Expectations'
+      if (!idxs.every(i => i >= BAND_ORDER.indexOf(need))) {
+        idx = BAND_ORDER.indexOf('Good');
+        reasons.push(need + ' needs every week at that level — capped at Good');
+      }
+    }
+  }
+  return { computed: BAND_ORDER[idx], base: BAND_ORDER[baseIdx], reasons, weekCount: bands.length };
+}
+
+// Compute + persist one person's monthly score. Top bands need director
+// sign-off; until approved the effective (paying) band is Good. An existing
+// approval is preserved across recomputes.
+async function computeMonth(userId, monthStart) {
+  const wk = await db.query(
+    `SELECT band FROM weekly_scores
+       WHERE user_id = $1 AND week_start >= $2::date AND week_start < ($2::date + INTERVAL '1 month')
+       ORDER BY week_start`,
+    [userId, monthStart]);
+  const weeks = wk.rows.map(r => r.band).filter(Boolean);
+  const m = monthlyBandFromWeeks(weeks);
+  const computed_band = m.computed;
+  const needs_approval = (computed_band === 'Excellent' || computed_band === 'Above Expectations');
+
+  const ex = await db.query(
+    `SELECT approval_status, approved_band FROM monthly_scores WHERE user_id = $1 AND month_start = $2`,
+    [userId, monthStart]);
+  const prior = ex.rows[0];
+
+  let approval_status, effective_band;
+  if (prior && prior.approval_status === 'approved') {
+    approval_status = 'approved';
+    effective_band = prior.approved_band || computed_band;
+  } else if (needs_approval) {
+    approval_status = 'pending';
+    effective_band = 'Good';
+  } else {
+    approval_status = 'n/a';
+    effective_band = computed_band;
+  }
+
+  await db.query(
+    `INSERT INTO monthly_scores
+       (user_id, month_start, computed_band, effective_band, week_count, reasons, needs_approval, approval_status, computed_at)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,NOW())
+     ON CONFLICT (user_id, month_start) DO UPDATE SET
+       computed_band  = EXCLUDED.computed_band,
+       week_count     = EXCLUDED.week_count,
+       reasons        = EXCLUDED.reasons,
+       needs_approval = EXCLUDED.needs_approval,
+       computed_at    = NOW(),
+       effective_band  = CASE WHEN monthly_scores.approval_status = 'approved'
+                              THEN monthly_scores.effective_band ELSE EXCLUDED.effective_band END,
+       approval_status = CASE WHEN monthly_scores.approval_status = 'approved'
+                              THEN 'approved' ELSE EXCLUDED.approval_status END`,
+    [userId, monthStart, computed_band, effective_band, weeks.length, JSON.stringify(m.reasons || []), needs_approval, approval_status]);
+
+  return { user_id: userId, month_start: monthStart, computed_band, effective_band,
+           week_count: weeks.length, needs_approval, approval_status, reasons: m.reasons };
+}
+
 module.exports = router;
 module.exports.assessDay = assessDay;
 module.exports.scoreWeek = scoreWeek;
@@ -560,3 +689,5 @@ module.exports.scoreLastWeek = scoreLastWeek;
 module.exports.retentionCleanup = retentionCleanup;
 module.exports.londonDate = londonDate;
 module.exports.mondayOf = mondayOf;
+module.exports.monthlyBandFromWeeks = monthlyBandFromWeeks;
+module.exports.computeMonth = computeMonth;
