@@ -21,6 +21,7 @@
 
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const cookieParser = require('cookie-parser');
 
 const { initDb } = require('./server/db');
@@ -49,7 +50,7 @@ const mailRoutes = require('./server/modules/mail');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r0.96';
+const VERSION = 'r0.97';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -57,6 +58,20 @@ app.use(cookieParser());
 
 // Health check
 app.get('/healthz', (req, res) => res.json({ ok: true, app: 'fk-home', version: VERSION }));
+
+// Serve the SPA shell with cache-busting version stamps on every module URL.
+// Each ship bumps VERSION, so /modules/x.js becomes /modules/x.js?v=r0.97 — a
+// brand-new URL the browser has never cached, forcing a fresh fetch of all
+// modules. Defeats browser cache, the SPA-never-reloads problem and edge cache.
+function serveShell(req, res) {
+  fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8', (err, html) => {
+    if (err) { res.status(500).send('Shell load error'); return; }
+    const stamped = html.replace(/(\bsrc=")(\/?modules\/[^"?]+\.js)(")/g, '$1$2?v=' + VERSION + '$3');
+    res.set('Cache-Control', 'no-cache');
+    res.type('html').send(stamped);
+  });
+}
+app.get(['/', '/index.html'], serveShell);
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -84,10 +99,8 @@ app.use('/api/mail', mailRoutes);
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
-// SPA fallback — everything else returns index.html
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+// SPA fallback — everything else returns the version-stamped shell
+app.get('*', serveShell);
 
 // ---- Cron jobs -----------------------------------------------------------
 // Simple setInterval scheduling (no node-cron dep). Every gated job checks

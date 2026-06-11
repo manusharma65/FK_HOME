@@ -83,9 +83,9 @@ window.fkModules['mail'] = {
     #mail-mod .clip{margin-left:5px;color:var(--soft);font-size:13px}
     #mail-mod .pn{display:inline-flex;align-items:center;gap:5px;margin-top:8px;font-size:11.5px;font-weight:600;color:#8A6A1E;background:#FBF3DD;border:1px solid #EDD9A6;padding:3px 8px;border-radius:6px;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
     /* Read */
-    #mail-mod .mread{overflow:auto;background:var(--canvas,#F4EFE7);display:flex;flex-direction:column}
+    #mail-mod .mread{overflow:auto;background:var(--canvas,#F4EFE7);display:flex;flex-direction:column;min-width:0}
     #mail-mod .mr-empty{margin:auto;color:var(--muted);font-size:15px;text-align:center;padding:40px}
-    #mail-mod .mr-pad{padding:28px 44px 56px;max-width:920px;margin:0 auto;width:100%;box-sizing:border-box}
+    #mail-mod #mailRead .mr-pad{padding:28px 44px 56px;max-width:920px!important;margin-left:auto!important;margin-right:auto!important;width:100%;box-sizing:border-box}
     #mail-mod .mr-top{display:flex;align-items:flex-start;gap:14px}
     #mail-mod .mr-h{font-size:24px;font-weight:700;line-height:1.25;flex:1}
     #mail-mod .mr-acts{display:flex;gap:7px;flex:none;position:relative}
