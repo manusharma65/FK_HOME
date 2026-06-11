@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const { db } = require('./db');
 
 const SESSION_COOKIE = 'fk_session';
+// Restored to a long session after the r1.05 short-TTL change logged people out
+// mid-day. Clock-in "freshness" will be handled without touching the login session.
 const SESSION_TTL_HOURS = 24 * 14;
 
 function generateToken() {

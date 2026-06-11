@@ -23,6 +23,12 @@ window.fkModules['hr/reports'] = {
           '#rep-mod .modal-err.on{display:block}' +
         '</style>' +
 
+        '<div class="card" id="ciExCard" style="display:none">' +
+          '<div class="card-head"><div><h2 style="margin:0">Clock-ins to approve</h2>' +
+            '<span class="meta" id="ciExMeta">—</span></div></div>' +
+          '<div id="ciExList" style="padding:2px 0 4px"></div>' +
+        '</div>' +
+
         '<div class="card">' +
           '<div class="card-head">' +
             '<div>' +
@@ -215,6 +221,50 @@ window.fkModules['hr/reports'] = {
       if (rev) { submitReview(parseInt(rev.getAttribute('data-review'), 10), rev.getAttribute('data-decision'), null); }
     });
 
+    const ciTime = (t) => { try { return new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
+    function ciRowHtml(r) {
+      const remote = r.arrival_place === 'remote';
+      const noPhoto = !r.selfie_id;
+      const thumb = r.selfie_id
+        ? '<img src="/api/attendance/selfie/' + r.selfie_id + '" alt="" style="width:44px;height:44px;border-radius:9px;object-fit:cover;border:1px solid var(--line)"/>'
+        : '<div style="width:44px;height:44px;border-radius:9px;background:#ece3d6;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:#b4471f"><i class="ti ti-camera-off"></i></div>';
+      const chip = remote
+        ? '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--amber-soft);color:var(--amber-deep)">working from home</span>'
+        : '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;background:#eef0f2;color:#5c6570">office</span>';
+      const flagNote = noPhoto ? ' · <span style="color:#b4471f">no photo</span>' : '';
+      return '<div class="ci-ex-row" style="display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--line)">' +
+        thumb +
+        '<div style="flex:1;min-width:0"><div style="font-family:var(--disp);font-size:15px;font-weight:600;color:var(--ink)">' + escapeHtml(r.display_name || r.full_name) + '</div>' +
+        '<div style="font-size:12.5px;color:var(--muted);margin-top:2px">' + ciTime(r.first_login) + ' ' + chip + flagNote + '</div></div>' +
+        '<div style="display:flex;gap:8px"><button class="btn btn-primary" data-decide="approve" data-uid="' + r.user_id + '" style="font-size:13px;padding:8px 13px">Approve</button>' +
+        '<button class="btn" data-decide="flag" data-uid="' + r.user_id + '" style="font-size:13px;padding:8px 13px">Flag</button></div>' +
+      '</div>';
+    }
+    async function loadClockinExceptions() {
+      try {
+        const r = await fetch('/api/attendance/exceptions/today', { credentials: 'include' });
+        if (!r.ok) { $('ciExCard').style.display = 'none'; return; }
+        const d = await r.json();
+        const rows = d.rows || [];
+        if (!rows.length) { $('ciExCard').style.display = 'none'; return; }
+        $('ciExCard').style.display = '';
+        $('ciExMeta').textContent = rows.length + ' to review';
+        $('ciExList').innerHTML = rows.map(ciRowHtml).join('');
+        $('ciExList').querySelectorAll('[data-decide]').forEach(b => b.addEventListener('click', async () => {
+          const uid = b.getAttribute('data-uid'), action = b.getAttribute('data-decide');
+          const row = b.closest('.ci-ex-row'); if (row) row.style.opacity = '.5';
+          try {
+            await fetch('/api/attendance/exceptions/' + uid + '/decide', {
+              method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action }),
+            });
+          } catch (e) {}
+          loadClockinExceptions();
+        }));
+      } catch (e) { $('ciExCard').style.display = 'none'; }
+    }
+
+    loadClockinExceptions();
     await load();
   }
 };

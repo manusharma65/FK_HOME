@@ -33,6 +33,7 @@ const express = require('express');
 const { db } = require('../db');
 const { requireAuth, requirePermission, logAudit } = require('../auth');
 const { notify, notifyManagersOf, notifyEvent } = require('../notify');
+const { isOfficeDevice } = require('./device');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -1024,8 +1025,18 @@ router.get('/hr/today', requirePermission('hr.dashboard.view'), async (req, res)
 
 // GET /api/attendance/dept/today — same shape as /hr/today, filtered to caller's primary dept.
 // Used by dept managers (Sitar for CS, etc.) to see only their team.
-router.get('/dept/today', requirePermission('attendance.view.dept'), async (req, res) => {
+router.get('/dept/today', async (req, res) => {
   try {
+    // Owner/HR with the dept-view permission, OR anyone who leads/manages a
+    // department (so a team lead sees their own team's attendance with no extra
+    // grant — matching how Team Work already works).
+    const isLead = (await db.query(
+      `SELECT 1 FROM user_department_memberships
+        WHERE user_id = $1 AND role IN ('manager','lead') AND deleted_at IS NULL LIMIT 1`,
+      [req.user.id])).rows.length > 0;
+    if (!req.user.can('attendance.view.dept') && !isLead) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
     const today = nowInLondon().date;
     const myDept = await getUserPrimaryDept(req.user.id);
     if (!myDept) {
@@ -1457,9 +1468,10 @@ async function tickWeeklySunday() {
 
 // Hook: when a user logs in, update attendance_day if status was 'pending'.
 // Called from auth.js login flow.
-async function recordLogin(userId, isMobile) {
+async function recordLogin(userId, isOffice) {
   try {
     const now = nowInLondon();
+    const place = isOffice ? 'office' : 'remote';
     // Ensure today's row exists
     const expected = await computeExpectedStatus(userId, now.date);
     const deptSlug = await getUserPrimaryDept(userId);
@@ -1471,9 +1483,9 @@ async function recordLogin(userId, isMobile) {
       [userId, now.date, expected, pol ? pol.start_time : null, pol ? pol.end_time : null]
     );
 
-    // Mobile login keeps the day row but never stamps the official arrival or
-    // flips the status — that's set on an office device. Keeps late-coming honest.
-    if (isMobile) return;
+    // Every login now stamps. A trusted office device stamps as 'office'; anywhere
+    // else stamps as 'remote' (working-from-home), which HR reviews as an exception.
+    // Graceful by design: nobody is ever blocked from clocking in.
 
     // Now update first_login + status if applicable
     const ad = await db.query(
@@ -1493,9 +1505,10 @@ async function recordLogin(userId, isMobile) {
         `UPDATE attendance_day
          SET first_login = COALESCE(first_login, NOW()),
              status = CASE WHEN status IN ('on_leave','off_sick') THEN status ELSE 'worked_voluntary' END,
+             arrival_place = COALESCE(arrival_place, $2),
              updated_at = NOW()
          WHERE id = $1`,
-        [row.id]
+        [row.id, place]
       );
       return;
     }
@@ -1518,9 +1531,10 @@ async function recordLogin(userId, isMobile) {
          SET first_login = NOW(),
              status = $1,
              late_minutes = $2,
+             arrival_place = $4,
              updated_at = NOW()
          WHERE id = $3`,
-        [newStatus, lateMin, row.id]
+        [newStatus, lateMin, row.id, place]
       );
     }
   } catch (err) {
@@ -1646,9 +1660,205 @@ router.post('/daily-report', requirePermission('daily_report.submit.own'), async
   }
 });
 
+// ---- Clock-in verification: selfies + HR approval of exceptions --------------
+// Normal office clock-ins (office device + photo) are auto-OK and never bother HR.
+// Only EXCEPTIONS surface: working-from-home, no photo (camera fault), or flagged.
+// Routing: the daily-ops HR owner (Deepanshi); if she's off today, the other HR
+// member; if both are off, the system owner. Selfies auto-purge at 90 days.
+
+function isHrOrOwner(u) {
+  try { return u.inGroup('owner') || u.inGroup('hr-team') || u.can('attendance.view.any'); }
+  catch (e) { return false; }
+}
+
+// Who should action clock-in exceptions today, best first (skips anyone off today).
+async function clockinApprovers(dateStr) {
+  const r = await db.query(
+    `SELECT ug.user_id
+       FROM user_groups ug
+       JOIN groups g ON g.id = ug.group_id
+       JOIN users u ON u.id = ug.user_id
+      WHERE g.slug = 'hr-team' AND g.deleted_at IS NULL
+        AND u.deleted_at IS NULL AND u.employment_status = 'active'
+        AND NOT EXISTS (
+          SELECT 1 FROM attendance_day ad
+           WHERE ad.user_id = u.id AND ad.for_date = $1
+             AND ad.status IN ('on_leave','off_sick','off_holiday'))
+      ORDER BY (u.hr_area = 'daily_ops') DESC, ug.user_id ASC`, [dateStr]);
+  if (r.rows.length) return r.rows.map(x => x.user_id);
+  const o = await db.query(
+    `SELECT ug.user_id FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+      WHERE g.slug = 'owner' AND g.deleted_at IS NULL`);
+  return o.rows.map(x => x.user_id);
+}
+
+// What the clock-in modal needs on load: am I on an office machine, am I already
+// clocked in (login auto-stamps), and do I still owe a photo?
+router.get('/clock-in/context', async (req, res) => {
+  try {
+    const day = nowInLondon().date;
+    const office = await isOfficeDevice(req);
+    const r = await db.query(
+      `SELECT first_login, arrival_place, selfie_id, status FROM attendance_day WHERE user_id = $1 AND for_date = $2`,
+      [req.user.id, day]);
+    const row = r.rows[0] || {};
+    const off = ['on_leave', 'off_sick', 'off_holiday', 'off_pattern', 'off_cs_rota'].includes(row.status);
+    res.json({
+      isOffice: office,
+      clockedIn: !!row.first_login,
+      place: row.arrival_place || (office ? 'office' : 'remote'),
+      hasSelfie: !!row.selfie_id,
+      isOffDay: off,
+      name: req.user.display_name || req.user.full_name,
+    });
+  } catch (e) { console.error('[clockin/context]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// Store today's clock-in selfie (the punching user's own photo).
+router.post('/selfie', async (req, res) => {
+  try {
+    const b64 = (req.body && req.body.image) || '';
+    const m = /^data:(image\/[a-z+.-]+);base64,(.+)$/i.exec(String(b64));
+    if (!m) return res.status(400).json({ error: 'image (data URL) required' });
+    const buf = Buffer.from(m[2], 'base64');
+    if (buf.length > 2_500_000) return res.status(413).json({ error: 'Photo too large' });
+    const day = nowInLondon().date;
+    const ins = await db.query(
+      `INSERT INTO clock_in_selfies (user_id, for_date, image, mime) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [req.user.id, day, buf, m[1]]);
+    await db.query(
+      `UPDATE attendance_day SET selfie_id = $1, updated_at = NOW() WHERE user_id = $2 AND for_date = $3`,
+      [ins.rows[0].id, req.user.id, day]);
+    res.json({ ok: true, selfie_id: ins.rows[0].id });
+  } catch (e) { console.error('[clockin/selfie]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// HR: today's clock-in exceptions to review (WFH / no photo / flagged).
+router.get('/exceptions/today', async (req, res) => {
+  if (!isHrOrOwner(req.user)) return res.status(403).json({ error: 'HR only' });
+  try {
+    const day = nowInLondon().date;
+    const r = await db.query(
+      `SELECT a.user_id, u.full_name, u.display_name, u.initials, u.avatar_colour,
+              a.status, a.first_login, a.arrival_place, a.approval_state, a.selfie_id
+         FROM attendance_day a JOIN users u ON u.id = a.user_id
+        WHERE a.for_date = $1 AND a.first_login IS NOT NULL
+          AND (a.approval_state = 'pending' OR a.arrival_place = 'remote' OR a.selfie_id IS NULL)
+          AND a.approval_state <> 'approved'
+        ORDER BY a.first_login ASC`, [day]);
+    res.json({ date: day, rows: r.rows });
+  } catch (e) { console.error('[clockin/exceptions]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// HR: approve or flag a clock-in exception.
+router.post('/exceptions/:userId/decide', async (req, res) => {
+  if (!isHrOrOwner(req.user)) return res.status(403).json({ error: 'HR only' });
+  const action = (req.body && req.body.action) || '';
+  if (!['approve', 'flag'].includes(action)) return res.status(400).json({ error: 'action approve|flag' });
+  try {
+    const day = nowInLondon().date;
+    await db.query(
+      `UPDATE attendance_day SET approval_state = $1, approved_by = $2, approved_at = NOW(), updated_at = NOW()
+        WHERE user_id = $3 AND for_date = $4`,
+      [action === 'approve' ? 'approved' : 'flagged', req.user.id, req.params.userId, day]);
+    res.json({ ok: true });
+  } catch (e) { console.error('[clockin/decide]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// HR: fetch a clock-in selfie image (thumbnail in the queue).
+router.get('/selfie/:id', async (req, res) => {
+  if (!isHrOrOwner(req.user)) return res.status(403).send('Forbidden');
+  try {
+    const r = await db.query(`SELECT image, mime FROM clock_in_selfies WHERE id = $1`, [req.params.id]);
+    if (!r.rows[0]) return res.status(404).send('Not found');
+    res.set('Content-Type', r.rows[0].mime || 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=300');
+    res.send(r.rows[0].image);
+  } catch (e) { res.status(500).send('Failed'); }
+});
+
+// Daily nudge: if exceptions are still unreviewed, ping today's approver (once).
+async function nudgeClockinExceptions() {
+  try {
+    const day = nowInLondon().date;
+    const c = await db.query(
+      `SELECT COUNT(*)::int n FROM attendance_day
+        WHERE for_date = $1 AND first_login IS NOT NULL AND approval_state = 'pending'`, [day]);
+    const n = c.rows[0].n;
+    if (!n) return;
+    const approvers = await clockinApprovers(day);
+    if (!approvers.length) return;
+    await notify({
+      userIds: [approvers[0]],
+      type: 'clockin_exceptions',
+      title: 'Clock-ins to review',
+      body: n + ' clock-in' + (n === 1 ? '' : 's') + ' need a quick check.',
+      action_url: '#hr/reports',
+    });
+  } catch (e) { console.error('[nudgeClockinExceptions]', e.message); }
+}
+
+// Daily purge: clock-in selfies older than 90 days.
+async function purgeOldSelfies() {
+  try {
+    const r = await db.query(`DELETE FROM clock_in_selfies WHERE captured_at < NOW() - INTERVAL '90 days'`);
+    if (r.rowCount) console.log('[purgeOldSelfies] removed', r.rowCount);
+  } catch (e) { console.error('[purgeOldSelfies]', e.message); }
+}
+
+// ---- Auto clock-out -------------------------------------------------------
+// Protects the punch clock from forgotten logouts. A user still clocked in is
+// clocked out when EITHER they've been in 10h (hard cap) OR it's past their shift
+// end and they've been idle >= 20 min. On clock-out we stamp last_logout, log the
+// shift event, set them offline, and DESTROY their sessions — so a forgotten
+// login can't linger into the next day. Still genuinely in? They just log back in.
+async function idleMinutesFor(userId) {
+  try {
+    const r = await db.query(
+      `SELECT EXTRACT(EPOCH FROM (NOW() - started_at))/60 AS mins
+         FROM idle_events WHERE user_id = $1 AND ended_at IS NULL
+         ORDER BY started_at DESC LIMIT 1`, [userId]);
+    return r.rows[0] ? Number(r.rows[0].mins) : 0;
+  } catch (e) { return 0; }
+}
+
+async function autoClockOut(userId, dateStr, reason) {
+  await db.query(
+    `UPDATE attendance_day SET last_logout = NOW(), updated_at = NOW()
+      WHERE user_id = $1 AND for_date = $2 AND last_logout IS NULL`, [userId, dateStr]);
+  await db.query(
+    `INSERT INTO shift_log (user_id, event_type, status_before, status_after, note)
+     VALUES ($1, 'logout', 'active', 'offline', $2)`, [userId, reason]);
+  await db.query(`UPDATE user_status SET status = 'offline', changed_at = NOW() WHERE user_id = $1`, [userId]);
+  // NOTE: auto clock-out stamps ATTENDANCE only. It must never delete the login
+  // session — doing so logged people out mid-day (r1.05 incident). Removed.
+}
+
+async function tickAutoClockout() {
+  try {
+    const now = nowInLondon();
+    const open = await db.query(
+      `SELECT user_id, first_login, shift_end_local
+         FROM attendance_day
+        WHERE for_date = $1 AND first_login IS NOT NULL AND last_logout IS NULL`, [now.date]);
+    for (const r of open.rows) {
+      const hoursIn = (Date.now() - new Date(r.first_login).getTime()) / 3600000;
+      let reason = null;
+      if (hoursIn >= 10) reason = 'auto: 10h cap';
+      else if (r.shift_end_local && now.hhmm >= r.shift_end_local && (await idleMinutesFor(r.user_id)) >= 20) {
+        reason = 'auto: shift end + idle';
+      }
+      if (reason) await autoClockOut(r.user_id, now.date, reason);
+    }
+  } catch (e) { console.error('[tickAutoClockout]', e.message); }
+}
+
 module.exports = router;
 module.exports.tickFiveMinute = tickFiveMinute;
 module.exports.tickDailyMidnight = tickDailyMidnight;
+module.exports.tickAutoClockout = tickAutoClockout;
+module.exports.nudgeClockinExceptions = nudgeClockinExceptions;
+module.exports.purgeOldSelfies = purgeOldSelfies;
 module.exports.tickWeeklySunday = tickWeeklySunday;
 module.exports.recordLogin = recordLogin;
 module.exports.recordLogout = recordLogout;

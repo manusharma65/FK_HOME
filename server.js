@@ -51,7 +51,7 @@ const monitoring = require('./server/modules/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r1.04';
+const VERSION = 'r1.09';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -196,6 +196,7 @@ function startCronJobs() {
   // Frequent: every 5 minutes — late detection, idle escalation.
   setInterval(() => {
     attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron 5min]', e.message));
+    attendanceRoutes.tickAutoClockout().catch(e => console.error('[cron 5min auto-clockout]', e.message));
   }, 5 * 60 * 1000);
 
   // Midnight: roll over the day, freeze yesterday's record + ledger, age off detail.
@@ -236,6 +237,12 @@ function startCronJobs() {
 
   // 07:00 — daily heartbeat + 24h error rollup (monitoring).
   scheduleDaily('heartbeat 07:00', '07:00', () => monitoring.tickHeartbeat());
+
+  // 14:00 — nudge today's HR approver if clock-in exceptions are still unreviewed.
+  scheduleDaily('clockin-nudge 14:00', '14:00', () => attendanceRoutes.nudgeClockinExceptions());
+
+  // 03:30 — purge clock-in selfies older than 90 days.
+  scheduleDaily('selfie-purge 03:30', '03:30', () => attendanceRoutes.purgeOldSelfies());
 
   console.log('[boot] cron jobs scheduled (5min, 00:00, 01:00, 02:00, 03:00, 06:00, 07:00, Sun 23:00, Sun 23:30)');
 }

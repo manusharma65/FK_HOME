@@ -1,10 +1,11 @@
 // FK Home — /api/auth/*
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { db } = require('../db');
-const { SESSION_COOKIE, createSession, destroySession, logAudit, logShift } = require('../auth');
+const { SESSION_COOKIE, createSession, destroySession, logAudit, logShift, requireAuth } = require('../auth');
 const attendance = require('./attendance');
-const { isMobileRequest } = require('./device');
+const { isMobileRequest, hashDeviceToken, isOfficeDevice } = require('./device');
 
 const router = express.Router();
 
@@ -17,6 +18,12 @@ const MAX_FAILS = 8, WINDOW_MS = 15 * 60 * 1000, LOCK_MS = 15 * 60 * 1000;
 // so an attacker can't tell a real account from a missing one by response time.
 const DUMMY_HASH = bcrypt.hashSync('fk-home-dummy-password', 10);
 function throttleKey(req, email) { return (req.ip || '?') + '|' + String(email || '').toLowerCase().trim(); }
+// Who may register/revoke office devices: the owner, or whoever can see all
+// attendance (Head of Ops, e.g. Satyam) — so device setup isn't blocked when the
+// owner isn't on site.
+function canTrustDevices(u) {
+  try { return u.inGroup('owner') || u.can('attendance.view.any'); } catch (e) { return false; }
+}
 function lockSecondsLeft(key) { const e = LOGIN_FAILS.get(key); return (e && e.until && e.until > Date.now()) ? Math.ceil((e.until - Date.now()) / 1000) : 0; }
 function noteLoginFail(key) { const now = Date.now(); let e = LOGIN_FAILS.get(key); if (!e || now - e.first > WINDOW_MS) e = { n: 0, first: now, until: 0 }; e.n += 1; if (e.n >= MAX_FAILS) e.until = now + LOCK_MS; LOGIN_FAILS.set(key, e); }
 function clearLoginFail(key) { LOGIN_FAILS.delete(key); }
@@ -58,7 +65,8 @@ router.post('/login', async (req, res) => {
     await logShift({ user_id: user.id, event_type: 'login', status_after: 'active', req });
     // r0.6: login = clock-in. Record/update attendance_day row.
     if (typeof attendance.recordLogin === 'function') {
-      attendance.recordLogin(user.id, isMobileRequest(req)).catch(e => console.error('[recordLogin]', e.message));
+      const onOfficeDevice = await isOfficeDevice(req);
+      attendance.recordLogin(user.id, onOfficeDevice).catch(e => console.error('[recordLogin]', e.message));
     }
 
     res.cookie(SESSION_COOKIE, token, {
@@ -91,6 +99,43 @@ router.post('/logout', async (req, res) => {
   }
   if (token) await destroySession(token);
   res.clearCookie(SESSION_COOKIE);
+  res.json({ ok: true });
+});
+
+// Owner: mark THIS machine a trusted office device. The raw token is stored only
+// in this machine's long-lived cookie; the DB keeps its hash. Dormant until ship 2
+// wires clock-in to it. (HR can be added to the gate later.)
+router.post('/trust-device', requireAuth, async (req, res) => {
+  if (!canTrustDevices(req.user)) return res.status(403).json({ error: 'Not permitted' });
+  try {
+    const raw = crypto.randomBytes(32).toString('hex');
+    await db.query(
+      `INSERT INTO trusted_devices (token_hash, label, created_by) VALUES ($1, $2, $3)`,
+      [hashDeviceToken(raw), String((req.body && req.body.label) || 'Office device').slice(0, 120), req.user.id]
+    );
+    res.cookie('fk_device', raw, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV !== 'development',
+      sameSite: 'lax',
+      maxAge: 365 * 24 * 3600 * 1000,
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[trust-device]', e.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Owner: list / revoke trusted devices.
+router.get('/trusted-devices', requireAuth, async (req, res) => {
+  if (!canTrustDevices(req.user)) return res.status(403).json({ error: 'Not permitted' });
+  const r = await db.query(
+    `SELECT id, label, created_at, last_seen_at FROM trusted_devices WHERE revoked_at IS NULL ORDER BY created_at DESC`);
+  res.json({ devices: r.rows });
+});
+router.post('/trusted-devices/:id/revoke', requireAuth, async (req, res) => {
+  if (!canTrustDevices(req.user)) return res.status(403).json({ error: 'Not permitted' });
+  await db.query(`UPDATE trusted_devices SET revoked_at = NOW() WHERE id = $1`, [req.params.id]);
   res.json({ ok: true });
 });
 

@@ -1493,6 +1493,7 @@
 <script src="/modules/recruitment.js"></script>
 <script src="/modules/team-work.js"></script>
 <script src="/modules/mail.js"></script>
+<script src="/modules/clockin-modal.js"></script>
 <script>
 // ===================================================================
 // FK Home — main app script
@@ -1522,6 +1523,7 @@ async function init() {
     window.fkUser = me;  // r0.9 — used by goToMyProfile() and other links
     maybeOfficeAutoActive();  // r0.30 — flip to active on an office device
     render();
+    if (window.fkClockInMaybe) window.fkClockInMaybe();  // r1.07 — clock-in photo if owed
     fetchPeople();
     fetchNotifications();
     fetchTeamChat();
