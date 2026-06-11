@@ -451,7 +451,12 @@ router.get('/team', async (req, res) => {
     const out = [];
     for (const p of people.rows) {
       const day = await assessDay(p.id, date);
-      out.push({ user: p, flags: day.flags, did: day.did.length, submitted: day.submitted, off: day.off });
+      const manual = Array.isArray(day.manual) ? day.manual : [];
+      out.push({
+        user: p, flags: day.flags, did: day.did.length, submitted: day.submitted, off: day.off,
+        manualPending: manual.filter(m => !m.counted && m.id).map(m => ({ id: m.id, note: m.note, category: m.category, at: m.at })),
+        manualConfirmed: manual.filter(m => m.counted).length,
+      });
     }
     res.json({ date, people: out });
   } catch (e) { console.error('[daily/team]', e.message); res.status(500).json({ error: 'Failed' }); }

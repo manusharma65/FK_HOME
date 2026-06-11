@@ -162,20 +162,47 @@ function decodeB64(data) {
   return Buffer.from((data || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
 }
 
-// Walk a Gmail payload tree and pull out plain + html bodies.
+// Walk a Gmail payload tree and pull out plain + html bodies, file attachments,
+// and inline (Content-ID) image parts used by cid: refs in the HTML.
 function extractBodies(payload) {
-  let text = '', html = ''; const attachments = [];
+  let text = '', html = ''; const attachments = []; const inline = [];
   (function walk(p) {
     if (!p) return;
     const mime = p.mimeType || '';
     const fn = p.filename || '';
+    const cidRaw = header(p.headers || [], 'Content-ID');
+    const cid = cidRaw ? cidRaw.replace(/^<|>$/g, '').trim() : '';
+    if (cid && p.body && p.body.attachmentId && mime.indexOf('image/') === 0) {
+      inline.push({ cid, mimeType: mime, attachmentId: p.body.attachmentId });
+    }
     if (fn && p.body && p.body.attachmentId) {
       attachments.push({ filename: fn, mimeType: mime, attachmentId: p.body.attachmentId, size: p.body.size || 0 });
     } else if (mime === 'text/plain' && p.body && p.body.data) text += decodeB64(p.body.data);
     else if (mime === 'text/html' && p.body && p.body.data) html += decodeB64(p.body.data);
     if (p.parts) p.parts.forEach(walk);
   })(payload);
-  return { text, html, attachments };
+  return { text, html, attachments, inline };
+}
+
+// Rewrite cid: references in the HTML to self-contained data: URIs by fetching
+// the inline parts' bytes. Best-effort per image: a failed fetch leaves the cid
+// ref untouched (no worse than today's broken image) rather than failing the read.
+async function inlineCidImages(gmail, messageId, html, inline) {
+  if (!html || !inline || !inline.length) return html;
+  let out = html;
+  for (const part of inline) {
+    if (!part.cid || !part.attachmentId) continue;
+    if (out.indexOf('cid:' + part.cid) === -1) continue; // not referenced — skip the fetch
+    try {
+      const a = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: part.attachmentId });
+      const std = String(a.data.data || '').replace(/-/g, '+').replace(/_/g, '/');
+      if (!std) continue;
+      const uri = 'data:' + (part.mimeType || 'image/png') + ';base64,' + std;
+      const esc = part.cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp('cid:' + esc, 'g'), uri);
+    } catch (e) { /* leave the cid ref in place */ }
+  }
+  return out;
 }
 
 const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -243,13 +270,14 @@ router.get('/message/:id', async (req, res) => {
     const gmail = gmailFor(req.user.email);
     const m = await gmail.users.messages.get({ userId: 'me', id: req.params.id, format: 'full' });
     const h = (m.data.payload && m.data.payload.headers) || [];
-    const { text, html, attachments } = extractBodies(m.data.payload);
+    const { text, html, attachments, inline } = extractBodies(m.data.payload);
+    const htmlOut = await inlineCidImages(gmail, req.params.id, html, inline);
     try { await gmail.users.messages.modify({ userId: 'me', id: req.params.id, requestBody: { removeLabelIds: ['UNREAD'] } }); } catch (e) {}
     res.json({
       id: req.params.id, threadId: m.data.threadId,
       from: header(h, 'From'), to: header(h, 'To'), cc: header(h, 'Cc'),
       subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'),
-      messageId: header(h, 'Message-ID'), text, html, attachments,
+      messageId: header(h, 'Message-ID'), text, html: htmlOut, attachments,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -259,11 +287,12 @@ router.get('/thread/:id', async (req, res) => {
   try {
     const gmail = gmailFor(req.user.email);
     const tg = await gmail.users.threads.get({ userId: 'me', id: req.params.id, format: 'full' });
-    const msgs = (tg.data.messages || []).map(mm => {
+    const msgs = await Promise.all((tg.data.messages || []).map(async (mm) => {
       const h = (mm.payload && mm.payload.headers) || [];
-      const { text, html, attachments } = extractBodies(mm.payload);
-      return { id: mm.id, from: header(h, 'From'), to: header(h, 'To'), cc: header(h, 'Cc'), subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'), messageId: header(h, 'Message-ID'), text, html, attachments, unread: (mm.labelIds || []).includes('UNREAD') };
-    });
+      const { text, html, attachments, inline } = extractBodies(mm.payload);
+      const htmlOut = await inlineCidImages(gmail, mm.id, html, inline);
+      return { id: mm.id, from: header(h, 'From'), to: header(h, 'To'), cc: header(h, 'Cc'), subject: header(h, 'Subject') || '(no subject)', date: header(h, 'Date'), messageId: header(h, 'Message-ID'), text, html: htmlOut, attachments, unread: (mm.labelIds || []).includes('UNREAD') };
+    }));
     res.json({ threadId: req.params.id, messages: msgs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -493,3 +522,6 @@ router.post('/ai/compose', async (req, res) => {
 });
 
 module.exports = router;
+// Exposed for unit tests (harmless extra props on the router function).
+module.exports.extractBodies = extractBodies;
+module.exports.inlineCidImages = inlineCidImages;

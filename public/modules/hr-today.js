@@ -31,6 +31,21 @@ window.fkModules['hr/today'] = {
           '#hrt-mod .flag .ft{flex:1;font-size:14.5px;color:#4a4138;line-height:1.4}' +
           '#hrt-mod .flag .ask{flex:none;font-family:inherit;font-size:13px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}' +
           '#hrt-mod .empty{color:var(--muted);font-size:15px;padding:20px;text-align:center}' +
+          '#hrt-mod .msec{margin-top:13px;border-top:1px solid #efe7da;padding-top:12px}' +
+          '#hrt-mod .mhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:2px}' +
+          '#hrt-mod .mlabel{font-size:14.5px;font-weight:600}' +
+          '#hrt-mod .mcap{font-size:13px;color:var(--muted)}' +
+          '#hrt-mod .mrow{display:flex;align-items:center;gap:11px;padding:12px 0;border-bottom:1px solid #efe7da}' +
+          '#hrt-mod .mrow:last-child{border-bottom:none}' +
+          '#hrt-mod .mnote{flex:1;font-size:14.5px;line-height:1.4;color:#3f372f}' +
+          '#hrt-mod .catchip{font-size:11px;background:var(--chip,#F2ECE2);color:#6a6056;padding:2px 8px;border-radius:6px;margin-left:7px}' +
+          '#hrt-mod .btn-confirm{font-family:inherit;font-size:13.5px;font-weight:600;padding:10px 17px;border-radius:10px;border:none;background:#E8722B;color:#fff;cursor:pointer}' +
+          '#hrt-mod .btn-confirm:hover{background:#cf5f1e}' +
+          '#hrt-mod .btn-confirm:disabled{opacity:.5;cursor:default}' +
+          '#hrt-mod .btn-reject{font-family:inherit;font-size:13.5px;font-weight:600;padding:10px 17px;border-radius:10px;border:1px solid #e0d4c4;background:var(--surface,#fff);color:#8a6a56;cursor:pointer}' +
+          '#hrt-mod .btn-reject:hover{background:#f6efe6}' +
+          '#hrt-mod .cchip{font-size:12px;font-weight:600;padding:4px 11px;border-radius:999px;background:#E6F2E6;color:#3f7320;white-space:nowrap}' +
+          '#hrt-mod .mnone{font-size:13.5px;color:var(--muted);padding:6px 0}' +
         '</style>' +
         '<p class="lead">Flags surface first. A clean day is one green line; a problem shows what to act on \u2014 tap <b>Open day</b> to read it.</p>' +
         '<div id="hrtList"><div class="empty">Loading\u2026</div></div>' +
@@ -47,6 +62,7 @@ window.fkModules['hr/today'] = {
       if (!r.ok) { $('hrtList').innerHTML = '<div class="empty">Could not load.</div>'; return; }
       const data = await r.json();
       const people = data.people || [];
+      const date = data.date;
       if (!people.length) { $('hrtList').innerHTML = '<div class="empty">No HR team members to show.</div>'; return; }
 
       $('hrtList').innerHTML = people.map(p => {
@@ -69,16 +85,75 @@ window.fkModules['hr/today'] = {
                  '<button class="ask" data-uid="' + u.id + '">Open day</button></div>';
         }).join('');
 
+        // Manual items awaiting the owner's confirm. Pending items score nothing
+        // until confirmed here; confirmed ones count (capped 5/day).
+        const mp = p.manualPending || [];
+        let manualHtml = '';
+        if (mp.length || p.manualConfirmed) {
+          const rows = mp.map(m =>
+            '<div class="mrow" data-id="' + esc(m.id) + '" data-uid="' + u.id + '">' +
+              '<div class="mnote">' + esc(m.note) + '<span class="catchip">' + esc(m.category || 'admin') + '</span></div>' +
+              '<button class="btn-confirm" data-act="confirm">Confirm</button>' +
+              '<button class="btn-reject" data-act="reject">Reject</button>' +
+            '</div>').join('');
+          manualHtml =
+            '<div class="msec">' +
+              '<div class="mhead"><span class="mlabel">Manual items to confirm</span>' +
+              '<span class="mcap"><b class="capn">' + (p.manualConfirmed || 0) + '</b> of 5 confirmed today</span></div>' +
+              (mp.length ? rows : '<div class="mnone">All reviewed.</div>') +
+            '</div>';
+        }
+
         return '<div class="card pcard">' +
           '<div class="prow"><span class="av" style="background:' + (u.avatar_colour || '#5E9C8C') + '">' + esc(initials(name)) + '</span>' +
           '<div><div class="nm">' + esc(name) + '</div><div class="sub">HR Executive</div></div>' + chip + '</div>' +
-          '<div class="' + didCls + '">' + didTxt + '</div>' + flagHtml +
+          '<div class="' + didCls + '">' + didTxt + '</div>' + flagHtml + manualHtml +
         '</div>';
       }).join('');
 
       // "Open day" → that person's growth/day (owner view via switcher)
       el.querySelectorAll('.ask').forEach(b => b.addEventListener('click', () => {
         location.hash = '#my-growth';   // My Growth has the person switcher + day drill-down
+      }));
+
+      // Confirm / reject a person's pending manual item. Confirmed items count
+      // toward their week (capped 5/day); rejected items are removed.
+      el.querySelectorAll('.mrow [data-act]').forEach(b => b.addEventListener('click', async () => {
+        const row = b.closest('.mrow');
+        const id = row.getAttribute('data-id');
+        const uid = row.getAttribute('data-uid');
+        const act = b.getAttribute('data-act');
+        const sec = row.closest('.msec');
+        row.querySelectorAll('button').forEach(x => x.disabled = true);
+        try {
+          const res = await fetch('/api/daily/manual-item/confirm', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: uid, date: date, id: id, action: act }),
+          });
+          if (!res.ok) { row.querySelectorAll('button').forEach(x => x.disabled = false); return; }
+          if (act === 'confirm') {
+            const note = row.querySelector('.mnote');
+            row.innerHTML = '';
+            row.appendChild(note);
+            const c = document.createElement('span');
+            c.className = 'cchip';
+            c.innerHTML = '\u2713 Confirmed';
+            row.appendChild(c);
+            const capn = sec && sec.querySelector('.capn');
+            if (capn) capn.textContent = String(Number(capn.textContent || '0') + 1);
+          } else {
+            row.parentNode.removeChild(row);
+            if (sec && !sec.querySelector('.mrow')) {
+              const list = document.createElement('div');
+              list.className = 'mnone';
+              list.textContent = 'All reviewed.';
+              sec.appendChild(list);
+            }
+          }
+        } catch (e) {
+          row.querySelectorAll('button').forEach(x => x.disabled = false);
+        }
       }));
     } catch (e) {
       $('hrtList').innerHTML = '<div class="empty">Network error.</div>';

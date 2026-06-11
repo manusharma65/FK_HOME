@@ -47,10 +47,11 @@ const backupEngine = require('./server/modules/backup');
 const lifecycle = require('./server/modules/lifecycle');
 const dailyRoutes = require('./server/modules/daily');
 const mailRoutes = require('./server/modules/mail');
+const monitoring = require('./server/modules/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r1.00';
+const VERSION = 'r1.01';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -99,8 +100,18 @@ app.use('/api/mail', mailRoutes);
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
+// Lightweight liveness/health probe (public — no auth). Reports uptime, the last
+// daily heartbeat, and the 24h error count from the monitoring sink.
+app.get('/healthz', async (req, res) => {
+  try { const h = await monitoring.health(); res.json({ ...h, version: VERSION }); }
+  catch (e) { res.status(500).json({ ok: false }); }
+});
+
 // SPA fallback — everything else returns the version-stamped shell
 app.get('*', serveShell);
+
+// Error sink — last in the chain. Catches unhandled route throws / next(err).
+app.use(monitoring.errorMiddleware);
 
 // ---- Cron jobs -----------------------------------------------------------
 // Simple setInterval scheduling (no node-cron dep). Every gated job checks
@@ -223,11 +234,15 @@ function startCronJobs() {
   scheduleWeekly('weekend-pay Sunday 23:30', 'Sunday', '23:30', () =>
     leaveEngine.tickWeeklyWeekendPay());
 
-  console.log('[boot] cron jobs scheduled (5min, 00:00, 01:00, 02:00, 03:00, 06:00, Sun 23:00, Sun 23:30)');
+  // 07:00 — daily heartbeat + 24h error rollup (monitoring).
+  scheduleDaily('heartbeat 07:00', '07:00', () => monitoring.tickHeartbeat());
+
+  console.log('[boot] cron jobs scheduled (5min, 00:00, 01:00, 02:00, 03:00, 06:00, 07:00, Sun 23:00, Sun 23:30)');
 }
 
 async function start() {
   try {
+    monitoring.installProcessHandlers();
     await initDb();
     console.log('[boot] database connected');
     await runMigrations();

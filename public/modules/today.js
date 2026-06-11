@@ -24,6 +24,9 @@ window.fkModules['today'] = {
           '#today-mod .src.auto{background:#EAF1EA;color:#3E7D4F}' +
           '#today-mod .src.you{background:#E3EDF4;color:#185FA5}' +
           '#today-mod .catchip{font-size:12px;font-weight:600;color:#6a6056;background:var(--chip,#F2ECE2);padding:2px 10px;border-radius:99px;flex:none}' +
+          '#today-mod .mst{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;flex:none;margin-left:8px}' +
+          '#today-mod .mst.pend{background:#FAEEDA;color:#8a5a14}' +
+          '#today-mod .mst.count{background:#E6F2E6;color:#3f7320}' +
           '#today-mod .addbox{display:flex;gap:9px;margin-top:12px}' +
           '#today-mod .addbox select,#today-mod .addbox input{font-family:inherit;font-size:14.5px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}' +
           '#today-mod .addbox input{flex:1}' +
@@ -113,12 +116,14 @@ window.fkModules['today'] = {
         (t.completed_at ? '<span class="tmin">' + hm(t.completed_at) + '</span>' : '') + '</div>'
       );
       const manual = (day.manual || []).map(m =>
-        '<div class="trow"><div class="tt">' + esc(m.note) + ' <span class="catchip">' + esc(m.category||'admin') + '</span></div><span class="src you">you</span></div>'
+        '<div class="trow"><div class="tt">' + esc(m.note) + ' <span class="catchip">' + esc(m.category||'admin') + '</span></div><span class="src you">you</span>' +
+        '<span class="mst ' + (m.counted ? 'count' : 'pend') + '">' + (m.counted ? 'counting' : 'pending') + '</span></div>'
       );
       const rows = did.concat(manual);
       $('tdDid').innerHTML = rows.length ? rows.join('') : '<div class="empty">Nothing logged yet today.</div>';
       const counted = (day.manual||[]).filter(m=>m.counted).length;
-      $('tdManualCap').textContent = counted + ' of 5 manual items counting';
+      const pendingN = (day.manual||[]).filter(m=>!m.counted).length;
+      $('tdManualCap').textContent = counted + ' of 5 counting' + (pendingN ? ' \u00b7 ' + pendingN + ' pending' : '');
 
       // Queue
       const q = (day.queue || []).map(t => {
