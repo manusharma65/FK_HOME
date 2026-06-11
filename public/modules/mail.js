@@ -85,7 +85,7 @@ window.fkModules['mail'] = {
     /* Read */
     #mail-mod .mread{overflow:auto;background:var(--canvas,#F4EFE7);display:flex;flex-direction:column;min-width:0}
     #mail-mod .mr-empty{margin:auto;color:var(--muted);font-size:15px;text-align:center;padding:40px}
-    #mail-mod #mailRead .mr-pad{padding:28px 44px 56px;max-width:920px!important;margin-left:auto!important;margin-right:auto!important;width:100%;box-sizing:border-box}
+    #mail-mod #mailRead .mr-pad{padding:28px 48px 56px;max-width:1500px!important;margin-left:auto!important;margin-right:auto!important;width:100%;box-sizing:border-box}
     #mail-mod .mr-top{display:flex;align-items:flex-start;gap:14px}
     #mail-mod .mr-h{font-size:24px;font-weight:700;line-height:1.25;flex:1}
     #mail-mod .mr-acts{display:flex;gap:7px;flex:none;position:relative}
