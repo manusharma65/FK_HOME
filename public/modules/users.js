@@ -233,8 +233,9 @@ window.fkModules['hr/users'] = {
       $('usrModalInner').innerHTML='<div class="usec" style="color:var(--muted)">Loading '+esc(u.display_name||u.full_name)+'…</div>';
       $('usrModal').classList.add('on');
       let ov={}; try{ ov=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include'})).json(); }catch(e){}
+      const U=ov.user||{};
       const bal=ov.leave_balance&&ov.leave_balance.remaining!=null?Number(ov.leave_balance.remaining):null;
-      const mgrId=ov.manager_user_id||'';
+      const mgrId=U.manager_user_id||'';
       const mgrOpts='<option value="">— none —</option>'+users_.filter(x=>x.id!==id&&x.employment_status==='active').map(x=>'<option value="'+x.id+'"'+(x.id===mgrId?' selected':'')+'>'+esc(x.display_name||x.full_name)+'</option>').join('');
       const deptRows=departments_.map(d=>{const m=(u.departments||[]).find(x=>x.slug===d.slug);const ck=m?'checked':'';const role=m?m.role:'agent';const pr=m?m.is_primary:false;
         return '<label style="display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:9px;font-weight:500;margin-bottom:8px"><input type="checkbox" data-slug="'+d.slug+'" '+ck+' style="width:auto;margin:0"/><span>'+esc(d.name)+'</span>'+
@@ -263,7 +264,7 @@ window.fkModules['hr/users'] = {
           '<button class="ubtn" id="rRecompute" style="padding:8px 13px;margin-right:8px">↻ Recompute</button><button class="ubtn" id="rAdjust" style="padding:8px 13px">± Adjust</button></div></div></div>'+
         '<div class="usec"><div class="ulabel"><span class="ubadge">4</span><div><h3>Status</h3><div class="s">Active, on leave, or leaving</div></div></div>'+
           '<div id="rStatus"><span class="opt'+(st==='active'?' on':'')+'" data-st="active">Active</span><span class="opt'+(st==='on_leave'?' on':'')+'" data-st="on_leave">On leave</span><span class="opt'+(st==='left'?' on':'')+'" data-st="left">Leaver</span></div>'+
-          '<div id="rLwdBox" style="margin-top:8px;display:'+(st==='left'?'block':'none')+'"><label>Last working day</label><input type="date" id="rLwd" value="'+dOnly(ov.last_working_day)+'" style="max-width:200px"/><div class="hint">Stops leave accrual and feeds their final payslip.</div></div></div>'+
+          '<div id="rLwdBox" style="margin-top:8px;display:'+(st==='left'?'block':'none')+'"><label>Last working day</label><input type="date" id="rLwd" value="'+dOnly(U.last_working_day)+'" style="max-width:200px"/><div class="hint">Stops leave accrual and feeds their final payslip.</div></div></div>'+
         '<div class="uerr" id="rErr" style="margin:0 22px"></div><div class="uok" id="rOk" style="margin:0 22px"></div>'+
         '<div class="ufoot"><button class="ubtn gh" id="rReset">Reset password</button><div style="display:flex;gap:9px"><button class="ubtn gh" id="rCancel">Cancel</button><button class="ubtn pri" id="rSave">Save changes</button></div></div>';
       // wire editor
@@ -295,7 +296,7 @@ window.fkModules['hr/users'] = {
         if(status==='left') emp.last_working_day=dOnly($('rLwd').value)||null;
         await callOK('Employment', '/api/admin/users/bulk-employment', {method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({updates:[emp]})});
         // verify the manager actually stuck (catches any silent server-side reset)
-        try{ const ov2=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include'})).json(); if((ov2.manager_user_id||null)!==mgrVal){ throw new Error('Manager: did not persist (expected '+mgrVal+', got '+(ov2.manager_user_id||'none')+')'); } }catch(ve){ if(/did not persist/.test(ve.message)) throw ve; }
+        try{ const ov2=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include',cache:'no-store'})).json(); const got=(ov2.user&&ov2.user.manager_user_id)||null; if(got!==mgrVal){ throw new Error('Manager: did not persist (expected '+mgrVal+', got '+(got||'none')+')'); } }catch(ve){ if(/did not persist/.test(ve.message)) throw ve; }
         ok.textContent='Saved.'; ok.classList.add('on');
         setTimeout(()=>{ $('usrModal').classList.remove('on'); loadUsers(); },700);
       }catch(e){ err.textContent=e.message||'Save failed'; err.classList.add('on'); }
