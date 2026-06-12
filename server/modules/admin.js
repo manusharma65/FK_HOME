@@ -33,9 +33,13 @@ router.get('/departments', requirePermission('admin.departments.view'), async (r
 // LIST
 router.get('/users', requirePermission('admin.users.view'), async (req, res) => {
   try {
+    // Default: active roster (deleted_at IS NULL). ?archived=1 → only archived (soft-deleted) users.
+    const wantArchived = ['1','true','yes'].includes(String(req.query.archived || '').toLowerCase());
+    const whereDeleted = wantArchived ? 'u.deleted_at IS NOT NULL' : 'u.deleted_at IS NULL';
     const r = await db.query(
       `SELECT u.id, u.email, u.full_name, u.display_name, u.initials, u.avatar_colour,
               u.employment_status, u.must_change_password, u.last_login_at, u.created_at,
+              u.deleted_at, u.left_date, u.last_working_day,
               u.hire_date, u.monthly_salary, u.salary_currency, u.employment_type,
               u.work_pattern, u.probation_end_date, u.notice_period_days, u.emergency_contact,
               (SELECT json_agg(json_build_object('id', d.id, 'slug', d.slug, 'name', d.name,
@@ -48,7 +52,7 @@ router.get('/users', requirePermission('admin.users.view'), async (req, res) => 
                  JOIN groups g ON g.id = ug.group_id
                  WHERE ug.user_id = u.id AND g.deleted_at IS NULL) AS groups
        FROM users u
-       WHERE u.deleted_at IS NULL
+       WHERE ${whereDeleted}
        ORDER BY u.full_name`
     );
     res.json({ users: r.rows });
@@ -367,19 +371,41 @@ router.put('/users/:id/groups', requirePermission('admin.groups.edit'), async (r
 router.delete('/users/:id', requirePermission('admin.users.delete'), async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'Bad id' });
-  if (id === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
+  if (id === req.user.id) return res.status(400).json({ error: 'Cannot archive yourself' });
   try {
-    const u = await db.query(`SELECT id, full_name FROM users WHERE id = $1 AND deleted_at IS NULL`, [id]);
+    const u = await db.query(`SELECT id, full_name, employment_status FROM users WHERE id = $1 AND deleted_at IS NULL`, [id]);
     if (u.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    // Safety: only people already marked as a leaver can be archived — never an active employee.
+    if (u.rows[0].employment_status !== 'left') {
+      return res.status(400).json({ error: 'Mark them as a leaver first, then archive.' });
+    }
     await db.query(
       `UPDATE users SET deleted_at = NOW(), employment_status = 'left' WHERE id = $1`,
       [id]
     );
     await db.query(`DELETE FROM user_sessions WHERE user_id = $1`, [id]);
-    await logAudit({ req, module: 'admin', action: 'user.deleted', target_type: 'user', target_id: id, before: u.rows[0] });
+    await logAudit({ req, module: 'admin', action: 'user.archived', target_type: 'user', target_id: id, before: u.rows[0] });
     res.json({ ok: true });
   } catch (err) {
-    console.error('[admin/users.delete] error:', err);
+    console.error('[admin/users.archive] error:', err);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// ---------- POST /api/admin/users/:id/restore — bring an archived person back ----------
+// Clears the archive (deleted_at) and returns them to the visible roster as a leaver
+// (still 'left'); re-activating for a rehire is then a normal status change.
+router.post('/users/:id/restore', requirePermission('admin.users.delete'), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Bad id' });
+  try {
+    const u = await db.query(`SELECT id, full_name FROM users WHERE id = $1 AND deleted_at IS NOT NULL`, [id]);
+    if (u.rows.length === 0) return res.status(404).json({ error: 'Not an archived user' });
+    await db.query(`UPDATE users SET deleted_at = NULL WHERE id = $1`, [id]);
+    await logAudit({ req, module: 'admin', action: 'user.restored', target_type: 'user', target_id: id, before: u.rows[0] });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/users.restore] error:', err);
     res.status(500).json({ error: 'Failed' });
   }
 });

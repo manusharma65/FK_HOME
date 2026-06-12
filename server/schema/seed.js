@@ -140,9 +140,6 @@ const GROUPS = [
       'admin.permissions.view',
       'admin.audit.view',
       'admin.employment.edit','admin.payroll.view','admin.leaves.adjust',
-      // r1.12 — Head of Ops can open System Settings (needed to reach the
-      // "Trust this computer" device card; also gives review/probation/backfill).
-      'admin.settings.edit',
       'attendance.view.any','attendance.regularise.approve.any','attendance.policy.edit','attendance.cs_rota.view',
       'hr.dashboard.view',
       'daily_report.view.any','daily_report.review.any',
@@ -181,6 +178,8 @@ const GROUPS = [
       'admin.departments.view',
       'admin.groups.view',
       'admin.break.edit',
+      // r1.16 — HR runs offboarding, so they can archive (and restore) leavers.
+      'admin.users.delete',
       'admin.employment.edit','admin.payroll.view','admin.leaves.adjust',
       'attendance.view.any','attendance.regularise.approve.any',
       'attendance.cs_rota.view',

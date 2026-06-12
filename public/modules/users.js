@@ -91,7 +91,7 @@ window.fkModules['hr/users'] = {
       '</div>' +
       '<div class="toolbar">' +
         '<div class="srch"><input id="usrSearch" placeholder="Search name or email…"/></div>' +
-        '<div class="pills" id="usrFilter"><button data-f="all" class="on">All</button><button data-f="active">Active</button><button data-f="on_leave">On leave</button><button data-f="left">Left</button></div>' +
+        '<div class="pills" id="usrFilter"><button data-f="all" class="on">All</button><button data-f="active">Active</button><button data-f="on_leave">On leave</button><button data-f="left">Left</button><button data-f="archived">Archived</button></div>' +
       '</div>' +
       '<div id="usrBody"><div style="color:var(--muted);padding:20px">Loading…</div></div>' +
       '<div class="umodal-bg" id="usrModal"><div class="umodal" id="usrModalInner"></div></div>' +
@@ -108,7 +108,8 @@ window.fkModules['hr/users'] = {
     const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     const roleLabel = (r) => r === 'manager' ? 'Manager' : (r === 'lead' ? 'Team Lead' : (r === 'senior' ? 'Senior Executive' : 'Executive'));
     const dOnly = (d) => d ? String(d).slice(0,10) : '';
-    let departments_=[], groups_=[], users_=[], filter_='all', search_='';
+    let departments_=[], groups_=[], users_=[], archived_=[], archivedLoaded_=false, filter_='all', search_='';
+    async function loadArchived(){ try{ const r=await fetch('/api/admin/users?archived=1',{credentials:'include'}); archived_=(await r.json()).users||[]; archivedLoaded_=true; }catch(e){ archived_=[]; } }
 
     async function init(){
       try{
@@ -134,10 +135,10 @@ window.fkModules['hr/users'] = {
       $('usrStat').innerHTML='<div><b>'+a+'</b><span>Active</span></div><div><b>'+ol+'</b><span>On leave</span></div><div><b>'+dep.size+'</b><span>Departments</span></div>';
     }
     function renderRows(){
-      let rows=users_;
-      if(filter_!=='all') rows=rows.filter(u=>u.employment_status===filter_);
+      let rows = (filter_==='archived') ? archived_ : users_;
+      if(filter_!=='all' && filter_!=='archived') rows=rows.filter(u=>u.employment_status===filter_);
       if(search_){const q=search_.toLowerCase();rows=rows.filter(u=>(u.full_name||'').toLowerCase().includes(q)||(u.display_name||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q));}
-      if(!rows.length){$('usrBody').innerHTML='<div style="color:var(--muted);padding:20px">No people match.</div>';return;}
+      if(!rows.length){$('usrBody').innerHTML='<div style="color:var(--muted);padding:20px">'+(filter_==='archived'?'No archived people.':'No people match.')+'</div>';return;}
       $('usrBody').innerHTML=rows.map(card).join('');
     }
     function card(u){
@@ -229,7 +230,7 @@ window.fkModules['hr/users'] = {
 
     // ---------------- Person record editor ----------------
     async function openRecord(id){
-      const u=users_.find(x=>x.id===id); if(!u) return;
+      const u=users_.find(x=>x.id===id)||archived_.find(x=>x.id===id); if(!u) return;
       $('usrModalInner').innerHTML='<div class="usec" style="color:var(--muted)">Loading '+esc(u.display_name||u.full_name)+'…</div>';
       $('usrModal').classList.add('on');
       let ov={}; try{ ov=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include'})).json(); }catch(e){}
@@ -246,6 +247,13 @@ window.fkModules['hr/users'] = {
       const ringPct=bal!=null?Math.max(0,Math.min(1,bal/24)):0;
       const dash=Math.round(276.5*(1-ringPct));
       const st=u.employment_status||'active';
+      const canDelete_=!!(window.fkUser&&(window.fkUser.permissions||[]).includes('admin.users.delete'));
+      const isArchived_=!!u.deleted_at;
+      const archiveBtn_= (canDelete_&&isArchived_)
+        ? '<button class="ubtn" id="rRestore" style="border-color:var(--green);color:var(--green)">↩ Restore person</button>'
+        : (canDelete_&&st==='left')
+          ? '<button class="ubtn" id="rArchive" style="border-color:var(--red);color:var(--red)">Archive</button>'
+          : '';
       $('usrModalInner').innerHTML=
         '<div class="usec" style="display:flex;align-items:center;gap:14px"><div class="uav" style="width:50px;height:50px;border-radius:15px;font-size:17px;background:'+(u.avatar_colour||'#888780')+'">'+esc(u.initials||'—')+'</div>'+
           '<div style="flex:1"><div style="font-family:var(--udisp);font-weight:600;font-size:19px">'+esc(u.full_name)+'</div><div class="em" style="color:var(--muted);font-size:12.5px">'+esc(u.email)+'</div></div><span class="spill '+st+'">'+st.replace('_',' ')+'</span></div>'+
@@ -266,7 +274,7 @@ window.fkModules['hr/users'] = {
           '<div id="rStatus"><span class="opt'+(st==='active'?' on':'')+'" data-st="active">Active</span><span class="opt'+(st==='on_leave'?' on':'')+'" data-st="on_leave">On leave</span><span class="opt'+(st==='left'?' on':'')+'" data-st="left">Leaver</span></div>'+
           '<div id="rLwdBox" style="margin-top:8px;display:'+(st==='left'?'block':'none')+'"><label>Last working day</label><input type="date" id="rLwd" value="'+dOnly(U.last_working_day)+'" style="max-width:200px"/><div class="hint">Stops leave accrual and feeds their final payslip.</div></div></div>'+
         '<div class="uerr" id="rErr" style="margin:0 22px"></div><div class="uok" id="rOk" style="margin:0 22px"></div>'+
-        '<div class="ufoot"><button class="ubtn gh" id="rReset">Reset password</button><div style="display:flex;gap:9px"><button class="ubtn gh" id="rCancel">Cancel</button><button class="ubtn pri" id="rSave">Save changes</button></div></div>';
+        '<div class="ufoot"><div style="display:flex;gap:9px"><button class="ubtn gh" id="rReset">Reset password</button>'+archiveBtn_+'</div><div style="display:flex;gap:9px"><button class="ubtn gh" id="rCancel">Cancel</button><button class="ubtn pri" id="rSave">Save changes</button></div></div>';
       // wire editor
       el.querySelectorAll('#rStatus .opt').forEach(o=>o.onclick=function(){el.querySelectorAll('#rStatus .opt').forEach(x=>x.classList.remove('on'));this.classList.add('on');$('rLwdBox').style.display=this.dataset.st==='left'?'block':'none';});
       $('rCancel').onclick=()=>$('usrModal').classList.remove('on');
@@ -274,6 +282,8 @@ window.fkModules['hr/users'] = {
       $('rRecompute').onclick=async()=>{ const r=await fetch('/api/admin/leaves/recompute',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({user_id:id})}); const d=await r.json(); const nb=(d&&d.remaining!=null)?d.remaining:(d&&d.balance&&d.balance.remaining); if(nb!=null)$('rBal').textContent=nb; };
       $('rAdjust').onclick=async()=>{ const delta=prompt('Adjust leave by how many days? (e.g. -1 or 2)'); if(delta===null||delta==='')return; const note=prompt('Reason (logged):')||''; const r=await fetch('/api/admin/leaves/adjust',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({user_id:id,delta:parseFloat(delta),note:note})}); const d=await r.json(); const nb=(d&&d.remaining!=null)?d.remaining:(d&&d.balance&&d.balance.remaining); if(nb!=null)$('rBal').textContent=nb; };
       $('rSave').onclick=()=>saveRecord(id);
+      if($('rArchive')) $('rArchive').onclick=()=>archiveUser(id,u.full_name);
+      if($('rRestore')) $('rRestore').onclick=()=>restoreUser(id,u.full_name);
     }
     async function callOK(label, url, opts){
       let r; try { r = await fetch(url, opts); } catch(e){ throw new Error(label+': network error'); }
@@ -308,6 +318,16 @@ window.fkModules['hr/users'] = {
       if(!r.ok) return alert(d.error||'Failed');
       alert('Temporary password: '+d.initial_password+'\n\nShare this with the user.');
     }
+    async function archiveUser(id,name){
+      if(!confirm('Archive '+name+'?\n\nThey move out of the active roster (into the Archived tab). Their record is kept and you can restore them anytime.')) return;
+      try{ const r=await fetch('/api/admin/users/'+id,{method:'DELETE',credentials:'include'}); const d=await r.json().catch(()=>({})); if(!r.ok){ alert(d.error||'Failed to archive'); return; } }catch(e){ alert('Failed to archive'); return; }
+      $('usrModal').classList.remove('on'); archivedLoaded_=false; await loadUsers(); if(filter_==='archived'){ await loadArchived(); renderRows(); }
+    }
+    async function restoreUser(id,name){
+      if(!confirm('Restore '+name+'?\n\nThey return to the roster as a leaver — set them Active if you are rehiring.')) return;
+      try{ const r=await fetch('/api/admin/users/'+id+'/restore',{method:'POST',credentials:'include'}); const d=await r.json().catch(()=>({})); if(!r.ok){ alert(d.error||'Failed to restore'); return; } }catch(e){ alert('Failed to restore'); return; }
+      $('usrModal').classList.remove('on'); archivedLoaded_=false; await loadUsers(); if(filter_==='archived'){ await loadArchived(); renderRows(); }
+    }
 
     // ---------------- wiring ----------------
     $('usrAdd').addEventListener('click', openWizard);
@@ -317,7 +337,7 @@ window.fkModules['hr/users'] = {
       const pr=e.target.closest('[data-profile]'); if(pr){ location.hash='#profile/'+pr.dataset.profile; }
     });
     $('usrSearch').addEventListener('input',(e)=>{ search_=e.target.value.trim(); renderRows(); });
-    $('usrFilter').addEventListener('click',(e)=>{ const b=e.target.closest('button[data-f]'); if(!b)return; filter_=b.dataset.f; el.querySelectorAll('#usrFilter button').forEach(x=>x.classList.toggle('on',x===b)); renderRows(); });
+    $('usrFilter').addEventListener('click',async (e)=>{ const b=e.target.closest('button[data-f]'); if(!b)return; filter_=b.dataset.f; el.querySelectorAll('#usrFilter button').forEach(x=>x.classList.toggle('on',x===b)); if(filter_==='archived' && !archivedLoaded_){ $('usrBody').innerHTML='<div style="color:var(--muted);padding:20px">Loading…</div>'; await loadArchived(); } renderRows(); });
 
     await init();
   }
