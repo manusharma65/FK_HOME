@@ -51,7 +51,7 @@ const monitoring = require('./server/modules/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r1.11';
+const VERSION = 'r1.13';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));

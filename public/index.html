@@ -1654,17 +1654,24 @@ function render() {
       }
       try { localStorage.setItem(storageKey, collapse ? '1' : '0'); } catch (e) {}
     }
-    header.addEventListener('click', () => toggle(!grp.classList.contains('collapsed')));
+    // Use onclick (not addEventListener) so re-running render() REPLACES the
+    // handler instead of stacking another. Stacked handlers made one click flip
+    // collapsed then instantly un-flip it — the "stuck till refresh" bug.
+    header.onclick = () => toggle(!grp.classList.contains('collapsed'));
     let saved = null;
     try { saved = localStorage.getItem(storageKey); } catch (e) {}
     if (saved === '1') { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; }
     else setOpenHeight();
   }
   ['grpHR', 'grpDay', 'grpSystem', 'grpYou'].forEach(setupNavGroup);
-  // Keep open groups correctly sized if the window resizes.
-  window.addEventListener('resize', () => {
-    document.querySelectorAll('.navgrp:not(.collapsed) .navgrp-items').forEach(it => { it.style.maxHeight = it.scrollHeight + 'px'; });
-  });
+  // Keep open groups correctly sized if the window resizes. Bind ONCE — render()
+  // runs on every reload(), so an unguarded listener here would stack too.
+  if (!window.__fkNavResizeBound) {
+    window.__fkNavResizeBound = true;
+    window.addEventListener('resize', () => {
+      document.querySelectorAll('.navgrp:not(.collapsed) .navgrp-items').forEach(it => { it.style.maxHeight = it.scrollHeight + 'px'; });
+    });
+  }
 
   // YOU — Your onboarding shows only if user has incomplete onboarding items
   // (will be wired in stage 4 when the home content loads — for now hidden by default)
