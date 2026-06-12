@@ -274,19 +274,28 @@ window.fkModules['hr/users'] = {
       $('rAdjust').onclick=async()=>{ const delta=prompt('Adjust leave by how many days? (e.g. -1 or 2)'); if(delta===null||delta==='')return; const note=prompt('Reason (logged):')||''; const r=await fetch('/api/admin/leaves/adjust',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({user_id:id,delta:parseFloat(delta),note:note})}); const d=await r.json(); const nb=(d&&d.remaining!=null)?d.remaining:(d&&d.balance&&d.balance.remaining); if(nb!=null)$('rBal').textContent=nb; };
       $('rSave').onclick=()=>saveRecord(id);
     }
+    async function callOK(label, url, opts){
+      let r; try { r = await fetch(url, opts); } catch(e){ throw new Error(label+': network error'); }
+      if(!r.ok){ let m=''; try{ m=(await r.json()).error; }catch(e){} throw new Error(label+(m?': '+m:' failed ('+r.status+')')); }
+      return r;
+    }
     async function saveRecord(id){
       const err=$('rErr'),ok=$('rOk'),btn=$('rSave'); err.classList.remove('on'); ok.classList.remove('on'); btn.disabled=true; btn.textContent='Saving…';
       const status=(el.querySelector('#rStatus .opt.on')||{}).dataset.st||'active';
+      const J=(b)=>({method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(b)});
       try{
-        await fetch('/api/admin/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({employment_status:status})});
+        await callOK('Status', '/api/admin/users/'+id, {method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({employment_status:status})});
         const memberships=Array.from(el.querySelectorAll('#rDepts input[data-slug]:checked')).map(inp=>{const s=inp.dataset.slug;return{department_slug:s,role:el.querySelector('#rDepts select[data-role="'+s+'"]').value,is_primary:el.querySelector('#rDepts input[data-prim="'+s+'"]').checked};});
-        await fetch('/api/admin/users/'+id+'/departments',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({memberships})});
+        await callOK('Departments', '/api/admin/users/'+id+'/departments', J({memberships}));
         const gs=Array.from(el.querySelectorAll('#rGroups input:checked')).map(x=>x.value);
-        await fetch('/api/admin/users/'+id+'/groups',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({group_slugs:gs})});
-        await fetch('/api/profile/'+id+'/manager',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({manager_user_id:$('rMgr').value?parseInt($('rMgr').value,10):null})});
+        await callOK('Groups', '/api/admin/users/'+id+'/groups', J({group_slugs:gs}));
+        const mgrVal=$('rMgr').value?parseInt($('rMgr').value,10):null;
+        await callOK('Manager', '/api/profile/'+id+'/manager', J({manager_user_id:mgrVal}));
         const emp={id:id,hire_date:dOnly($('rHire').value)||null,employment_type:$('rType').value,work_pattern:$('rPat').value,probation_end_date:dOnly($('rProb').value)||null,notice_period_days:($('rNotice').value!==''?parseInt($('rNotice').value,10):null)};
         if(status==='left') emp.last_working_day=dOnly($('rLwd').value)||null;
-        await fetch('/api/admin/users/bulk-employment',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({updates:[emp]})});
+        await callOK('Employment', '/api/admin/users/bulk-employment', {method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({updates:[emp]})});
+        // verify the manager actually stuck (catches any silent server-side reset)
+        try{ const ov2=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include'})).json(); if((ov2.manager_user_id||null)!==mgrVal){ throw new Error('Manager: did not persist (expected '+mgrVal+', got '+(ov2.manager_user_id||'none')+')'); } }catch(ve){ if(/did not persist/.test(ve.message)) throw ve; }
         ok.textContent='Saved.'; ok.classList.add('on');
         setTimeout(()=>{ $('usrModal').classList.remove('on'); loadUsers(); },700);
       }catch(e){ err.textContent=e.message||'Save failed'; err.classList.add('on'); }
