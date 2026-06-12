@@ -109,7 +109,10 @@
     const go = document.getElementById('fk-ci-go');
     const skip = document.getElementById('fk-ci-skip');
 
-    skip.addEventListener('click', function () { doneState(ovl, ctx.place); });
+    skip.addEventListener('click', function () {
+      try { fetch('/api/attendance/clock-in/ack', { method: 'POST', credentials: 'include' }); } catch (e) {}
+      doneState(ovl, ctx.place);
+    });
 
     const camOk = await startCamera(vid, ph);
     if (!camOk) {
@@ -141,7 +144,7 @@
       const ctx = await r.json();
       if (ctx.isOffDay) return;          // day off — don't prompt
       if (!ctx.clockedIn) return;        // nothing stamped (shouldn't happen) — stay silent
-      if (ctx.hasSelfie) return;         // already has a photo
+      if (ctx.hasSelfie || ctx.acked) return; // already handled today (photo OR skip) — don't re-ask
       await run(ctx);
     } catch (e) { /* never block the app */ }
   };

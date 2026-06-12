@@ -1483,6 +1483,15 @@ async function recordLogin(userId, isOffice) {
       [userId, now.date, expected, pol ? pol.start_time : null, pol ? pol.end_time : null]
     );
 
+    // Reflect office vs working-from-home in the LIVE presence status so the
+    // indicator agrees with the clock-in. This is presence only — it does NOT
+    // touch on-time/late, which is computed the same for office and remote below.
+    await db.query(
+      `INSERT INTO user_status (user_id, status, changed_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET status = $2, changed_at = NOW()`,
+      [userId, place === 'remote' ? 'wfh' : 'active']
+    ).catch(e => console.error('[recordLogin presence]', e.message));
+
     // Every login now stamps. A trusted office device stamps as 'office'; anywhere
     // else stamps as 'remote' (working-from-home), which HR reviews as an exception.
     // Graceful by design: nobody is ever blocked from clocking in.
@@ -1699,7 +1708,7 @@ router.get('/clock-in/context', async (req, res) => {
     const day = nowInLondon().date;
     const office = await isOfficeDevice(req);
     const r = await db.query(
-      `SELECT first_login, arrival_place, selfie_id, status FROM attendance_day WHERE user_id = $1 AND for_date = $2`,
+      `SELECT first_login, arrival_place, selfie_id, clockin_ack_at, status FROM attendance_day WHERE user_id = $1 AND for_date = $2`,
       [req.user.id, day]);
     const row = r.rows[0] || {};
     const off = ['on_leave', 'off_sick', 'off_holiday', 'off_pattern', 'off_cs_rota'].includes(row.status);
@@ -1708,6 +1717,7 @@ router.get('/clock-in/context', async (req, res) => {
       clockedIn: !!row.first_login,
       place: row.arrival_place || (office ? 'office' : 'remote'),
       hasSelfie: !!row.selfie_id,
+      acked: !!row.clockin_ack_at,
       isOffDay: off,
       name: req.user.display_name || req.user.full_name,
     });
@@ -1727,10 +1737,24 @@ router.post('/selfie', async (req, res) => {
       `INSERT INTO clock_in_selfies (user_id, for_date, image, mime) VALUES ($1,$2,$3,$4) RETURNING id`,
       [req.user.id, day, buf, m[1]]);
     await db.query(
-      `UPDATE attendance_day SET selfie_id = $1, updated_at = NOW() WHERE user_id = $2 AND for_date = $3`,
+      `UPDATE attendance_day SET selfie_id = $1, clockin_ack_at = NOW(), updated_at = NOW() WHERE user_id = $2 AND for_date = $3`,
       [ins.rows[0].id, req.user.id, day]);
     res.json({ ok: true, selfie_id: ins.rows[0].id });
   } catch (e) { console.error('[clockin/selfie]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// Mark today's clock-in prompt as handled WITHOUT a photo (the "skip / no photo"
+// path, incl. working-from-home). Stops the modal re-firing on every refresh.
+// Best-effort: a no-op if there's no clock-in row yet (login always stamps one).
+router.post('/clock-in/ack', async (req, res) => {
+  try {
+    const day = nowInLondon().date;
+    await db.query(
+      `UPDATE attendance_day SET clockin_ack_at = NOW(), updated_at = NOW()
+        WHERE user_id = $1 AND for_date = $2 AND clockin_ack_at IS NULL`,
+      [req.user.id, day]);
+    res.json({ ok: true });
+  } catch (e) { console.error('[clockin/ack]', e.message); res.status(500).json({ error: 'Failed' }); }
 });
 
 // HR: today's clock-in exceptions to review (WFH / no photo / flagged).
