@@ -124,6 +124,10 @@ window.fkModules['my-work'] = {
               '</select>' +
               '<select id="mwAssignee"><option value="">Myself</option></select>' +
             '</div>' +
+            '<div class="mw-frow" style="align-items:center;gap:8px">' +
+              '<label for="mwDue" style="font-size:12px;color:var(--muted);white-space:nowrap">Due (optional)</label>' +
+              '<input type="date" id="mwDue" style="flex:1" />' +
+            '</div>' +
             '<div class="mw-frow" style="justify-content:flex-end">' +
               '<button id="mwCancel">Cancel</button>' +
               '<button class="save" id="mwSave">Add task</button>' +
@@ -147,6 +151,7 @@ window.fkModules['my-work'] = {
   async mount(el) {
     const $ = (id) => el.querySelector('#' + id);
     function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function fmtDue(d){ if(!d) return ''; const p=String(d).slice(0,10).split('-'); if(p.length!==3) return ''; const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (p[2]*1)+' '+(M[p[1]*1-1]||''); }
 
     const PILL = { event:['event','from event'], recurring:['recurring','recurring'],
                    ad_hoc:['adhoc','ad-hoc'], recruitment:['adhoc','recruitment'],
@@ -185,10 +190,11 @@ window.fkModules['my-work'] = {
       }
       const pillHtml = isOverdue ? '<span class="pill overdue">overdue</span>'
                                  : '<span class="pill '+pill[0]+'">'+pill[1]+'</span>';
-      return '<div class="mw-row" data-row="'+t.id+'" data-title="'+esc(t.title)+'" data-cat="'+esc(t.category||'')+'">' +
+      const dueChip = t.due_at ? '<span class="pill" style="background:var(--amber-soft);color:var(--amber-deep)">Due '+fmtDue(t.due_at)+'</span>' : '';
+      return '<div class="mw-row" data-row="'+t.id+'" data-title="'+esc(t.title)+'" data-cat="'+esc(t.category||'')+'" data-due="'+esc(String(t.due_at||'').slice(0,10))+'">' +
         '<i class="ti '+icon+' ico" style="color:'+colour+'"></i>' +
         '<div class="mid"><div class="t1">'+esc(t.title)+'</div>'+(sub?'<div class="t2">'+sub+'</div>':'')+'</div>' +
-        pillHtml + actionsFor(t) + '</div>';
+        dueChip + pillHtml + actionsFor(t) + '</div>';
     }
 
     function coveringHtml(t) {
@@ -337,7 +343,7 @@ window.fkModules['my-work'] = {
     // ---- creator ----
     function resetForm() {
       editingId = null;
-      $('mwTitle').value=''; $('mwCategory').value=''; $('mwAssignee').value='';
+      $('mwTitle').value=''; $('mwCategory').value=''; $('mwAssignee').value=''; $('mwDue').value='';
       $('mwSave').textContent='Add task';
       $('mwForm').querySelector('h4')?.remove();
     }
@@ -354,13 +360,14 @@ window.fkModules['my-work'] = {
       try {
         if (editingId) {
           const r=await fetch('/api/tasks/'+editingId,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',
-            body:JSON.stringify({ title, category })});
+            body:JSON.stringify({ title, category, due_at:($('mwDue').value||null) })});
           if(!r.ok){ alert('Could not save'); } else { $('mwForm').classList.remove('on'); resetForm(); await load(); }
         } else {
           const assignee=$('mwAssignee').value||null;
+          const due=$('mwDue').value||null;
           // Server decides: no person = my own task; category 'request' = request; else assign.
           const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',
-            body:JSON.stringify({ title, category, assignee_user_id:assignee })});
+            body:JSON.stringify({ title, category, assignee_user_id:assignee, due_at:due })});
           if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Could not add task'); }
           else { $('mwForm').classList.remove('on'); resetForm(); await load(); }
         }
@@ -400,6 +407,7 @@ window.fkModules['my-work'] = {
         editingId=editBtn.getAttribute('data-edit');
         $('mwTitle').value=row.getAttribute('data-title')||'';
         $('mwCategory').value=row.getAttribute('data-cat')||'';
+        $('mwDue').value=row.getAttribute('data-due')||'';
         $('mwAssignee').value='';
         $('mwSave').textContent='Save changes';
         $('mwForm').classList.add('on'); $('mwTitle').focus();

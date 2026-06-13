@@ -31,6 +31,38 @@
   .home-zone .att-overview .kpi .v{ font-family:var(--disp); font-size:27px; font-weight:700; }
   .home-zone .att-overview .kpi .l{ font-size:11.5px; font-weight:600; margin-top:6px; }
   .home-zone .att-overview .kpi.voluntary{ background:var(--green-soft); }
+
+  /* r1.20 — owner/manager cockpit */
+  #ownerCockpit .ck-sum{ display:flex; flex-wrap:wrap; gap:10px; margin:14px 0 18px; }
+  #ownerCockpit .ck-pill{ background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:7px 14px; font-weight:600; font-size:13px; display:flex; align-items:center; gap:7px; }
+  #ownerCockpit .ck-pill .n{ font-family:var(--disp); font-size:16px; }
+  #ownerCockpit .ck-pill.red{ background:var(--red-soft); border-color:rgba(163,45,45,.3); color:var(--red); }
+  #ownerCockpit .ck-pill.amber{ background:var(--amber-soft); border-color:rgba(239,159,39,.4); color:var(--amber-deep); }
+  #ownerCockpit .ck-card{ background:var(--surface); border:1px solid var(--line); border-radius:18px; margin-bottom:16px; overflow:hidden; box-shadow:0 2px 10px rgba(36,31,27,.04); }
+  #ownerCockpit .ck-head{ padding:16px 20px 13px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  #ownerCockpit .ck-head h2{ font-family:var(--disp); font-weight:600; font-size:18px; margin:0; }
+  #ownerCockpit .ck-head .sub{ font-size:12.5px; color:var(--soft); margin-top:2px; }
+  #ownerCockpit .ck-chip{ font-family:var(--disp); font-weight:600; font-size:13px; background:var(--canvas); border:1px solid var(--line); border-radius:999px; padding:3px 11px; }
+  #ownerCockpit .ck-body{ padding:4px 20px 14px; }
+  #ownerCockpit .ck-row{ display:flex; align-items:center; gap:12px; padding:13px 0; border-top:1px solid var(--line); }
+  #ownerCockpit .ck-row:first-child{ border-top:none; }
+  #ownerCockpit .ck-sev{ width:10px; height:10px; border-radius:50%; flex:none; }
+  #ownerCockpit .ck-sev.now{ background:var(--red); } #ownerCockpit .ck-sev.soon{ background:var(--amber); }
+  #ownerCockpit .ck-main{ flex:1; min-width:0; }
+  #ownerCockpit .ck-t{ font-weight:600; font-size:14.5px; color:var(--ink); }
+  #ownerCockpit .ck-m{ color:var(--soft); font-size:12.5px; margin-top:1px; }
+  #ownerCockpit .ck-tag{ font-size:11px; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap; }
+  #ownerCockpit .ck-tag.esc{ background:var(--amber-soft); color:var(--amber-deep); }
+  #ownerCockpit .ck-acts{ display:flex; gap:7px; flex:none; }
+  #ownerCockpit .ck-btn{ font-family:var(--body); font-size:12.5px; font-weight:600; padding:8px 13px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; }
+  #ownerCockpit .ck-btn.pri{ background:var(--orange); border-color:var(--orange); color:#fff; }
+  #ownerCockpit .ck-seg{ display:inline-flex; background:var(--canvas); border:1px solid var(--line); border-radius:10px; padding:3px; gap:2px; }
+  #ownerCockpit .ck-seg button{ font-family:var(--body); font-size:12.5px; font-weight:600; border:none; background:none; color:var(--soft); padding:6px 12px; border-radius:8px; cursor:pointer; }
+  #ownerCockpit .ck-seg button.on{ background:var(--surface); color:var(--ink); box-shadow:0 1px 2px rgba(20,22,27,.08); }
+  #ownerCockpit .ck-av{ width:34px; height:34px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12.5px; color:#fff; font-family:var(--disp); }
+  #ownerCockpit .ck-pchip{ font-size:11.5px; font-weight:600; padding:4px 10px; border-radius:999px; background:var(--canvas); color:var(--soft); }
+  #ownerCockpit .ck-empty{ padding:14px 2px; color:var(--soft); font-size:13.5px; }
+  #ownerCockpit .ck-gh{ font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--soft); font-weight:700; margin:12px 0 6px; }
   /* Managing — chat beside Who's-in-today (was CSS-columns, which stacked them) */
   #manageZone .masonry{ columns:auto; display:grid; grid-template-columns:1.15fr 1fr; gap:16px; align-items:start; }
   #manageZone .masonry > .card{ display:block; width:auto; margin-bottom:0; break-inside:auto; }
@@ -1003,6 +1035,9 @@
            hides this and shows #moduleView when a module route is active.
            Home cards and their wiring are never re-rendered, only shown/hidden. -->
       <div id="homeView">
+      <!-- r1.20 — Owner/manager cockpit. Rendered for owner & managers; hidden for everyone else,
+           who keep the personal home below untouched. Fed by GET /api/me/attention. -->
+      <div id="ownerCockpit" style="display:none;padding:0 16px"></div>
       <!-- r0.14 — Birthday banner: shown only on the user's own birthday. -->
       <div id="birthdayBanner" style="display:none;margin:0 16px 0;">
         <div style="background:var(--amber-soft);border:0.5px solid var(--amber-warm);border-radius:14px;padding:16px 20px;display:flex;align-items:center;gap:14px;margin-top:14px">
@@ -1558,6 +1593,10 @@ function render() {
   const perms = new Set(dash.permissions);
   const can = (p) => perms.has(p) || perms.has('*');
   const isOwner = (me.group_slugs || []).includes('owner');
+  // r1.20 — owner/manager home cockpit. Fire-and-forget; the function gates its own display
+  // and falls back silently for everyone else (who keep the personal home untouched).
+  const isManager_ck = !!(me.departments || []).some(d => d.role === 'manager' || d.role === 'lead') || can('leaves.approve.any') || can('leaves.approve.dept');
+  if (isOwner || isManager_ck) { setTimeout(function(){ try { window.fkRenderCockpit && window.fkRenderCockpit(isOwner, isManager_ck); } catch(e){ console.error('[cockpit]', e); } }, 0); }
   const show = (id) => { const e = document.getElementById(id); if (e) e.style.display = 'flex'; };
   const showText = (id) => { const e = document.getElementById(id); if (e) e.style.display = 'block'; };
 
@@ -3324,6 +3363,125 @@ async function refreshBackupPill() {
 }
 
 init();
+</script>
+<script>
+// r1.20 — Owner/manager home cockpit. Renders the four attention panels into #ownerCockpit
+// and hides the personal home cards for owner/managers. Employees never call this.
+window.fkRenderCockpit = async function (isOwner, isManager) {
+  const host = document.getElementById('ownerCockpit');
+  if (!host) return;
+  let data;
+  try { const r = await fetch('/api/me/attention', { credentials: 'include' }); if (!r.ok) return; data = await r.json(); }
+  catch (e) { return; }
+  const hv = document.getElementById('homeView');
+  if (hv) Array.from(hv.children).forEach(c => { if (c.id !== 'ownerCockpit') c.style.display = 'none'; });
+  host.style.display = '';
+
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmtD = (d) => { if (!d) return ''; const p = String(d).slice(0, 10).split('-'); if (p.length !== 3) return ''; const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (p[2] * 1) + ' ' + (M[p[1] * 1 - 1] || ''); };
+  const av = (p) => '<div class="ck-av" style="background:' + (p.colour || p.avatar_colour || '#888') + '">' + esc(p.initials || '') + '</div>';
+  const STAT = { on_leave: 'On leave', off_sick: 'Off sick', wfh: 'Working from home', off_holiday: 'On holiday' };
+
+  const waiting = data.waiting || [];
+  const present = data.present || [];
+  const watch = data.watch || { overdue_reviews: [], leavers: [], probation: [] };
+  const dg = data.yesterday_digest || {};
+  const wc = waiting.length, escC = waiting.filter(w => w.escalated).length, oc = present.length;
+  const watchN = (watch.overdue_reviews.length + watch.leavers.length + watch.probation.length);
+
+  let h = '';
+  h += '<div class="ck-sum">'
+    + '<div class="ck-pill ' + (wc ? 'red' : '') + '"><span class="n">' + wc + '</span> waiting on you</div>'
+    + (escC ? '<div class="ck-pill amber"><span class="n">' + escC + '</span> stuck / escalated</div>' : '')
+    + '<div class="ck-pill"><span class="n">' + oc + '</span> out today</div>'
+    + '<div class="ck-pill"><span class="n">' + watchN + '</span> to watch</div>'
+    + '</div>';
+
+  if (data.can_set_cover) {
+    const cs = data.cover_state || { active: false };
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;background:' + (cs.active ? 'var(--amber-soft)' : 'var(--surface)') + ';border:1px solid ' + (cs.active ? 'var(--amber-warm)' : 'var(--line)') + ';border-radius:14px;padding:13px 18px;margin-bottom:16px">'
+      + (cs.active
+        ? '<div><div style="font-weight:600;font-size:14px;color:var(--amber-deep)">Your approvals are covered</div><div style="font-size:12.5px;color:var(--amber-deep);opacity:.85">' + esc(cs.deputy_name || 'Your deputy') + ' is handling your queue while you\u2019re away</div></div><button class="ck-btn" data-ck-cover="off">Take it back</button>'
+        : '<div><div style="font-weight:600;font-size:14px">Going away?</div><div style="font-size:12.5px;color:var(--soft)">Hand your approval queue to your deputy \u2014 your oversight stays yours</div></div><button class="ck-btn pri" data-ck-cover="on">Hand over my approvals</button>')
+      + '</div>';
+  }
+
+  h += '<div class="ck-card"><div class="ck-head"><div><h2>Waiting on you</h2><div class="sub">Decisions only you can make</div></div><span class="ck-chip">' + wc + '</span></div><div class="ck-body">';
+  if (!wc) h += '<div class="ck-empty">Nothing waiting \u2014 you\u2019re clear.</div>';
+  else h += waiting.map(w => '<div class="ck-row">'
+    + '<span class="ck-sev ' + (w.severity === 'now' ? 'now' : 'soon') + '"></span>'
+    + '<div class="ck-main"><div class="ck-t">' + esc(w.title) + '</div><div class="ck-m">' + esc(w.detail) + (w.escalated ? ' \u00b7 waiting ' + w.age_days + ' working days' : '') + '</div></div>'
+    + (w.escalated ? '<span class="ck-tag esc">Escalated</span>' : '')
+    + '<div class="ck-acts"><button class="ck-btn" data-ck-msg="' + w.user_id + '">Message</button><button class="ck-btn pri" data-ck-open="approvals">Open</button></div>'
+    + '</div>').join('');
+  h += '</div></div>';
+
+  h += '<div class="ck-card"><div class="ck-head"><div><h2>Out today</h2><div class="sub">Who isn\u2019t at their desk</div></div>'
+    + '<div class="ck-seg"><button class="on" data-ck-pres="all">Whole company</button><button data-ck-pres="mine">My team</button></div></div>'
+    + '<div class="ck-body" id="ckPresBody"></div></div>';
+
+  h += '<div class="ck-card"><div class="ck-head"><div><h2>Watch</h2><div class="sub">Coming up \u2014 keep in view</div></div><span class="ck-chip">' + watchN + '</span></div><div class="ck-body">';
+  if (!watchN) h += '<div class="ck-empty">Nothing on the horizon.</div>';
+  else {
+    watch.probation.forEach(p => { h += '<div class="ck-row"><span class="ck-sev now"></span><div class="ck-main"><div class="ck-t">' + esc(p.display_name || p.full_name) + ' \u2014 probation ending</div><div class="ck-m">Decision needed by ' + fmtD(p.probation_end_date) + '</div></div><button class="ck-btn" data-ck-prof="' + p.id + '">Open</button></div>'; });
+    watch.leavers.forEach(p => { h += '<div class="ck-row"><span class="ck-sev soon"></span><div class="ck-main"><div class="ck-t">' + esc(p.display_name || p.full_name) + ' leaving</div><div class="ck-m">Last working day ' + fmtD(p.last_working_day) + '</div></div><button class="ck-btn" data-ck-prof="' + p.id + '">Open</button></div>'; });
+    watch.overdue_reviews.forEach(t => { h += '<div class="ck-row"><span class="ck-sev soon"></span><div class="ck-main"><div class="ck-t">' + esc(t.title || 'Review') + '</div><div class="ck-m">Overdue' + (t.display_name ? ' \u00b7 ' + esc(t.display_name) : '') + '</div></div></div>'; });
+  }
+  h += '</div></div>';
+
+  const missed = Math.max(0, (dg.active || 0) - (dg.filed || 0));
+  h += '<div class="ck-card"><div class="ck-head"><div><h2>Yesterday in brief</h2><div class="sub">A quiet read \u2014 not a live feed</div></div><span class="ck-chip">' + fmtD(data.yesterday) + '</span></div><div class="ck-body">'
+    + '<div style="display:flex;gap:28px;padding:10px 0">'
+    + '<div><div style="font-family:var(--disp);font-size:23px;font-weight:600">' + (dg.filed || 0) + '<span style="font-size:14px;color:var(--soft)">/' + (dg.active || 0) + '</span></div><div style="font-size:12px;color:var(--soft)">Reports filed</div></div>'
+    + '<div><div style="font-family:var(--disp);font-size:23px;font-weight:600">' + (dg.late || 0) + '</div><div style="font-size:12px;color:var(--soft)">Late in</div></div>'
+    + '<div><div style="font-family:var(--disp);font-size:23px;font-weight:600">' + missed + '</div><div style="font-size:12px;color:var(--soft)">Reports not filed</div></div>'
+    + '</div></div></div>';
+
+  host.innerHTML = h;
+
+  function renderPres(filter) {
+    const list = present.filter(p => filter === 'mine' ? p.mine : true);
+    const body = document.getElementById('ckPresBody'); if (!body) return;
+    if (!list.length) { body.innerHTML = '<div class="ck-empty">' + (filter === 'mine' ? 'No one on your team is out today.' : 'Everyone\u2019s in today.') + '</div>'; return; }
+    const order = ['on_leave', 'off_sick', 'wfh', 'off_holiday']; const groups = {};
+    list.forEach(p => { (groups[p.status] = groups[p.status] || []).push(p); });
+    let g = '';
+    order.forEach(st => { if (!groups[st] || !groups[st].length) return;
+      g += '<div class="ck-gh">' + esc(STAT[st] || st) + '</div>';
+      groups[st].forEach(p => { const chip = (st === 'on_leave' && p.leave_until) ? 'Back ' + fmtD(p.leave_until) : (STAT[st] || '');
+        g += '<div class="ck-row" style="border-top:none;padding:7px 0">' + av(p)
+          + '<div class="ck-main"><div class="ck-t">' + esc(p.display_name || p.full_name) + '</div><div class="ck-m">' + esc(p.dept || '') + '</div></div>'
+          + '<span class="ck-pchip">' + esc(chip) + '</span>'
+          + '<div class="ck-acts"><button class="ck-btn" data-ck-msg="' + p.id + '">Message</button></div></div>';
+      });
+    });
+    body.innerHTML = g;
+  }
+  renderPres('all');
+
+  // Single assigned handler (never stacks across reloads).
+  host.onclick = async function (ev) {
+    const cov = ev.target.closest('[data-ck-cover]');
+    if (cov) {
+      const on = cov.getAttribute('data-ck-cover') === 'on';
+      cov.disabled = true;
+      try {
+        const r = await fetch('/api/me/cover', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ on: on }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { alert(d.error || 'Could not update cover'); cov.disabled = false; return; }
+        window.fkRenderCockpit(isOwner, isManager);
+      } catch (e) { alert('Network error'); cov.disabled = false; }
+      return;
+    }
+    const seg = ev.target.closest('[data-ck-pres]');
+    if (seg) { host.querySelectorAll('[data-ck-pres]').forEach(b => b.classList.remove('on')); seg.classList.add('on'); renderPres(seg.getAttribute('data-ck-pres')); return; }
+    const msg = ev.target.closest('[data-ck-msg]');
+    if (msg) { const uid = msg.getAttribute('data-ck-msg'); try { const r = await fetch('/api/chat/dm/' + uid + '/open', { method: 'POST', credentials: 'include' }); const d = await r.json().catch(() => ({})); location.hash = d.channel_id ? '#chat/' + d.channel_id : '#chat'; } catch (e) { location.hash = '#chat'; } return; }
+    if (ev.target.closest('[data-ck-open]')) { location.hash = '#hr/approvals'; return; }
+    const pr = ev.target.closest('[data-ck-prof]');
+    if (pr) { location.hash = '#profile/' + pr.getAttribute('data-ck-prof'); return; }
+  };
+};
 </script>
 </body>
 </html>

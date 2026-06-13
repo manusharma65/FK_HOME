@@ -359,14 +359,29 @@ router.get('/mine', async (req, res) => {
 });
 
 // ---------- PENDING (manager / HR) ----------
+// r1.20 — Away-cover: the leave-approval scope a deputy inherits from active covers.
+// Defensive: if the table isn't present yet (first boot before migration runs), returns empty.
+async function coverFor(deputyUserId) {
+  try {
+    const r = await db.query(
+      `SELECT scope_any, dept_ids FROM approval_cover WHERE deputy_user_id = $1 AND active = TRUE`,
+      [deputyUserId]);
+    let any = false, deptIds = [];
+    for (const row of r.rows) { if (row.scope_any) any = true; if (Array.isArray(row.dept_ids)) deptIds = deptIds.concat(row.dept_ids); }
+    return { any, deptIds };
+  } catch (e) { return { any: false, deptIds: [] }; }
+}
+
 router.get('/pending', async (req, res) => {
-  const canAny = req.user.can('leaves.approve.any');
-  const canDept = req.user.can('leaves.approve.dept');
-  if (!canAny && !canDept) return res.status(403).json({ error: 'Permission denied' });
+  const cover = await coverFor(req.user.id);
+  const effAny = req.user.can('leaves.approve.any') || cover.any;
+  const ownDeptIds = req.user.departments.filter(d => d.role === 'manager' || d.role === 'lead').map(d => d.id);
+  const effDeptIds = Array.from(new Set([...ownDeptIds, ...cover.deptIds]));
+  if (!effAny && effDeptIds.length === 0) return res.status(403).json({ error: 'Permission denied' });
 
   try {
     let query, params;
-    if (canAny) {
+    if (effAny) {
       query = `
         SELECT lr.*, u.full_name AS user_full_name, u.display_name AS user_display_name,
                u.initials AS user_initials, u.avatar_colour AS user_avatar_colour
@@ -375,11 +390,7 @@ router.get('/pending', async (req, res) => {
         ORDER BY lr.start_date`;
       params = [];
     } else {
-      // Dept managers see requests for users in their managed departments
-      const managedDeptIds = req.user.departments
-        .filter(d => d.role === 'manager' || d.role === 'lead')
-        .map(d => d.id);
-      if (managedDeptIds.length === 0) return res.json({ requests: [] });
+      if (effDeptIds.length === 0) return res.json({ requests: [] });
       query = `
         SELECT DISTINCT lr.*, u.full_name AS user_full_name, u.display_name AS user_display_name,
                u.initials AS user_initials, u.avatar_colour AS user_avatar_colour
@@ -388,7 +399,7 @@ router.get('/pending', async (req, res) => {
         JOIN user_department_memberships m ON m.user_id = u.id AND m.deleted_at IS NULL
         WHERE lr.status = 'pending' AND m.department_id = ANY($1::int[])
         ORDER BY lr.start_date`;
-      params = [managedDeptIds];
+      params = [effDeptIds];
     }
     const r = await db.query(query, params);
 
@@ -419,9 +430,11 @@ router.get('/pending', async (req, res) => {
 
 // ---------- APPROVE / REJECT ----------
 router.post('/:id/decide', async (req, res) => {
-  const canAny = req.user.can('leaves.approve.any');
-  const canDept = req.user.can('leaves.approve.dept');
-  if (!canAny && !canDept) return res.status(403).json({ error: 'Permission denied' });
+  const cover = await coverFor(req.user.id);
+  const canAny = req.user.can('leaves.approve.any') || cover.any;
+  const ownDeptIds = req.user.departments.filter(d => d.role === 'manager' || d.role === 'lead').map(d => d.id);
+  const effDeptIds = Array.from(new Set([...ownDeptIds, ...cover.deptIds]));
+  if (!canAny && effDeptIds.length === 0) return res.status(403).json({ error: 'Permission denied' });
 
   const id = parseInt(req.params.id, 10);
   const { decision, decision_note } = req.body || {};
@@ -433,16 +446,14 @@ router.post('/:id/decide', async (req, res) => {
     const lr = r.rows[0];
     if (lr.status !== 'pending') return res.status(400).json({ error: 'Only pending requests can be decided' });
 
-    // If dept-only manager, check they manage this user's dept
+    // Not an any-scope approver: the request's dept must be in my effective scope
+    // (own managed depts ∪ any depts I'm currently covering for someone away).
     if (!canAny) {
-      const managedDeptIds = req.user.departments
-        .filter(d => d.role === 'manager' || d.role === 'lead')
-        .map(d => d.id);
       const userDepts = await db.query(
         `SELECT department_id FROM user_department_memberships WHERE user_id = $1 AND deleted_at IS NULL`,
         [lr.user_id]
       );
-      const overlap = userDepts.rows.some(x => managedDeptIds.includes(x.department_id));
+      const overlap = userDepts.rows.some(x => effDeptIds.includes(x.department_id));
       if (!overlap) return res.status(403).json({ error: 'You do not manage this user\'s department' });
     }
 
