@@ -167,6 +167,22 @@ const GROUPS = [
     ]
   },
   {
+    slug: 'ops-deputy',
+    name: 'Operations Deputy',
+    description: "Bobby's deputy — manages their own teams (dept-scoped) and (in later ships) covers Bobby's approvals when away. No HR or admin access.",
+    is_system: true,
+    permissions: [
+      ...EMPLOYEE_BASE_PERMS,
+      'leaves.approve.dept','leaves.view.dept',
+      'attendance.view.dept','attendance.regularise.approve.dept',
+      'daily_report.view.dept','daily_report.review.dept',
+      'profile.view.dept','profile.edit.dept',
+      'reviews.complete',
+      // Deputy powers (device authorisation, all-late notifications, away-cover approvals)
+      // are added to THIS group only, in later ships — so they never leak to other managers.
+    ]
+  },
+  {
     slug: 'hr-team',
     name: 'HR Team',
     description: 'HR can manage leaves, lateness, and people.',
