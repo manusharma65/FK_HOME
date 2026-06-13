@@ -22,7 +22,7 @@ function throttleKey(req, email) { return (req.ip || '?') + '|' + String(email |
 // attendance (Head of Ops, e.g. Satyam) — so device setup isn't blocked when the
 // owner isn't on site.
 function canTrustDevices(u) {
-  try { return u.inGroup('owner') || u.can('attendance.view.any'); } catch (e) { return false; }
+  try { return u.inGroup('owner') || u.can('attendance.device.trust') || u.can('attendance.view.any'); } catch (e) { return false; }
 }
 function lockSecondsLeft(key) { const e = LOGIN_FAILS.get(key); return (e && e.until && e.until > Date.now()) ? Math.ceil((e.until - Date.now()) / 1000) : 0; }
 function noteLoginFail(key) { const now = Date.now(); let e = LOGIN_FAILS.get(key); if (!e || now - e.first > WINDOW_MS) e = { n: 0, first: now, until: 0 }; e.n += 1; if (e.n >= MAX_FAILS) e.until = now + LOCK_MS; LOGIN_FAILS.set(key, e); }

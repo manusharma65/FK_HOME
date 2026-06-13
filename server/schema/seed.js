@@ -60,6 +60,7 @@ const PERMISSIONS = [
   { slug: 'attendance.regularise.request',   module: 'attendance', description: 'Submit an attendance correction request' },
   { slug: 'attendance.regularise.approve.dept', module: 'attendance', description: 'Approve attendance corrections for your department' },
   { slug: 'attendance.regularise.approve.any',  module: 'attendance', description: 'Approve attendance corrections for anyone' },
+  { slug: 'attendance.device.trust',            module: 'attendance', description: 'Mark/trust office computers for clock-in' },
   { slug: 'attendance.view.own',             module: 'attendance', description: 'View own attendance record' },
   { slug: 'attendance.view.dept',            module: 'attendance', description: 'View attendance for your department' },
   { slug: 'attendance.view.any',             module: 'attendance', description: 'View attendance company-wide' },
@@ -178,8 +179,9 @@ const GROUPS = [
       'daily_report.view.dept','daily_report.review.dept',
       'profile.view.dept','profile.edit.dept',
       'reviews.complete',
-      // Deputy powers (device authorisation, all-late notifications, away-cover approvals)
-      // are added to THIS group only, in later ships — so they never leak to other managers.
+      // Deputy power #1 — device authorisation: trust office PCs without HR/admin access.
+      'attendance.device.trust',
+      // Deputy powers (all-late notifications, away-cover approvals) are added to THIS group only, in later ships.
     ]
   },
   {

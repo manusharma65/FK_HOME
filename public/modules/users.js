@@ -247,7 +247,9 @@ window.fkModules['hr/users'] = {
       const ringPct=bal!=null?Math.max(0,Math.min(1,bal/24)):0;
       const dash=Math.round(276.5*(1-ringPct));
       const st=u.employment_status||'active';
-      const canDelete_=!!(window.fkUser&&(window.fkUser.permissions||[]).includes('admin.users.delete'));
+      // window.fkUser carries group_slugs (not permissions), so gate on group:
+      // owner + HR are exactly who hold admin.users.delete. Backend still enforces the perm.
+      const canDelete_=!!(window.fkUser&&(window.fkUser.group_slugs||[]).some(function(g){return g==='owner'||g==='hr-team';}));
       const isArchived_=!!u.deleted_at;
       const archiveBtn_= (canDelete_&&isArchived_)
         ? '<button class="ubtn" id="rRestore" style="border-color:var(--green);color:var(--green)">↩ Restore person</button>'

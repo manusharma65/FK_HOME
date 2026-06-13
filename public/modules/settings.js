@@ -60,16 +60,6 @@ window.fkModules['system/settings'] = {
             '<div id="setBackfillResult" style="margin-top:14px;font-size:14px;color:var(--ink)"></div>' +
           '</div>' +
         '</div>' +
-
-        '<div class="card" id="setDevicesCard" style="display:none">' +
-          '<div class="card-head"><h2 style="margin:0">Trusted office devices</h2></div>' +
-          '<div style="padding:18px;max-width:600px">' +
-            '<p style="font-size:14px;color:var(--muted);margin:0 0 14px">Mark a computer as an <strong>office machine</strong>. Clock-ins from a trusted machine count as office and take a photo; clock-ins from anywhere else are marked working-from-home for HR to review. Do this once on each office computer.</p>' +
-            '<button class="btn btn-primary" id="setTrustBtn">Trust this computer</button>' +
-            '<div id="setTrustResult" style="margin-top:12px;font-size:14px"></div>' +
-            '<div id="setDeviceList" style="margin-top:14px"></div>' +
-          '</div>' +
-        '</div>' +
       '</div>';
   },
 
@@ -158,46 +148,6 @@ window.fkModules['system/settings'] = {
       btn.disabled = false; btn.textContent = 'Generate review schedules now';
     });
 
-    const fmtDate = (s) => { try { return new Date(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
-    const escd = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-    async function loadDevices() {
-      try {
-        const r = await fetch('/api/auth/trusted-devices', { credentials: 'include' });
-        if (!r.ok) { $('setDevicesCard').style.display = 'none'; return; } // not permitted — keep hidden
-        $('setDevicesCard').style.display = '';
-        const d = await r.json();
-        const list = $('setDeviceList');
-        if (!d.devices || !d.devices.length) { list.innerHTML = '<p style="font-size:13px;color:var(--muted)">No trusted devices yet.</p>'; return; }
-        list.innerHTML = d.devices.map(dev =>
-          '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid var(--line)">' +
-            '<div><div style="font-size:14px;font-weight:600;color:var(--ink)">' + escd(dev.label || 'Office device') + '</div>' +
-            '<div style="font-size:12px;color:var(--muted)">added ' + fmtDate(dev.created_at) + (dev.last_seen_at ? ' · last seen ' + fmtDate(dev.last_seen_at) : '') + '</div></div>' +
-            '<button class="btn" data-revoke="' + dev.id + '" style="font-size:13px;padding:7px 12px">Revoke</button>' +
-          '</div>').join('');
-        list.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
-          if (!confirm('Revoke this device? Clock-ins from it will be treated as working-from-home.')) return;
-          await fetch('/api/auth/trusted-devices/' + b.getAttribute('data-revoke') + '/revoke', { method: 'POST', credentials: 'include' });
-          loadDevices();
-        }));
-      } catch (e) { $('setDevicesCard').style.display = 'none'; }
-    }
-
-    $('setTrustBtn').addEventListener('click', async () => {
-      const btn = $('setTrustBtn'), res = $('setTrustResult');
-      btn.disabled = true; btn.textContent = 'Trusting…';
-      try {
-        const r = await fetch('/api/auth/trust-device', {
-          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ label: 'Office · ' + (navigator.platform || 'computer') }),
-        });
-        if (r.ok) { res.innerHTML = '<span style="color:var(--green)">This computer is now a trusted office device.</span>'; loadDevices(); }
-        else { const d = await r.json().catch(() => ({})); res.innerHTML = '<span style="color:var(--red)">' + (d.error || 'Failed') + '</span>'; }
-      } catch (e) { res.innerHTML = '<span style="color:var(--red)">Network error</span>'; }
-      btn.disabled = false; btn.textContent = 'Trust this computer';
-    });
-
-    loadDevices();
     await load();
   }
 };

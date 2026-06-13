@@ -99,6 +99,17 @@ window.fkModules['hr/attendance'] = {
             '<span><i style="background:#F1EFE8"></i>Holiday</span>' +
           '</div>' +
         '</div>' +
+      '</div>' +
+      // Deputy device authorisation (moved here from Settings so HR + Ops Deputy can reach it).
+      // Self-gates: stays hidden unless the viewer is permitted (canTrustDevices).
+      '<div class="card" id="setDevicesCard" style="display:none;margin-top:18px">' +
+        '<div class="card-head"><h2 style="margin:0">Trusted office devices</h2></div>' +
+        '<div style="padding:18px;max-width:600px">' +
+          '<p style="font-size:14px;color:var(--muted);margin:0 0 14px">Mark a computer as an <strong>office machine</strong>. Clock-ins from a trusted machine count as office and take a photo; clock-ins from anywhere else are marked working-from-home for HR to review. Do this once on each office computer.</p>' +
+          '<button class="btn btn-primary" id="setTrustBtn">Trust this computer</button>' +
+          '<div id="setTrustResult" style="margin-top:12px;font-size:14px"></div>' +
+          '<div id="setDeviceList" style="margin-top:14px"></div>' +
+        '</div>' +
       '</div>';
   },
 
@@ -264,6 +275,48 @@ window.fkModules['hr/attendance'] = {
     $('taSumNext').addEventListener('click', () => { month_++; if (month_ > 12) { month_ = 1; year_++; } loadSummaryWrapped(); });
     $('taCalPrev').addEventListener('click', () => { month_--; if (month_ < 1) { month_ = 12; year_--; } renderCalendar(); });
     $('taCalNext').addEventListener('click', () => { month_++; if (month_ > 12) { month_ = 1; year_++; } renderCalendar(); });
+
+    // ---- Deputy device authorisation (self-contained; moved from Settings) ----
+    (function setupDevices(){
+      const fmtDate = (s) => { try { return new Date(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
+      const escd = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      async function loadDevices() {
+        try {
+          const r = await fetch('/api/auth/trusted-devices', { credentials: 'include' });
+          if (!r.ok) { $('setDevicesCard').style.display = 'none'; return; }
+          $('setDevicesCard').style.display = '';
+          const d = await r.json();
+          const list = $('setDeviceList');
+          if (!d.devices || !d.devices.length) { list.innerHTML = '<p style="font-size:13px;color:var(--muted)">No trusted devices yet.</p>'; return; }
+          list.innerHTML = d.devices.map(dev =>
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid var(--line)">' +
+              '<div><div style="font-size:14px;font-weight:600;color:var(--ink)">' + escd(dev.label || 'Office device') + '</div>' +
+              '<div style="font-size:12px;color:var(--muted)">added ' + fmtDate(dev.created_at) + (dev.last_seen_at ? ' · last seen ' + fmtDate(dev.last_seen_at) : '') + '</div></div>' +
+              '<button class="btn" data-revoke="' + dev.id + '" style="font-size:13px;padding:7px 12px">Revoke</button>' +
+            '</div>').join('');
+          list.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
+            if (!confirm('Revoke this device? Clock-ins from it will be treated as working-from-home.')) return;
+            await fetch('/api/auth/trusted-devices/' + b.getAttribute('data-revoke') + '/revoke', { method: 'POST', credentials: 'include' });
+            loadDevices();
+          }));
+        } catch (e) { $('setDevicesCard').style.display = 'none'; }
+      }
+      const tb = $('setTrustBtn');
+      if (tb) tb.addEventListener('click', async () => {
+        const btn = $('setTrustBtn'), res = $('setTrustResult');
+        btn.disabled = true; btn.textContent = 'Trusting…';
+        try {
+          const r = await fetch('/api/auth/trust-device', {
+            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: 'Office · ' + (navigator.platform || 'computer') }),
+          });
+          if (r.ok) { res.innerHTML = '<span style="color:var(--green)">This computer is now a trusted office device.</span>'; loadDevices(); }
+          else { const d = await r.json().catch(() => ({})); res.innerHTML = '<span style="color:var(--red)">' + (d.error || 'Failed') + '</span>'; }
+        } catch (e) { res.innerHTML = '<span style="color:var(--red)">Network error</span>'; }
+        btn.disabled = false; btn.textContent = 'Trust this computer';
+      });
+      loadDevices();
+    })();
 
     await loadSummaryWrapped();
   }
