@@ -1035,9 +1035,6 @@
            hides this and shows #moduleView when a module route is active.
            Home cards and their wiring are never re-rendered, only shown/hidden. -->
       <div id="homeView">
-      <!-- r1.20 — Owner/manager cockpit. Rendered for owner & managers; hidden for everyone else,
-           who keep the personal home below untouched. Fed by GET /api/me/attention. -->
-      <div id="ownerCockpit" style="display:none;padding:0 16px"></div>
       <!-- r0.14 — Birthday banner: shown only on the user's own birthday. -->
       <div id="birthdayBanner" style="display:none;margin:0 16px 0;">
         <div style="background:var(--amber-soft);border:0.5px solid var(--amber-warm);border-radius:14px;padding:16px 20px;display:flex;align-items:center;gap:14px;margin-top:14px">
@@ -1057,6 +1054,10 @@
           <p class="greet-sub" id="greetSub">—</p>
         </div>
       </div>
+      <!-- r1.21 — Owner/manager cockpit sits directly under the greeting; the rest of the
+           home stays exactly as it was (nothing hidden). class="home-zone" aligns it to the
+           same gutter as the cards below. Fed by GET /api/me/attention. -->
+      <div id="ownerCockpit" class="home-zone" style="display:none"></div>
 
       <!-- Top alerts (full width, above the day) -->
       <div class="home-zone" style="padding-top:4px">
@@ -1271,10 +1272,10 @@
             </div>
             <div class="off-label">Not expected — off today</div>
             <div class="kpi-row off">
-              <div class="kpi" id="kpiOffWrap" title="Pattern / CS rota / holiday" style="cursor:default">
+              <div class="kpi" id="kpiOffWrap" title="Pattern / CS rota / holiday" style="cursor:pointer" onclick="openPeopleModalFiltered('off')">
                 <div class="v" id="kpiOff">—</div><div class="l" id="kpiOffLabel">Off</div>
               </div>
-              <div class="kpi voluntary"><div class="v" id="kpiVoluntary">—</div><div class="l">Worked anyway</div></div>
+              <div class="kpi voluntary" style="cursor:pointer" onclick="openPeopleModalFiltered('worked_voluntary')"><div class="v" id="kpiVoluntary">—</div><div class="l">Worked anyway</div></div>
             </div>
             <button class="view-all" onclick="openPeopleModal()">View all people →</button>
           </div>
@@ -3196,8 +3197,9 @@ function renderPeopleTable() {
   const presById = {};
   (typeof _allPeople !== 'undefined' ? _allPeople : []).forEach(p => { if (p && p.id != null) presById[p.id] = p.status; });
   const PRES_BADGE = { heads_down: ['Heads down', '#7F77DD'], in_meeting: ['In meeting', '#378ADD'], on_break: ['On break', '#85B7EB'], wfh: ['WFH', '#1D9E75'] };
+  const OFF_SET = ['off_pattern', 'off_cs_rota', 'off_holiday'];
   const rows = attOverviewRows
-    .filter(r => attOverviewFilter === 'all' || r.status === attOverviewFilter)
+    .filter(r => attOverviewFilter === 'all' || r.status === attOverviewFilter || (attOverviewFilter === 'off' && OFF_SET.includes(r.status)))
     .map(r => {
       const tm = r.first_login ? formatTime(r.first_login) : '—';
       const cls = statusPillClass(r.status);
@@ -3373,8 +3375,8 @@ window.fkRenderCockpit = async function (isOwner, isManager) {
   let data;
   try { const r = await fetch('/api/me/attention', { credentials: 'include' }); if (!r.ok) return; data = await r.json(); }
   catch (e) { return; }
-  const hv = document.getElementById('homeView');
-  if (hv) Array.from(hv.children).forEach(c => { if (c.id !== 'ownerCockpit') c.style.display = 'none'; });
+  // r1.21 — do NOT hide the rest of the home. The cockpit is an extra section under
+  // the greeting; everything below it stays exactly as it was.
   host.style.display = '';
 
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -3390,6 +3392,7 @@ window.fkRenderCockpit = async function (isOwner, isManager) {
   const watchN = (watch.overdue_reviews.length + watch.leavers.length + watch.probation.length);
 
   let h = '';
+  h += '<div class="zone-label"><span class="zt">At a glance</span><span class="zline"></span></div>';
   h += '<div class="ck-sum">'
     + '<div class="ck-pill ' + (wc ? 'red' : '') + '"><span class="n">' + wc + '</span> waiting on you</div>'
     + (escC ? '<div class="ck-pill amber"><span class="n">' + escC + '</span> stuck / escalated</div>' : '')
