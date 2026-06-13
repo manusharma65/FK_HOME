@@ -15,6 +15,54 @@ const attendance = require('./attendance');
 const router = express.Router();
 router.use(requireAuth);
 
+// r1.25 — Two-stage approval routing helpers.
+// The line manager(s)/lead(s) of the requester's department(s), excluding the
+// requester themselves (a manager applying for leave skips straight to HR).
+async function getDeptManagersFor(userId) {
+  const r = await db.query(
+    `SELECT DISTINCT m2.user_id
+       FROM user_department_memberships m1
+       JOIN user_department_memberships m2 ON m2.department_id = m1.department_id
+       JOIN users u ON u.id = m2.user_id
+      WHERE m1.user_id = $1 AND m1.deleted_at IS NULL
+        AND m2.role IN ('manager','lead') AND m2.deleted_at IS NULL
+        AND m2.user_id <> $1
+        AND u.deleted_at IS NULL AND u.employment_status = 'active'`,
+    [userId]
+  );
+  return r.rows.map(x => x.user_id);
+}
+
+// The HR approver: the senior-most active hr-team member who is not on approved
+// leave today (Tanu first; falls back to Deepanshi / next if she's away). Returns
+// a single user id, or null if there's no HR team. Never the owner.
+async function getHrApprover() {
+  const r = await db.query(
+    `SELECT u.id,
+            COALESCE(MAX(CASE m.role WHEN 'manager' THEN 4 WHEN 'lead' THEN 3 WHEN 'senior' THEN 2 ELSE 1 END), 1) AS rank
+       FROM user_groups ug
+       JOIN groups g ON g.id = ug.group_id
+       JOIN users u ON u.id = ug.user_id
+       LEFT JOIN user_department_memberships m ON m.user_id = u.id AND m.deleted_at IS NULL
+      WHERE g.slug = 'hr-team' AND u.deleted_at IS NULL AND u.employment_status = 'active'
+      GROUP BY u.id
+      ORDER BY rank DESC, u.id ASC`
+  );
+  const ids = r.rows.map(x => x.id);
+  if (ids.length === 0) return null;
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date());
+  for (const uid of ids) {
+    const out = await db.query(
+      `SELECT 1 FROM leave_requests
+        WHERE user_id = $1 AND status = 'approved'
+          AND $2::date BETWEEN start_date AND end_date LIMIT 1`,
+      [uid, today]
+    );
+    if (out.rows.length === 0) return uid; // first senior who isn't on leave today
+  }
+  return ids[0]; // everyone's away — still route to the most senior
+}
+
 // Helper — count the user's actual WORKING days in [start, end] inclusive.
 // Uses the same resolver as attendance: respects the alternating-Saturday
 // pattern, the CS rota, and public holidays. A day counts only if the person
@@ -173,18 +221,27 @@ router.post('/request', async (req, res) => {
       await logAudit({ req, module: 'leaves', action: 'request.created', target_type: 'leave_request', target_id: r.rows[0].id, after: r.rows[0] });
     } catch (e) { console.error('[leaves/request] audit failed:', e.message); }
 
+    // r1.25 — Two-stage routing. A request goes to the line manager first; if the
+    // requester has no manager (or is themselves a manager/lead) it goes straight to HR.
+    // No more fan-out to owner + every HR at once.
     try {
       const range = start_date === end_date
         ? formatDateUK(start_date)
         : `${formatDateUK(start_date)} → ${formatDateUK(end_date)}`;
       const daysText = `${formatDays(totalDays)} day${totalDays === 1 ? '' : 's'}`;
-      await notifyEvent('leave.requested', {
+      const managers = await getDeptManagersFor(req.user.id);
+      let stage, approverId;
+      if (managers.length > 0) { stage = 'manager'; approverId = managers[0]; }
+      else { stage = 'hr'; approverId = await getHrApprover(); }
+      await db.query(`UPDATE leave_requests SET stage = $1 WHERE id = $2`, [stage, r.rows[0].id]);
+      await notifyEvent(stage === 'manager' ? 'leave.requested' : 'leave.awaiting_hr', {
         actorUserId: req.user.id,
         name: req.user.display_name || req.user.full_name,
         range, daysText, reason: reason || null,
         related_id: r.rows[0].id,
+        approverId,
       });
-    } catch (e) { console.error('[leaves/request] notify failed:', e.message); }
+    } catch (e) { console.error('[leaves/request] routing/notify failed:', e.message); }
 
     res.json({ ok: true, request: r.rows[0] });
   } catch (err) {
@@ -386,7 +443,7 @@ router.get('/pending', async (req, res) => {
         SELECT lr.*, u.full_name AS user_full_name, u.display_name AS user_display_name,
                u.initials AS user_initials, u.avatar_colour AS user_avatar_colour
         FROM leave_requests lr JOIN users u ON u.id = lr.user_id
-        WHERE lr.status = 'pending'
+        WHERE lr.status = 'pending' AND COALESCE(lr.stage, 'hr') = 'hr'
         ORDER BY lr.start_date`;
       params = [];
     } else {
@@ -397,7 +454,7 @@ router.get('/pending', async (req, res) => {
         FROM leave_requests lr
         JOIN users u ON u.id = lr.user_id
         JOIN user_department_memberships m ON m.user_id = u.id AND m.deleted_at IS NULL
-        WHERE lr.status = 'pending' AND m.department_id = ANY($1::int[])
+        WHERE lr.status = 'pending' AND lr.stage = 'manager' AND m.department_id = ANY($1::int[])
         ORDER BY lr.start_date`;
       params = [effDeptIds];
     }
@@ -446,27 +503,57 @@ router.post('/:id/decide', async (req, res) => {
     const lr = r.rows[0];
     if (lr.status !== 'pending') return res.status(400).json({ error: 'Only pending requests can be decided' });
 
-    // Not an any-scope approver: the request's dept must be in my effective scope
-    // (own managed depts ∪ any depts I'm currently covering for someone away).
-    if (!canAny) {
-      const userDepts = await db.query(
+    // r1.25 — Two-stage decision. stage 'manager' = awaiting the line manager;
+    // stage 'hr' = awaiting HR (final). Legacy rows with no stage are treated as 'hr'.
+    const stage = lr.stage || 'hr';
+    const managesThisUser = async () => {
+      const ud = await db.query(
         `SELECT department_id FROM user_department_memberships WHERE user_id = $1 AND deleted_at IS NULL`,
-        [lr.user_id]
-      );
-      const overlap = userDepts.rows.some(x => effDeptIds.includes(x.department_id));
-      if (!overlap) return res.status(403).json({ error: 'You do not manage this user\'s department' });
+        [lr.user_id]);
+      return ud.rows.some(x => effDeptIds.includes(x.department_id));
+    };
+    const range2 = lr.start_date === lr.end_date
+      ? formatDateUK(lr.start_date)
+      : `${formatDateUK(lr.start_date)} → ${formatDateUK(lr.end_date)}`;
+    const daysText2 = `${formatDays(lr.total_days)} day${Number(lr.total_days) === 1 ? '' : 's'}`;
+
+    // ---------- STAGE 1: line manager ----------
+    if (stage === 'manager') {
+      if (!canAny && !(await managesThisUser())) {
+        return res.status(403).json({ error: 'You do not manage this user\'s department' });
+      }
+      if (decision === 'rejected') {
+        await db.query(
+          `UPDATE leave_requests SET status='rejected', stage=NULL, decided_by_user_id=$1,
+                  decided_at=NOW(), decision_note=$2, updated_at=NOW() WHERE id=$3`,
+          [req.user.id, decision_note || null, id]);
+        try { await logAudit({ req, module:'leaves', action:'request.rejected', target_type:'leave_request', target_id:id, before:{status:'pending',stage:'manager'}, after:{status:'rejected'} }); } catch (e) { console.error('[leaves/decide] audit failed:', e.message); }
+        try { await notifyEvent('leave.rejected', { actorUserId: lr.user_id, range: range2, daysText: daysText2, decisionNote: decision_note || null, related_id: id }); } catch (e) { console.error('[leaves/decide] notify failed:', e.message); }
+        return res.json({ ok: true, stage: 'done' });
+      }
+      // manager approves -> hand to HR (notify HR + create the HR task HERE, not on request)
+      const hrId = await getHrApprover();
+      await db.query(`UPDATE leave_requests SET stage='hr', updated_at=NOW() WHERE id=$1`, [id]);
+      try { await logAudit({ req, module:'leaves', action:'request.manager_approved', target_type:'leave_request', target_id:id, before:{stage:'manager'}, after:{stage:'hr'} }); } catch (e) { console.error('[leaves/decide] audit failed:', e.message); }
+      try {
+        const who = await db.query(`SELECT display_name, full_name FROM users WHERE id=$1`, [lr.user_id]);
+        const nm = who.rows[0] ? (who.rows[0].display_name || who.rows[0].full_name) : 'An employee';
+        await notifyEvent('leave.awaiting_hr', { actorUserId: lr.user_id, name: nm, range: range2, daysText: daysText2, reason: lr.reason || null, related_id: id, approverId: hrId });
+      } catch (e) { console.error('[leaves/decide] awaiting_hr notify failed:', e.message); }
+      return res.json({ ok: true, stage: 'hr' });
     }
+
+    // ---------- STAGE 2: HR (final) ----------
+    if (!canAny) return res.status(403).json({ error: 'This request is awaiting HR — only HR can give final approval.' });
 
     await db.query(
       `UPDATE leave_requests
-       SET status = $1, decided_by_user_id = $2, decided_at = NOW(), decision_note = $3, updated_at = NOW()
+       SET status = $1, stage = NULL, decided_by_user_id = $2, decided_at = NOW(), decision_note = $3, updated_at = NOW()
        WHERE id = $4`,
       [decision, req.user.id, decision_note || null, id]
     );
 
-    // r0.31 — the leave decision is the single source of truth. Close the HR-queue
-    // task the router created for this leave (matched by event_related_id) so it
-    // doesn't linger as "open" after the leave is decided.
+    // Close the HR-queue task the router created (matched by event_related_id).
     try {
       await db.query(
         `UPDATE tasks
@@ -483,12 +570,11 @@ router.post('/:id/decide', async (req, res) => {
     const startStr = new Date(lr.start_date).toISOString().slice(0, 10);
     const endStr = new Date(lr.end_date).toISOString().slice(0, 10);
 
-    // Balance recompute is a derivative cache update — never let it fail the
-    // decision (which is already committed above).
+    // Balance recompute is a derivative cache update — never let it fail the decision.
     try { await recomputeBalance(lr.user_id); }
     catch (e) { console.error('[leaves/decide] recomputeBalance failed:', e.message); }
 
-    // Log to accrual ledger so the take is visible in audit history.
+    // Effects apply ONLY on final HR approval.
     if (decision === 'approved') {
       try {
         await db.query(
@@ -502,32 +588,24 @@ router.post('/:id/decide', async (req, res) => {
       } catch (e) {
         console.error('[leaves/decide] accrual-log insert failed:', e.message);
       }
-      // r0.15 (HR-1.5) — recompute weekend pay for every Mon–Sun week
-      // overlapping this leave, in case it pushes the week below 5 days.
       try {
-        const r = await leaveEngine.recomputeWeekendPayForRange(lr.user_id, startStr, endStr);
-        console.log(`[leaves/decide] weekend pay recomputed for user ${lr.user_id} weeks=${r.weeks || 0}`);
+        const wr = await leaveEngine.recomputeWeekendPayForRange(lr.user_id, startStr, endStr);
+        console.log(`[leaves/decide] weekend pay recomputed for user ${lr.user_id} weeks=${wr.weeks || 0}`);
       } catch (e) {
         console.error('[leaves/decide] weekend recompute failed:', e.message);
       }
     }
 
-    // Decision is saved above — audit + notify must never 500 the response
-    // (this is what made approve/reject "do nothing" while actually working).
     try {
       await logAudit({
         req, module: 'leaves',
         action: decision === 'approved' ? 'request.approved' : 'request.rejected',
         target_type: 'leave_request', target_id: id,
-        before: { status: lr.status }, after: { status: decision, decision_note }
+        before: { status: lr.status, stage: 'hr' }, after: { status: decision, decision_note }
       });
     } catch (e) { console.error('[leaves/decide] audit failed:', e.message); }
 
     try {
-      const range2 = lr.start_date === lr.end_date
-        ? formatDateUK(lr.start_date)
-        : `${formatDateUK(lr.start_date)} → ${formatDateUK(lr.end_date)}`;
-      const daysText2 = `${formatDays(lr.total_days)} day${Number(lr.total_days) === 1 ? '' : 's'}`;
       await notifyEvent(decision === 'approved' ? 'leave.approved' : 'leave.rejected', {
         actorUserId: lr.user_id,
         range: range2, daysText: daysText2,
@@ -536,7 +614,7 @@ router.post('/:id/decide', async (req, res) => {
       });
     } catch (e) { console.error('[leaves/decide] notify failed:', e.message); }
 
-    res.json({ ok: true });
+    res.json({ ok: true, stage: 'done' });
   } catch (err) {
     console.error('[leaves/decide] error:', err);
     res.status(500).json({ error: 'Failed to decide' });
@@ -544,3 +622,5 @@ router.post('/:id/decide', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getDeptManagersFor = getDeptManagersFor;
+module.exports.getHrApprover = getHrApprover;

@@ -51,7 +51,7 @@ const monitoring = require('./server/modules/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r1.22';
+const VERSION = 'r1.25';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -266,6 +266,9 @@ async function start() {
       startCronJobs();
       // Run one immediate 5-min tick on boot, in case the server was down for a while.
       attendanceRoutes.tickFiveMinute().catch(e => console.error('[cron boot tick]', e.message));
+      // r1.25 — after migrations correct the pattern anchor, re-derive today's already-written
+      // attendance rows (the midnight tick won't heal non-pending rows on its own).
+      attendanceRoutes.reconcileTodayPattern().catch(e => console.error('[boot reconcile]', e.message));
     });
   } catch (err) {
     console.error('[boot] FATAL:', err.message);

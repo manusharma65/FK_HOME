@@ -88,6 +88,10 @@ window.fkModules['leaves-time'] = {
         '<p class="sec-lbl">Lateness &amp; corrections</p>' +
         '<div class="panel" id="ltLatePanel"><div class="empty">Loading\u2026</div></div>' +
 
+        // Company holidays (r1.25 — so staff can see the national holidays)
+        '<p class="sec-lbl">Company holidays</p>' +
+        '<div class="panel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
+
       '</div>';
   },
 
@@ -125,8 +129,12 @@ window.fkModules['leaves-time'] = {
         $('ltPending').textContent = fdays(b.pending);
         if (rows.length === 0) { panel.innerHTML = '<div class="empty">No leave requests this year.</div>'; return; }
         const typeLabels = { annual: 'Annual leave', unpaid: 'Unpaid leave', compassionate: 'Compassionate', sick: 'Sick', other: 'Other' };
-        panel.innerHTML = rows.map(l => {
-          const typeLabel = typeLabels[l.request_type] || l.request_type || 'Leave';
+        // r1.25 — collapsible: show the 5 most recent, hide the rest behind a toggle
+        // so a long leave history doesn't dominate the page.
+        const COLLAPSE_AT = 5;
+        const perRow = [];
+        rows.forEach(l => {
+          const typeLabel = (typeLabels[l.request_type] || l.request_type || 'Leave');
           const dys = (l.total_days != null) ? fdays(l.total_days) : '\u2014';
           const halfPart = l.half_day_part === 'am' ? 'morning' : l.half_day_part === 'pm' ? 'afternoon' : l.half_day_part;
           const half = l.is_half_day ? ' (half day' + (halfPart ? ', ' + halfPart : '') + ')' : '';
@@ -136,10 +144,23 @@ window.fkModules['leaves-time'] = {
                 '<button class="btn-secondary" data-cancel-leave="' + l.id + '" style="padding:10px 18px;font-size:14px;color:var(--red)">Cancel</button>' +
               '</div>'
             : '';
-          return '<div class="row" style="align-items:flex-start"><div style="flex:1"><div class="t1">' + dOnly(l.start_date) + ' \u2192 ' + dOnly(l.end_date) + '</div>' +
+          perRow.push('<div class="row" style="align-items:flex-start"><div style="flex:1"><div class="t1">' + dOnly(l.start_date) + ' \u2192 ' + dOnly(l.end_date) + '</div>' +
             '<div class="t2">' + esc(typeLabel) + ' \u00b7 ' + dys + (Number(l.total_days) === 1 ? ' day' : ' days') + half +
-            (l.reason ? ' \u00b7 ' + esc(l.reason) : '') + '</div>' + actions + '</div>' + leavePill(l.status) + '</div>';
-        }).join('');
+            (l.reason ? ' \u00b7 ' + esc(l.reason) : '') + '</div>' + actions + '</div>' + leavePill(l.status) + '</div>');
+        });
+        let html = perRow.slice(0, COLLAPSE_AT).join('');
+        if (perRow.length > COLLAPSE_AT) {
+          html += '<div id="ltMoreLeaves" style="display:none">' + perRow.slice(COLLAPSE_AT).join('') + '</div>' +
+            '<button id="ltLeavesToggle" class="btn-secondary" style="margin-top:10px;padding:9px 16px;font-size:14px">Show all ' + perRow.length + ' \u2192</button>';
+        }
+        panel.innerHTML = html;
+        const tg = $('ltLeavesToggle');
+        if (tg) tg.addEventListener('click', () => {
+          const more = $('ltMoreLeaves');
+          const open = more.style.display !== 'none';
+          more.style.display = open ? 'none' : 'block';
+          tg.textContent = open ? ('Show all ' + perRow.length + ' \u2192') : 'Show less';
+        });
         panel.querySelectorAll('[data-edit-leave]').forEach(btn => btn.addEventListener('click', () => {
           const lv = leaveRows.find(x => String(x.id) === btn.getAttribute('data-edit-leave'));
           if (lv && typeof window.openLeaveModal === 'function') window.openLeaveModal(lv);
@@ -173,12 +194,14 @@ window.fkModules['leaves-time'] = {
           const title = dOnly(d.for_date) + ' \u00b7 ' + (d.status || 'pending') + (d.late_minutes > 0 ? ' (' + d.late_minutes + 'm late)' : '');
           return '<div class="' + cls + '" title="' + title + '"></div>';
         }).join('');
-        $('ltCal').innerHTML = cells || '';
+        $('ltCal').innerHTML = cells || '<div class="empty" style="grid-column:1/-1">No attendance recorded in the last 30 days.</div>';
         $('ltAttCounts').innerHTML =
-          '<div><span class="v" style="color:#3B6D11">' + onTime + '</span> <span class="l">on time</span></div>' +
+          (rows.length === 0
+            ? '<span class="l">Nothing yet for the last 30 days.</span>'
+            : '<div><span class="v" style="color:#3B6D11">' + onTime + '</span> <span class="l">on time</span></div>' +
           '<div><span class="v" style="color:#9A5B1F">' + late + '</span> <span class="l">late</span></div>' +
           (noShow ? '<div><span class="v" style="color:#A32D2D">' + noShow + '</span> <span class="l">unauthorised</span></div>' : '') +
-          '<div><span class="v">' + leave + '</span> <span class="l">leave</span></div>';
+          '<div><span class="v">' + leave + '</span> <span class="l">leave</span></div>');
       } catch (e) { $('ltAttCounts').innerHTML = '<span class="l">Network error.</span>'; }
     }
 
@@ -204,14 +227,31 @@ window.fkModules['leaves-time'] = {
       } catch (e) { panel.innerHTML = '<div class="empty">Network error.</div>'; }
     }
 
+    async function loadHolidays() {
+      const panel = $('ltHolidaysPanel');
+      try {
+        const r = await fetch('/api/attendance/holidays', { credentials: 'include' });
+        if (!r.ok) { panel.innerHTML = '<div class="empty">Cannot load holidays.</div>'; return; }
+        const data = await r.json();
+        const list = (data.holidays || []).filter(h => h && h.holiday_date)
+          .sort((a, b) => String(a.holiday_date).localeCompare(String(b.holiday_date)));
+        if (list.length === 0) { panel.innerHTML = '<div class="empty">No company holidays listed yet.</div>'; return; }
+        panel.innerHTML = list.map(h =>
+          '<div class="row"><div><div class="t1">' + esc(h.name || 'Holiday') + '</div>' +
+          '<div class="t2">' + dOnly(h.holiday_date) + (h.office_closed_for_cs ? ' \u00b7 office closed (CS)' : '') + '</div></div></div>'
+        ).join('');
+      } catch (e) { panel.innerHTML = '<div class="empty">Network error.</div>'; }
+    }
+
     loadLeaves();
     loadAttendance();
     loadLateness();
+    loadHolidays();
 
     // Let the global leave modal refresh this page after an edit/request.
     window.__fkLeavesReload = function () {
       if (!document.body.contains(el)) return;
-      try { loadLeaves(); loadAttendance(); loadLateness(); } catch (e) {}
+      try { loadLeaves(); loadAttendance(); loadLateness(); loadHolidays(); } catch (e) {}
     };
   },
 

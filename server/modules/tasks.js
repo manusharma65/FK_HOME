@@ -313,7 +313,10 @@ router.patch('/:id', async (req, res) => {
 });
 
 // ---------- POST /api/tasks/:id/cancel ----------
-// Cancel (not hard-delete): status='cancelled', kept for history.
+// r1.25 — cancel now REMOVES the task (matches Amazon, where cancel deletes).
+// Previously it set status='cancelled' and the task lingered in the list/history.
+// FKs (subtasks parent_task_id, files.task_id) are ON DELETE CASCADE, so this is clean.
+// Audit-logged before deletion so there's still a record of who removed what.
 router.post('/:id/cancel', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad id' });
@@ -325,11 +328,9 @@ router.post('/:id/cancel', async (req, res) => {
     const canCancel = t.assignee_user_id === req.user.id || t.assigned_by_user_id === req.user.id
       || t.requester_user_id === req.user.id || req.user.can('profile.view.any');
     if (!canCancel) return res.status(403).json({ error: 'Permission denied' });
-    await db.query(
-      `UPDATE tasks SET status='cancelled', cancelled_at=NOW(), cancel_reason=$1, updated_at=NOW() WHERE id=$2`,
-      [reason || null, id]);
-    await logAudit({ req, module:'tasks', action:'task.cancelled', target_type:'task', target_id:id });
-    res.json({ ok: true });
+    await logAudit({ req, module:'tasks', action:'task.deleted', target_type:'task', target_id:id, before: { title: t.title, status: t.status, cancel_reason: reason || null } });
+    await db.query(`DELETE FROM tasks WHERE id=$1`, [id]);
+    res.json({ ok: true, deleted: true });
   } catch (e) {
     console.error('[tasks/cancel] failed:', e.message);
     res.status(500).json({ error: 'Failed' });

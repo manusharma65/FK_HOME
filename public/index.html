@@ -63,6 +63,8 @@
   #ownerCockpit .ck-pchip{ font-size:11.5px; font-weight:600; padding:4px 10px; border-radius:999px; background:var(--canvas); color:var(--soft); }
   #ownerCockpit .ck-empty{ padding:14px 2px; color:var(--soft); font-size:13.5px; }
   #ownerCockpit .ck-gh{ font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--soft); font-weight:700; margin:12px 0 6px; }
+  /* r1.24 — owner home shows ONLY greeting + cockpit; the rest is hidden robustly (beats async re-shows, no flicker). */
+  #homeView.ck-owner-only > .home-zone:not(#ownerCockpit){ display:none !important; }
   /* Managing — chat beside Who's-in-today (was CSS-columns, which stacked them) */
   #manageZone .masonry{ columns:auto; display:grid; grid-template-columns:1.15fr 1fr; gap:16px; align-items:start; }
   #manageZone .masonry > .card{ display:block; width:auto; margin-bottom:0; break-inside:auto; }
@@ -397,8 +399,8 @@
   }
   .person-msg-btn:hover { background: var(--amber); color: white; border-color: var(--amber); }
   .person-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .person-name { font-size: 15px; color: var(--ink); font-weight: 500; line-height: 1.1; }
-  .person-role { font-size: 13px; color: var(--muted); margin-top: 1px; }
+  .person-name { font-size: 14px; color: var(--ink); font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .03em; }
+  .person-role { font-size: 12.5px; color: var(--muted); margin-top: 2px; font-weight: 500; }
   .person-late { color: var(--amber); }
 
   /* Time off card */
@@ -1159,12 +1161,12 @@
           </div>
 
           <!-- My attendance (moved to left col for balance) -->
-          <div class="card">
+          <div class="card" onclick="location.hash='#leaves-time'" style="cursor:pointer">
             <div class="card-header">
               <div class="card-title"><i class="ti ti-clock-hour-4"></i> My attendance</div>
               <div style="display:flex;align-items:center;gap:10px">
                 <span class="card-meta" id="attMonthLabel">—</span>
-                <a href="#my-growth/attendance" style="font-size:14px;color:var(--amber);text-decoration:none">See history →</a>
+                <a href="#leaves-time" style="font-size:14px;color:var(--amber);text-decoration:none">See history →</a>
               </div>
             </div>
             <div class="timeoff-row">
@@ -1182,10 +1184,10 @@
           </div>
 
           <!-- Time off (moved to left col for balance) -->
-          <div class="card timeoff-card">
+          <div class="card timeoff-card" onclick="location.hash='#leaves-time'" style="cursor:pointer">
             <div class="card-header">
               <div class="card-title"><i class="ti ti-beach"></i> Time off</div>
-              <a href="#my-growth/leaves" style="font-size:14px;color:var(--amber);text-decoration:none">See leaves →</a>
+              <a href="#leaves-time" style="font-size:14px;color:var(--amber);text-decoration:none">See leaves →</a>
             </div>
             <div class="timeoff-row">
               <span class="lbl">Accrued</span>
@@ -1596,8 +1598,9 @@ function render() {
   const isOwner = (me.group_slugs || []).includes('owner');
   // r1.20 — owner/manager home cockpit. Fire-and-forget; the function gates its own display
   // and falls back silently for everyone else (who keep the personal home untouched).
-  const isManager_ck = !!(me.departments || []).some(d => d.role === 'manager' || d.role === 'lead') || can('leaves.approve.any') || can('leaves.approve.dept');
-  if (isOwner || isManager_ck) { setTimeout(function(){ try { window.fkRenderCockpit && window.fkRenderCockpit(isOwner, isManager_ck); } catch(e){ console.error('[cockpit]', e); } }, 0); }
+  // r1.25 — Cockpit is OWNER-ONLY. Managers, team leads and agents keep their normal home
+  // unchanged (this previously also fired for managers/leads, which changed their screens).
+  if (isOwner) { setTimeout(function(){ try { window.fkRenderCockpit && window.fkRenderCockpit(true, false); } catch(e){ console.error('[cockpit]', e); } }, 0); }
   const show = (id) => { const e = document.getElementById(id); if (e) e.style.display = 'flex'; };
   const showText = (id) => { const e = document.getElementById(id); if (e) e.style.display = 'block'; };
 
@@ -1781,7 +1784,7 @@ function applyStatusPill(s) {
   pill.className = 'status-pill';
   const map = {
     active: 'Active', idle: 'Idle', running_late: 'Running late',
-    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Feeling sick',
+    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Take rest',
     in_meeting: 'In meeting', wfh: 'Working from home',
     on_leave: 'On leave', offline: 'Active'
   };
@@ -2082,7 +2085,7 @@ function renderPersonRow(p) {
     in_meeting: ['In meeting', '#378ADD'],
     on_break:   ['On break',   '#85B7EB'],
     wfh:        ['WFH',        '#1D9E75'],
-    off_sick:   ['Off sick',   '#A32D2D'],
+    off_sick:   ['Take rest',  '#A32D2D'],
     on_leave:   ['On leave',   '#888780'],
   };
   const bd = STATUS_BADGE[p.status];
@@ -2094,7 +2097,7 @@ function renderPersonRow(p) {
     <div class="person">
       <span class="person-dot" style="background:${statusColour}"></span>
       <div class="person-main">
-        <p class="person-name" style="${isOff ? 'color:var(--soft)' : ''}">${escapeHtml(p.name)}</p>
+        <p class="person-name" style="${isOff ? 'color:var(--soft)' : ''}">${escapeHtml(p.full_name || p.name)}</p>
         <p class="person-role">${role}</p>
       </div>
       ${badge}
@@ -2268,7 +2271,7 @@ function openStatusModal() {
     { v: 'active',     label: 'Active',            desc: 'Working as usual',                      icon: 'ti-circle-filled' },
     { v: 'in_meeting', label: 'In meeting',        desc: 'In a call or meeting',                  icon: 'ti-users' },
     { v: 'heads_down', label: 'Heads down',        desc: 'Focus mode — please don\'t interrupt', icon: 'ti-headphones' },
-    { v: 'off_sick',   label: 'Feeling sick',      desc: 'Unwell today',                          icon: 'ti-mood-sick' },
+    { v: 'off_sick',   label: 'Take rest',         desc: 'Resting \u2014 flip back to Active when you return', icon: 'ti-bed' },
     { v: 'wfh',        label: 'Working from home', desc: 'Asks for your location',                icon: 'ti-home' },
   ];
   const wrap = document.getElementById('statusOptions');
@@ -2335,10 +2338,13 @@ function wfhBlockedMessage() {
 
 async function setStatus(s) {
   if (s === 'off_sick') {
+    // r1.25 — "Take rest" is a TEMPORARY presence status (rest a while, then flip
+    // back to Active), not a formal sick day. Set presence only via /status; do NOT
+    // call /me/sick (which marked the whole attendance day off_sick and left a stale
+    // "sick" on the manager's Company-today even after the person returned to Active).
     closeModal('statusModal');
-    if (!confirm('Mark yourself as feeling sick today?')) return;
     try {
-      const r = await fetch('/api/me/sick', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({}) });
+      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'off_sick' }) });
       if (!r.ok) { alert('Failed to update'); return; }
       await reload();
     } catch (err) { alert('Network error'); }
@@ -2506,6 +2512,23 @@ function fkRoute() {
   }
 }
 window.addEventListener('hashchange', fkRoute);
+
+// r1.25 — Day-rollover refresh. A page left open overnight keeps yesterday's state
+// (stale attendance/who's-in, and yesterday's daily-report free text). When the
+// London calendar day changes — on tab refocus, or while left open across midnight —
+// reload so the morning shows today: fresh login/selfie prompt, today's blank daily
+// report, correct attendance. Fixes "pages don't refresh themselves".
+(function fkDayRolloverGuard() {
+  const londonDate = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date());
+  let loadedDay = londonDate();
+  function check() {
+    const now = londonDate();
+    if (now !== loadedDay) { loadedDay = now; location.reload(); }
+  }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+  window.addEventListener('focus', check);
+  setInterval(check, 60000); // catch a tab left focused across midnight
+})();
 
 // Amazon/Google/Logistics — show "coming soon" toast for now
 document.addEventListener('click', function(e) {
@@ -2916,12 +2939,16 @@ function formatTime(t) {
   if (!t) return '—';
   // Accept '09:14' or '09:14:00' or ISO date
   if (typeof t === 'string' && /^\d{2}:\d{2}/.test(t)) return t.slice(0, 5);
-  try { return new Date(t).toTimeString().slice(0, 5); } catch (e) { return '—'; }
+  // r1.25 — format explicitly in Europe/London (toTimeString used the viewer's
+  // browser tz, so anyone not on UK time saw the wrong hour).
+  try {
+    return new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(t));
+  } catch (e) { return '—'; }
 }
 function statusLabel(s) {
   return ({
     on_time: 'On time', late: 'Late', very_late: 'Very late', not_yet_in: 'Not yet in',
-    on_leave: 'On leave', off_sick: 'Feeling sick',
+    on_leave: 'On leave', off_sick: 'Take rest',
     off_pattern: 'Off (pattern)', off_cs_rota: 'Off (rota)', off_holiday: 'Off (holiday)',
     worked_voluntary: 'Worked', pending: 'Not yet in'
   })[s] || s || '—';
@@ -3367,22 +3394,25 @@ async function refreshBackupPill() {
 init();
 </script>
 <script>
-// r1.20 — Owner/manager home cockpit. Renders the four attention panels into #ownerCockpit
-// and hides the personal home cards for owner/managers. Employees never call this.
+// r1.25 — OWNER-ONLY home cockpit. Renders the four attention panels into #ownerCockpit and
+// strips the rest of the owner's home (greeting + cockpit only). Managers/leads/agents never call this.
 window.fkRenderCockpit = async function (isOwner, isManager) {
   const host = document.getElementById('ownerCockpit');
   if (!host) return;
   let data;
   try { const r = await fetch('/api/me/attention', { credentials: 'include' }); if (!r.ok) return; data = await r.json(); }
   catch (e) { return; }
-  // r1.21 — do NOT hide the rest of the home. The cockpit is an extra section under
-  // the greeting; everything below it stays exactly as it was.
+  // r1.24 — OWNER home = greeting + cockpit only (hide the rest via a class; CSS !important
+  // beats any async re-show, so no flicker). MANAGERS keep their full personal home below
+  // the cockpit (they're tracked employees). Toggle, don't one-way set, so role changes are safe.
+  const hv = document.getElementById('homeView');
+  if (hv) { if (isOwner) hv.classList.add('ck-owner-only'); else hv.classList.remove('ck-owner-only'); }
   host.style.display = '';
 
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmtD = (d) => { if (!d) return ''; const p = String(d).slice(0, 10).split('-'); if (p.length !== 3) return ''; const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (p[2] * 1) + ' ' + (M[p[1] * 1 - 1] || ''); };
   const av = (p) => '<div class="ck-av" style="background:' + (p.colour || p.avatar_colour || '#888') + '">' + esc(p.initials || '') + '</div>';
-  const STAT = { on_leave: 'On leave', off_sick: 'Off sick', wfh: 'Working from home', off_holiday: 'On holiday' };
+  const STAT = { on_leave: 'On leave', off_sick: 'Take rest', wfh: 'Working from home', off_holiday: 'On holiday' };
 
   const waiting = data.waiting || [];
   const present = data.present || [];

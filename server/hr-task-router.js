@@ -23,10 +23,13 @@ const { db } = require('./db');
 // kind: task kind (event = auto-generated)
 // contextUrl(ctx): deep link to the evidence the owner needs to act
 const HR_EVENT_ROUTING = {
-  'leave.requested': {
+  // r1.25 — the HR-queue task is created only AFTER the manager approves
+  // (event 'leave.awaiting_hr'), not on the initial request. This is what stopped
+  // every leave landing in the HR queue before a manager had seen it.
+  'leave.awaiting_hr': {
     area: 'daily_ops', kind: 'event', category: 'leave',
-    title: c => 'Leave request — ' + (c.name || 'employee'),
-    body:  c => [c.range, c.daysText, c.reason].filter(Boolean).join(' · '),
+    title: c => 'Leave to approve — ' + (c.name || 'employee'),
+    body:  c => [c.range, c.daysText, 'manager approved', c.reason].filter(Boolean).join(' · '),
     contextUrl: c => '#hr/leaves',
   },
   'attendance.regularise.requested': {
@@ -123,7 +126,9 @@ async function maybeCreateHrTask(eventType, ctx) {
     const team = await hrTeamIds();
     if (team.length === 0) return; // no HR team configured — nothing to route to
 
-    const assignee = owner || team[0];
+    // r1.25 — if the caller resolved a specific approver (the senior HR, with
+    // fallback), assign the task to them so the task and the notification match.
+    const assignee = (c.approverId && team.includes(c.approverId)) ? c.approverId : (owner || team[0]);
 
     const meta = {
       hr_area: route.area,

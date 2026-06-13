@@ -113,7 +113,16 @@ async function isUserSickOn(userId, dateStr) {
   return r.rows.length > 0;
 }
 
-// Returns the user's primary department slug (the one with role='manager' is irrelevant — we want any membership).
+// r1.24 — Is this user the owner? The owner works 24/7, so the working-pattern and
+// public-holiday "off" rules do not apply to them (they're never marked off).
+async function isOwnerUser(userId) {
+  const r = await db.query(
+    `SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+      WHERE ug.user_id = $1 AND g.slug = 'owner' LIMIT 1`,
+    [userId]
+  );
+  return r.rows.length > 0;
+}
 // We use the SMALLEST sort order as a tiebreaker for users in multiple depts.
 async function getUserPrimaryDept(userId) {
   const r = await db.query(
@@ -199,6 +208,10 @@ async function computeExpectedStatus(userId, dateStr) {
   // 2) Sick
   if (await isUserSickOn(userId, dateStr)) return 'off_sick';
 
+  // r1.24 — Owner works 24/7: the holiday + working-pattern "off" rules don't apply.
+  // Leave/sick above still honour an explicit entry, but the owner is never auto-marked off.
+  if (await isOwnerUser(userId)) return 'pending';
+
   const deptSlug = await getUserPrimaryDept(userId);
   const isCs = deptSlug === 'cs';
 
@@ -248,6 +261,16 @@ function nowInLondon() {
     hhmm: `${get('hour')}:${get('minute')}`,
     iso: new Date().toISOString()
   };
+}
+
+// Format a timestamptz/Date as London wall-clock "HH:MM:SS" (r1.25 — replaces
+// toISOString() which rendered UTC and showed login times an hour early).
+function londonClock(ts) {
+  if (!ts) return null;
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  });
+  return fmt.format(new Date(ts));
 }
 
 // Helper: minutes between two HH:MM strings (a >= b returns positive minutes).
@@ -500,7 +523,10 @@ router.post('/regularise', async (req, res) => {
     const combineDT = (time) => {
       if (!time) return null;
       const t = String(time).trim();
-      if (/^\d{1,2}:\d{2}$/.test(t)) return for_date + ' ' + (t.length === 4 ? '0' + t : t) + ':00';
+      // r1.25 — MUST stamp the zone. A bare "09:00 +date" with no zone is read in the
+      // server session tz (UTC on Railway), so 09:00 came back as 10:00 BST (+1hr).
+      // Append Europe/London so Postgres stores the correct instant (matches buildLocalTimestamp).
+      if (/^\d{1,2}:\d{2}$/.test(t)) return for_date + ' ' + (t.length === 4 ? '0' + t : t) + ':00 Europe/London';
       return t; // already a full timestamp / ISO string
     };
     const firstLogin = combineDT(requested_first_login);
@@ -771,7 +797,11 @@ router.put('/anchor', requirePermission('attendance.policy.edit'), async (req, r
   }
 });
 
-router.get('/holidays', requirePermission('attendance.view.any'), async (req, res) => {
+// r1.25 — readable by ANY authenticated user. Company holidays are not sensitive,
+// and staff need to see them (the list was previously gated to attendance.view.any,
+// so employees got 403 and could never see the national holidays). Editing (POST/
+// DELETE below) stays permission-gated.
+router.get('/holidays', async (req, res) => {
   const r = await db.query(
     `SELECT id, holiday_date, name, office_closed_for_cs
      FROM holidays WHERE deleted_at IS NULL ORDER BY holiday_date`
@@ -1629,9 +1659,9 @@ router.post('/daily-report', requirePermission('daily_report.submit.own'), async
     );
     const s = snap.rows[0] || {};
 
-    // Format snapshot times as HH:MM:SS for storage; null if absent.
-    const snapFirst = s.first_login ? new Date(s.first_login).toISOString().slice(11, 19) : null;
-    const snapLast = s.last_logout ? new Date(s.last_logout).toISOString().slice(11, 19) : null;
+    // Format snapshot times as London HH:MM:SS for storage; null if absent.
+    const snapFirst = londonClock(s.first_login);
+    const snapLast = londonClock(s.last_logout);
 
     if (existing.rows[0]) {
       // Update path.
@@ -1877,6 +1907,56 @@ async function tickAutoClockout() {
   } catch (e) { console.error('[tickAutoClockout]', e.message); }
 }
 
+// r1.25 — One-time/idempotent reconcile of TODAY's rows. The midnight tick only
+// overwrites rows whose status is still 'pending', so when the anchor is corrected
+// the wrong off_pattern/off_holiday/worked_voluntary rows already written today will
+// NOT self-heal. This re-derives them against the corrected expected status.
+// Cheap (one day, ~all active users) and idempotent — safe to run on every boot.
+async function reconcileTodayPattern() {
+  try {
+    const today = nowInLondon().date;
+    const rows = await db.query(
+      `SELECT a.id, a.user_id, a.status, a.first_login, a.shift_start_local
+         FROM attendance_day a JOIN users u ON u.id = a.user_id
+        WHERE a.for_date = $1 AND u.deleted_at IS NULL AND u.employment_status = 'active'
+          AND a.status IN ('off_pattern','off_holiday','worked_voluntary')`,
+      [today]
+    );
+    for (const r of rows.rows) {
+      const expected = await computeExpectedStatus(r.user_id, today);
+      if (expected !== 'pending') {
+        // Genuinely still off (leave/sick/CS-rota/holiday/owner-exempt-not-applicable) — align to it.
+        if (r.status !== expected) {
+          await db.query(`UPDATE attendance_day SET status = $1, updated_at = NOW() WHERE id = $2`, [expected, r.id]);
+        }
+        continue;
+      }
+      // Expected = working today. Derive status from the actual login (if any); else leave 'pending'
+      // and let the 5-minute tick mark late as usual.
+      let newStatus = 'pending', lateMin = 0;
+      if (r.first_login && r.shift_start_local) {
+        const hhmm = (londonClock(r.first_login) || '').slice(0, 5);
+        const deptSlug = await getUserPrimaryDept(r.user_id);
+        const pol = await getShiftPolicy(deptSlug);
+        const grace = pol ? pol.grace_minutes : 5;
+        lateMin = Math.max(0, minutesBetween(hhmm, r.shift_start_local));
+        if (lateMin <= grace) newStatus = 'on_time';
+        else if (lateMin <= 30) newStatus = 'late';
+        else newStatus = 'very_late';
+      } else if (r.first_login) {
+        newStatus = 'on_time';
+      }
+      await db.query(
+        `UPDATE attendance_day SET status = $1, late_minutes = $2, updated_at = NOW() WHERE id = $3`,
+        [newStatus, lateMin, r.id]
+      );
+    }
+    if (rows.rows.length) console.log('[reconcileTodayPattern] reconciled ' + rows.rows.length + ' row(s) for ' + today);
+  } catch (e) {
+    console.error('[reconcileTodayPattern]', e.message);
+  }
+}
+
 module.exports = router;
 module.exports.tickFiveMinute = tickFiveMinute;
 module.exports.tickDailyMidnight = tickDailyMidnight;
@@ -1887,3 +1967,4 @@ module.exports.tickWeeklySunday = tickWeeklySunday;
 module.exports.recordLogin = recordLogin;
 module.exports.recordLogout = recordLogout;
 module.exports.computeExpectedStatus = computeExpectedStatus;
+module.exports.reconcileTodayPattern = reconcileTodayPattern;

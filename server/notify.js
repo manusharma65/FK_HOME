@@ -23,7 +23,17 @@ const TEMPLATES = {
   'leave.requested': {
     title: c => c.name + ' requested leave',
     body:  c => c.range + ' \u00b7 ' + c.daysText + (c.reason ? ' \u00b7 ' + c.reason : ''),
-    recipients: c => 'managers_of:' + c.actorUserId,
+    // r1.25 — line manager ONLY (the requester's manager), passed in as approverId.
+    // No more fan-out to owner + every HR at once.
+    recipients: c => (c.approverId ? [c.approverId] : []),
+    action_url: c => c.related_id ? '#hr/leaves/' + c.related_id : '#hr/leaves',
+    related_type: 'leave_request',
+  },
+  'leave.awaiting_hr': {
+    title: c => 'Leave to approve: ' + c.name,
+    body:  c => c.range + ' \u00b7 ' + c.daysText + ' \u00b7 manager approved' + (c.reason ? ' \u00b7 ' + c.reason : ''),
+    // r1.25 — the single HR approver (senior HR, with fallback), passed as approverId.
+    recipients: c => (c.approverId ? [c.approverId] : []),
     action_url: c => c.related_id ? '#hr/leaves/' + c.related_id : '#hr/leaves',
     related_type: 'leave_request',
   },

@@ -49,8 +49,10 @@ window.fkModules['my-work'] = {
           '#mw-mod .mw-ico-btn:hover{color:var(--ink)}' +
           '#mw-mod .mw-empty{text-align:center;color:var(--muted);padding:30px;font-size:14px}' +
           '#mw-mod .mw-note{font-size:13.5px;color:var(--soft);margin-top:14px;padding-top:12px;border-top:0.5px solid var(--line)}' +
-          '#mw-mod .mw-form{background:var(--surface);border:0.5px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px;display:none}' +
-          '#mw-mod .mw-form.on{display:block}' +
+          '#mw-mod .mw-form{display:none}' +
+          '#mw-mod .mw-form.on{display:block;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1000;background:var(--surface);border:0.5px solid var(--line);border-radius:16px;padding:22px 22px 18px;width:min(440px,92vw);max-height:86vh;overflow:auto;box-shadow:0 18px 50px rgba(20,22,27,.28)}' +
+          '#mw-mod .mw-form.on::before{content:"";position:fixed;inset:0;background:rgba(20,22,27,.38);z-index:-1}' +
+          '#mw-mod .mw-form h4{font-family:var(--disp,\'Fraunces\'),serif;font-weight:600;font-size:19px;margin:0 0 14px}' +
           '#mw-mod .mw-form input,#mw-mod .mw-form select{width:100%;padding:8px 11px;border:0.5px solid var(--line);border-radius:8px;font-size:14px;background:var(--bg,#fff);margin-bottom:8px}' +
           '#mw-mod .mw-frow{display:flex;gap:8px}' +
           '#mw-mod .mw-mode{display:none;gap:8px;margin-bottom:8px}' +
@@ -111,6 +113,7 @@ window.fkModules['my-work'] = {
           '</div>' +
 
           '<div class="mw-form" id="mwForm">' +
+            '<h4 id="mwFormTitle">New task</h4>' +
             '<input type="text" id="mwTitle" placeholder="What needs doing?" />' +
             '<div class="mw-frow">' +
               '<select id="mwCategory">' +
@@ -345,7 +348,7 @@ window.fkModules['my-work'] = {
       editingId = null;
       $('mwTitle').value=''; $('mwCategory').value=''; $('mwAssignee').value=''; $('mwDue').value='';
       $('mwSave').textContent='Add task';
-      $('mwForm').querySelector('h4')?.remove();
+      var _ft=$('mwFormTitle'); if(_ft) _ft.textContent='New task';
     }
     $('mwAddBtn').addEventListener('click', ()=>{ resetForm(); $('mwForm').classList.add('on'); $('mwTitle').focus(); });
     $('mwCancel').addEventListener('click', ()=>{ $('mwForm').classList.remove('on'); resetForm(); });
@@ -410,6 +413,7 @@ window.fkModules['my-work'] = {
         $('mwDue').value=row.getAttribute('data-due')||'';
         $('mwAssignee').value='';
         $('mwSave').textContent='Save changes';
+        var _et=$('mwFormTitle'); if(_et) _et.textContent='Edit task';
         $('mwForm').classList.add('on'); $('mwTitle').focus();
       } else if (cancelBtn) {
         const id=cancelBtn.getAttribute('data-cancel');
