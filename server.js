@@ -47,6 +47,7 @@ const backupEngine = require('./server/modules/backup');
 const lifecycle = require('./server/modules/lifecycle');
 const dailyRoutes = require('./server/modules/daily');
 const mailRoutes = require('./server/modules/mail');
+const learningRoutes = require('./server/modules/learning');
 const monitoring = require('./server/modules/monitoring');
 
 const app = express();
@@ -96,6 +97,7 @@ app.use('/api/tasks', tasksRoutes);
 app.use('/api/recruitment', recruitmentRoutes);
 app.use('/api/daily', dailyRoutes);
 app.use('/api/mail', mailRoutes);
+app.use('/api/learning', learningRoutes);
 
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
