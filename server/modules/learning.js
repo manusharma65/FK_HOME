@@ -26,8 +26,13 @@ router.use(requireAuth);
 // have created the tables, so there's no server.js boot-order wiring to get wrong.
 let _ready = null;
 async function ensureSchema() {
-  const sql = fs.readFileSync(path.join(__dirname, '..', 'schema', '44-learning.sql'), 'utf8');
-  await db.query(sql); // CREATE TABLE IF NOT EXISTS ... — safe to re-run
+  // The learning module owns these schema files; apply them all, in order.
+  // All are idempotent (CREATE ... IF NOT EXISTS / ADD COLUMN IF NOT EXISTS),
+  // so this is safe even though server.js also runs them via its migration runner.
+  for (const f of ['44-learning.sql', '45-check-tag.sql']) {
+    const sql = fs.readFileSync(path.join(__dirname, '..', 'schema', f), 'utf8');
+    await db.query(sql);
+  }
 }
 async function init() {
   try { await ensureSchema(); await seedCourse(content.course, 1); await seedReference(content.reference); }
@@ -69,10 +74,10 @@ async function seedCourse(course, ownerId) {
     for (let ci = 0; ci < checks.length; ci++) {
       const k = checks[ci];
       await db.query(
-        `INSERT INTO lms_checks (session_id,position,type,prompt,options_json,model_answer,pass_criteria,hard_fail)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `INSERT INTO lms_checks (session_id,position,type,prompt,options_json,model_answer,pass_criteria,hard_fail,tag)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [sessionId, ci, k.type, k.prompt, k.options ? JSON.stringify(k.options) : null,
-         k.model_answer || null, k.pass_criteria || null, !!k.hard_fail]
+         k.model_answer || null, k.pass_criteria || null, !!k.hard_fail, k.tag || null]
       );
     }
   }
@@ -246,10 +251,35 @@ router.post('/assign', async (req, res) => {
   });
 
   router.get('/my-courses', async (req, res) => {
-    const rows = await db.query(
-      `SELECT c.id, c.title, c.department, a.status, a.due_date
+    const fetch = () => db.query(
+      `SELECT c.id, c.title, c.department, c.slug, a.status, a.due_date
          FROM lms_assignments a JOIN lms_courses c ON c.id=a.course_id
         WHERE a.user_id=$1 ORDER BY a.created_at`, [req.user.id]);
+    let rows = await fetch();
+    // Auto-assign: a logistics/despatch user with no course assigned gets Course A
+    // automatically the first time they open Academy ("everyone goes through").
+    // Fully guarded — if identity fields differ on the live app this just no-ops,
+    // it never throws and never breaks the course listing.
+    if (!rows.rows.length) {
+      try {
+        let signals = [req.user.role, req.user.department, req.user.dept, req.user.job_title, req.user.designation]
+          .filter(Boolean).join(' ');
+        if (!signals) {
+          const u = await db.query(`SELECT * FROM users WHERE id=$1`, [req.user.id]);
+          if (u.rows.length) {
+            const r = u.rows[0];
+            signals = [r.role, r.department, r.dept, r.job_title, r.designation, r.title].filter(Boolean).join(' ');
+          }
+        }
+        if (/logist|despatch|dispatch|warehouse|courier|shipping/i.test(signals)) {
+          const c = await db.query(`SELECT id FROM lms_courses WHERE slug='logistics-dispatch' LIMIT 1`);
+          if (c.rows.length) {
+            await assignCourse(c.rows[0].id, req.user.id, req.user.id, 'auto', null);
+            rows = await fetch();
+          }
+        }
+      } catch (e) { /* best-effort auto-assign; fall through with whatever we have */ }
+    }
     res.json(rows.rows);
   });
   router.get('/course/:id', async (req, res) => {
@@ -264,10 +294,10 @@ router.post('/assign', async (req, res) => {
     const sid = parseInt(req.params.id, 10);
     const s = await db.query(`SELECT id,position,title,objective,body_html,est_minutes FROM lms_sessions WHERE id=$1`, [sid]);
     if (!s.rows.length) return res.status(404).json({ error: 'no session' });
-    const ck = await db.query(`SELECT id,position,type,prompt,options_json FROM lms_checks WHERE session_id=$1 ORDER BY position`, [sid]);
+    const ck = await db.query(`SELECT id,position,type,prompt,options_json,tag FROM lms_checks WHERE session_id=$1 ORDER BY position`, [sid]);
     const checks = ck.rows.map(c => {
       const opts = c.options_json ? (typeof c.options_json === 'string' ? JSON.parse(c.options_json) : c.options_json) : [];
-      return { id: c.id, type: c.type, prompt: c.prompt, options: opts.map(o => ({ text: o.text })) };
+      return { id: c.id, type: c.type, tag: c.tag || null, prompt: c.prompt, options: opts.map(o => ({ text: o.text })) };
     });
     res.json({ session: s.rows[0], checks });
   });
@@ -278,19 +308,35 @@ router.post('/assign', async (req, res) => {
     res.json(rows.rows);
   });
 
-  // Manager: progress across everyone assigned to a course.
+  // Manager: progress across everyone assigned to a course, WITH a first-attempt
+  // accuracy score so 4–5 trainees on probation can be compared (who got it right
+  // first time, not just who eventually passed). Free-text checks (result 'flagged')
+  // are excluded from the score denominator — they're manager-reviewed.
   router.get('/manager/progress/:courseId', async (req, res) => {
     const cid = parseInt(req.params.courseId, 10);
     const rows = await db.query(
       `SELECT a.id assignment_id, a.user_id, u.full_name, a.status,
               (SELECT count(*) FROM lms_sessions s WHERE s.course_id=a.course_id) AS total,
               (SELECT count(*) FROM lms_progress p WHERE p.assignment_id=a.id AND p.status='passed') AS done,
+              (SELECT count(*) FROM (
+                 SELECT DISTINCT ON (check_id) result FROM lms_check_attempts
+                  WHERE assignment_id=a.id ORDER BY check_id, id
+               ) f WHERE f.result='pass') AS first_pass,
+              (SELECT count(*) FROM (
+                 SELECT DISTINCT ON (check_id) result FROM lms_check_attempts
+                  WHERE assignment_id=a.id ORDER BY check_id, id
+               ) f WHERE f.result IN ('pass','fail')) AS first_graded,
+              (SELECT count(*) FROM lms_check_attempts WHERE assignment_id=a.id) AS attempts_total,
               comp.status AS competency_status
          FROM lms_assignments a
          JOIN users u ON u.id=a.user_id
          LEFT JOIN lms_competencies comp ON comp.user_id=a.user_id AND comp.course_id=a.course_id
         WHERE a.course_id=$1 ORDER BY u.full_name`, [cid]);
-    res.json(rows.rows);
+    const out = rows.rows.map(r => {
+      const fp = Number(r.first_pass), fg = Number(r.first_graded);
+      return { ...r, accuracy_pct: fg > 0 ? Math.round((fp / fg) * 100) : null };
+    });
+    res.json(out);
   });
   router.post('/check/:checkId', async (req, res) => {
     const out = await gradeCheck(req.body.assignmentId, parseInt(req.params.checkId, 10), req.body.answer);
@@ -304,6 +350,19 @@ router.post('/assign', async (req, res) => {
     // manager/owner only — gate in real auth middleware
     const out = await signOff(req.body.courseId, req.body.userId, req.user.id);
     res.json(out);
+  });
+
+  // Competencies for a user — for the profile "Training & competencies" drawer to read.
+  router.get('/competencies/:userId', async (req, res) => {
+    const uid = parseInt(req.params.userId, 10);
+    const rows = await db.query(
+      `SELECT comp.competency_key, comp.status, comp.recert_due, comp.signed_off_at,
+              c.title AS course_title, c.slug AS course_slug
+         FROM lms_competencies comp
+         LEFT JOIN lms_courses c ON c.id=comp.course_id
+        WHERE comp.user_id=$1
+        ORDER BY comp.signed_off_at DESC NULLS LAST`, [uid]);
+    res.json(rows.rows);
   });
 
 

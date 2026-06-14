@@ -52,7 +52,9 @@
     .lms .lms-order .ob{background:#0F1620;padding:9px 16px;font-family:ui-monospace,monospace;font-size:12px;color:#9FB0C3;border-bottom:1px solid var(--grid)}.lms .lms-order .ob .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--orange);margin-right:7px}.lms .lms-order .ob b{color:#E7ECF2}
     .lms .lms-order table{width:100%;border-collapse:collapse}.lms .lms-order td{padding:9px 16px;border-bottom:1px solid var(--grid);vertical-align:top}.lms .lms-order td.k{color:#8FA1B5;width:112px;font-size:12px;text-transform:uppercase}.lms .lms-order td.v{font-family:ui-monospace,monospace}.lms .lms-order tr:last-child td{border-bottom:0}.lms .lms-order .sel{background:#3a2a1a;border:1px solid #6b4a22;border-radius:6px;padding:2px 8px;color:#F0C998}
     .lms .gate2{margin-top:28px;border-top:1px solid var(--line);padding-top:18px}.lms .meter{font-size:12.5px;font-weight:700;color:var(--muted);background:#FBF6EE;border:1px solid var(--line);padding:6px 12px;border-radius:999px;float:right}
-    .lms .q{background:#FBF6EE;border:1px solid var(--line);border-radius:16px;padding:20px 24px;margin-top:16px}.lms .q .tag{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#9A4A18}.lms .q .tag.ft{color:var(--ai)}
+    .lms .q{background:#FBF6EE;border:1px solid var(--line);border-radius:16px;padding:20px 24px;margin-top:16px}.lms .q .tag{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#9A4A18}.lms .q .tag.ft{color:var(--ai)}.lms .q .tag.apt{color:#185FA5}
+    .lms .kbtop{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}.lms .back.pdf{color:#9A4A18}
+    .lms .mt .acc{display:flex;flex-direction:column;line-height:1.15}.lms .mt .acc b{font-size:15px;color:var(--ink)}.lms .mt .acc span{font-size:11px;color:#8B8173}.lms .mt .acc .muted{color:#B8AE9F;font-weight:400}
     .lms .q .pr{font-weight:600;margin:12px 0;font-size:16px}
     .lms .opt{display:block;width:100%;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 17px;margin-bottom:10px;cursor:pointer;font-size:15.5px;font-family:inherit;color:var(--ink)}
     .lms .opt:hover{border-color:var(--orange2)}.lms .opt:disabled{cursor:default}.lms .opt.r{background:var(--green-bg);border-color:#CBE0CB}.lms .opt.w{background:var(--red-bg);border-color:#E8C9C1}
@@ -130,7 +132,9 @@
       } else {
         let opts = '';
         c.options.forEach((o, oi) => { opts += '<button class="opt lmsOpt" data-c="' + c.id + '" data-o="' + oi + '">' + o.text + '</button>'; });
-        checks += '<div class="q" data-c="' + c.id + '"><span class="tag">Process / decide</span><div class="pr">' + c.prompt + '</div>' + opts + '<div class="fb" id="fb' + c.id + '"></div></div>';
+        var isApt = c.tag === 'Aptitude';
+        var kick = c.tag ? (isApt ? 'Aptitude · reasoning' : c.tag) : 'Process / decide';
+        checks += '<div class="q" data-c="' + c.id + '"><span class="tag' + (isApt ? ' apt' : '') + '">' + kick + '</span><div class="pr">' + c.prompt + '</div>' + opts + '<div class="fb" id="fb' + c.id + '"></div></div>';
       }
     });
     const s = data.session;
@@ -190,15 +194,18 @@
       const pct = r.total ? Math.round(r.done / r.total * 100) : 0;
       const canSign = r.status === 'completed' && r.competency_status !== 'active';
       const st = r.competency_status === 'active' ? 'Signed off' : (r.status === 'completed' ? 'Awaiting sign-off' : (r.done > 0 ? 'In progress' : 'Not started'));
+      const acc = (r.accuracy_pct == null) ? '<span class="muted">\u2014</span>' : (r.accuracy_pct + '%');
+      const tries = Number(r.attempts_total) || 0;
       trs += '<tr><td><b>' + r.full_name + '</b></td>' +
         '<td><div class="prog"><div class="pb2"><i style="width:' + pct + '%"></i></div><span>' + pct + '%</span></div></td>' +
+        '<td><div class="acc"><b>' + acc + '</b><span>' + tries + (tries === 1 ? ' try' : ' tries') + '</span></div></td>' +
         '<td><span class="chip ' + (r.competency_status === 'active' || canSign ? 'ok' : 'cur') + '">' + st + '</span></td>' +
         '<td><button class="btn ' + (canSign ? '' : 'g') + ' lmsSign" data-u="' + r.user_id + '" ' + (canSign ? '' : 'disabled') + '>' + (r.competency_status === 'active' ? 'Signed off \u2713' : 'Sign off') + '</button></td></tr>';
     });
     lms().innerHTML = seg() +
       '<div class="hero m"><div class="ey">Manager</div><h1>Logistics training \u2014 team</h1><p>Watch progress and sign people off when they\u2019re ready.</p></div>' +
-      '<div class="sech"><h2>Progress</h2></div>' +
-      '<table class="mt"><tr><th>Team member</th><th>Progress</th><th>Status</th><th></th></tr>' + trs + '</table>' +
+      '<div class="sech"><h2>Progress</h2><span class="n">First-try accuracy = right on the first attempt \u2014 compare trainees on probation</span></div>' +
+      '<table class="mt"><tr><th>Team member</th><th>Progress</th><th>First-try accuracy</th><th>Status</th><th></th></tr>' + trs + '</table>' +
       '<div class="gate" style="margin-top:18px">Signing off confirms they\u2019ve shown it on real orders \u2014 it flips <b>logistics-ready</b> on their profile with an annual recert date.</div>';
     wireSeg();
     Array.from(document.querySelectorAll('.lmsSign')).forEach(b => b.onclick = async () => {
@@ -231,8 +238,22 @@
     if (it.type === 'flashcard' && cfg) {
       body = ''; cfg.cards.forEach(c => { body += '<div class="fc" onclick="this.classList.toggle(\'f\')"><div class="in"><div class="fa">' + c.q + '</div><div class="fa bk">' + c.a + '</div></div></div>'; });
     }
-    lms().innerHTML = '<button class="back" id="bk">\u2039 Back to Knowledge Base</button><div class="lesson"><h3 style="margin-top:0">' + it.title + '</h3>' + body + '</div>';
+    lms().innerHTML = '<div class="kbtop"><button class="back" id="bk">\u2039 Back to Knowledge Base</button><button class="back pdf" id="pdf">\u2913 Save as PDF</button></div><div class="lesson" id="kbdoc"><h3 style="margin-top:0">' + it.title + '</h3>' + body + '</div>';
     el('bk').onclick = renderKB;
+    el('pdf').onclick = () => printDoc(it.title, it.verified_on, body);
+  }
+
+  function printDoc(title, verified, bodyHtml) {
+    var w = window.open('', '_blank');
+    if (!w) { alert('Allow pop-ups for this page to save as PDF.'); return; }
+    var css = 'body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#241F1B;max-width:760px;margin:32px auto;padding:0 28px;line-height:1.6}'
+      + 'h1{font-size:23px;margin:0 0 4px}h4{font-size:14px;margin:18px 0 6px}p,li{font-size:13.5px}'
+      + 'table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #E9E2D6;padding:7px 10px;text-align:left;font-size:12.5px;vertical-align:top}th{background:#F4EFE7}'
+      + '.warn{background:#F6E9E6;border-left:3px solid #B0453A;padding:10px 13px;margin:14px 0;border-radius:6px;font-size:13px}'
+      + '.fc{display:none}.foot{color:#8B8173;font-size:11.5px;margin-top:26px;border-top:1px solid #E9E2D6;padding-top:10px}';
+    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>' + title + '</title><style>' + css + '</style></head><body><h1>' + title + '</h1>' + bodyHtml + '<div class="foot">FK Sports \u2014 Despatch Coordinator reference' + (verified ? ' \u00b7 verified ' + verified : '') + '. Printed from FK Home Academy.</div></body></html>');
+    w.document.close(); w.focus();
+    setTimeout(function () { try { w.print(); } catch (e) {} }, 350);
   }
 
   // ---------- boot: fetch + render the live UI into #lmsRoot, then wire ----------
