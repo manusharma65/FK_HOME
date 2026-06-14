@@ -10,6 +10,11 @@ const { db } = require('../db');
 const content = require('../learning-content');
 const fs = require('fs');
 const path = require('path');
+// Notifications + line-manager / HR resolution. Required lazily-safe: these only
+// touch the DB inside calls, never at load, so importing here is fine.
+let notify = null, approvals = null;
+try { notify = require('../notify'); } catch (e) { /* optional in some test rigs */ }
+try { approvals = require('../approval-flow'); } catch (e) { /* optional */ }
 
 const router = express.Router();
 
@@ -209,6 +214,7 @@ async function markSessionPassed(assignmentId, sessionId) {
     await db.query(`UPDATE lms_progress SET status='current' WHERE assignment_id=$1 AND session_id=$2 AND status='locked'`, [assignmentId, nxt.rows[0].id]);
   } else {
     await db.query(`UPDATE lms_assignments SET status='completed', completed_at=now() WHERE id=$1`, [assignmentId]);
+    notifyAwaitingSignoff(assignmentId).catch(() => {}); // best-effort: tell line manager + HR
   }
   return { passed: true };
 }
@@ -233,12 +239,102 @@ async function signOff(courseId, userId, managerId) {
            recert_due=EXCLUDED.recert_due, status='active'`,
     [userId, key, courseId, managerId || null, months]
   );
+  notifySignedOff(courseId, userId, managerId).catch(() => {}); // best-effort
   return { ok: true, competency: key };
 }
 
 async function getCompetency(userId, key) {
   const r = await db.query(`SELECT competency_key, status, recert_due FROM lms_competencies WHERE user_id=$1 AND competency_key=$2`, [userId, key]);
   return r.rows[0] || null;
+}
+
+// ---------- management gate (real req.user shape from auth.js) ----------
+// Manager of any dept, HR-team, owner, or an explicit learning.manage perm.
+function canManage(req) {
+  const u = req.user || {};
+  try {
+    if (typeof u.inGroup === 'function' && (u.inGroup('owner') || u.inGroup('hr-team'))) return true;
+    if (typeof u.can === 'function' && (u.can('learning.manage') || u.can('reviews.complete'))) return true;
+    if (Array.isArray(u.departments) && u.departments.some(d => d && (d.role === 'manager' || d.role === 'lead'))) return true;
+  } catch (e) { /* fall through to deny */ }
+  return false;
+}
+
+// ---------- completion + sign-off side-effects (best-effort; never block flow) ----------
+// On course completion: notify line manager + HR, AND drop a "Sign off training"
+// task in the line manager's My Work (shared with HR), mirroring how hr-task-router
+// creates review tasks. All wrapped — a failure here never breaks the gate.
+async function notifyAwaitingSignoff(assignmentId) {
+  const a = await db.query(
+    `SELECT a.user_id, a.course_id, c.title AS course_title, u.full_name
+       FROM lms_assignments a JOIN lms_courses c ON c.id=a.course_id
+       JOIN users u ON u.id=a.user_id WHERE a.id=$1`, [assignmentId]);
+  if (!a.rows.length) return;
+  const t = a.rows[0];
+  let manager = null, hr = [];
+  try { if (approvals && approvals.resolveStageOneManager) manager = await approvals.resolveStageOneManager(t.user_id); } catch (e) {}
+  try { if (approvals && approvals.hrTeamIds) hr = await approvals.hrTeamIds(); } catch (e) {}
+
+  // 1) notify line manager + HR
+  if (notify && notify.notifyEvent) {
+    const ids = []; if (manager) ids.push(manager); for (const h of hr) if (!ids.includes(h)) ids.push(h);
+    if (ids.length) { try {
+      await notify.notifyEvent('learning.awaiting_signoff', { name: t.full_name, courseTitle: t.course_title, userIds: ids, related_id: assignmentId });
+    } catch (e) {} }
+  }
+
+  // 2) "Sign off training" task in the line manager's My Work (idempotent, shared w/ HR)
+  if (manager) {
+    try {
+      const exists = await db.query(
+        `SELECT 1 FROM tasks WHERE category='training' AND status NOT IN ('done','cancelled')
+           AND (meta->>'assignment_id') = $1 LIMIT 1`, [String(assignmentId)]);
+      if (!exists.rows.length) {
+        let deptId = null; try { if (approvals && approvals.primaryDeptId) deptId = await approvals.primaryDeptId(t.user_id); } catch (e) {}
+        const meta = { context_url: '#learning', shared_with: hr, learning_signoff: true, assignment_id: String(assignmentId), course_id: t.course_id };
+        await db.query(
+          `INSERT INTO tasks (kind, source, title, body, category, assignee_user_id, related_user_id, department_id, status, opens_at, meta)
+           VALUES ('event','auto_event',$1,$2,'training',$3,$4,$5,'open',NOW(),$6)`,
+          ['Sign off training \u2014 ' + (t.full_name || 'employee'),
+           (t.course_title || 'Course') + ' \u2014 all sessions complete, ready to sign off',
+           manager, t.user_id, deptId, JSON.stringify(meta)]);
+      }
+    } catch (e) { /* tasks shape differs → notification already delivered, no harm */ }
+  }
+}
+
+async function notifySignedOff(courseId, userId, managerId) {
+  const c = await db.query(`SELECT title, competency_key FROM lms_courses WHERE id=$1`, [courseId]);
+  const courseTitle = c.rows[0] && c.rows[0].title;
+  const label = ((c.rows[0] && c.rows[0].competency_key) || '').replace(/_/g, '-') || 'qualified';
+
+  // 1) notify the trainee
+  if (notify && notify.notifyEvent) {
+    let byName = null;
+    if (managerId) { const m = await db.query(`SELECT full_name FROM users WHERE id=$1`, [managerId]); byName = m.rows[0] && m.rows[0].full_name; }
+    try { await notify.notifyEvent('learning.signed_off', { targetUserId: userId, courseTitle, byName, competencyLabel: label }); } catch (e) {}
+  }
+
+  // 2) close the open "Sign off training" task
+  try {
+    await db.query(
+      `UPDATE tasks SET status='done', completed_at=NOW(), completed_by_user_id=$1, updated_at=NOW()
+        WHERE category='training' AND related_user_id=$2 AND status NOT IN ('done','cancelled')`,
+      [managerId || null, userId]);
+  } catch (e) { /* tasks shape differs → harmless */ }
+
+  // 3) tick a completed onboarding item on the trainee's profile (idempotent by title)
+  try {
+    const title = ('Training: ' + (courseTitle || 'course') + ' \u2014 signed off').slice(0, 200);
+    const dup = await db.query(
+      `SELECT 1 FROM profile_notes WHERE user_id=$1 AND kind='onboarding' AND title=$2 LIMIT 1`, [userId, title]);
+    if (!dup.rows.length) {
+      await db.query(
+        `INSERT INTO profile_notes (user_id, kind, title, body, author_user_id, review_type, review_date, status, is_completed)
+         VALUES ($1,'onboarding',$2,$3,$4,NULL,NULL,NULL,TRUE)`,
+        [userId, title, 'Academy course completed and signed off by manager.', managerId || null]);
+    }
+  } catch (e) { /* profile_notes shape differs → harmless */ }
 }
 
 // ---------- Express router (mounted at /api/learning in server.js) ----------
@@ -258,23 +354,21 @@ router.post('/assign', async (req, res) => {
     let rows = await fetch();
     // Auto-assign: a logistics/despatch user with no course assigned gets Course A
     // automatically the first time they open Academy ("everyone goes through").
-    // Fully guarded — if identity fields differ on the live app this just no-ops,
-    // it never throws and never breaks the course listing.
+    // Keys off the real FK Home identity model that auth.js puts on req.user:
+    //   req.user.departments = [{ slug, name, role, ... }]
+    //   req.user.group_slugs = ['logistics-agent', ...]
+    // Fully guarded — never throws, never blocks the course listing.
     if (!rows.rows.length) {
       try {
-        let signals = [req.user.role, req.user.department, req.user.dept, req.user.job_title, req.user.designation]
-          .filter(Boolean).join(' ');
-        if (!signals) {
-          const u = await db.query(`SELECT * FROM users WHERE id=$1`, [req.user.id]);
-          if (u.rows.length) {
-            const r = u.rows[0];
-            signals = [r.role, r.department, r.dept, r.job_title, r.designation, r.title].filter(Boolean).join(' ');
-          }
-        }
-        if (/logist|despatch|dispatch|warehouse|courier|shipping/i.test(signals)) {
+        const depts = Array.isArray(req.user.departments) ? req.user.departments : [];
+        const groups = Array.isArray(req.user.group_slugs) ? req.user.group_slugs : [];
+        const hay = depts.map(d => ((d && d.slug) || '') + ' ' + ((d && d.name) || ''))
+          .concat(groups)
+          .join(' ').toLowerCase();
+        if (/logist|despatch|dispatch|warehouse|courier|shipping/.test(hay)) {
           const c = await db.query(`SELECT id FROM lms_courses WHERE slug='logistics-dispatch' LIMIT 1`);
           if (c.rows.length) {
-            await assignCourse(c.rows[0].id, req.user.id, req.user.id, 'auto', null);
+            await assignCourse(c.rows[0].id, req.user.id, req.user.id, 'onboarding', null);
             rows = await fetch();
           }
         }
@@ -313,6 +407,7 @@ router.post('/assign', async (req, res) => {
   // first time, not just who eventually passed). Free-text checks (result 'flagged')
   // are excluded from the score denominator — they're manager-reviewed.
   router.get('/manager/progress/:courseId', async (req, res) => {
+    if (!canManage(req)) return res.status(403).json({ error: 'Managers and HR only' });
     const cid = parseInt(req.params.courseId, 10);
     const rows = await db.query(
       `SELECT a.id assignment_id, a.user_id, u.full_name, a.status,
@@ -347,7 +442,7 @@ router.post('/assign', async (req, res) => {
     res.json(out);
   });
   router.post('/signoff', async (req, res) => {
-    // manager/owner only — gate in real auth middleware
+    if (!canManage(req)) return res.status(403).json({ error: 'Only a manager or HR can sign off' });
     const out = await signOff(req.body.courseId, req.body.userId, req.user.id);
     res.json(out);
   });
@@ -355,6 +450,7 @@ router.post('/assign', async (req, res) => {
   // Competencies for a user — for the profile "Training & competencies" drawer to read.
   router.get('/competencies/:userId', async (req, res) => {
     const uid = parseInt(req.params.userId, 10);
+    if (req.user.id !== uid && !canManage(req)) return res.status(403).json({ error: 'Not allowed' });
     const rows = await db.query(
       `SELECT comp.competency_key, comp.status, comp.recert_due, comp.signed_off_at,
               c.title AS course_title, c.slug AS course_slug
@@ -363,6 +459,27 @@ router.post('/assign', async (req, res) => {
         WHERE comp.user_id=$1
         ORDER BY comp.signed_off_at DESC NULLS LAST`, [uid]);
     res.json(rows.rows);
+  });
+
+  // Per-user course progress — powers the profile Training tab. Self, or a manager/HR.
+  router.get('/progress/:userId', async (req, res) => {
+    const uid = parseInt(req.params.userId, 10);
+    if (req.user.id !== uid && !canManage(req)) return res.status(403).json({ error: 'Not allowed' });
+    const rows = await db.query(
+      `SELECT c.id AS course_id, c.title, c.slug, a.status,
+              (SELECT count(*) FROM lms_sessions s WHERE s.course_id=a.course_id) AS total,
+              (SELECT count(*) FROM lms_progress p WHERE p.assignment_id=a.id AND p.status='passed') AS done,
+              (SELECT count(*) FROM (SELECT DISTINCT ON (check_id) result FROM lms_check_attempts WHERE assignment_id=a.id ORDER BY check_id, id) f WHERE f.result='pass') AS first_pass,
+              (SELECT count(*) FROM (SELECT DISTINCT ON (check_id) result FROM lms_check_attempts WHERE assignment_id=a.id ORDER BY check_id, id) f WHERE f.result IN ('pass','fail')) AS first_graded,
+              comp.status AS competency_status, comp.recert_due, comp.signed_off_at
+         FROM lms_assignments a
+         JOIN lms_courses c ON c.id=a.course_id
+         LEFT JOIN lms_competencies comp ON comp.user_id=a.user_id AND comp.course_id=a.course_id
+        WHERE a.user_id=$1 ORDER BY a.created_at`, [uid]);
+    res.json(rows.rows.map(r => {
+      const fp = Number(r.first_pass), fg = Number(r.first_graded);
+      return { ...r, accuracy_pct: fg > 0 ? Math.round((fp / fg) * 100) : null };
+    }));
   });
 
 

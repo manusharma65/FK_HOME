@@ -19,6 +19,21 @@ const { db } = require('./db');
 // managers/owner/HR of that user, or an array of userIds.
 
 const TEMPLATES = {
+  // Academy / Learning (r1.27)
+  'learning.awaiting_signoff': {
+    title: c => (c.name || 'A trainee') + ' has finished their training',
+    body:  c => (c.courseTitle || 'Course') + ' \u2014 ready for you to sign off',
+    recipients: c => c.userIds || [],          // line manager + HR (pre-resolved)
+    action_url: c => '#learning',
+    related_type: 'lms_assignment',
+  },
+  'learning.signed_off': {
+    title: c => 'Training signed off',
+    body:  c => (c.courseTitle || 'Your course') + ' \u2014 signed off by ' + (c.byName || 'your manager') + '. You are now ' + (c.competencyLabel || 'qualified') + '.',
+    recipients: c => (c.targetUserId ? [c.targetUserId] : []),
+    action_url: c => '#learning',
+    related_type: 'lms_competency',
+  },
   // Leaves
   'leave.requested': {
     title: c => c.name + ' requested leave',
