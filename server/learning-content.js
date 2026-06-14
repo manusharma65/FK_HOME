@@ -184,14 +184,142 @@ const reference = [
       {q:'Final Amazon pick wave?',a:'15:00 (Mixed wave 14:30)'},
       {q:'Channels to sweep at end of day?',a:'Amazon, eBay, Shopify, Temu, OnBuy'}
     ]}},
-  { department:'logistics', type:'error_table', title:'Common errors & fixes', verified_on:'2026-06-13',
-    body_html:'<ul><li>Amazon ineligible → change courier → regenerate</li><li>Yodel email missing → add info@fksports.co.uk → regenerate</li><li>Yodel address too long → shorten/abbreviate → regenerate</li><li>Evri Next Day unavailable → Hermes Tracked → regenerate</li><li>DHL size fail → recompute ÷5000; over 25 → split</li></ul>' },
-  { department:'logistics', type:'article', title:'End of day', verified_on:'2026-06-13',
-    body_html:'<p>Pick waves: Mixed 14:30, Final Amazon 15:00. Sweep Amazon, eBay, Shopify, Temu, OnBuy. Nothing unprocessed, no same-day pending.</p>' },
-  { department:'logistics', type:'article', title:'Surcharges & payment', verified_on:'2026-06-13',
-    body_html:'<p>Check postcode → identify courier → surcharge sheet → calculate (surcharge + margin) → written approval → <b>payment before dispatch</b>.</p>' },
-  { department:'logistics', type:'sop', title:'Full Logistics SOP', verified_on:'2026-06-13',
-    body_html:'<p>The complete FK-OPS-SOP-001 — courier selection, errors, end-of-day, surcharges, final checklist. Always the current version.</p>' }
+  // ---- How-to / SOP — the full FK-OPS-SOP-001, one document per topic ----
+  { department:'logistics', type:'sop', title:'1 · Courier Selection & Label Creation', verified_on:'2026-06-13',
+    config_json:{ summary:'Per-courier limits, formulas, splitting & combining rules, and the EVA-mat quantity caps.' },
+    body_html:`<p class="ref">FK-OPS-SOP-001 · Section 01 · Internal use only</p>
+<p>Pick the courier the parcel actually fits, then build the label. Two formulas do all the heavy lifting — volume in litres (<code>L × W × H ÷ 1000</code>) for the standard couriers, and the dimensional figure (<code>L × W × H ÷ 5000</code>) for DHL and DX. Measurements are length, width and height in cm, taken from the order record.</p>
+
+<h4>1.1 — Amazon Prime</h4>
+<p>Automatically assigned as Amazon Prime. <b>Must not normally be changed.</b> Splitting an order into separate labels is permitted when required.</p>
+<p><b>Formula:</b> <code>L × W × H ÷ 1000</code></p>
+<table class="sop"><tr><th>Condition</th><th>Action</th></tr>
+<tr><td>Volume &lt; 40 L</td><td>Single box — one label</td></tr>
+<tr><td>Volume &gt; 40 L</td><td>Separate labels required</td></tr></table>
+<p><b>Combining products</b> — all three must be true at the same time: total volume stays below 40 L · weight within courier limits · parcel dimensions within courier limits. Recheck the volume after combining.</p>
+
+<h4>1.2 — Yodel</h4>
+<table class="sop"><tr><th>Limit</th><th>Value</th></tr>
+<tr><td>Maximum weight</td><td>17 kg</td></tr>
+<tr><td>Maximum length</td><td>90 cm</td></tr>
+<tr><td>Maximum volume (CBM)</td><td>0.113 m³</td></tr></table>
+<p>Use the approved online CBM calculator to verify volume before creating the label.</p>
+<table class="sop"><tr><th>Condition</th><th>Action</th></tr>
+<tr><td>CBM &lt; 0.113 m³</td><td>One box — single label</td></tr>
+<tr><td>CBM &gt; 0.113 m³</td><td>Separate labels required</td></tr></table>
+<div class="warn"><b>Special size.</b> Trampolines, racks and rocking chairs must not exceed 90 cm length. If length is over 90 cm, Yodel must <b>not</b> be used.</div>
+<p><b>EVA mat caps — Yodel Medium</b> (all of: weight &lt; 17 kg · length ≤ 90 cm · CBM &lt; 0.113 m³):</p>
+<table class="sop"><tr><th>Product</th><th>Max qty</th></tr>
+<tr><td>EVA 2.5</td><td>8 pieces</td></tr>
+<tr><td>EVA 60 × 60</td><td>16 pieces</td></tr>
+<tr><td>EVA 12 MM</td><td>16 pieces</td></tr>
+<tr><td>Cartoon EVA mats</td><td>16 pieces</td></tr></table>
+
+<h4>1.3 — Evri (Hermes)</h4>
+<table class="sop"><tr><th>Limit</th><th>Value</th></tr>
+<tr><td>Maximum weight</td><td>15 kg</td></tr>
+<tr><td>Maximum parcel size</td><td>120 cm</td></tr>
+<tr><td>Maximum volume</td><td>40 L</td></tr></table>
+<p><b>Formula:</b> <code>L × W × H ÷ 1000</code> — under 40 L is one label, over 40 L needs separate labels.</p>
+<p><b>Combining products</b> — all must hold: total weight below 15 kg · parcel size below 120 cm · total volume below 40 L.</p>
+<p><b>EVA mat caps — Hermes / Evri:</b></p>
+<table class="sop"><tr><th>Product</th><th>Allowed per parcel</th></tr>
+<tr><td>EVA 2.5</td><td>4 pieces or 8 pieces</td></tr>
+<tr><td>EVA 30 × 30</td><td>Max 80 pieces</td></tr>
+<tr><td>EVA 60 × 60</td><td>Max 12 pieces</td></tr>
+<tr><td>EVA 12 MM</td><td>Max 12 pieces</td></tr>
+<tr><td>Cartoon EVA mats</td><td>Max 12 pieces</td></tr></table>
+
+<h4>1.4 — DHL (Parcel Next Day)</h4>
+<div class="warn"><b>Weight limit is 30 kg — always.</b> That applies to the dead weight <b>or</b> the volumetric weight, whichever is higher. The number 25 is <b>not</b> a weight; it is only the volumetric split threshold from the formula below.</div>
+<p><b>Formula:</b> <code>L × W × H ÷ 5000</code></p>
+<table class="sop"><tr><th>Condition</th><th>Action</th></tr>
+<tr><td>Result &lt; 25</td><td>Single label</td></tr>
+<tr><td>Result &gt; 25</td><td>Separate labels required</td></tr></table>
+<p><b>Approved EVA quantities — DHL:</b> EVA 60 × 60 → 7 sets (28 pieces) · EVA 2.5 → 3 sets.</p>
+
+<h4>1.5 — DX Group</h4>
+<p><b>DX Standard</b> — max length 150 cm, max weight 25 kg. Formula <code>L × W × H ÷ 5000</code>: result under 25 is a single label, over 25 needs separate labels.</p>
+<p><b>DX Overnight</b> — for treadmills, walking pads and heavy gym equipment. <b>No size limit, no weight limit.</b> Use DX Overnight whenever the shipment is beyond DX Standard limits.</p>` },
+
+  { department:'logistics', type:'sop', title:'2 · Common Courier Errors & Resolution', verified_on:'2026-06-13',
+    config_json:{ summary:'The exact fix for each label error, then regenerate.' },
+    body_html:`<p class="ref">FK-OPS-SOP-001 · Section 02 · Internal use only</p>
+<p>When a label fails or won't generate, work the symptom to its fix, then regenerate the label.</p>
+<table class="sop"><tr><th>Courier</th><th>Error / issue</th><th>Resolution</th></tr>
+<tr><td>Amazon Prime</td><td>Item not eligible for Amazon Shipping</td><td>Change courier to Evri, Yodel or DHL (Parcel Next Day) based on parcel size and weight. Regenerate the label.</td></tr>
+<tr><td>Yodel</td><td>Email address missing from order</td><td>Add <code>info@fksports.co.uk</code> as the email address, then regenerate the label.</td></tr>
+<tr><td>Yodel</td><td>Address or email field too long</td><td>Shorten the address — remove unnecessary wording and use standard abbreviations. Regenerate the label.</td></tr>
+<tr><td>Evri</td><td>Hermes Next Day unavailable for delivery postcode</td><td>Change service to Hermes Tracked, then regenerate the label.</td></tr>
+<tr><td>DHL</td><td>Label generation failure — parcel size restriction</td><td>Recalculate using <code>L × W × H ÷ 5000</code>. If the result exceeds 25, split the order into separate parcels and generate an individual label for each.</td></tr></table>` },
+
+  { department:'logistics', type:'sop', title:'3 · End-of-Day Dispatch Verification', verified_on:'2026-06-13',
+    config_json:{ summary:'Pick-wave times, the five-platform sweep, and the post-wave checklist.' },
+    body_html:`<p class="ref">FK-OPS-SOP-001 · Section 03 · Internal use only</p>
+<h4>Pick waves</h4>
+<table class="sop"><tr><th>Pick wave</th><th>Time</th></tr>
+<tr><td>Mixed Pick Wave</td><td>14:30</td></tr>
+<tr><td>Final Amazon Pick Wave</td><td>15:00</td></tr></table>
+<h4>Platforms to sweep</h4>
+<p>Every channel must be checked: <b>Amazon · eBay · Shopify · Temu · OnBuy</b>.</p>
+<h4>Post pick-wave verification checklist</h4>
+<ul>
+<li>No orders remain unprocessed across all platforms.</li>
+<li>No same-day dispatch orders remain pending.</li>
+<li>All orders assigned to the correct pick wave.</li>
+<li>All labels generated successfully.</li>
+<li>Any remaining order processed immediately.</li>
+</ul>` },
+
+  { department:'logistics', type:'sop', title:'4 · Additional Shipping Charge Calculation', verified_on:'2026-06-13',
+    config_json:{ summary:'The seven-step surcharge process — approval and payment before dispatch.' },
+    body_html:`<p class="ref">FK-OPS-SOP-001 · Section 04 · Internal use only</p>
+<p>Surcharges apply to remote and extended-area postcodes on DHL and DX Group. Work the steps in order.</p>
+<ol>
+<li>Check the customer's delivery postcode.</li>
+<li>Identify the courier being used: DHL or DX Group.</li>
+<li>Open the relevant courier surcharge sheet.</li>
+<li>Locate the postcode and identify the applicable surcharge amount.</li>
+<li>Calculate the total additional charge — it must cover the surcharge and maintain the required profit margin.</li>
+<li>Contact the customer, provide full details, and obtain written approval.</li>
+<li>Receive payment before proceeding to dispatch.</li>
+</ol>
+<div class="warn">Only proceed with dispatch after the additional shipping charge has been <b>approved and payment confirmed</b>.</div>
+<h4>Reference sheets</h4>
+<ul>
+<li>DHL Additional Shipping Charges Sheet — DHL surcharge lookup (remote / extended-area postcodes).</li>
+<li>DX Additional Shipping Charges Sheet — DX Group surcharge lookup.</li>
+<li>Remote Postcode / Courier Surcharge Reference Sheet — combined reference for all couriers.</li>
+</ul>
+<h4>Pre-payment verification checklist</h4>
+<ul>
+<li>Correct postcode identified.</li>
+<li>Correct surcharge sheet used.</li>
+<li>Additional courier charge verified.</li>
+<li>Profit margin maintained.</li>
+<li>Customer informed and approval received.</li>
+<li>Payment received (if applicable).</li>
+</ul>` },
+
+  { department:'logistics', type:'sop', title:'5 · Final Dispatch Checklist', verified_on:'2026-06-13',
+    config_json:{ summary:'The end-of-process checklist before releasing the shipment.' },
+    body_html:`<p class="ref">FK-OPS-SOP-001 · Section 05 · Internal use only</p>
+<p>Run this before releasing the shipment for warehouse processing and courier collection.</p>
+<ul>
+<li>Correct courier selected for each shipment.</li>
+<li>Weight verified — within courier limits.</li>
+<li>Length verified — within courier limits.</li>
+<li>Volume / CBM calculated correctly.</li>
+<li>Product combinations verified against courier rules.</li>
+<li>All labels generated successfully.</li>
+<li>All courier errors identified and resolved.</li>
+<li>All platforms checked after the final pick waves.</li>
+<li>No same-day dispatch orders remaining.</li>
+<li>Additional shipping charges confirmed where applicable.</li>
+<li>Customer informed where required.</li>
+<li>Shipment ready for dispatch.</li>
+</ul>
+<div class="warn"><b>End of process.</b> Once all checks are complete, all labels generated, all platforms reviewed and any additional charges confirmed — release the shipment. This confirms the order has been correctly labelled, verified, approved and is ready for dispatch.</div>` }
 ];
 
 module.exports = { course, reference };

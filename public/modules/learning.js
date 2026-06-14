@@ -39,6 +39,14 @@
     .lms .lesson h1{font-size:23px;margin:6px 0 3px}.lms .lead{color:var(--muted);font-size:14px;margin:0}
     .lms .obj{background:var(--surf2);border:1px solid var(--line);border-left:3px solid var(--terra);border-radius:10px;padding:13px 16px;margin:16px 0;font-size:14px}
     .lms .lesson p{margin:0 0 11px}.lms .lesson ul{margin:0 0 11px;padding-left:20px}.lms .lesson li{margin-bottom:5px}.lms code{background:#fff;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12.5px}
+    .lms .lesson ol{margin:0 0 11px;padding-left:22px}.lms .lesson ol li{margin-bottom:6px}
+    .lms .lesson h4{font-family:'Fraunces',Georgia,serif;font-size:15.5px;margin:22px 0 9px;color:var(--ink)}
+    .lms .lesson p.ref{text-transform:uppercase;letter-spacing:.08em;font-size:10.5px;font-weight:700;color:var(--muted);margin:0 0 14px}
+    .lms .lesson table.sop{width:100%;border-collapse:collapse;margin:10px 0 14px;font-size:13.5px}
+    .lms .lesson table.sop th{text-align:left;padding:8px 12px;background:var(--surf2);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line)}
+    .lms .lesson table.sop td{padding:8px 12px;border-bottom:1px solid #EFE7D7;vertical-align:top}
+    .lms .lesson table.sop tr:last-child td{border-bottom:0}
+    .lms .lesson .warn{background:#FBF1E8;border:1px solid #EBD3BE;border-left:3px solid var(--terra);border-radius:10px;padding:12px 15px;margin:14px 0;font-size:13.5px}
     .lms .lms-order{background:var(--ink2);color:#E7ECF2;border-radius:11px;margin:12px 0;overflow:hidden;font-size:13px;border:1px solid var(--grid)}
     .lms .lms-order .ob{background:#0F1620;padding:8px 14px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#9FB0C3;border-bottom:1px solid var(--grid)}.lms .lms-order .ob .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#E8722B;margin-right:7px}.lms .lms-order .ob b{color:#E7ECF2}
     .lms .lms-order table{width:100%;border-collapse:collapse}.lms .lms-order td{padding:7px 14px;border-bottom:1px solid var(--grid);vertical-align:top}.lms .lms-order td.k{color:#8FA1B5;width:104px;font-size:11.5px;text-transform:uppercase}.lms .lms-order td.v{font-family:'IBM Plex Mono',monospace}.lms .lms-order tr:last-child td{border-bottom:0}.lms .lms-order .sel{background:#3a2a1a;border:1px solid #6b4a22;border-radius:6px;padding:2px 8px;color:#F0C998}
@@ -201,7 +209,7 @@
   async function renderKB() {
     const items = await api('/kb?department=logistics');
     let tiles = '';
-    items.forEach(it => { tiles += '<div class="tile lmsKb" data-i="' + it.id + '"><h3>' + it.title + '</h3><p>' + ({ rate_card: 'All couriers, sizes and prices.', flashcard: 'Drill the numbers.', error_table: 'The fix for each error.', sop: 'The full document.', article: 'Reference.', calculator_link: 'Tool.' }[it.type] || 'Reference.') + '</p></div>'; });
+    items.forEach(it => { var blurb = (it.config_json && it.config_json.summary) || ({ rate_card: 'All couriers, sizes and prices.', flashcard: 'Drill the numbers.', error_table: 'The fix for each error.', sop: 'The full document.', article: 'Reference.', calculator_link: 'Tool.' }[it.type] || 'Reference.'); tiles += '<div class="tile lmsKb" data-i="' + it.id + '"><h3>' + it.title + '</h3><p>' + blurb + '</p></div>'; });
     lms().innerHTML =
       '<div class="hero m"><div class="ey">Learn · Knowledge Base</div><h1>Knowledge Base</h1><p>Always here, never locked. Forget a rate or a step \u2014 look it up in seconds.</p></div>' +
       '<div class="search"><input id="kbq" placeholder="Search\u2026 e.g. \u201cYodel max length\u201d"></div>' +

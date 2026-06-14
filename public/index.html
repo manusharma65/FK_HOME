@@ -263,6 +263,7 @@
   .g-day { --accent: #5E9BE0; --soft: 94,155,224; }
   .g-sys { --accent: #8B82E6; --soft: 139,130,230; }
   .g-you { --accent: #E67D5B; --soft: 230,125,91; }
+  .g-academy { --accent: #0F9B8E; --soft: 15,155,142; }
   .nav-spacer { height: 18px; }
 
   .sidebar-break {
@@ -835,20 +836,6 @@
         <i class="ti ti-mail"></i>
         <span>My Mail</span>
       </div>
-      <!-- ===== Academy ===== -->
-      <div class="navgrp g-academy" id="grpAcademy">
-        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-school"></i></span><span class="navgrp-lbl">Academy</span><span class="navgrp-cnt" id="cntAcademy"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
-        <div class="navgrp-items">
-      <div class="nav-item" data-route="#learning" onclick="location.hash='#learning'">
-        <i class="ti ti-school"></i>
-        <span>My Learning</span>
-      </div>
-      <div class="nav-item" data-route="#kb" onclick="location.hash='#kb'">
-        <i class="ti ti-book"></i>
-        <span>Knowledge Base</span>
-      </div>
-        </div>
-      </div>
       <div class="nav-item" data-route="#my-work" onclick="location.hash='#my-work'">
         <i class="ti ti-checkbox"></i>
         <span>My work</span>
@@ -873,6 +860,20 @@
         <span class="soon-badge">soon</span>
       </div>
 
+      <!-- ===== Academy ===== -->
+      <div class="navgrp g-academy" id="grpAcademy">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-school"></i></span><span class="navgrp-lbl">Academy</span><span class="navgrp-cnt" id="cntAcademy"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
+      <div class="nav-item" data-route="#learning" onclick="location.hash='#learning'">
+        <i class="ti ti-school"></i>
+        <span>My Learning</span>
+      </div>
+      <div class="nav-item" data-route="#kb" onclick="location.hash='#kb'">
+        <i class="ti ti-book"></i>
+        <span>Knowledge Base</span>
+      </div>
+        </div>
+      </div>
       <!-- ===== HR ===== -->
       <div class="navgrp g-hr" id="grpHR" style="display:none">
         <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-users"></i></span><span class="navgrp-lbl">HR</span><span class="navgrp-cnt" id="cntHR"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
@@ -1601,7 +1602,7 @@ async function init() {
 
 function render() {
   // Sidebar user
-  document.getElementById('sidebarName').textContent = me.display_name || me.full_name;
+  document.getElementById('sidebarName').textContent = me.full_name || me.display_name;
   document.getElementById('sidebarInitials').textContent = me.initials || initialsFrom(me.full_name);
   if (me.avatar_colour) document.getElementById('sidebarAvatar').style.background = me.avatar_colour;
   document.getElementById('sidebarRole').textContent = roleLabel(me.departments, me.group_slugs) || 'Active';

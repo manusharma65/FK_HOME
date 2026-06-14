@@ -34,9 +34,9 @@ async function init() {
   catch (e) { console.error('[learning] init failed:', e.message); _ready = null; throw e; }
 }
 function ensureReady() { if (!_ready) _ready = init(); return _ready; }
-// kick it off at boot (non-blocking) so it's usually done before the first click
-ensureReady().catch(() => {});
-// and gate the first requests on it, but never hang: errors flow to the 500 handler below
+// IMPORTANT: do NOT init at module load — server/db.js has no pool until initDb() runs
+// on boot. Init lazily on the first request, by which point the pool is up.
+// gate the first requests on it, but never hang: errors flow to the 500 handler below
 router.use((req, res, next) => { ensureReady().then(() => next()).catch(next); });
 
 async function seedCourse(course, ownerId) {
@@ -81,6 +81,16 @@ async function seedReference(items) {
          SET type=EXCLUDED.type, body_html=EXCLUDED.body_html,
              config_json=EXCLUDED.config_json, verified_on=EXCLUDED.verified_on, updated_at=now()`,
       [r.department, r.title, r.type, r.body_html || null, r.config_json ? JSON.stringify(r.config_json) : null, r.verified_on || null]
+    );
+  }
+  // Purge retired titles: for each department we just seeded, drop any rows
+  // whose title is no longer in the content set (e.g. old thin articles).
+  const depts = [...new Set(items.map(r => r.department))];
+  for (const d of depts) {
+    const titles = items.filter(r => r.department === d).map(r => r.title);
+    await db.query(
+      `DELETE FROM lms_reference WHERE department = $1 AND title <> ALL($2::text[])`,
+      [d, titles]
     );
   }
 }
