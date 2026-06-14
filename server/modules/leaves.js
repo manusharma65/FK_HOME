@@ -34,9 +34,11 @@ async function getDeptManagersFor(userId) {
 }
 
 // The HR approver: the senior-most active hr-team member who is not on approved
-// leave today (Tanu first; falls back to Deepanshi / next if she's away). Returns
-// a single user id, or null if there's no HR team. Never the owner.
-async function getHrApprover() {
+// leave today (Tanu first; falls back to Deepanshi / next if she's away). Excludes
+// `excludeUserId` (so an HR person's OWN leave never routes back to them). If that
+// leaves no HR (the requester is the only HR), falls back to the owner. Never the
+// requester themselves.
+async function getHrApprover(excludeUserId) {
   const r = await db.query(
     `SELECT u.id,
             COALESCE(MAX(CASE m.role WHEN 'manager' THEN 4 WHEN 'lead' THEN 3 WHEN 'senior' THEN 2 ELSE 1 END), 1) AS rank
@@ -48,8 +50,21 @@ async function getHrApprover() {
       GROUP BY u.id
       ORDER BY rank DESC, u.id ASC`
   );
-  const ids = r.rows.map(x => x.id);
-  if (ids.length === 0) return null;
+  let ids = r.rows.map(x => x.id);
+  if (excludeUserId) ids = ids.filter(id => id !== excludeUserId);
+  if (ids.length === 0) {
+    // No HR left to approve (requester is the only HR) → fall back to the owner.
+    const o = await db.query(
+      `SELECT u.id FROM users u
+         JOIN user_groups ug ON ug.user_id = u.id
+         JOIN groups g ON g.id = ug.group_id
+        WHERE g.slug = 'owner' AND u.deleted_at IS NULL AND u.employment_status = 'active'
+          AND u.id <> COALESCE($1, -1)
+        ORDER BY u.id LIMIT 1`,
+      [excludeUserId || null]
+    );
+    return o.rows[0] ? o.rows[0].id : null;
+  }
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date());
   for (const uid of ids) {
     const out = await db.query(
@@ -232,7 +247,7 @@ router.post('/request', async (req, res) => {
       const managers = await getDeptManagersFor(req.user.id);
       let stage, approverId;
       if (managers.length > 0) { stage = 'manager'; approverId = managers[0]; }
-      else { stage = 'hr'; approverId = await getHrApprover(); }
+      else { stage = 'hr'; approverId = await getHrApprover(req.user.id); }
       await db.query(`UPDATE leave_requests SET stage = $1 WHERE id = $2`, [stage, r.rows[0].id]);
       await notifyEvent(stage === 'manager' ? 'leave.requested' : 'leave.awaiting_hr', {
         actorUserId: req.user.id,
@@ -351,6 +366,30 @@ router.put('/:id', async (req, res) => {
     try {
       await logAudit({ req, module: 'leaves', action: 'request.edited', target_type: 'leave_request', target_id: id, before: lr, after: upd.rows[0] });
     } catch (e) { console.error('[leaves/edit] audit failed:', e.message); }
+
+    // r1.25 — an edit changes the dates/days, so any prior manager approval no longer
+    // applies. Send the request back to the START of the approval chain and re-notify,
+    // and cancel any HR-queue task left over from a previous (now-void) approval.
+    try {
+      await db.query(
+        `UPDATE tasks SET status='cancelled', updated_at=NOW()
+          WHERE kind='event' AND category='leave' AND (meta->>'event_related_id')=$1
+            AND status NOT IN ('done','cancelled')`,
+        [String(id)]);
+      const managers = await getDeptManagersFor(req.user.id);
+      let stage, approverId;
+      if (managers.length > 0) { stage = 'manager'; approverId = managers[0]; }
+      else { stage = 'hr'; approverId = await getHrApprover(req.user.id); }
+      await db.query(`UPDATE leave_requests SET stage=$1 WHERE id=$2`, [stage, id]);
+      const range = start_date === end_date ? formatDateUK(start_date) : `${formatDateUK(start_date)} → ${formatDateUK(end_date)}`;
+      const daysText = `${formatDays(totalDays)} day${totalDays === 1 ? '' : 's'}`;
+      await notifyEvent(stage === 'manager' ? 'leave.requested' : 'leave.awaiting_hr', {
+        actorUserId: req.user.id,
+        name: req.user.display_name || req.user.full_name,
+        range, daysText, reason: reason || null,
+        related_id: id, approverId,
+      });
+    } catch (e) { console.error('[leaves/edit] re-route failed:', e.message); }
 
     res.json({ ok: true, request: upd.rows[0] });
   } catch (err) {
@@ -502,6 +541,9 @@ router.post('/:id/decide', async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const lr = r.rows[0];
     if (lr.status !== 'pending') return res.status(400).json({ error: 'Only pending requests can be decided' });
+    // r1.25 — you can never decide your own leave (defends both stages: a manager who
+    // is the requester, or an HR person whose request somehow reached them).
+    if (lr.user_id === req.user.id) return res.status(403).json({ error: "You can't approve or reject your own leave request." });
 
     // r1.25 — Two-stage decision. stage 'manager' = awaiting the line manager;
     // stage 'hr' = awaiting HR (final). Legacy rows with no stage are treated as 'hr'.
@@ -532,7 +574,7 @@ router.post('/:id/decide', async (req, res) => {
         return res.json({ ok: true, stage: 'done' });
       }
       // manager approves -> hand to HR (notify HR + create the HR task HERE, not on request)
-      const hrId = await getHrApprover();
+      const hrId = await getHrApprover(lr.user_id);
       await db.query(`UPDATE leave_requests SET stage='hr', updated_at=NOW() WHERE id=$1`, [id]);
       try { await logAudit({ req, module:'leaves', action:'request.manager_approved', target_type:'leave_request', target_id:id, before:{stage:'manager'}, after:{stage:'hr'} }); } catch (e) { console.error('[leaves/decide] audit failed:', e.message); }
       try {
