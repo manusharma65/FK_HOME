@@ -835,6 +835,10 @@
         <i class="ti ti-mail"></i>
         <span>My Mail</span>
       </div>
+      <!-- ===== Academy ===== -->
+      <div class="navgrp g-academy" id="grpAcademy">
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-school"></i></span><span class="navgrp-lbl">Academy</span><span class="navgrp-cnt" id="cntAcademy"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
       <div class="nav-item" data-route="#learning" onclick="location.hash='#learning'">
         <i class="ti ti-school"></i>
         <span>My Learning</span>
@@ -842,6 +846,8 @@
       <div class="nav-item" data-route="#kb" onclick="location.hash='#kb'">
         <i class="ti ti-book"></i>
         <span>Knowledge Base</span>
+      </div>
+        </div>
       </div>
       <div class="nav-item" data-route="#my-work" onclick="location.hash='#my-work'">
         <i class="ti ti-checkbox"></i>
@@ -1715,7 +1721,7 @@ function render() {
     if (saved === '1') { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; }
     else setOpenHeight();
   }
-  ['grpHR', 'grpDay', 'grpSystem', 'grpYou'].forEach(setupNavGroup);
+  ['grpHR', 'grpDay', 'grpSystem', 'grpYou', 'grpAcademy'].forEach(setupNavGroup);
   // Keep open groups correctly sized if the window resizes. Bind ONCE — render()
   // runs on every reload(), so an unguarded listener here would stack too.
   if (!window.__fkNavResizeBound) {

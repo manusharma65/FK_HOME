@@ -228,6 +228,16 @@
   // ---------- boot: fetch + render the live UI into #lmsRoot, then wire ----------
   async function boot(view) {
     const r = lms(); if (!r) return;
+    try { await bootInner(view); }
+    catch (e) {
+      console.error('[learning]', e);
+      r.innerHTML = '<div class="hero"><h1>' + (view === 'kb' ? 'Knowledge Base' : 'My Learning') + '</h1></div>' +
+        '<div style="padding:28px;text-align:center;color:#8B8173">Couldn\'t load just now. <button class="btn" id="lmsRetry" style="margin-left:8px">Retry</button></div>';
+      if (el('lmsRetry')) el('lmsRetry').onclick = () => { r.innerHTML = '<div style="padding:40px;text-align:center;color:#8B8173">Loading…</div>'; boot(view); };
+    }
+  }
+  async function bootInner(view) {
+    const r = lms(); if (!r) return;
     if (view === 'kb') { await renderKB(); wireSeg(); return; }
     const courses = await api('/my-courses');
     if (!courses.length) {

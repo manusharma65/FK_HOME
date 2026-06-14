@@ -8,19 +8,36 @@ const express = require('express');
 const { requireAuth } = require('../auth');
 const { db } = require('../db');
 const content = require('../learning-content');
+const fs = require('fs');
+const path = require('path');
 
 const router = express.Router();
+
+// Wrap router verbs so any async handler error becomes a clean 500 (Express 4 otherwise hangs).
+['get','post','put','delete'].forEach((m) => {
+  const orig = router[m].bind(router);
+  router[m] = (rp, ...hs) => orig(rp, ...hs.map((h) => (typeof h === 'function'
+    ? (req, res, next) => Promise.resolve(h(req, res, next)).catch(next) : h)));
+});
+
 router.use(requireAuth);
 
 // Seed the Logistics course + KB on first use (idempotent). Runs after boot migrations
 // have created the tables, so there's no server.js boot-order wiring to get wrong.
-let _seeded = false;
-async function ensureSeeded() {
-  if (_seeded) return;
-  try { await seedCourse(content.course, 1); await seedReference(content.reference); _seeded = true; }
-  catch (e) { console.error('[learning] seed failed:', e.message); }
+let _ready = null;
+async function ensureSchema() {
+  const sql = fs.readFileSync(path.join(__dirname, '..', 'schema', '44-learning.sql'), 'utf8');
+  await db.query(sql); // CREATE TABLE IF NOT EXISTS ... — safe to re-run
 }
-router.use(async (req, res, next) => { try { await ensureSeeded(); } catch (e) {} next(); });
+async function init() {
+  try { await ensureSchema(); await seedCourse(content.course, 1); await seedReference(content.reference); }
+  catch (e) { console.error('[learning] init failed:', e.message); _ready = null; throw e; }
+}
+function ensureReady() { if (!_ready) _ready = init(); return _ready; }
+// kick it off at boot (non-blocking) so it's usually done before the first click
+ensureReady().catch(() => {});
+// and gate the first requests on it, but never hang: errors flow to the 500 handler below
+router.use((req, res, next) => { ensureReady().then(() => next()).catch(next); });
 
 async function seedCourse(course, ownerId) {
   const c = await db.query(
@@ -249,6 +266,11 @@ router.post('/assign', async (req, res) => {
     res.json(out);
   });
 
+
+router.use((err, req, res, next) => {
+  console.error('[learning]', err && err.message);
+  if (!res.headersSent) res.status(500).json({ error: 'learning: ' + (err && err.message || 'error') });
+});
 
 module.exports = router;
 // helpers exposed for boot-seed + onboarding auto-assign:
