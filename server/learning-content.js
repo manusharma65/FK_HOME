@@ -36,7 +36,7 @@ const course = {
 
     { title: 'Checking size & weight fit the courier', est: 20, tier: 1,
       objective: 'Read the order’s dimensions and weight, verify the courier fits, or decide to split — no measuring.',
-      body_html: `<p>Dimensions and weight come from the order in Linnworks. Check them against the courier’s limits.</p><ul><li><b>÷1000 = litres</b> (Amazon/Prime, Yodel, Evri; 40 L)</li><li><b>÷5000 = dimensional</b> (DHL, DX; 25)</li><li>Yodel CBM <b>0.113 m³</b> — verify on the online calculator.</li></ul><p>Limits aren’t only volume — <b>length and weight kill a courier too</b>.</p>`,
+      body_html: `<p>Dimensions and weight come from the order in Linnworks. Check them against the courier’s limits.</p><ul><li><b>÷1000 = litres</b> (Amazon/Prime, Yodel, Evri; 40 L)</li><li><b>÷5000 = dimensional</b> (DHL splits at 30, DX at 25)</li><li>Yodel CBM <b>0.113 m³</b> — verify on the online calculator.</li></ul><p>Limits aren’t only volume — <b>length and weight kill a courier too</b>.</p>`,
       checks: [
         { type:'scenario', prompt: ORDER({id:'#FK-3104',channel:'Amazon',items:'1 × Olympic Barbell 7ft',dims:'220 × 12 × 12 cm',weight:'9.0 kg',courier:'Evri Next Day',shipTo:'14 Mill Road, Cardiff, CF24 1AA',paid:'Next-day — £6.99'}) + '<b>Process #FK-3104.</b>',
           options:[
@@ -72,7 +72,7 @@ const course = {
 
     { title: 'Big & heavy: DHL, DX, DX Freight', est: 25, tier: 2,
       objective: 'Handle zoned and heavy couriers and special sizes.',
-      body_html: `<ul><li><b>DHL</b> — 30 kg; ÷5000 (over 25 → split); zones A–D; <b>9:00/10:30 not available in Zone D</b>.</li><li><b>DX Box</b> 25 kg/150 cm; <b>Length</b> 200 cm.</li><li><b>DX Overnight</b> — treadmills, heavy gym kit; no size/weight limit.</li></ul>`,
+      body_html: `<ul><li><b>DHL</b> — 30 kg; ÷5000 (over 30 → split); zones A–D; <b>9:00/10:30 not available in Zone D</b>.</li><li><b>DX Box</b> 25 kg/150 cm; <b>Length</b> 200 cm.</li><li><b>DX Overnight</b> — treadmills, heavy gym kit; no size/weight limit.</li></ul>`,
       checks: [
         { type:'scenario', prompt: ORDER({id:'#FK-4102',channel:'Shopify',items:'1 × Resistance Rack',dims:'48 × 40 × 36 cm',weight:'19 kg',courier:'DHL Next Working Day',shipTo:'22 Harbour St, Inverness, IV1 1NF',paid:'Next-day BY 9AM — £18.50 paid'}) + '<b>Customer paid DHL next-day by 9am. Process #FK-4102.</b>',
           options:[
@@ -90,7 +90,7 @@ const course = {
 
     { title: 'When labels go wrong', est: 15, tier: 2,
       objective: 'Fix the common courier errors in the system.',
-      body_html: `<ul><li>Amazon ineligible → change courier → regenerate.</li><li>Yodel email missing → add info@fksports.co.uk → regenerate.</li><li>Yodel address too long → shorten/abbreviate → regenerate.</li><li>Evri Next Day unavailable → Hermes Tracked → regenerate.</li><li>DHL size fail → recompute ÷5000; over 25 → split.</li></ul>`,
+      body_html: `<ul><li>Amazon ineligible → change courier → regenerate.</li><li>Yodel email missing → add info@fksports.co.uk → regenerate.</li><li>Yodel address too long → shorten/abbreviate → regenerate.</li><li>Evri Next Day unavailable → Hermes Tracked → regenerate.</li><li>DHL size fail → recompute ÷5000; over 30 → split.</li></ul>`,
       checks: [
         { type:'scenario', prompt:`A Yodel label fails: "Address or email field too long." The address is a long rural one with full county and country spelled out.`,
           options:[
@@ -178,7 +178,7 @@ const reference = [
       {q:'Evri limits?',a:'15 kg · 120 cm · 40 L'},
       {q:'Yodel limits?',a:'17 kg · 90 cm · 0.113 m³ — never over 90 cm'},
       {q:'DHL "by 9am" — the catch?',a:'Not available in Zone D'},
-      {q:'DHL weight limit?',a:'30 kg (the 25 is the volumetric result, not weight)'},
+      {q:'DHL weight limit?',a:'30 kg — dead or volumetric, whichever is higher. ÷5000 splits at 30 too.'},
       {q:'DX parcel — Box vs Length service?',a:'Box £6 up to 150 cm · Length £9.60 up to 200 cm'},
       {q:'Treadmill — which courier?',a:'DX Overnight (no size/weight limit)'},
       {q:'Final Amazon pick wave?',a:'15:00 (Mixed wave 14:30)'},
@@ -234,8 +234,8 @@ const reference = [
 <div class="warn"><b>Weight limit is 30 kg — always.</b> That applies to the dead weight <b>or</b> the volumetric weight, whichever is higher. The number 25 is <b>not</b> a weight; it is only the volumetric split threshold from the formula below.</div>
 <p><b>Formula:</b> <code>L × W × H ÷ 5000</code></p>
 <table class="sop"><tr><th>Condition</th><th>Action</th></tr>
-<tr><td>Result &lt; 25</td><td>Single label</td></tr>
-<tr><td>Result &gt; 25</td><td>Separate labels required</td></tr></table>
+<tr><td>Result &lt; 30</td><td>Single label</td></tr>
+<tr><td>Result &gt; 30</td><td>Separate labels required</td></tr></table>
 <p><b>Approved EVA quantities — DHL:</b> EVA 60 × 60 → 7 sets (28 pieces) · EVA 2.5 → 3 sets.</p>
 
 <h4>1.5 — DX Group</h4>

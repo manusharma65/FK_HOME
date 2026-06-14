@@ -48,16 +48,23 @@ async function seedCourse(course, ownerId) {
     [course.slug, course.title, course.department, course.competency_key, course.recert_months || 12, ownerId || null]
   );
   const courseId = c.rows[0].id;
-  // rebuild sessions/checks cleanly so re-seeding reflects edits
-  await db.query(`DELETE FROM lms_sessions WHERE course_id=$1`, [courseId]);
+  // Upsert sessions by (course_id, position) so their IDs stay STABLE across re-seeds.
+  // lms_progress is keyed to session_id (ON DELETE CASCADE) — deleting sessions on every
+  // boot wiped learner progress and locked the whole course. Upserting preserves it.
   for (let si = 0; si < course.sessions.length; si++) {
     const s = course.sessions[si];
     const sr = await db.query(
       `INSERT INTO lms_sessions (course_id,position,title,objective,body_html,est_minutes)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (course_id,position) DO UPDATE
+         SET title=EXCLUDED.title, objective=EXCLUDED.objective,
+             body_html=EXCLUDED.body_html, est_minutes=EXCLUDED.est_minutes
+       RETURNING id`,
       [courseId, si, s.title, s.objective || null, s.body_html || null, s.est || null]
     );
     const sessionId = sr.rows[0].id;
+    // Checks can be rebuilt per session (attempts are audit only; progress is keyed to session).
+    await db.query(`DELETE FROM lms_checks WHERE session_id=$1`, [sessionId]);
     const checks = s.checks || [];
     for (let ci = 0; ci < checks.length; ci++) {
       const k = checks[ci];
@@ -69,7 +76,29 @@ async function seedCourse(course, ownerId) {
       );
     }
   }
+  // Drop any sessions beyond the current course length (if a version shrank).
+  await db.query(`DELETE FROM lms_sessions WHERE course_id=$1 AND position >= $2`, [courseId, course.sessions.length]);
   return courseId;
+}
+
+// Self-heal an assignment's progress: insert any missing rows, and if nothing is
+// current/passed (e.g. progress was wiped by an old destructive re-seed), open session 1.
+async function ensureProgress(assignmentId, courseId) {
+  const sessions = await db.query(`SELECT id, position FROM lms_sessions WHERE course_id=$1 ORDER BY position`, [courseId]);
+  for (const s of sessions.rows) {
+    await db.query(
+      `INSERT INTO lms_progress (assignment_id,session_id,status) VALUES ($1,$2,'locked')
+       ON CONFLICT (assignment_id,session_id) DO NOTHING`,
+      [assignmentId, s.id]
+    );
+  }
+  const active = await db.query(
+    `SELECT 1 FROM lms_progress WHERE assignment_id=$1 AND status IN ('current','passed') LIMIT 1`, [assignmentId]
+  );
+  if (!active.rows.length && sessions.rows.length) {
+    await db.query(`UPDATE lms_progress SET status='current' WHERE assignment_id=$1 AND session_id=$2`,
+      [assignmentId, sessions.rows[0].id]);
+  }
 }
 
 async function seedReference(items) {
@@ -121,8 +150,9 @@ async function getCourseForUser(courseId, userId) {
   const a = await db.query(`SELECT id, status FROM lms_assignments WHERE course_id=$1 AND user_id=$2`, [courseId, userId]);
   if (!a.rows.length) return null;
   const assignmentId = a.rows[0].id;
+  await ensureProgress(assignmentId, courseId);
   const rows = await db.query(
-    `SELECT s.id, s.position, s.title, COALESCE(p.status,'locked') AS status
+    `SELECT s.id, s.position, s.title, s.objective, COALESCE(p.status,'locked') AS status
        FROM lms_sessions s
        LEFT JOIN lms_progress p ON p.session_id=s.id AND p.assignment_id=$1
       WHERE s.course_id=$2 ORDER BY s.position`,
