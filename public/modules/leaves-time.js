@@ -40,13 +40,19 @@ window.fkModules['leaves-time'] = {
           '#lt-mod .pill.green{background:#EAF3DE;color:#3B6D11}' +
           '#lt-mod .pill.amber{background:#FAEEDA;color:#9A5B1F}' +
           '#lt-mod .pill.red{background:#FCEBEB;color:#A32D2D}' +
-          '#lt-mod .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:4px 0 10px}' +
-          '#lt-mod .cal .d{aspect-ratio:1;border-radius:5px;background:#ECEAE3;cursor:default;position:relative}' +
+          '#lt-mod .cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:4px 0 5px}' +
+          '#lt-mod .cal-dow span{text-align:center;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}' +
+          '#lt-mod .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:0 0 10px}' +
+          '#lt-mod .cal .d{aspect-ratio:1;border-radius:7px;background:#ECEAE3;cursor:default;position:relative;display:flex;flex-direction:column;justify-content:space-between;padding:5px 6px}' +
+          '#lt-mod .cal .d.blank{background:transparent}' +
+          '#lt-mod .cal .d .mon{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:#C2562E;line-height:1}' +
+          '#lt-mod .cal .d .num{font-family:var(--disp,"Fraunces"),serif;font-size:14px;font-weight:600;line-height:1;align-self:flex-end;color:var(--ink)}' +
           '#lt-mod .cal .d.on_time{background:#CDE8D6}' +
           '#lt-mod .cal .d.late{background:#F6DEB0;outline:1px solid #C98A2E}' +
           '#lt-mod .cal .d.no_show{background:#F2C7C7}' +
           '#lt-mod .cal .d.leave{background:#CBDCF0}' +
           '#lt-mod .cal .d.sick{background:#E0D5EC}' +
+          '#lt-mod .cal .d.today{outline:2px solid #C2562E;outline-offset:1px}' +
           '#lt-mod .cal-key{font-size:13.5px;color:var(--soft);margin-bottom:6px}' +
           '#lt-mod .att-counts{display:flex;gap:20px;margin-bottom:12px}' +
           '#lt-mod .att-counts .v{font-size:18px;font-weight:600}' +
@@ -100,6 +106,7 @@ window.fkModules['leaves-time'] = {
         '<p class="sec-lbl">My attendance \u00b7 last 30 days</p>' +
         '<div class="panel" style="padding:14px 15px" id="ltAttPanel">' +
           '<div class="att-counts" id="ltAttCounts"><span class="l">Loading\u2026</span></div>' +
+          '<div class="cal-dow"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>' +
           '<div class="cal" id="ltCal"></div>' +
           '<div class="cal-key">Green on time \u00b7 amber late \u00b7 red unauthorised \u00b7 blue leave \u00b7 purple sick \u00b7 grey off.</div>' +
         '</div>' +
@@ -217,17 +224,32 @@ window.fkModules['leaves-time'] = {
         const data = await r.json();
         const rows = (data.days || []).slice().reverse(); // oldest -> newest for the grid
         let onTime = 0, late = 0, noShow = 0, leave = 0;
-        const cells = rows.map(d => {
-          let cls = 'd';
-          if (d.status === 'on_time' || d.status === 'worked_voluntary') { cls += ' on_time'; onTime++; }
-          else if (d.status === 'late' || d.status === 'very_late' || (d.late_minutes > 0)) { cls += ' late'; late++; }
-          else if (d.status === 'not_yet_in') { cls += ' no_show'; noShow++; }
-          else if (d.status === 'on_leave') { cls += ' leave'; leave++; }
-          else if (d.status === 'off_sick') { cls += ' sick'; }
-          // off_* and pending stay grey
-          const title = dOnly(d.for_date) + ' \u00b7 ' + (d.status || 'pending') + (d.late_minutes > 0 ? ' (' + d.late_minutes + 'm late)' : '');
-          return '<div class="' + cls + '" title="' + title + '"></div>';
-        }).join('');
+        const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const pdate = (s) => { const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+        const todayD = new Date(); todayD.setHours(0, 0, 0, 0);
+        let cells = '';
+        if (rows.length) {
+          // Weekday-align the grid: lead with blanks up to the first day's weekday (Mon=0..Sun=6).
+          const first = pdate(rows[0].for_date);
+          const lead = first ? ((first.getDay() + 6) % 7) : 0;
+          for (let i = 0; i < lead; i++) cells += '<div class="d blank"></div>';
+          cells += rows.map((d, idx) => {
+            let cls = 'd';
+            if (d.status === 'on_time' || d.status === 'worked_voluntary') { cls += ' on_time'; onTime++; }
+            else if (d.status === 'late' || d.status === 'very_late' || (d.late_minutes > 0)) { cls += ' late'; late++; }
+            else if (d.status === 'not_yet_in') { cls += ' no_show'; noShow++; }
+            else if (d.status === 'on_leave') { cls += ' leave'; leave++; }
+            else if (d.status === 'off_sick') { cls += ' sick'; }
+            // off_* and pending stay grey
+            const dt = pdate(d.for_date);
+            const num = dt ? dt.getDate() : '';
+            const mon = (dt && (idx === 0 || dt.getDate() === 1)) ? MON[dt.getMonth()] : '';
+            const isToday = dt && dt.getTime() === todayD.getTime();
+            const title = dOnly(d.for_date) + ' \u00b7 ' + (d.status || 'pending') + (d.late_minutes > 0 ? ' (' + d.late_minutes + 'm late)' : '');
+            return '<div class="' + cls + (isToday ? ' today' : '') + '" title="' + title + '">' +
+              '<span class="mon">' + mon + '</span><span class="num">' + num + '</span></div>';
+          }).join('');
+        }
         $('ltCal').innerHTML = cells || '<div class="empty" style="grid-column:1/-1">No attendance recorded in the last 30 days.</div>';
         $('ltAttCounts').innerHTML =
           (rows.length === 0
