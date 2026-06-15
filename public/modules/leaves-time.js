@@ -52,6 +52,25 @@ window.fkModules['leaves-time'] = {
           '#lt-mod .att-counts .v{font-size:18px;font-weight:600}' +
           '#lt-mod .att-counts .l{font-size:14.5px;color:var(--muted)}' +
           '#lt-mod .empty{text-align:center;color:var(--muted);padding:18px;font-size:14px}' +
+          // Company-holidays redesign (cards): date block + Fraunces name + weekday + CS chip + countdown.
+          '#ltHolidaysModal .modal{max-width:540px}' +
+          '#ltHolidaysModal .hpanel{max-height:60vh;overflow:auto;margin:4px 0 2px}' +
+          '#ltHolidaysModal .hol{display:flex;align-items:center;gap:14px;padding:11px 8px;position:relative}' +
+          '#ltHolidaysModal .hol+.hol{border-top:0.5px solid var(--line)}' +
+          '#ltHolidaysModal .hol .date{flex-shrink:0;width:54px;height:58px;border-radius:12px;background:var(--canvas,#F4EFE7);border:0.5px solid var(--line);display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1}' +
+          '#ltHolidaysModal .hol .date .d{font-family:var(--disp,"Fraunces"),serif;font-weight:600;font-size:22px;color:var(--ink)}' +
+          '#ltHolidaysModal .hol .date .m{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#C2562E;margin-top:3px}' +
+          '#ltHolidaysModal .hol .info{flex:1;min-width:0}' +
+          '#ltHolidaysModal .hol .nm{font-family:var(--disp,"Fraunces"),serif;font-weight:600;font-size:17px;line-height:1.15}' +
+          '#ltHolidaysModal .hol .meta{font-size:12.5px;color:var(--muted);margin-top:3px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}' +
+          '#ltHolidaysModal .hol .dow{font-weight:500;color:#6B6358}' +
+          '#ltHolidaysModal .hol .cs{font-size:11px;font-weight:600;color:#8A6A3A;background:#F7EBD8;padding:2px 8px;border-radius:99px}' +
+          '#ltHolidaysModal .hol .away{flex-shrink:0;text-align:right;min-width:44px}' +
+          '#ltHolidaysModal .hol .away .n{font-family:var(--disp,"Fraunces"),serif;font-weight:600;font-size:16px;color:var(--ink)}' +
+          '#ltHolidaysModal .hol .away .u{font-size:10.5px;color:var(--muted)}' +
+          '#ltHolidaysModal .hol.next{background:linear-gradient(90deg,#FBF1E6,transparent 72%);border-radius:12px}' +
+          '#ltHolidaysModal .hol.next .nextchip{position:absolute;top:7px;right:7px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#fff;background:var(--orange,#E8722B);padding:3px 9px;border-radius:99px}' +
+          '#ltHolidaysModal .hol.past{opacity:.5}' +
         '</style>' +
 
         '<div class="lt-head">' +
@@ -94,11 +113,11 @@ window.fkModules['leaves-time'] = {
       '</div>' +
       // Company holidays modal (opened by the "Company holidays" action button)
       '<div class="modal-bg" id="ltHolidaysModal">' +
-        '<div class="modal" style="max-width:460px">' +
+        '<div class="modal">' +
           '<h2>Company holidays</h2>' +
-          '<div class="modal-sub">The company days off this year.</div>' +
-          '<div class="panel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
-          '<div class="modal-actions" style="margin-top:16px"><button class="btn-secondary" id="ltHolidaysClose">Close</button></div>' +
+          '<div class="modal-sub">The days the office is closed this year. CS works through the ones marked.</div>' +
+          '<div class="hpanel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
+          '<div class="modal-actions" style="margin-top:14px"><button class="btn-secondary" id="ltHolidaysClose">Close</button></div>' +
         '</div>' +
       '</div>';
   },
@@ -251,10 +270,31 @@ window.fkModules['leaves-time'] = {
         const list = (data.holidays || []).filter(h => h && h.holiday_date)
           .sort((a, b) => String(a.holiday_date).localeCompare(String(b.holiday_date)));
         if (list.length === 0) { panel.innerHTML = '<div class="empty">No company holidays listed yet.</div>'; return; }
-        panel.innerHTML = list.map(h =>
-          '<div class="row"><div><div class="t1">' + esc(h.name || 'Holiday') + '</div>' +
-          '<div class="t2">' + dOnly(h.holiday_date) + (h.office_closed_for_cs ? ' \u00b7 office closed (CS)' : '') + '</div></div></div>'
-        ).join('');
+
+        const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const DOW = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const parse = (s) => { const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+
+        let nextDone = false;
+        panel.innerHTML = list.map(h => {
+          const dt = parse(h.holiday_date); if (!dt) return '';
+          const days = Math.round((dt - today) / 86400000);
+          const past = days < 0;
+          let cls = 'hol' + (past ? ' past' : '');
+          let nextChip = '';
+          if (!past && !nextDone) { cls += ' next'; nextDone = true; nextChip = '<span class="nextchip">Next up</span>'; }
+          const csWorks = !h.office_closed_for_cs; // office_closed_for_cs=false => CS works that day
+          const away = (!past && days >= 0 && days <= 31)
+            ? '<div class="away"><div class="n">' + (days === 0 ? '\u2014' : days) + '</div><div class="u">' + (days === 0 ? 'today' : 'days') + '</div></div>'
+            : '';
+          return '<div class="' + cls + '">' + nextChip +
+            '<div class="date"><div class="d">' + dt.getDate() + '</div><div class="m">' + MON[dt.getMonth()] + '</div></div>' +
+            '<div class="info"><div class="nm">' + esc(h.name || 'Holiday') + '</div>' +
+            '<div class="meta"><span class="dow">' + DOW[dt.getDay()] + '</span><span>\u00b7 ' + dt.getFullYear() + '</span>' +
+            (csWorks ? '<span class="cs">CS works</span>' : '') + '</div></div>' +
+            away + '</div>';
+        }).join('');
       } catch (e) { panel.innerHTML = '<div class="empty">Network error.</div>'; }
     }
 

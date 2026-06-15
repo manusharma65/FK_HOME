@@ -436,6 +436,40 @@ router.get('/me/week', async (req, res) => {
   }
 });
 
+// GET /api/attendance/debug/sick
+//   Read-only. Shows exactly why the 30-day grid colours days as sick: the
+//   caller's sick_log rows, the days currently stored as off_sick, and whether
+//   the one-time re-stamp has run. Self only (or another user with view perms).
+router.get('/debug/sick', async (req, res) => {
+  try {
+    let uid = req.user.id;
+    if (req.query.user_id) {
+      const requested = parseInt(req.query.user_id, 10);
+      if (Number.isFinite(requested) && requested !== req.user.id) {
+        if (!req.user.can('attendance.view.any')) return res.status(403).json({ error: 'Cannot view other users' });
+        uid = requested;
+      }
+    }
+    const logs = await db.query(
+      `SELECT id, start_date::text AS start_date, end_date::text AS end_date, reason,
+              (deleted_at IS NOT NULL) AS deleted
+         FROM sick_log WHERE user_id = $1 ORDER BY start_date`, [uid]);
+    const off = await db.query(
+      `SELECT for_date::text AS for_date FROM attendance_day
+         WHERE user_id = $1 AND status = 'off_sick' ORDER BY for_date DESC`, [uid]);
+    const guard = await db.query(`SELECT value FROM system_state WHERE key = 'fix:spurious_sick_v2'`);
+    res.json({
+      user_id: uid,
+      fix_has_run: guard.rows.length ? guard.rows[0].value : null,
+      sick_logs: logs.rows,
+      off_sick_days: off.rows.map(r => r.for_date),
+      off_sick_count: off.rows.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/attendance/me/lateness
 //   Lateness log + regularisation history for self or another user.
 //   Same permission rules as /me/week.
@@ -1912,6 +1946,78 @@ async function tickAutoClockout() {
   } catch (e) { console.error('[tickAutoClockout]', e.message); }
 }
 
+// r1.28 — One-time re-stamp of attendance days wrongly frozen as 'off_sick'.
+// History: an open-ended sick_log (end_date NULL) made computeExpectedStatus
+// return 'off_sick' for EVERY day from its start onward, and the nightly seed
+// stamped each day's stored status as off_sick. Migration 46 closed those open
+// logs (fixing the leave block + all FUTURE computes) but never re-stamped the
+// days already frozen as off_sick. The 30-day attendance grid reads those frozen
+// rows verbatim, so it shows a wall of purple. This walks those rows ONCE and
+// re-derives each day's true status using the same logic as reconcileTodayPattern.
+// Only rows where NO sick_log actually covers the date are touched, so a
+// genuinely-sick day is left exactly as it is. Self-guards via system_state so it
+// runs at most once, ever, then becomes a single cheap SELECT on later boots.
+async function fixSpuriousSick() {
+  const GUARD = 'fix:spurious_sick_v2';
+  try {
+    const done = await db.query('SELECT 1 FROM system_state WHERE key = $1', [GUARD]);
+    if (done.rows.length) return;
+
+    // off_sick days with no sick_log covering that date (same predicate as isUserSickOn).
+    const rows = await db.query(
+      `SELECT a.id, a.user_id, a.for_date, a.first_login, a.shift_start_local
+         FROM attendance_day a
+         JOIN users u ON u.id = a.user_id
+        WHERE a.status = 'off_sick'
+          AND NOT EXISTS (
+            SELECT 1 FROM sick_log s
+             WHERE s.user_id = a.user_id
+               AND s.deleted_at IS NULL
+               AND s.start_date <= a.for_date
+               AND (s.end_date IS NULL OR s.end_date >= a.for_date))`
+    );
+
+    let fixed = 0;
+    for (const r of rows.rows) {
+      const dateStr = (typeof r.for_date === 'string')
+        ? r.for_date.slice(0, 10)
+        : new Date(r.for_date).toISOString().slice(0, 10);
+      const expected = await computeExpectedStatus(r.user_id, dateStr);
+      let newStatus = expected, lateMin = 0;
+      if (expected === 'pending') {
+        // Expected to work that day — derive from the actual login (if any).
+        if (r.first_login && r.shift_start_local) {
+          const hhmm = (londonClock(r.first_login) || '').slice(0, 5);
+          const deptSlug = await getUserPrimaryDept(r.user_id);
+          const pol = await getShiftPolicy(deptSlug);
+          const grace = pol ? pol.grace_minutes : 5;
+          lateMin = Math.max(0, minutesBetween(hhmm, r.shift_start_local));
+          if (lateMin <= grace) newStatus = 'on_time';
+          else if (lateMin <= 30) newStatus = 'late';
+          else newStatus = 'very_late';
+        } else if (r.first_login) {
+          newStatus = 'on_time';
+        } else {
+          newStatus = 'pending'; // worked nothing, no schedule resolved — neutral (renders grey)
+        }
+      }
+      await db.query(
+        'UPDATE attendance_day SET status = $1, late_minutes = $2, updated_at = NOW() WHERE id = $3',
+        [newStatus, lateMin, r.id]
+      );
+      fixed++;
+    }
+
+    await db.query(
+      'INSERT INTO system_state (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+      [GUARD, new Date().toISOString().slice(0, 10)]
+    );
+    if (fixed) console.log('[fixSpuriousSick] re-stamped ' + fixed + ' spurious off_sick day(s)');
+  } catch (e) {
+    console.error('[fixSpuriousSick]', e.message);
+  }
+}
+
 // r1.25 — One-time/idempotent reconcile of TODAY's rows. The midnight tick only
 // overwrites rows whose status is still 'pending', so when the anchor is corrected
 // the wrong off_pattern/off_holiday/worked_voluntary rows already written today will
@@ -1919,6 +2025,7 @@ async function tickAutoClockout() {
 // Cheap (one day, ~all active users) and idempotent — safe to run on every boot.
 async function reconcileTodayPattern() {
   try {
+    await fixSpuriousSick(); // r1.28 — one-time historical off_sick re-stamp (self-guarded)
     const today = nowInLondon().date;
     const rows = await db.query(
       `SELECT a.id, a.user_id, a.status, a.first_login, a.shift_start_local
