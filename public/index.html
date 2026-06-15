@@ -3152,12 +3152,17 @@ async function loadDailyReport() {
 }
 
 function refreshDailyReportSummary() {
+  // r1.28b — the home daily-report card was removed (filed on the Today page now),
+  // so #dailyReportSummary no longer exists. Guard, or this throws when
+  // loadAttendanceToday calls it.
+  const summary = document.getElementById('dailyReportSummary');
+  if (!summary) return;
   // Pull from the Today card data already in DOM (avoids extra API call)
   const inT = document.getElementById('todayIn').textContent;
   const act = document.getElementById('todayActive').textContent;
   const idl = document.getElementById('todayIdle').textContent;
   const brk = document.getElementById('todayBreak').textContent;
-  document.getElementById('dailyReportSummary').innerHTML =
+  summary.innerHTML =
     'In <b>' + inT + '</b> · Active <b>' + act + '</b> · Idle <b>' + idl + '</b> · Break <b>' + brk + '</b>';
 }
 
