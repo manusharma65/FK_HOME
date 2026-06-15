@@ -84,13 +84,14 @@ window.fkModules['leaves-time'] = {
           '<div class="cal-key">Green on time \u00b7 amber late \u00b7 red unauthorised \u00b7 blue leave \u00b7 purple sick \u00b7 grey off.</div>' +
         '</div>' +
 
+        // Company holidays — r1.27: sits right under the calendar so people see the
+        // company days off while they're planning leave (was at the very bottom).
+        '<p class="sec-lbl">Company holidays</p>' +
+        '<div class="panel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
+
         // Lateness & corrections
         '<p class="sec-lbl">Lateness &amp; corrections</p>' +
         '<div class="panel" id="ltLatePanel"><div class="empty">Loading\u2026</div></div>' +
-
-        // Company holidays (r1.25 — so staff can see the national holidays)
-        '<p class="sec-lbl">Company holidays</p>' +
-        '<div class="panel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
 
       '</div>';
   },

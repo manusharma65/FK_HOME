@@ -346,9 +346,33 @@ router.post('/assign', async (req, res) => {
     res.json({ ok: true, courseId: c.rows[0].id, assignmentId: aId });
   });
 
+  // r1.27 — a course is only visible to someone who belongs to that course's
+  // discipline (so HR never sees the Logistics course), UNLESS a manager deliberately
+  // assigned it (assigned_via='manual'). This guards display everywhere a learner's
+  // own courses are read, independent of any stale auto/onboarding assignment rows.
+  async function userDeptHay(uid) {
+    try {
+      const r = await db.query(
+        `SELECT COALESCE(string_agg(DISTINCT lower(coalesce(dep.slug,'') || ' ' || coalesce(dep.name,'')), ' '), '') AS depts,
+                COALESCE((SELECT string_agg(lower(g.slug), ' ') FROM user_groups ug JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = $1), '') AS groups
+           FROM user_department_memberships m
+           JOIN departments dep ON dep.id = m.department_id
+          WHERE m.user_id = $1 AND m.deleted_at IS NULL`, [uid]);
+      const row = r.rows[0] || {};
+      return ((row.depts || '') + ' ' + (row.groups || '')).toLowerCase();
+    } catch (e) { return ''; }
+  }
+  function courseVisible(hay, courseDept, assignedVia) {
+    if (assignedVia === 'manual') return true; // deliberate cross-discipline assignment
+    const d = String(courseDept || '').toLowerCase();
+    if (/logist|despatch|dispatch|warehouse|courier|shipping/.test(d))
+      return /logist|despatch|dispatch|warehouse|courier|shipping/.test(hay);
+    return !d || hay.includes(d);
+  }
+
   router.get('/my-courses', async (req, res) => {
     const fetch = () => db.query(
-      `SELECT c.id, c.title, c.department, c.slug, a.status, a.due_date
+      `SELECT c.id, c.title, c.department, c.slug, a.status, a.due_date, a.assigned_via
          FROM lms_assignments a JOIN lms_courses c ON c.id=a.course_id
         WHERE a.user_id=$1 ORDER BY a.created_at`, [req.user.id]);
     let rows = await fetch();
@@ -374,7 +398,11 @@ router.post('/assign', async (req, res) => {
         }
       } catch (e) { /* best-effort auto-assign; fall through with whatever we have */ }
     }
-    res.json(rows.rows);
+    // r1.27 — hide courses that aren't for this person's discipline (a stale logistics
+    // assignment on a non-logistics user must not render). Manual assignments pass.
+    const hay = await userDeptHay(req.user.id);
+    const visible = rows.rows.filter(r => courseVisible(hay, r.department, r.assigned_via));
+    res.json(visible);
   });
   router.get('/course/:id', async (req, res) => {
     const data = await getCourseForUser(parseInt(req.params.id, 10), req.user.id);
@@ -466,7 +494,7 @@ router.post('/assign', async (req, res) => {
     const uid = parseInt(req.params.userId, 10);
     if (req.user.id !== uid && !canManage(req)) return res.status(403).json({ error: 'Not allowed' });
     const rows = await db.query(
-      `SELECT c.id AS course_id, c.title, c.slug, a.status,
+      `SELECT c.id AS course_id, c.title, c.slug, c.department, a.status, a.assigned_via,
               (SELECT count(*) FROM lms_sessions s WHERE s.course_id=a.course_id) AS total,
               (SELECT count(*) FROM lms_progress p WHERE p.assignment_id=a.id AND p.status='passed') AS done,
               (SELECT count(*) FROM (SELECT DISTINCT ON (check_id) result FROM lms_check_attempts WHERE assignment_id=a.id ORDER BY check_id, id) f WHERE f.result='pass') AS first_pass,
@@ -476,10 +504,15 @@ router.post('/assign', async (req, res) => {
          JOIN lms_courses c ON c.id=a.course_id
          LEFT JOIN lms_competencies comp ON comp.user_id=a.user_id AND comp.course_id=a.course_id
         WHERE a.user_id=$1 ORDER BY a.created_at`, [uid]);
-    res.json(rows.rows.map(r => {
-      const fp = Number(r.first_pass), fg = Number(r.first_graded);
-      return { ...r, accuracy_pct: fg > 0 ? Math.round((fp / fg) * 100) : null };
-    }));
+    // r1.27 — department-scope: a learner's profile only shows courses for their own
+    // discipline (HR never sees the Logistics course), manual assignments excepted.
+    const hay = await userDeptHay(uid);
+    res.json(rows.rows
+      .filter(r => courseVisible(hay, r.department, r.assigned_via))
+      .map(r => {
+        const fp = Number(r.first_pass), fg = Number(r.first_graded);
+        return { ...r, accuracy_pct: fg > 0 ? Math.round((fp / fg) * 100) : null };
+      }));
   });
 
 

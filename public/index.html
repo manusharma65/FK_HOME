@@ -2214,13 +2214,21 @@ function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;',
 
 // --- HEARTBEAT ---
 function startHeartbeat() {
-  setInterval(() => {
-    if (document.hidden) return;
+  // r1.27 — "active" means the person is at their computer with FK Home open, NOT that
+  // FK Home is the focused tab. The team works all day in Seller Central / Excel / email
+  // with FK Home in a background tab; the old `if (document.hidden) return` paused the
+  // heartbeat there, so the server saw no beat for 5 min and falsely flipped them to idle
+  // (and fired the 20-min idle alert). We now beat regardless of focus, and beat again on
+  // refocus to cover any browser background-timer throttling.
+  const beat = () => {
     fetch('/api/me/heartbeat', {
       method: 'POST', credentials: 'include',
       headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
     }).catch(()=>{});
-  }, 30000);
+  };
+  beat();
+  setInterval(beat, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) beat(); });
 }
 
 // --- MODALS ---
