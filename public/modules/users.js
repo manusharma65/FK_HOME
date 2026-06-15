@@ -169,7 +169,8 @@ window.fkModules['hr/users'] = {
         '</div>'+
         '<div class="pane on" data-n="0"><h2>Welcome someone new</h2><p class="lead">Start with the basics. They get a login and a temporary password.</p>'+
           '<label>Full name</label><input id="wName" placeholder="e.g. Satyam Kumar"/>'+
-          '<div class="r2"><div><label>Work email</label><input id="wEmail" placeholder="name@fksports.co.uk"/></div><div><label>Display name</label><input id="wDisp" placeholder="optional"/></div></div></div>'+
+          '<div class="r2"><div><label>Work email</label><input id="wEmail" placeholder="name@fksports.co.uk"/></div><div><label>Display name</label><input id="wDisp" placeholder="optional"/></div></div>'+
+          '<label style="margin-top:10px">Employee ID</label><input id="wEmpId" placeholder="e.g. FK205 — leave blank to auto-assign"/></div>'+
         '<div class="pane" data-n="1"><h2>Where do they fit?</h2><p class="lead">Department, role and who they report to — from day one.</p>'+
           '<label>Primary department</label><select id="wDept">'+deptOpts+'</select>'+
           '<label>Role</label><div id="wRole"><span class="opt on" data-r="agent">Executive</span><span class="opt" data-r="senior">Senior Executive</span><span class="opt" data-r="lead">Team Lead</span><span class="opt" data-r="manager">Manager</span></div>'+
@@ -206,7 +207,7 @@ window.fkModules['hr/users'] = {
       btn.disabled=true; btn.textContent='Creating…';
       try{
         const role=(el.querySelector('#wRole .opt.on')||{}).dataset?(el.querySelector('#wRole .opt.on').dataset.r):'agent';
-        const cr=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({full_name:name,email:email,display_name:$('wDisp').value.trim()||undefined,primary_department_slug:$('wDept').value||undefined,group_slugs:[]})});
+        const cr=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({full_name:name,email:email,display_name:$('wDisp').value.trim()||undefined,primary_department_slug:$('wDept').value||undefined,group_slugs:[],emp_id:($('wEmpId')&&$('wEmpId').value.trim())||undefined})});
         const cd=await cr.json();
         if(!cr.ok) throw new Error(cd.error||'Create failed');
         const id=cd.user.id;

@@ -1388,7 +1388,9 @@ router.get('/people', async (req, res) => {
 router.put('/:userId/manager', async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad id' });
-  if (!req.user.can('profile.edit.any')) return res.status(403).json({ error: 'Permission denied' });
+  // r1.28 — also accept admin.users.edit so onboarding HR (who create/edit employees) can
+  // set a new hire's manager, not just holders of the broad profile.edit.any.
+  if (!req.user.can('profile.edit.any') && !req.user.can('admin.users.edit')) return res.status(403).json({ error: 'Permission denied' });
   let mgr = (req.body || {}).manager_user_id;
   mgr = (mgr === '' || mgr == null) ? null : parseInt(mgr, 10);
   if (mgr != null && (!Number.isFinite(mgr) || mgr === userId)) return res.status(400).json({ error: 'Invalid manager' });

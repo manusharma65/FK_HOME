@@ -64,14 +64,24 @@ router.get('/users', requirePermission('admin.users.view'), async (req, res) => 
 
 // CREATE
 router.post('/users', requirePermission('admin.users.create'), async (req, res) => {
-  const { email, full_name, display_name, primary_department_slug, group_slugs, password } = req.body || {};
+  const { email, full_name, display_name, primary_department_slug, group_slugs, password, emp_id } = req.body || {};
   if (!email || !full_name) return res.status(400).json({ error: 'Email and full name required' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email' });
+  // r1.28 — HR may type the Employee ID (FK###). Validate format + uniqueness here;
+  // only auto-number when the field is left blank.
+  let typedEmpId = (emp_id == null ? '' : String(emp_id).trim().toUpperCase());
+  if (typedEmpId && !/^FK[0-9]+$/.test(typedEmpId)) {
+    return res.status(400).json({ error: 'Employee ID must look like FK123 (FK followed by numbers).' });
+  }
 
   try {
     // Check duplicate
     const dup = await db.query(`SELECT id FROM users WHERE LOWER(email) = LOWER($1)`, [email.trim()]);
     if (dup.rows.length > 0) return res.status(409).json({ error: 'A user with that email already exists' });
+    if (typedEmpId) {
+      const e = await db.query(`SELECT id FROM users WHERE UPPER(emp_id) = $1`, [typedEmpId]);
+      if (e.rows.length > 0) return res.status(409).json({ error: 'That Employee ID is already in use.' });
+    }
 
     // Compute defaults
     const firstName = full_name.split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, '');
@@ -80,7 +90,7 @@ router.post('/users', requirePermission('admin.users.create'), async (req, res) 
     const dn = display_name || full_name.split(/\s+/)[0];
     const initials = full_name.split(/\s+/).map(p => p[0]).slice(0, 2).join('').toUpperCase();
     const avatarColour = pickAvatarColour(initials);
-    const empId = await nextEmpId();
+    const empId = typedEmpId || await nextEmpId();
 
     const u = await db.query(
       `INSERT INTO users (email, password_hash, full_name, display_name, initials, avatar_colour, emp_id, must_change_password)

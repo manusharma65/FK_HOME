@@ -90,7 +90,7 @@ window.fkModules['today'] = {
           '<textarea id="tdNotes" class="td-notes" placeholder="How did today go? A line or two about what you worked on. (Optional if you have logged items above.)" maxlength="2000"></textarea>' +
           '<div class="submitbar">' +
             '<span class="pendpill" id="tdPend">Not submitted</span>' +
-            '<div class="txt">Glance over your day and submit. If you forget, it submits itself at midnight \u2014 and on days off, nothing\u2019s expected.</div>' +
+            '<div class="txt">Glance over your day and submit before you sign off. It won\u2019t submit itself \u2014 if you forget, you\u2019ll get a reminder next day. On days off, nothing\u2019s expected.</div>' +
             '<span class="td-err" id="tdErr"></span>' +
             '<button class="btn-submit" id="tdSubmit">Submit my day</button>' +
           '</div>' +

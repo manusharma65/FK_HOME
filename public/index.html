@@ -1271,19 +1271,9 @@
             </div>
           </div>
 
-          <!-- Daily report card (new — HR-1) -->
-          <div class="card daily-report-card">
-            <div class="card-header">
-              <div class="card-title"><i class="ti ti-notes"></i> Daily report</div>
-              <span class="card-meta" id="dailyReportMeta">—</span>
-            </div>
-            <div class="auto-summary" id="dailyReportSummary">—</div>
-            <textarea id="dailyReportNotes" placeholder="What did you work on today? (free text — auto-saves)" maxlength="5000"></textarea>
-            <div class="footer">
-              <span id="dailyReportStatus">Not yet saved.</span>
-              <button class="save-btn" id="dailyReportSaveBtn" onclick="saveDailyReport()">Save</button>
-            </div>
-          </div>
+          <!-- Daily report card removed (r1.28): the report is filed on the Today page
+               (My Day -> Today), which has logged items + proper submit. This was a weaker
+               duplicate writing a half-version of the same day. -->
 
         </div>
       </div>
@@ -3089,7 +3079,35 @@ let dailyReportLocked = false;
 let dailyReportSaveTimer = null;
 let dailyReportLastSavedText = '';
 
+// r1.28 — big, can't-miss reminder shown across the top of the content if YESTERDAY was
+// worked but the daily report was never submitted. Replaces the silent midnight auto-submit.
+// Dismissable for the session; returns next login while the report is still missing.
+function showDailyReportReminder() {
+  if (document.getElementById('fkReportReminder')) return;
+  try { if (sessionStorage.getItem('fkReportReminderDismissed') === '1') return; } catch (e) {}
+  fetch('/api/daily/reminder', { credentials: 'include' })
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (!d || !d.unsubmitted) return;
+      const host = document.querySelector('main.content') || document.body;
+      const bar = document.createElement('div');
+      bar.id = 'fkReportReminder';
+      bar.style.cssText = 'position:sticky;top:0;z-index:1500;background:#E8722B;color:#fff;padding:15px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 3px 12px rgba(0,0,0,.18);font-size:16px;font-weight:500';
+      bar.innerHTML =
+        '<i class="ti ti-alert-triangle" style="font-size:24px;flex-shrink:0"></i>' +
+        '<span style="flex:1;line-height:1.4">You didn\u2019t submit yesterday\u2019s report. Please finish it and submit \u2014 it won\u2019t submit itself.</span>' +
+        '<button id="fkReportGo" style="background:#fff;color:#C2562E;border:none;border-radius:10px;padding:10px 20px;font-weight:700;font-size:15px;cursor:pointer;flex-shrink:0">Submit it now</button>' +
+        '<button id="fkReportX" title="Hide for now" style="background:transparent;border:none;color:#fff;font-size:24px;cursor:pointer;line-height:1;flex-shrink:0">\u00d7</button>';
+      host.insertBefore(bar, host.firstChild);
+      document.getElementById('fkReportGo').onclick = () => { location.hash = '#today'; bar.remove(); };
+      document.getElementById('fkReportX').onclick = () => { try { sessionStorage.setItem('fkReportReminderDismissed', '1'); } catch (e) {} bar.remove(); };
+    }).catch(() => {});
+}
 async function loadDailyReport() {
+  // r1.28 — the home daily-report card was removed (filed on the Today page now). This
+  // function instead shows a big, can't-miss reminder if YESTERDAY was worked but never
+  // submitted. Guarded: if the old card somehow exists, it falls through harmlessly.
+  if (!document.getElementById('dailyReportNotes')) { showDailyReportReminder(); return; }
   try {
     const r = await fetch('/api/attendance/daily-report/today', { credentials: 'include' });
     if (!r.ok) return;

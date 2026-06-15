@@ -57,8 +57,11 @@ const upload = multer({
 // ---------- permission helper: can user upload to (targetUserId, drawer)? ----------
 async function canUploadTo(viewer, targetUserId, drawer) {
   if (viewer.can('files.upload.any')) return true;
-  // Own profile + Personal drawer only via files.upload.own
-  if (viewer.id === targetUserId && drawer === 'personal' && viewer.can('files.upload.own')) return true;
+  // r1.28 — a person can upload their OWN documents to the drawers used during onboarding
+  // (was 'personal' only, which blocked new hires uploading ID / contract / onboarding docs).
+  // Salary, payroll, reviews, appraisals and performance stay HR-only.
+  const OWN_UPLOAD_DRAWERS = ['personal','onboarding','employment','insurance'];
+  if (viewer.id === targetUserId && OWN_UPLOAD_DRAWERS.includes(drawer) && viewer.can('files.upload.own')) return true;
   return false;
 }
 

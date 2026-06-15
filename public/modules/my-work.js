@@ -540,7 +540,7 @@ window.fkModules['my-work'] = {
               '<div class="mwc-tile">' +
                 '<div class="mwc-tile-k"><i class="ti ti-clock"></i> Time spent</div>' +
                 '<div class="mwc-time-row"><span id="mwcTime" class="mwc-time">'+fmtMins(liveSeconds())+'</span>' +
-                  '<button class="mwc-timer-btn" id="mwcTimerBtn">'+(cardState.timing_since?'Pause':'Start timer')+'</button></div>' +
+                  '<button class="mwc-timer-btn" id="mwcTimerBtn">'+(cardState.timing_since?'Pause':'Start task')+'</button></div>' +
                 '<div class="mwc-amend"><input id="mwcLogged" type="number" min="0" placeholder="adjust" value="'+(w.logged_minutes!=null?w.logged_minutes:'')+'" /> min' +
                   (w.time_edited_by_name && w.logged_minutes!=null && w.logged_minutes!==Math.round((w.timer_seconds||0)/60)
                     ? '<span class="mwc-edithint">timer saw '+Math.round((w.timer_seconds||0)/60)+' \u00b7 edited by '+esc(w.time_edited_by_name)+'</span>' : '') +
@@ -587,7 +587,7 @@ window.fkModules['my-work'] = {
         if(!rr.ok){ alert('Timer failed'); return; }
         const jd = await rr.json();
         if (act==='start'){ cardState.timing_since=jd.timing_since; cardState.base_seconds=jd.timer_seconds||cardState.base_seconds; $('mwcTimerBtn').textContent='Pause'; if(cardTimer)clearInterval(cardTimer); cardTimer=setInterval(tick,1000); }
-        else { cardState.timing_since=null; cardState.base_seconds=jd.timer_seconds||0; $('mwcTimerBtn').textContent='Start timer'; if(cardTimer)clearInterval(cardTimer); tick(); }
+        else { cardState.timing_since=null; cardState.base_seconds=jd.timer_seconds||0; $('mwcTimerBtn').textContent='Start task'; if(cardTimer)clearInterval(cardTimer); tick(); }
       };
 
       async function saveWork(complete){

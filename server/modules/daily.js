@@ -377,14 +377,17 @@ async function freezeDay(dateStr) {
       await ledgerForDay(u.id, dateStr);
       await db.query(
         `INSERT INTO daily_reports (user_id, for_date, notes, snapshot_tasks, snapshot_flags, auto_submitted)
-         VALUES ($1, $2, '', $3::jsonb, $4::jsonb, TRUE)
+         VALUES ($1, $2, '', $3::jsonb, $4::jsonb, FALSE)
          ON CONFLICT (user_id, for_date) DO UPDATE SET
            snapshot_tasks = EXCLUDED.snapshot_tasks,
            snapshot_flags = EXCLUDED.snapshot_flags,
-           auto_submitted = (daily_reports.submitted_at IS NULL),
+           auto_submitted = FALSE,
            updated_at = NOW()`,
         [u.id, dateStr, JSON.stringify(day.did), JSON.stringify(day.flags)]
       );
+      // r1.28 — the midnight freeze keeps the day's snapshot for scoring but NEVER marks
+      // it submitted. An unsubmitted day stays unsubmitted (submitted_at IS NULL = "missed"),
+      // so reports aren't auto-filed unread; the person is reminded next login instead.
       // Bell: notify the person's managers/owner on a serious flag (absence).
       const serious = day.flags.find(f => f.kind === 'absence');
       if (serious) {
@@ -430,6 +433,25 @@ router.get('/me', async (req, res) => {
     const standing = await ledgerStanding(req.user.id);
     res.json({ day, standing });
   } catch (e) { console.error('[daily/me]', e.message); res.status(500).json({ error: 'Failed' }); }
+});
+
+// r1.28 — next-day reminder. Returns whether YESTERDAY was actually worked but the daily
+// report was never submitted, so the home screen can show a big "you didn't submit
+// yesterday" banner. Reports no longer auto-submit, so this is how a missed one is chased.
+router.get('/reminder', async (req, res) => {
+  try {
+    const d = addDays(londonDate(), -1);
+    const a = await db.query(
+      `SELECT status, first_login FROM attendance_day WHERE user_id=$1 AND for_date=$2`, [req.user.id, d]);
+    const row = a.rows[0];
+    const offOrUnworked = !row || !row.first_login ||
+      ['on_leave','off_sick','off_holiday','off_pattern','off_cs_rota','no_show','pending'].includes(row.status);
+    if (offOrUnworked) return res.json({ unsubmitted: false });
+    const r = await db.query(
+      `SELECT submitted_at FROM daily_reports WHERE user_id=$1 AND for_date=$2`, [req.user.id, d]);
+    const submitted = r.rows.length > 0 && r.rows[0].submitted_at != null;
+    res.json({ unsubmitted: !submitted, for_date: d });
+  } catch (e) { res.json({ unsubmitted: false }); }
 });
 
 // Direct reports' days (HR today) — owner/manager only

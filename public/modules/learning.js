@@ -216,13 +216,16 @@
 
   // ---------- knowledge base ----------
   async function renderKB() {
-    const items = await api('/kb?department=logistics');
+    const items = await api('/kb');
+    const deptLabel = items.length ? String(items[0].department || '').replace(/\b\w/g, c => c.toUpperCase()) : '';
     let tiles = '';
     items.forEach(it => { var blurb = (it.config_json && it.config_json.summary) || ({ rate_card: 'All couriers, sizes and prices.', flashcard: 'Drill the numbers.', error_table: 'The fix for each error.', sop: 'The full document.', article: 'Reference.', calculator_link: 'Tool.' }[it.type] || 'Reference.'); var tk = (it.type === 'sop' ? 'How-to · SOP' : 'Quick reference'); tiles += '<div class="tile lmsKb" data-i="' + it.id + '"><div class="tk">' + tk + '</div><h3>' + it.title + '</h3><p>' + blurb + '</p></div>'; });
     lms().innerHTML =
       '<div class="hero m"><div class="ey">Learn · Knowledge Base</div><h1>Knowledge Base</h1><p>Always here, never locked. Forget a rate or a step \u2014 look it up in seconds.</p></div>' +
-      '<div class="search"><input id="kbq" placeholder="Search\u2026 e.g. \u201cYodel max length\u201d"></div>' +
-      '<div class="sech"><h2>Logistics</h2></div><div class="tiles" id="kbt">' + tiles + '</div>';
+      '<div class="search"><input id="kbq" placeholder="Search\u2026"></div>' +
+      (items.length
+        ? '<div class="sech"><h2>' + deptLabel + '</h2></div><div class="tiles" id="kbt">' + tiles + '</div>'
+        : '<div class="card" style="opacity:.75;margin-top:8px"><div><div class="ttl">Nothing for your department yet</div><div class="sub">Reference material will appear here when it\u2019s added for your team.</div></div></div>');
     const data = {}; items.forEach(it => data[it.id] = it);
     Array.from(document.querySelectorAll('.lmsKb')).forEach(t => t.onclick = () => openKB(data[t.getAttribute('data-i')]));
     el('kbq').oninput = e => { const v = e.target.value.toLowerCase(); Array.from(document.querySelectorAll('.lmsKb')).forEach(t => { t.style.display = (data[t.getAttribute('data-i')].title.toLowerCase().includes(v)) ? '' : 'none'; }); };
@@ -272,10 +275,20 @@
     if (view === 'kb') { await renderKB(); wireSeg(); return; }
     const courses = await api('/my-courses');
     if (!courses.length) {
-      r.innerHTML = seg() + '<div class="hero"><div class="ey">Learn · My Learning</div><h1>Your training</h1><p>No course assigned yet.</p></div>' +
-        '<div class="sech"><h2>Available</h2></div><div class="card"><span class="cbadge" style="background:#C2562E">LOGISTICS</span><div><div class="ttl">Courier Selection &amp; Dispatch</div><div class="sub">Start the course</div></div><div class="right"><button class="btn" id="lmsStart">Start</button></div></div>';
+      // r1.28 — show only courses AVAILABLE to this person's department. Was a hardcoded
+      // logistics card shown to everyone (HR/Amazon saw "Courier Selection & Dispatch").
+      let avail = [];
+      try { avail = await api('/available'); } catch (e) { avail = []; }
+      const availHtml = avail.length
+        ? avail.map(c => '<div class="card"><span class="cbadge" style="background:#C2562E">' + String(c.department || '').toUpperCase() + '</span><div><div class="ttl">' + c.title + '</div><div class="sub">Start the course</div></div><div class="right"><button class="btn lmsStart" data-slug="' + (c.slug || '') + '">Start</button></div></div>').join('')
+        : '<div class="card" style="opacity:.75"><div><div class="ttl">No training for your department yet</div><div class="sub">New courses appear here when they\u2019re added for your team.</div></div></div>';
+      r.innerHTML = seg() + '<div class="hero"><div class="ey">Learn \u00b7 My Learning</div><h1>Your training</h1><p>No course assigned yet.</p></div>' +
+        '<div class="sech"><h2>Available</h2></div>' + availHtml;
       wireSeg();
-      if (el('lmsStart')) el('lmsStart').onclick = async () => { await api('/assign', { method: 'POST', body: JSON.stringify({}) }); boot('learn'); };
+      Array.from(document.querySelectorAll('.lmsStart')).forEach(b => b.onclick = async () => {
+        try { await api('/assign', { method: 'POST', body: JSON.stringify({ slug: b.getAttribute('data-slug') || undefined }) }); boot('learn'); }
+        catch (e) { alert('Could not start this course.'); }
+      });
       return;
     }
     courseId = courses[0].id;

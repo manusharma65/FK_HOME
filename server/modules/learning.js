@@ -340,8 +340,15 @@ async function notifySignedOff(courseId, userId, managerId) {
 // ---------- Express router (mounted at /api/learning in server.js) ----------
 router.post('/assign', async (req, res) => {
     const userId = req.body.userId || req.user.id;
-    const c = await db.query(`SELECT id FROM lms_courses WHERE slug=$1 LIMIT 1`, [req.body.slug || 'logistics-dispatch']);
+    const c = await db.query(`SELECT id, department FROM lms_courses WHERE slug=$1 LIMIT 1`, [req.body.slug || 'logistics-dispatch']);
     if (!c.rows.length) return res.status(404).json({ error: 'course not seeded' });
+    // r1.28 — a person self-assigning may only take a course for their OWN department.
+    // Managers/HR assigning to someone else (passing userId) pass through.
+    if (userId === req.user.id && !canManage(req)) {
+      const hay = await userDeptHay(req.user.id);
+      if (!courseVisible(hay, c.rows[0].department, null))
+        return res.status(403).json({ error: 'That course is not for your department.' });
+    }
     const aId = await assignCourse(c.rows[0].id, userId, req.user.id, req.body.via || 'manual', req.body.due || null);
     res.json({ ok: true, courseId: c.rows[0].id, assignmentId: aId });
   });
@@ -425,9 +432,21 @@ router.post('/assign', async (req, res) => {
   });
 
   router.get('/kb', async (req, res) => {
-    const dept = req.query.department || 'logistics';
-    const rows = await db.query(`SELECT id,department,type,title,body_html,config_json,verified_on FROM lms_reference WHERE department=$1 ORDER BY id`, [dept]);
-    res.json(rows.rows);
+    // r1.28 — scope the knowledge base to the VIEWER's own department(s). Was hardcoded
+    // to 'logistics' (via a query-param default), so every employee saw logistics KB.
+    const hay = await userDeptHay(req.user.id);
+    const rows = await db.query(`SELECT id,department,type,title,body_html,config_json,verified_on FROM lms_reference ORDER BY id`);
+    res.json(rows.rows.filter(r => courseVisible(hay, r.department, null)));
+  });
+
+  // r1.28 — courses available to THIS viewer's discipline, for the Academy "Available"
+  // list. Replaces the frontend's hardcoded logistics card so HR/Amazon/etc. only ever
+  // see training for a department they belong to (none -> empty -> "nothing for you yet").
+  router.get('/available', async (req, res) => {
+    const hay = await userDeptHay(req.user.id);
+    const rows = await db.query(
+      `SELECT id, slug, title, department FROM lms_courses WHERE status='active' ORDER BY id`);
+    res.json(rows.rows.filter(c => courseVisible(hay, c.department, null)));
   });
 
   // Manager: progress across everyone assigned to a course, WITH a first-attempt
