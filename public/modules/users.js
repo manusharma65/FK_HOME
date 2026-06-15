@@ -92,6 +92,7 @@ window.fkModules['hr/users'] = {
       '<div class="toolbar">' +
         '<div class="srch"><input id="usrSearch" placeholder="Search name or email…"/></div>' +
         '<div class="pills" id="usrFilter"><button data-f="all" class="on">All</button><button data-f="active">Active</button><button data-f="on_leave">On leave</button><button data-f="left">Left</button><button data-f="archived">Archived</button></div>' +
+        '<button id="usrFixIds" style="margin-left:auto;border:1px solid var(--line);padding:9px 15px;border-radius:10px;background:var(--surface,#FFFDF9);cursor:pointer;font-weight:700;font-size:13.5px;color:var(--ink);display:inline-flex;align-items:center;gap:7px"><i class="ti ti-id-badge-2"></i> Fix Employee IDs</button>' +
       '</div>' +
       '<div id="usrBody"><div style="color:var(--muted);padding:20px">Loading…</div></div>' +
       '<div class="umodal-bg" id="usrModal"><div class="umodal" id="usrModalInner"></div></div>' +
@@ -152,6 +153,54 @@ window.fkModules['hr/users'] = {
         '<span class="spill '+st+'">'+st.replace('_',' ')+'</span>'+
         '<button class="elink" data-edit="'+u.id+'">Edit ›</button>'+
       '</div>';
+    }
+
+    // ---------------- Bulk Employee-ID editor (r1.28) ----------------
+    // One screen listing everyone with their FK#### editable, to correct wrong IDs in one go.
+    function openEmpIdEditor(){
+      const list = (users_||[]).slice().sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||''));
+      const rowsHtml = list.map(u=>{
+        const pd=(u.departments||[]).find(d=>d.is_primary)||(u.departments||[])[0];
+        const sub = pd ? esc(pd.name) : 'No department';
+        return '<div class="eidrow" style="display:flex;align-items:center;gap:12px;padding:10px 2px;border-bottom:1px solid var(--line)">'
+          + '<div class="uav" style="background:'+(u.avatar_colour||'#888780')+';width:34px;height:34px;flex-shrink:0">'+esc(u.initials||'—')+'</div>'
+          + '<div style="flex:1;min-width:0"><div class="nm" style="font-weight:600">'+esc(u.display_name||u.full_name)+'</div><div class="em" style="font-size:12px;color:var(--muted)">'+sub+'</div></div>'
+          + '<input class="eidinput" data-id="'+u.id+'" data-orig="'+esc(u.emp_id||'')+'" value="'+esc(u.emp_id||'')+'" placeholder="FK—" style="width:118px;text-transform:uppercase;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-weight:600"/>'
+          + '<span class="eidmsg" data-for="'+u.id+'" style="width:96px;font-size:11.5px;font-weight:600"></span>'
+          + '</div>';
+      }).join('');
+      $('usrModalInner').innerHTML =
+        '<div style="padding:4px 2px 2px"><h2 style="margin:0 0 4px">Fix Employee IDs</h2>'
+        + '<p class="lead" style="margin:0 0 14px;color:var(--muted)">Correct any wrong IDs and save. Format is FK followed by numbers, e.g. FK205. Blank rows are skipped.</p></div>'
+        + '<div style="max-height:52vh;overflow:auto;padding-right:4px">'+rowsHtml+'</div>'
+        + '<div class="uerr" id="eidErr" style="margin-top:10px"></div>'
+        + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px"><button class="ubtn gh" id="eidCancel">Close</button><button class="ubtn pri" id="eidSave">Save all changes</button></div>';
+      $('usrModal').classList.add('on');
+      $('eidCancel').onclick=()=>$('usrModal').classList.remove('on');
+      $('eidSave').onclick=saveEmpIds;
+    }
+    async function saveEmpIds(){
+      const inputs = Array.from(document.querySelectorAll('.eidinput'));
+      const changed = inputs.filter(i=>i.value.trim().toUpperCase() !== (i.getAttribute('data-orig')||'').toUpperCase());
+      document.querySelectorAll('.eidmsg').forEach(s=>{s.textContent='';s.style.color='';});
+      const err=$('eidErr'); err.classList.remove('on'); err.textContent='';
+      const bad = changed.filter(i=>{ const v=i.value.trim().toUpperCase(); return v && !/^FK[0-9]+$/.test(v); });
+      if(bad.length){ bad.forEach(i=>{ const m=document.querySelector('.eidmsg[data-for="'+i.getAttribute('data-id')+'"]'); if(m){m.textContent='Bad format';m.style.color='#B0453A';} }); err.textContent='Some IDs aren\u2019t FK + numbers \u2014 fix the red rows.'; err.classList.add('on'); return; }
+      if(!changed.length){ err.textContent='No changes to save.'; err.classList.add('on'); return; }
+      const btn=$('eidSave'); btn.disabled=true; btn.textContent='Saving\u2026';
+      let okN=0, failN=0;
+      for(const i of changed){
+        const id=i.getAttribute('data-id'); const v=i.value.trim().toUpperCase();
+        const m=document.querySelector('.eidmsg[data-for="'+id+'"]');
+        try{
+          const r=await fetch('/api/admin/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({emp_id:v})});
+          if(r.ok){ okN++; i.setAttribute('data-orig',v); if(m){m.textContent='Saved';m.style.color='#16A86B';} }
+          else { failN++; const d=await r.json().catch(()=>({})); if(m){ m.textContent=(/in use/i.test(d.error||'')?'Already used':'Failed'); m.style.color='#B0453A'; } }
+        }catch(e){ failN++; if(m){m.textContent='Failed';m.style.color='#B0453A';} }
+      }
+      btn.disabled=false; btn.textContent='Save all changes';
+      err.textContent = okN+' saved'+(failN?(' \u00b7 '+failN+' need attention'):'.'); err.classList.add('on');
+      if(okN) loadUsers();
     }
 
     // ---------------- Add-user wizard ----------------
@@ -334,6 +383,7 @@ window.fkModules['hr/users'] = {
 
     // ---------------- wiring ----------------
     $('usrAdd').addEventListener('click', openWizard);
+    $('usrFixIds').addEventListener('click', openEmpIdEditor);
     $('usrModal').addEventListener('click',(e)=>{ if(e.target===$('usrModal')) $('usrModal').classList.remove('on'); });
     $('usrBody').addEventListener('click',(e)=>{
       const ed=e.target.closest('[data-edit]'); if(ed){ e.stopPropagation(); openRecord(parseInt(ed.dataset.edit,10)); return; }

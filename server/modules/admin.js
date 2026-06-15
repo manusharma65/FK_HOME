@@ -38,6 +38,7 @@ router.get('/users', requirePermission('admin.users.view'), async (req, res) => 
     const whereDeleted = wantArchived ? 'u.deleted_at IS NOT NULL' : 'u.deleted_at IS NULL';
     const r = await db.query(
       `SELECT u.id, u.email, u.full_name, u.display_name, u.initials, u.avatar_colour,
+              u.emp_id,
               u.employment_status, u.must_change_password, u.last_login_at, u.created_at,
               u.deleted_at, u.left_date, u.last_working_day,
               u.hire_date, u.monthly_salary, u.salary_currency, u.employment_type,
@@ -220,7 +221,7 @@ router.post('/users', requirePermission('admin.users.create'), async (req, res) 
 router.patch('/users/:id', requirePermission('admin.users.edit'), async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'Bad id' });
-  const { full_name, display_name, employment_status } = req.body || {};
+  const { full_name, display_name, employment_status, emp_id } = req.body || {};
 
   try {
     const cur = await db.query(`SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL`, [id]);
@@ -236,6 +237,14 @@ router.patch('/users/:id', requirePermission('admin.users.edit'), async (req, re
         return res.status(400).json({ error: 'Bad employment_status' });
       }
       updates.push(`employment_status = $${p++}`); params.push(employment_status);
+    }
+    // r1.28 — edit an existing person's Employee ID (used to bulk-correct wrong IDs).
+    if (emp_id !== undefined) {
+      const v = (emp_id == null ? '' : String(emp_id).trim().toUpperCase());
+      if (!/^FK[0-9]+$/.test(v)) return res.status(400).json({ error: 'Employee ID must look like FK123 (FK followed by numbers).' });
+      const clash = await db.query(`SELECT id FROM users WHERE UPPER(emp_id) = $1 AND id <> $2`, [v, id]);
+      if (clash.rows.length) return res.status(409).json({ error: 'That Employee ID is already in use.' });
+      updates.push(`emp_id = $${p++}`); params.push(v);
     }
     if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
 

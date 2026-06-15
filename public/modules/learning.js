@@ -225,7 +225,7 @@
       '<div class="search"><input id="kbq" placeholder="Search\u2026"></div>' +
       (items.length
         ? '<div class="sech"><h2>' + deptLabel + '</h2></div><div class="tiles" id="kbt">' + tiles + '</div>'
-        : '<div class="card" style="opacity:.75;margin-top:8px"><div><div class="ttl">Nothing for your department yet</div><div class="sub">Reference material will appear here when it\u2019s added for your team.</div></div></div>');
+        : '<div class="card" style="opacity:.75;margin-top:8px"><div><div class="ttl">Coming soon</div><div class="sub">No reference material has been added for your department yet.</div></div></div>');
     const data = {}; items.forEach(it => data[it.id] = it);
     Array.from(document.querySelectorAll('.lmsKb')).forEach(t => t.onclick = () => openKB(data[t.getAttribute('data-i')]));
     el('kbq').oninput = e => { const v = e.target.value.toLowerCase(); Array.from(document.querySelectorAll('.lmsKb')).forEach(t => { t.style.display = (data[t.getAttribute('data-i')].title.toLowerCase().includes(v)) ? '' : 'none'; }); };
@@ -281,7 +281,7 @@
       try { avail = await api('/available'); } catch (e) { avail = []; }
       const availHtml = avail.length
         ? avail.map(c => '<div class="card"><span class="cbadge" style="background:#C2562E">' + String(c.department || '').toUpperCase() + '</span><div><div class="ttl">' + c.title + '</div><div class="sub">Start the course</div></div><div class="right"><button class="btn lmsStart" data-slug="' + (c.slug || '') + '">Start</button></div></div>').join('')
-        : '<div class="card" style="opacity:.75"><div><div class="ttl">No training for your department yet</div><div class="sub">New courses appear here when they\u2019re added for your team.</div></div></div>';
+        : '<div class="card" style="opacity:.75"><div><div class="ttl">No courses have been added to your department yet</div><div class="sub">Coming soon \u2014 new courses will appear here when they\u2019re added for your team.</div></div></div>';
       r.innerHTML = seg() + '<div class="hero"><div class="ey">Learn \u00b7 My Learning</div><h1>Your training</h1><p>No course assigned yet.</p></div>' +
         '<div class="sech"><h2>Available</h2></div>' + availHtml;
       wireSeg();

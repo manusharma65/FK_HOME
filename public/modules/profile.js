@@ -511,6 +511,7 @@ window.fkModules['profile'] = {
         { key: 'details',    icon: 'ti-id',          label: 'My details', show: true },
         { key: 'pay',        icon: 'ti-coin',        label: 'Pay',        show: hasPay, count: payCount },
         { key: 'time',       icon: 'ti-calendar',    label: 'Time',       show: true },
+        { key: 'training',   icon: 'ti-school',      label: 'Training',   show: true },
       ].filter(s => s.show);
 
       nav.innerHTML = SECTIONS.map(s => {
@@ -552,6 +553,7 @@ window.fkModules['profile'] = {
         employment: ['Employment', 'Contract and role documents.'],
         pay: ['Pay', 'Salary, payslips and where you are paid.'],
         time: ['Time', 'Monthly attendance calendar.'],
+        training: ['Training', 'Academy courses, progress and sign-off.'],
         onboarding: ['Onboarding', 'Joining checklist and signed docs.'],
       };
       titleEl.textContent = (TITLES[drawer] || [drawer])[0];
@@ -562,6 +564,7 @@ window.fkModules['profile'] = {
         if (drawer === 'details') { renderMyDetails(); return; }
         if (drawer === 'time') { await renderAttendanceDrawer(); return; }
         if (drawer === 'pay') { await renderPaySection(); return; }
+        if (drawer === 'training') { await renderTrainingSection(); return; }
         // employment = file drawer
         const r = await fetch('/api/profile/' + profileUserId + '/drawer/' + drawer, { credentials: 'include' });
         if (!r.ok) {
@@ -574,6 +577,41 @@ window.fkModules['profile'] = {
         console.error('[profile loadDrawer]', e);
         body.innerHTML = '<div style="color:var(--red)">Failed to load</div>';
       }
+    }
+
+    // --- Training section (Academy progress + competency) -------------
+    async function renderTrainingSection() {
+      const body = document.getElementById('profPanelBody');
+      let rows = [];
+      try {
+        const r = await fetch('/api/learning/progress/' + profileUserId, { credentials: 'include' });
+        if (r.status === 403) { body.innerHTML = '<div style="color:var(--muted);padding:18px 0">You don\u2019t have access to this person\u2019s training.</div>'; return; }
+        if (!r.ok) throw 0;
+        rows = await r.json();
+      } catch (e) { body.innerHTML = '<div style="color:var(--red)">Failed to load training.</div>'; return; }
+      if (!rows.length) { body.innerHTML = '<div style="color:var(--muted);padding:18px 0">No training assigned yet.</div>'; return; }
+      body.innerHTML = rows.map(function (c) {
+        const total = Number(c.total) || 0, done = Number(c.done) || 0;
+        const pct = total ? Math.round(done / total * 100) : 0;
+        const signed = c.competency_status === 'active';
+        const chip = signed
+          ? '<span style="background:rgba(62,125,79,.12);color:#3E7D4F;font-size:12.5px;font-weight:600;padding:3px 10px;border-radius:99px">Signed off</span>'
+          : (c.status === 'completed'
+            ? '<span style="background:var(--amber-soft);color:var(--amber-deep);font-size:12.5px;font-weight:600;padding:3px 10px;border-radius:99px">Awaiting sign-off</span>'
+            : '<span style="background:var(--line);color:var(--muted);font-size:12.5px;padding:3px 10px;border-radius:99px">' + (done > 0 ? 'In progress' : 'Not started') + '</span>');
+        const acc = (c.accuracy_pct == null) ? '\u2014' : (c.accuracy_pct + '%');
+        const recert = (signed && c.recert_due) ? ('<div style="font-size:12.5px;color:var(--muted);margin-top:6px">Re-certify by ' + String(c.recert_due).slice(0, 10) + '</div>') : '';
+        return '<div style="border:0.5px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:12px;background:var(--surface)">'
+          + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">'
+          + '<div style="font-weight:600;font-size:15px;color:var(--ink)">' + (c.title || 'Course') + '</div>' + chip
+          + '</div>'
+          + '<div style="height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:' + pct + '%;background:var(--amber)"></div></div>'
+          + '<div style="display:flex;gap:18px;font-size:13px;color:var(--muted);flex-wrap:wrap">'
+          + '<span>' + done + ' of ' + total + ' sessions \u00b7 ' + pct + '%</span>'
+          + '<span>First-try accuracy: <b style="color:var(--ink)">' + acc + '</b></span>'
+          + '</div>' + recert
+          + '</div>';
+      }).join('');
     }
 
     // --- File row component (r0.16 NEW) -------------------------------
@@ -1301,7 +1339,7 @@ window.fkModules['profile'] = {
       const snapCard = '<div class="card"><div class="card-title">Snapshot</div><div class="field-grid">' +
         snap.map(p => '<div class="fld"><div class="fl">' + p[0] + '</div><div class="fv' + (p[1] ? '' : ' empty') + '">' + (p[1] ? esc(p[1]) : 'Not set') + '</div></div>').join('') +
         '</div>' +
-        (viewer.can_edit_any ? '<div style="margin-top:16px"><button class="det-btn" data-assign-mgr="1"><i class="ti ti-user-cog"></i> ' + (u.manager_user_id ? 'Change manager' : 'Assign manager') + '</button></div>' : '') +
+        (viewer.can_assign_manager ? '<div style="margin-top:16px"><button class="det-btn" data-assign-mgr="1"><i class="ti ti-user-cog"></i> ' + (u.manager_user_id ? 'Change manager' : 'Assign manager') + '</button></div>' : '') +
         '</div>';
 
       body.innerHTML = '<div class="two-col">' + completeCard + snapCard + '</div>';

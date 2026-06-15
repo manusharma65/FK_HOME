@@ -221,6 +221,8 @@ router.get('/:userId/overview', async (req, res) => {
       viewer: {
         user_id: req.user.id,
         can_edit_any: req.user.can('profile.edit.any'),
+        // r1.28 — assigning a manager is part of onboarding; allow user-admins too.
+        can_assign_manager: req.user.can('profile.edit.any') || req.user.can('admin.users.edit') || req.user.can('admin.users.create'),
         can_edit_dept: req.user.can('profile.edit.dept'),
         can_view_salary: req.user.can('profile.salary.view'),
         can_edit_salary: req.user.can('profile.salary.edit'),
@@ -1388,9 +1390,11 @@ router.get('/people', async (req, res) => {
 router.put('/:userId/manager', async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Bad id' });
-  // r1.28 — also accept admin.users.edit so onboarding HR (who create/edit employees) can
-  // set a new hire's manager, not just holders of the broad profile.edit.any.
-  if (!req.user.can('profile.edit.any') && !req.user.can('admin.users.edit')) return res.status(403).json({ error: 'Permission denied' });
+  // r1.28 — assigning a manager is part of onboarding a new hire, so accept the onboarding/
+  // user-admin perms (create or edit), not just the broad profile.edit.any. Covers HR who can
+  // create/onboard employees but aren't granted full profile-edit.
+  if (!req.user.can('profile.edit.any') && !req.user.can('admin.users.edit') && !req.user.can('admin.users.create'))
+    return res.status(403).json({ error: 'Permission denied' });
   let mgr = (req.body || {}).manager_user_id;
   mgr = (mgr === '' || mgr == null) ? null : parseInt(mgr, 10);
   if (mgr != null && (!Number.isFinite(mgr) || mgr === userId)) return res.status(400).json({ error: 'Invalid manager' });

@@ -167,21 +167,23 @@
   }
   .brand-name { font-size: 16px; font-weight: 500; color: #FAF7F2; }
   .user-pill {
-    padding: 9px 10px; background: #F1EFE8; border-radius: 8px;
-    display: flex; align-items: center; gap: 9px; margin-bottom: 12px;
+    padding: 13px 13px 13px 16px; background: #FFFDF9; border: 1px solid #ECE3D4; border-radius: 15px;
+    display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+    position: relative; overflow: hidden; box-shadow: 0 5px 16px -11px rgba(60,40,20,.6);
   }
+  .user-pill::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--orange); }
   .avatar {
-    width: 28px; height: 28px; border-radius: 50%;
+    width: 46px; height: 46px; border-radius: 13px;
     display: flex; align-items: center; justify-content: center;
-    font-weight: 500; font-size: 14px; color: var(--ink); position: relative; flex-shrink: 0;
+    font-family: var(--disp); font-weight: 700; font-size: 19px; color: var(--ink); position: relative; flex-shrink: 0;
   }
   .avatar .dot {
-    position: absolute; bottom: -1px; right: -1px;
-    width: 8px; height: 8px; border-radius: 50%;
-    border: 1.5px solid #F1EFE8;
+    position: absolute; bottom: -3px; right: -3px;
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 3px solid #FFFDF9;
   }
-  .user-pill .name { font-size: 15px; font-weight: 500; color: var(--ink); line-height: 1.2; }
-  .user-pill .role { font-size: 13px; color: #5F5E5A; margin-top: 1px; }
+  .user-pill .name { font-family: var(--disp); font-size: 19px; font-weight: 600; color: var(--ink); line-height: 1.05; letter-spacing: -0.01em; }
+  .user-pill .role { font-size: 10.5px; font-weight: 800; color: #C2562E; margin-top: 4px; letter-spacing: 0.1em; text-transform: uppercase; }
 
   .late-btn {
     padding: 10px 12px; background: var(--nav-elev-2); border: 1px solid var(--amber);
