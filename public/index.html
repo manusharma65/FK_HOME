@@ -2220,15 +2220,30 @@ function startHeartbeat() {
   // heartbeat there, so the server saw no beat for 5 min and falsely flipped them to idle
   // (and fired the 20-min idle alert). We now beat regardless of focus, and beat again on
   // refocus to cover any browser background-timer throttling.
-  const beat = () => {
-    fetch('/api/me/heartbeat', {
-      method: 'POST', credentials: 'include',
-      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
-    }).catch(()=>{});
-  };
-  beat();
+  const beat = () => fetch('/api/me/heartbeat', {
+    method: 'POST', credentials: 'include',
+    headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
+  }).catch(()=>{});
+  // The FIRST beat of the day is what stamps the clock-in. fkClockInMaybe() must run
+  // AFTER that, or it sees "not clocked in yet" and the selfie only appears on a manual
+  // refresh. So fire the selfie check once the first beat lands.
+  beat().then(() => { if (window.fkClockInMaybe) window.fkClockInMaybe(); });
   setInterval(beat, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) beat(); });
+
+  // r1.27 — live refresh: the app used to only re-fetch after YOUR own actions, so other
+  // people's status changes and the evening auto-clock-out never showed without a manual
+  // refresh. Poll the dashboard + board every 45s — but skip while a modal is open or the
+  // user is typing, so it never wipes an in-progress action. Also refresh on refocus.
+  const canRefresh = () => {
+    if (document.hidden) return false;
+    if (document.querySelector('.modal-bg.on') || document.getElementById('fk-clockin-ovl') || document.querySelector('.mw-form.on')) return false;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return false;
+    return true;
+  };
+  setInterval(() => { if (canRefresh() && typeof reload === 'function') reload().catch(()=>{}); }, 45000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && canRefresh() && typeof reload === 'function') reload().catch(()=>{}); });
 }
 
 // --- MODALS ---

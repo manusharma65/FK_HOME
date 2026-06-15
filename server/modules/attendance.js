@@ -1902,6 +1902,11 @@ async function tickAutoClockout() {
       else if (r.shift_end_local && now.hhmm >= r.shift_end_local && (await idleMinutesFor(r.user_id)) >= 20) {
         reason = 'auto: shift end + idle';
       }
+      // r1.27 — hard end-of-day close. Since "active" now means "FK Home open in the
+      // browser" (heartbeat fires even on a background tab), a tab left open overnight
+      // would otherwise never go idle. So past 22:30 London, clock out + set offline
+      // anyone still open. Runs server-side, so it works regardless of the client tab.
+      else if (now.hhmm >= '22:30') reason = 'auto: end of day';
       if (reason) await autoClockOut(r.user_id, now.date, reason);
     }
   } catch (e) { console.error('[tickAutoClockout]', e.message); }

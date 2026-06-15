@@ -70,6 +70,7 @@ window.fkModules['leaves-time'] = {
         '<div class="actions">' +
           '<button class="btn-primary" id="ltReqLeave"><i class="ti ti-plus" style="vertical-align:-2px"></i> Request leave</button>' +
           '<button class="btn-secondary" id="ltReqCorrection"><i class="ti ti-edit" style="vertical-align:-2px"></i> Request a correction</button>' +
+          '<button class="btn-secondary" id="ltHolidaysBtn"><i class="ti ti-calendar-star" style="vertical-align:-2px"></i> Company holidays</button>' +
         '</div>' +
 
         // My leave
@@ -84,15 +85,21 @@ window.fkModules['leaves-time'] = {
           '<div class="cal-key">Green on time \u00b7 amber late \u00b7 red unauthorised \u00b7 blue leave \u00b7 purple sick \u00b7 grey off.</div>' +
         '</div>' +
 
-        // Company holidays — r1.27: sits right under the calendar so people see the
-        // company days off while they're planning leave (was at the very bottom).
-        '<p class="sec-lbl">Company holidays</p>' +
-        '<div class="panel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
+        // Company holidays now live in a modal opened by the action button above.
 
         // Lateness & corrections
         '<p class="sec-lbl">Lateness &amp; corrections</p>' +
         '<div class="panel" id="ltLatePanel"><div class="empty">Loading\u2026</div></div>' +
 
+      '</div>' +
+      // Company holidays modal (opened by the "Company holidays" action button)
+      '<div class="modal-bg" id="ltHolidaysModal">' +
+        '<div class="modal" style="max-width:460px">' +
+          '<h2>Company holidays</h2>' +
+          '<div class="modal-sub">The company days off this year.</div>' +
+          '<div class="panel" id="ltHolidaysPanel"><div class="empty">Loading\u2026</div></div>' +
+          '<div class="modal-actions" style="margin-top:16px"><button class="btn-secondary" id="ltHolidaysClose">Close</button></div>' +
+        '</div>' +
       '</div>';
   },
 
@@ -115,6 +122,13 @@ window.fkModules['leaves-time'] = {
       if (typeof window.openRegulariseModal === 'function') window.openRegulariseModal();
       else location.hash = '#home';
     });
+    // Company holidays modal (3rd action, beside Request leave / correction)
+    $('ltHolidaysBtn').addEventListener('click', () => {
+      $('ltHolidaysModal').classList.add('on');
+      loadHolidays();
+    });
+    $('ltHolidaysClose').addEventListener('click', () => $('ltHolidaysModal').classList.remove('on'));
+    $('ltHolidaysModal').addEventListener('click', (e) => { if (e.target.id === 'ltHolidaysModal') $('ltHolidaysModal').classList.remove('on'); });
 
     async function loadLeaves() {
       const panel = $('ltLeavePanel');
@@ -247,12 +261,11 @@ window.fkModules['leaves-time'] = {
     loadLeaves();
     loadAttendance();
     loadLateness();
-    loadHolidays();
 
     // Let the global leave modal refresh this page after an edit/request.
     window.__fkLeavesReload = function () {
       if (!document.body.contains(el)) return;
-      try { loadLeaves(); loadAttendance(); loadLateness(); loadHolidays(); } catch (e) {}
+      try { loadLeaves(); loadAttendance(); loadLateness(); } catch (e) {}
     };
   },
 
