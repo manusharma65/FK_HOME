@@ -25,6 +25,7 @@ router.get('/whos-on', async (req, res) => {
         SELECT u.id, u.full_name, u.display_name, u.initials, u.avatar_colour,
                s.status, s.status_note, s.status_until, s.last_active_at,
                s.wfh_lat, s.wfh_lng, s.wfh_location_at,
+               ad.status AS att_status, ad.first_login,
                (SELECT json_agg(json_build_object('slug', d.slug, 'name', d.name, 'role', m.role))
                   FROM user_department_memberships m
                   JOIN departments d ON d.id = m.department_id
@@ -34,6 +35,7 @@ router.get('/whos-on', async (req, res) => {
                   WHERE ug.user_id = u.id AND g.deleted_at IS NULL) AS group_slugs
         FROM users u
         LEFT JOIN user_status s ON s.user_id = u.id
+        LEFT JOIN attendance_day ad ON ad.user_id = u.id AND ad.for_date = (now() AT TIME ZONE 'Europe/London')::date
         WHERE u.deleted_at IS NULL AND u.employment_status = 'active' AND u.id <> $1
         ORDER BY u.full_name`;
       params = [req.user.id];
@@ -44,6 +46,7 @@ router.get('/whos-on', async (req, res) => {
         SELECT u.id, u.full_name, u.display_name, u.initials, u.avatar_colour,
                s.status, s.status_note, s.status_until, s.last_active_at,
                s.wfh_lat, s.wfh_lng, s.wfh_location_at,
+               ad.status AS att_status, ad.first_login,
                (SELECT json_agg(json_build_object('slug', d.slug, 'name', d.name, 'role', m.role))
                   FROM user_department_memberships m
                   JOIN departments d ON d.id = m.department_id
@@ -53,6 +56,7 @@ router.get('/whos-on', async (req, res) => {
                   WHERE ug.user_id = u.id AND g.deleted_at IS NULL) AS group_slugs
         FROM users u
         LEFT JOIN user_status s ON s.user_id = u.id
+        LEFT JOIN attendance_day ad ON ad.user_id = u.id AND ad.for_date = (now() AT TIME ZONE 'Europe/London')::date
         WHERE u.deleted_at IS NULL AND u.employment_status = 'active'
           AND u.id <> $1
           AND EXISTS (
@@ -65,21 +69,36 @@ router.get('/whos-on', async (req, res) => {
     }
 
     const r = await db.query(query, params);
-    const people = r.rows.map(p => ({
-      id: p.id,
-      name: p.display_name || p.full_name,
-      full_name: p.full_name,
-      initials: p.initials,
-      avatar_colour: p.avatar_colour,
-      status: p.status || 'offline',
-      status_note: p.status_note,
-      status_until: p.status_until,
-      wfh_lat: p.wfh_lat,
-      wfh_lng: p.wfh_lng,
-      wfh_location_at: p.wfh_location_at,
-      departments: p.departments || [],
-      role_label: pickRoleLabel(p.departments || [], p.group_slugs || []),
-    }));
+    // r1.27 — board state from TODAY's attendance so "Who's in today" can show
+    // In / Not in yet / Off-with-reason, rather than just sticky presence:
+    //   off    — attendance says they're off today (leave/sick/holiday/rota/pattern)
+    //   in     — clocked in today (first_login set); presence overlays active/resting/etc.
+    //   not_in — active employee, no clock-in yet today
+    const OFF = ['on_leave','off_sick','off_holiday','off_cs_rota','off_pattern'];
+    const people = r.rows.map(p => {
+      let board_state, off_reason = null;
+      if (p.att_status && OFF.includes(p.att_status)) { board_state = 'off'; off_reason = p.att_status; }
+      else if (p.first_login) board_state = 'in';
+      else board_state = 'not_in';
+      return {
+        id: p.id,
+        name: p.display_name || p.full_name,
+        full_name: p.full_name,
+        initials: p.initials,
+        avatar_colour: p.avatar_colour,
+        status: p.status || 'offline',
+        status_note: p.status_note,
+        status_until: p.status_until,
+        wfh_lat: p.wfh_lat,
+        wfh_lng: p.wfh_lng,
+        wfh_location_at: p.wfh_location_at,
+        board_state,            // 'in' | 'not_in' | 'off'
+        off_reason,             // attendance status when board_state==='off'
+        clocked_in: !!p.first_login,
+        departments: p.departments || [],
+        role_label: pickRoleLabel(p.departments || [], p.group_slugs || []),
+      };
+    });
     res.json({ people });
   } catch (err) {
     console.error('[team/whos-on] error:', err);

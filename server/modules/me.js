@@ -311,7 +311,10 @@ router.post('/status', async (req, res) => {
   if (!req.user.can('me.status.set')) return res.status(403).json({ error: 'Permission denied' });
   const { status, status_note, status_until, wfh_lat, wfh_lng, wfh_accuracy_m } = req.body || {};
   // r0.14 — added in_meeting + wfh. running_late/on_break kept for existing flows.
-  const allowed = ['active','idle','running_late','on_break','heads_down','off_sick','in_meeting','wfh'];
+  // r1.27 — 'resting' is the casual "Take rest" presence (person is AT work, just taking a
+  // breather). It is SEPARATE from 'off_sick' (a genuine dated sick day that lives in Leave &
+  // Time). resting writes presence only — never a sick_log, never attendance, never blocks leave.
+  const allowed = ['active','idle','running_late','on_break','heads_down','resting','off_sick','in_meeting','wfh'];
   if (!allowed.includes(status)) return res.status(400).json({ error: `Status must be one of: ${allowed.join(', ')}` });
 
   // r0.14 — WFH requires a location stamp. No location = no WFH (enforced here;
@@ -465,13 +468,13 @@ router.post('/sick', async (req, res) => {
       await db.query(
         `INSERT INTO sick_log (user_id, reported_by_user_id, start_date, end_date, reason)
          VALUES ($1,$2,$3,$4,$5)`,
-        [req.user.id, req.user.id, today, end_date || null, reason || null]
+        [req.user.id, req.user.id, today, end_date || today, reason || null]
       );
     } else {
       await db.query(
         `UPDATE sick_log SET end_date = $1, reason = COALESCE($2, reason), reported_at = NOW()
          WHERE id = $3`,
-        [end_date || null, reason || null, existing.rows[0].id]
+        [end_date || today, reason || null, existing.rows[0].id]
       );
     }
 
@@ -681,6 +684,14 @@ async function recordClockIn(userId, isMobile) {
             updated_at = NOW()
       WHERE id = $3`,
     [lateMinutes, newStatus, row.id]);
+  // r1.27 — first clock-in of the day clears any stale presence carried over from a
+  // prior day (a 'resting' breather or an old casual 'off_sick' that never got reset),
+  // so the new day starts Active. This only fires on the genuine first clock-in because
+  // the function returns early once first_login is set — so a 'resting' the person chooses
+  // AFTER arriving today is preserved.
+  await db.query(
+    `UPDATE user_status SET status = 'active', changed_at = NOW()
+      WHERE user_id = $1 AND status IN ('resting','off_sick')`, [userId]);
 }
 
 // London HH:MM now.

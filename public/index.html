@@ -403,6 +403,24 @@
   .person-name { font-size: 14px; color: var(--ink); font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .03em; }
   .person-role { font-size: 12.5px; color: var(--muted); margin-top: 2px; font-weight: 500; }
   .person-late { color: var(--amber); }
+  /* r1.27 — Option D directory card for "Who's in today" */
+  .pcard { display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--bg);
+           border:0.5px solid var(--line); border-radius:12px; border-left:4px solid var(--line); }
+  .pcard.off { opacity:.62; }
+  .pcard-av { width:42px; height:42px; border-radius:12px; flex-shrink:0; display:flex;
+              align-items:center; justify-content:center; color:#fff; font-weight:600;
+              font-size:15px; letter-spacing:.02em; }
+  .pcard-main { flex:1; min-width:0; }
+  .pcard-name { font-family:'Fraunces',Georgia,serif; font-size:17px; font-weight:500;
+                color:var(--ink); line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pcard-role { font-size:10.5px; color:var(--muted); margin-top:3px; font-weight:600;
+                text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pcard-stat { display:flex; align-items:center; gap:6px; margin-top:5px; font-size:12.5px; font-weight:500; }
+  .pcard-stat .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .pcard-msg { background:transparent; border:0.5px solid var(--line); border-radius:7px;
+               padding:5px 11px; font-size:13px; color:var(--muted); cursor:pointer; flex-shrink:0;
+               transition:background .12s,color .12s; }
+  .pcard-msg:hover { background:var(--amber); color:#fff; border-color:var(--amber); }
 
   /* Time off card */
   .timeoff-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
@@ -1800,7 +1818,7 @@ function applyStatusPill(s) {
   pill.className = 'status-pill';
   const map = {
     active: 'Active', idle: 'Idle', running_late: 'Running late',
-    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Take rest',
+    on_break: 'On break', heads_down: 'Heads down', resting: 'Resting', off_sick: 'Off sick',
     in_meeting: 'In meeting', wfh: 'Working from home',
     on_leave: 'On leave', offline: 'Active'
   };
@@ -2062,8 +2080,8 @@ function renderPeople(people) {
     list.classList.remove('scrollable');
     return;
   }
-  const onCount = people.filter(p => p.status === 'active').length;
-  meta.textContent = `${onCount} of ${people.length} on`;
+  const inCount = people.filter(p => p.board_state === 'in').length;
+  meta.textContent = `${inCount} in today`;
 
   // Show search box + scrollable list once there are more than 6 people
   if (people.length > 6) {
@@ -2090,34 +2108,45 @@ function filterPeople() {
   list.innerHTML = matches.map(renderPersonRow).join('');
 }
 function renderPersonRow(p) {
-  const statusColour = {
-    active: '#639922', idle: '#EF9F27', running_late: '#EF9F27',
-    on_break: '#85B7EB', heads_down: '#7F77DD', off_sick: '#A32D2D',
-    in_meeting: '#378ADD', wfh: '#1D9E75',
-    on_leave: '#888780', offline: '#B4B2A9'
-  }[p.status] || '#B4B2A9';
-  const STATUS_BADGE = {
-    heads_down: ['Heads down', '#7F77DD'],
-    in_meeting: ['In meeting', '#378ADD'],
-    on_break:   ['On break',   '#85B7EB'],
-    wfh:        ['WFH',        '#1D9E75'],
-    off_sick:   ['Take rest',  '#A32D2D'],
-    on_leave:   ['On leave',   '#888780'],
+  const deptColour = p.avatar_colour || '#B4B2A9';
+  const initials = (p.initials || String(p.full_name || p.name || '?').trim().slice(0, 2)).toUpperCase();
+  // Presence label + colour for people who ARE in today. 'resting' = the casual "Take rest"
+  // (at work, just on a breather) — distinct from off_sick, which is a dated day off.
+  const PRESENCE = {
+    active:       ['Active',            '#639922'],
+    resting:      ['Resting',           '#7E9AAE'],
+    on_break:     ['On break',          '#85B7EB'],
+    heads_down:   ['Heads down',        '#7F77DD'],
+    in_meeting:   ['In meeting',        '#378ADD'],
+    wfh:          ['Working from home', '#1D9E75'],
+    running_late: ['Running late',      '#EF9F27'],
+    idle:         ['Idle',              '#EF9F27'],
+    offline:      ['Away',              '#B4B2A9'],
   };
-  const bd = STATUS_BADGE[p.status];
-  const badge = bd ? `<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:99px;white-space:nowrap;margin-right:8px;background:${bd[1]}1A;color:${bd[1]}">${bd[0]}</span>` : '';
-  const isLate = p.status === 'running_late';
-  const isOff = p.status === 'off_sick' || p.status === 'on_leave' || p.status === 'offline';
-  const role = isLate ? `<span class="person-late">${p.status_note || 'Running late'}</span>` : (p.role_label || '—');
+  const OFF_REASON = {
+    on_leave: 'On leave', off_sick: 'Off sick', off_holiday: 'On holiday',
+    off_cs_rota: 'Off (rota)', off_pattern: 'Off today',
+  };
+  let dotColour, statusText, cardOff = false;
+  if (p.board_state === 'off') {
+    cardOff = true; dotColour = '#B4B2A9';
+    statusText = OFF_REASON[p.off_reason] || 'Off today';
+  } else if (p.board_state === 'not_in') {
+    dotColour = '#C9C7BF'; statusText = 'Not in yet';
+  } else {
+    const pr = PRESENCE[p.status] || PRESENCE.active;
+    dotColour = pr[1];
+    statusText = (p.status === 'running_late' && p.status_note) ? p.status_note : pr[0];
+  }
   return `
-    <div class="person">
-      <span class="person-dot" style="background:${statusColour}"></span>
-      <div class="person-main">
-        <p class="person-name" style="${isOff ? 'color:var(--soft)' : ''}">${escapeHtml(p.full_name || p.name)}</p>
-        <p class="person-role">${role}</p>
+    <div class="pcard${cardOff ? ' off' : ''}" style="border-left-color:${deptColour}">
+      <div class="pcard-av" style="background:${cardOff ? '#B4B2A9' : deptColour}">${escapeHtml(initials)}</div>
+      <div class="pcard-main">
+        <div class="pcard-name">${escapeHtml(p.full_name || p.name)}</div>
+        <div class="pcard-role">${escapeHtml(p.role_label || '\u2014')}</div>
+        <div class="pcard-stat"><span class="dot" style="background:${dotColour}"></span>${escapeHtml(statusText)}</div>
       </div>
-      ${badge}
-      <button class="person-msg-btn" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
+      <button class="pcard-msg" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
     </div>`;
 }
 async function openDM(userId) {
@@ -2310,7 +2339,7 @@ function openStatusModal() {
     { v: 'active',     label: 'Active',            desc: 'Working as usual',                      icon: 'ti-circle-filled' },
     { v: 'in_meeting', label: 'In meeting',        desc: 'In a call or meeting',                  icon: 'ti-users' },
     { v: 'heads_down', label: 'Heads down',        desc: 'Focus mode — please don\'t interrupt', icon: 'ti-headphones' },
-    { v: 'off_sick',   label: 'Take rest',         desc: 'Resting \u2014 flip back to Active when you return', icon: 'ti-bed' },
+    { v: 'resting',    label: 'Take rest',         desc: 'A breather \u2014 flip back to Active when you return', icon: 'ti-bed' },
     { v: 'wfh',        label: 'Working from home', desc: 'Asks for your location',                icon: 'ti-home' },
   ];
   const wrap = document.getElementById('statusOptions');
@@ -2376,14 +2405,13 @@ function wfhBlockedMessage() {
 }
 
 async function setStatus(s) {
-  if (s === 'off_sick') {
-    // r1.25 — "Take rest" is a TEMPORARY presence status (rest a while, then flip
-    // back to Active), not a formal sick day. Set presence only via /status; do NOT
-    // call /me/sick (which marked the whole attendance day off_sick and left a stale
-    // "sick" on the manager's Company-today even after the person returned to Active).
+  if (s === 'resting') {
+    // r1.27 — "Take rest" is a momentary presence (a breather at work), NOT a sick day.
+    // It sets presence='resting' via /status only — never a sick_log, never attendance,
+    // and it never blocks leave. Flips back to Active when they return (or on next clock-in).
     closeModal('statusModal');
     try {
-      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'off_sick' }) });
+      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'resting' }) });
       if (!r.ok) { alert('Failed to update'); return; }
       await reload();
     } catch (err) { alert('Network error'); }
@@ -2987,7 +3015,7 @@ function formatTime(t) {
 function statusLabel(s) {
   return ({
     on_time: 'On time', late: 'Late', very_late: 'Very late', not_yet_in: 'Not yet in',
-    on_leave: 'On leave', off_sick: 'Take rest',
+    on_leave: 'On leave', off_sick: 'Off sick',
     off_pattern: 'Off (pattern)', off_cs_rota: 'Off (rota)', off_holiday: 'Off (holiday)',
     worked_voluntary: 'Worked', pending: 'Not yet in'
   })[s] || s || '—';
@@ -3451,7 +3479,7 @@ window.fkRenderCockpit = async function (isOwner, isManager) {
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmtD = (d) => { if (!d) return ''; const p = String(d).slice(0, 10).split('-'); if (p.length !== 3) return ''; const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (p[2] * 1) + ' ' + (M[p[1] * 1 - 1] || ''); };
   const av = (p) => '<div class="ck-av" style="background:' + (p.colour || p.avatar_colour || '#888') + '">' + esc(p.initials || '') + '</div>';
-  const STAT = { on_leave: 'On leave', off_sick: 'Take rest', wfh: 'Working from home', off_holiday: 'On holiday' };
+  const STAT = { on_leave: 'On leave', resting: 'Resting', off_sick: 'Off sick', wfh: 'Working from home', off_holiday: 'On holiday' };
 
   const waiting = data.waiting || [];
   const present = data.present || [];
