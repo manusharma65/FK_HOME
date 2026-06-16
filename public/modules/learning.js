@@ -30,6 +30,7 @@
     .lms .btn{font-family:inherit;font-weight:600;font-size:14px;border-radius:11px;padding:11px 20px;border:1px solid transparent;cursor:pointer;background:var(--orange);color:#FFF8EF}
     .lms .btn:hover{background:#D2641F}.lms .btn.g{background:var(--surface);color:var(--ink);border-color:var(--line)}.lms .btn.g:hover{background:#FBF6EE}.lms .btn:disabled{background:var(--chip);color:var(--soft);cursor:not-allowed;border-color:var(--line)}
     .lms .btn.sm{padding:8px 15px;font-size:14.5px}
+    .lms table.mt td.ra{white-space:nowrap;text-align:right}.lms table.mt td.ra .btn+.btn{margin-left:8px}
     .lms .gate{margin-top:18px;background:#FBF6EE;border:1px solid var(--line);border-radius:14px;padding:16px 20px;font-size:14.5px;color:#5b5249}.lms .gate b{color:var(--ink)}
     .lms .scard{background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shad);padding:20px 24px;display:flex;gap:18px;align-items:center;margin-bottom:14px}
     .lms .num{flex:0 0 auto;width:44px;height:44px;border-radius:13px;background:var(--chip);border:1px solid var(--line);display:grid;place-items:center;font-family:'Fraunces',serif;font-weight:600;font-size:19px;color:var(--soft)}
@@ -218,28 +219,58 @@
   // ---------- manager ----------
   async function renderManager() {
     const rows = await api('/manager/progress/' + (courseId || 1));
-    let trs = '';
-    rows.forEach(r => {
-      const pct = r.total ? Math.round(r.done / r.total * 100) : 0;
-      const canSign = r.status === 'completed' && r.competency_status !== 'active';
-      const st = r.competency_status === 'active' ? 'Signed off' : (r.status === 'completed' ? 'Awaiting sign-off' : (r.done > 0 ? 'In progress' : 'Not started'));
+    const active = [], signed = [];
+    rows.forEach(r => { (r.competency_status === 'active' || r.status === 'completed' ? signed : active).push(r); });
+
+    function accCell(r) {
       const acc = (r.accuracy_pct == null) ? '<span class="muted">\u2014</span>' : (r.accuracy_pct + '%');
       const tries = Number(r.attempts_total) || 0;
-      trs += '<tr><td><b>' + r.full_name + '</b></td>' +
+      return '<div class="acc"><b>' + acc + '</b><span>' + tries + (tries === 1 ? ' try' : ' tries') + '</span></div>';
+    }
+    function removeBtn(r) {
+      return '<button class="btn g sm lmsRemove" data-a="' + r.assignment_id + '" data-n="' + r.full_name + '">Remove</button>';
+    }
+    function activeRow(r) {
+      const pct = r.total ? Math.round(r.done / r.total * 100) : 0;
+      const canSign = r.status === 'completed' && r.competency_status !== 'active';
+      const st = canSign ? 'Awaiting sign-off' : (r.done > 0 ? 'In progress' : 'Not started');
+      return '<tr><td><b>' + r.full_name + '</b></td>' +
         '<td><div class="prog"><div class="pb2"><i style="width:' + pct + '%"></i></div><span>' + pct + '%</span></div></td>' +
-        '<td><div class="acc"><b>' + acc + '</b><span>' + tries + (tries === 1 ? ' try' : ' tries') + '</span></div></td>' +
-        '<td><span class="chip ' + (r.competency_status === 'active' || canSign ? 'ok' : 'cur') + '">' + st + '</span></td>' +
-        '<td><button class="btn ' + (canSign ? '' : 'g') + ' lmsSign" data-u="' + r.user_id + '" ' + (canSign ? '' : 'disabled') + '>' + (r.competency_status === 'active' ? 'Signed off \u2713' : 'Sign off') + '</button></td></tr>';
-    });
+        '<td>' + accCell(r) + '</td>' +
+        '<td><span class="chip ' + (canSign ? 'ok' : 'cur') + '">' + st + '</span></td>' +
+        '<td class="ra"><button class="btn ' + (canSign ? '' : 'g') + ' sm lmsSign" data-u="' + r.user_id + '" ' + (canSign ? '' : 'disabled') + '>Sign off</button>' + removeBtn(r) + '</td></tr>';
+    }
+    function signedRow(r) {
+      return '<tr><td><b>' + r.full_name + '</b></td>' +
+        '<td>' + accCell(r) + '</td>' +
+        '<td><span class="chip ok">Signed off \u2713</span></td>' +
+        '<td class="ra">' + removeBtn(r) + '</td></tr>';
+    }
+
+    const activeTbl = active.length
+      ? '<table class="mt"><tr><th>Team member</th><th>Progress</th><th>First-try accuracy</th><th>Status</th><th></th></tr>' + active.map(activeRow).join('') + '</table>'
+      : '<div class="gate">No one is currently working through this course.</div>';
+    const signedTbl = signed.length
+      ? '<div class="sech" style="margin-top:32px"><h2>Signed off</h2><span class="n">' + signed.length + ' competent \u00b7 history</span></div>' +
+        '<table class="mt"><tr><th>Team member</th><th>First-try accuracy</th><th>Status</th><th></th></tr>' + signed.map(signedRow).join('') + '</table>'
+      : '';
+
     lms().innerHTML = seg() +
       '<div class="hero m"><div class="ey">Manager</div><h1>Logistics training \u2014 team</h1><p>Watch progress and sign people off when they\u2019re ready.</p></div>' +
-      '<div class="sech"><h2>Progress</h2><span class="n">First-try accuracy = right on the first attempt \u2014 compare trainees on probation</span></div>' +
-      '<table class="mt"><tr><th>Team member</th><th>Progress</th><th>First-try accuracy</th><th>Status</th><th></th></tr>' + trs + '</table>' +
-      '<div class="gate" style="margin-top:18px">Signing off confirms they\u2019ve shown it on real orders \u2014 it flips <b>logistics-ready</b> on their profile with an annual recert date.</div>';
+      '<div class="sech"><h2>In progress &amp; awaiting sign-off</h2><span class="n">First-try accuracy = right on the first attempt</span></div>' +
+      activeTbl +
+      '<div class="gate" style="margin-top:18px">Signing off confirms they\u2019ve shown it on real orders \u2014 it flips <b>logistics-ready</b> on their profile with an annual recert date.</div>' +
+      signedTbl;
     wireSeg();
-    Array.from(document.querySelectorAll('.lmsSign')).forEach(b => b.onclick = async () => {
+    Array.from(document.querySelectorAll('.lmsSign')).forEach(b => { if (b.disabled) return; b.onclick = async () => {
       const out = await api('/signoff', { method: 'POST', body: JSON.stringify({ courseId: courseId, userId: parseInt(b.getAttribute('data-u'), 10) }) });
       if (out.ok) renderManager(); else alert('That person needs all sessions complete first.');
+    }; });
+    Array.from(document.querySelectorAll('.lmsRemove')).forEach(b => b.onclick = async () => {
+      const nm = b.getAttribute('data-n');
+      if (!confirm('Remove ' + nm + ' from this course?\n\nUse this when someone leaves or was assigned by mistake. It clears their progress on this course. Any past sign-off on their profile stays.')) return;
+      const out = await api('/manager/assignment/' + b.getAttribute('data-a'), { method: 'DELETE' });
+      if (out && out.ok) renderManager(); else alert('Could not remove \u2014 please try again.');
     });
   }
 

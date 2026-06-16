@@ -543,6 +543,17 @@ router.post('/assign', async (req, res) => {
     res.json(out);
   });
 
+  // r1.30 — remove someone from a course (mid-course leaver, or assigned by mistake).
+  // Hard delete: lms_progress + lms_check_attempts cascade off the assignment. A
+  // past sign-off lives on lms_competencies (keyed to the user) and is left intact.
+  router.delete('/manager/assignment/:assignmentId', async (req, res) => {
+    if (!canManage(req)) return res.status(403).json({ error: 'Managers and HR only' });
+    const id = parseInt(req.params.assignmentId, 10);
+    if (!id) return res.status(400).json({ error: 'Bad id' });
+    await db.query('DELETE FROM lms_assignments WHERE id=$1', [id]);
+    res.json({ ok: true });
+  });
+
   // Competencies for a user — for the profile "Training & competencies" drawer to read.
   router.get('/competencies/:userId', async (req, res) => {
     const uid = parseInt(req.params.userId, 10);
