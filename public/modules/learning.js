@@ -65,7 +65,8 @@
     .lms table.mt th{text-align:left;padding:14px 18px;background:#FAF5ED;font-size:13.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line)}
     .lms table.mt td{padding:15px 18px;border-bottom:1px solid #F0E9DC}.lms table.mt .nm{font-family:'Fraunces',serif;font-weight:600;font-size:15.5px}.lms .prog{display:flex;align-items:center;gap:10px;min-width:150px}.lms .pb2{flex:1;height:8px;background:var(--chip);border-radius:999px;overflow:hidden}.lms .pb2 i{display:block;height:100%;background:var(--orange);border-radius:999px}
     .lms .search{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:13px 18px;margin-top:16px}.lms .search input{border:0;background:none;outline:none;font-family:inherit;font-size:15.5px;width:100%;color:var(--ink)}
-    .lms .tiles{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.lms .tile{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:22px 24px;box-shadow:var(--shad);cursor:pointer}.lms .tile:hover{border-color:var(--orange2)}.lms .tile .tk{font-size:13.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);font-weight:700}.lms .tile h3{margin:8px 0 5px;font-size:18px}.lms .tile p{margin:0;font-size:14.5px;color:var(--muted)}
+    .lms .tiles{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.lms .tile{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:22px 24px;box-shadow:var(--shad);cursor:pointer}.lms .tile:hover{border-color:var(--orange2)}.lms .tile .tk{font-size:13.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);font-weight:700}.lms .tile h3{margin:8px 0 5px;font-size:18px}.lms .tile p{margin:0;font-size:15px;color:var(--muted)}
+    .lms .kbdocs{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}.lms .kbdoc{display:flex;align-items:center;gap:14px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:var(--shad);text-decoration:none;color:var(--ink)}.lms .kbdoc:hover{border-color:var(--orange2)}.lms .kbdoc .ic{flex:0 0 auto;width:42px;height:42px;border-radius:11px;background:#FBF1E8;color:var(--orange);display:grid;place-items:center;font-size:21px;font-weight:700}.lms .kbdoc .dx{display:flex;flex-direction:column;line-height:1.3}.lms .kbdoc .dx b{font-size:15.5px}.lms .kbdoc .dx span{font-size:13px;color:var(--muted)}@media(max-width:680px){.lms .kbdocs{grid-template-columns:1fr}}
     .lms .ratetab{width:100%;border-collapse:collapse;font-size:15.5px}.lms .ratetab th{text-align:left;padding:12px 16px;background:#FAF5ED;font-size:13.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line)}.lms .ratetab td{padding:13px 16px;border-bottom:1px solid #F0E9DC}.lms .ratetab .dot{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:8px;vertical-align:middle}
     .lms .fc{height:130px;perspective:1000px;cursor:pointer;margin-bottom:12px}.lms .fc .in{position:relative;width:100%;height:100%;transition:transform .5s;transform-style:preserve-3d}.lms .fc.f .in{transform:rotateY(180deg)}.lms .fc .fa{position:absolute;inset:0;backface-visibility:hidden;border-radius:14px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;padding:18px;text-align:center;font-family:'Fraunces',serif;font-size:16px;background:var(--surface)}.lms .fc .bk{background:#FBF6EE;transform:rotateY(180deg);font-size:15px;font-family:'Hanken Grotesk',sans-serif}
     `;
@@ -244,19 +245,23 @@
 
   // ---------- knowledge base ----------
   async function renderKB() {
-    const items = await api('/kb');
-    const deptLabel = items.length ? String(items[0].department || '').replace(/\b\w/g, c => c.toUpperCase()) : '';
+    const [items, docs] = await Promise.all([api('/kb'), api('/kb/docs').catch(() => [])]);
+    const src = items.length ? items : (docs || []);
+    const deptLabel = src.length ? String(src[0].department || '').replace(/\b\w/g, c => c.toUpperCase()) : '';
     let tiles = '';
     items.forEach(it => { var blurb = (it.config_json && it.config_json.summary) || ({ rate_card: 'All couriers, sizes and prices.', flashcard: 'Drill the numbers.', error_table: 'The fix for each error.', sop: 'The full document.', article: 'Reference.', calculator_link: 'Tool.' }[it.type] || 'Reference.'); var tk = (it.type === 'sop' ? 'How-to · SOP' : 'Quick reference'); tiles += '<div class="tile lmsKb" data-i="' + it.id + '"><div class="tk">' + tk + '</div><h3>' + it.title + '</h3><p>' + blurb + '</p></div>'; });
+    let docCards = '';
+    (docs || []).forEach(d => { var kb = d.byte_size ? (Math.max(1, Math.round(d.byte_size / 1024)) + ' KB') : 'PDF'; docCards += '<a class="kbdoc" href="' + API + '/kb/doc/' + encodeURIComponent(d.slug) + '" download><span class="ic">\u2913</span><span class="dx"><b>' + d.title + '</b><span>PDF · ' + kb + ' · download</span></span></a>'; });
     lms().innerHTML =
       '<div class="hero m"><div class="ey">Learn · Knowledge Base</div><h1>Knowledge Base</h1><p>Always here, never locked. Forget a rate or a step \u2014 look it up in seconds.</p></div>' +
       '<div class="search"><input id="kbq" placeholder="Search\u2026"></div>' +
+      (docCards ? '<div class="sech"><h2>Documents</h2><span class="n">Read or download</span></div><div class="kbdocs">' + docCards + '</div>' : '') +
       (items.length
-        ? '<div class="sech"><h2>' + deptLabel + '</h2></div><div class="tiles" id="kbt">' + tiles + '</div>'
-        : '<div class="card" style="opacity:.75;margin-top:8px"><div><div class="ttl">Coming soon</div><div class="sub">No reference material has been added for your department yet.</div></div></div>');
+        ? '<div class="sech"><h2>' + (deptLabel || 'Reference') + '</h2></div><div class="tiles" id="kbt">' + tiles + '</div>'
+        : (docCards ? '' : '<div class="card" style="opacity:.75;margin-top:8px"><div><div class="ttl">Coming soon</div><div class="sub">No reference material has been added for your department yet.</div></div></div>'));
     const data = {}; items.forEach(it => data[it.id] = it);
     Array.from(document.querySelectorAll('.lmsKb')).forEach(t => t.onclick = () => openKB(data[t.getAttribute('data-i')]));
-    el('kbq').oninput = e => { const v = e.target.value.toLowerCase(); Array.from(document.querySelectorAll('.lmsKb')).forEach(t => { t.style.display = (data[t.getAttribute('data-i')].title.toLowerCase().includes(v)) ? '' : 'none'; }); };
+    var qbox = el('kbq'); if (qbox) qbox.oninput = e => { const v = e.target.value.toLowerCase(); Array.from(document.querySelectorAll('.lmsKb')).forEach(t => { t.style.display = (data[t.getAttribute('data-i')].title.toLowerCase().includes(v)) ? '' : 'none'; }); };
   }
   function openKB(it) {
     let body = it.body_html || '';

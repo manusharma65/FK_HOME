@@ -923,9 +923,20 @@ const stockinReference = [
 ];
 
 
+// ---- Knowledge Base downloadable documents (PDFs in server/kb-files/) ----
+const kbDocs = [
+  { slug: 'sow-shipping-stock-dispatch', department: 'logistics',
+    title: 'Scope of Work \u2014 Shipping, Stock & Dispatch Coordinator',
+    filename: 'FK_SOW-WH-004_Shipping_Stock_Dispatch.pdf', file: 'SOW-WH-004.pdf', verified_on: '2026-06-16' },
+  { slug: 'sop-shipping-stock-dispatch', department: 'logistics',
+    title: 'Procedure \u2014 Shipping, Stock-In & Dispatch',
+    filename: 'FK_SOP-WH-004_Shipping_Stock_Dispatch.pdf', file: 'SOP-WH-004.pdf', verified_on: '2026-06-16' },
+];
+
 module.exports = {
   course, stockinCourse,
   courses: [course, stockinCourse],
   reference: reference.concat(stockinReference),
+  kbDocs,
 };
 

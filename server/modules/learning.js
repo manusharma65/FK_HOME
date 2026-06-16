@@ -34,13 +34,13 @@ async function ensureSchema() {
   // The learning module owns these schema files; apply them all, in order.
   // All are idempotent (CREATE ... IF NOT EXISTS / ADD COLUMN IF NOT EXISTS),
   // so this is safe even though server.js also runs them via its migration runner.
-  for (const f of ['44-learning.sql', '45-check-tag.sql']) {
+  for (const f of ['44-learning.sql', '45-check-tag.sql', '46-kb-docs.sql']) {
     const sql = fs.readFileSync(path.join(__dirname, '..', 'schema', f), 'utf8');
     await db.query(sql);
   }
 }
 async function init() {
-  try { await ensureSchema(); for (const c of (content.courses || [content.course])) await seedCourse(c, 1); await seedReference(content.reference); }
+  try { await ensureSchema(); for (const c of (content.courses || [content.course])) await seedCourse(c, 1); await seedReference(content.reference); await seedKbDocs(content.kbDocs || []); }
   catch (e) { console.error('[learning] init failed:', e.message); _ready = null; throw e; }
 }
 function ensureReady() { if (!_ready) _ready = init(); return _ready; }
@@ -131,6 +131,25 @@ async function seedReference(items) {
       `DELETE FROM lms_reference WHERE department = $1 AND title <> ALL($2::text[])`,
       [d, titles]
     );
+  }
+}
+
+// Seed the downloadable KB documents (PDFs) from server/kb-files/ into bytea.
+// A missing/unreadable file is skipped, never fatal — Academy init must not break.
+async function seedKbDocs(docs) {
+  for (const d of docs) {
+    try {
+      const buf = fs.readFileSync(path.join(__dirname, '..', 'kb-files', d.file));
+      await db.query(
+        `INSERT INTO lms_kb_docs (slug,department,title,filename,mime,data,byte_size,verified_on)
+         VALUES ($1,$2,$3,$4,'application/pdf',$5,$6,$7)
+         ON CONFLICT (slug) DO UPDATE
+           SET department=EXCLUDED.department, title=EXCLUDED.title, filename=EXCLUDED.filename,
+               data=EXCLUDED.data, byte_size=EXCLUDED.byte_size, verified_on=EXCLUDED.verified_on, updated_at=now()`,
+        [d.slug, d.department, d.title, d.filename, buf, buf.length, d.verified_on || null]);
+    } catch (e) {
+      console.error('[learning] kb doc seed skipped (' + d.slug + '):', e.message);
+    }
   }
 }
 
@@ -445,6 +464,27 @@ router.post('/assign', async (req, res) => {
     const all = ownerSeesAll(req);
     const rows = await db.query(`SELECT id,department,type,title,body_html,config_json,verified_on FROM lms_reference ORDER BY id`);
     res.json(rows.rows.filter(r => all || courseVisible(hay, r.department, null)));
+  });
+
+  // r1.29 — list the downloadable KB documents (SOW/SOP PDFs) for this viewer's dept.
+  router.get('/kb/docs', async (req, res) => {
+    const hay = await userDeptHay(req.user.id);
+    const all = ownerSeesAll(req);
+    const rows = await db.query(
+      `SELECT slug, department, title, filename, byte_size, verified_on FROM lms_kb_docs ORDER BY id`);
+    res.json(rows.rows.filter(d => all || courseVisible(hay, d.department, null)));
+  });
+  // Stream one KB document as a download (cookie-authed, same dept-visibility gate).
+  router.get('/kb/doc/:slug', async (req, res) => {
+    const hay = await userDeptHay(req.user.id);
+    const all = ownerSeesAll(req);
+    const r = await db.query(`SELECT department, title, filename, mime, data FROM lms_kb_docs WHERE slug=$1`, [req.params.slug]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+    const doc = r.rows[0];
+    if (!all && !courseVisible(hay, doc.department, null)) return res.status(403).json({ error: 'Not allowed' });
+    res.setHeader('Content-Type', doc.mime || 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + String(doc.filename || 'document.pdf').replace(/[^\w.\- ]/g, '') + '"');
+    res.send(doc.data);
   });
 
   // r1.28 — courses available to THIS viewer's discipline, for the Academy "Available"
