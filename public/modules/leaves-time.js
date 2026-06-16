@@ -40,20 +40,34 @@ window.fkModules['leaves-time'] = {
           '#lt-mod .pill.green{background:#EAF3DE;color:#3B6D11}' +
           '#lt-mod .pill.amber{background:#FAEEDA;color:#9A5B1F}' +
           '#lt-mod .pill.red{background:#FCEBEB;color:#A32D2D}' +
-          '#lt-mod .cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:4px 0 5px}' +
-          '#lt-mod .cal-dow span{text-align:center;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}' +
-          '#lt-mod .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:0 0 10px}' +
-          '#lt-mod .cal .d{aspect-ratio:1;border-radius:7px;background:#ECEAE3;cursor:default;position:relative;display:flex;flex-direction:column;justify-content:space-between;padding:5px 6px}' +
-          '#lt-mod .cal .d.blank{background:transparent}' +
-          '#lt-mod .cal .d .mon{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:#C2562E;line-height:1}' +
-          '#lt-mod .cal .d .num{font-family:var(--disp,"Fraunces"),serif;font-size:14px;font-weight:600;line-height:1;align-self:flex-end;color:var(--ink)}' +
-          '#lt-mod .cal .d.on_time{background:#CDE8D6}' +
-          '#lt-mod .cal .d.late{background:#F6DEB0;outline:1px solid #C98A2E}' +
-          '#lt-mod .cal .d.no_show{background:#F2C7C7}' +
-          '#lt-mod .cal .d.leave{background:#CBDCF0}' +
-          '#lt-mod .cal .d.sick{background:#E0D5EC}' +
-          '#lt-mod .cal .d.today{outline:2px solid #C2562E;outline-offset:1px}' +
-          '#lt-mod .cal-key{font-size:13.5px;color:var(--soft);margin-bottom:6px}' +
+          '#lt-mod .att-cal{background:var(--surface);border:0.5px solid var(--line);border-radius:12px;padding:14px 16px}' +
+          '#lt-mod .att-cal-head{display:flex;align-items:center;justify-content:center;margin-bottom:18px}' +
+          '#lt-mod .att-cal-nav{display:inline-flex;align-items:center;gap:14px}' +
+          '#lt-mod .att-cal-nav .header-action-btn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;font-size:18px;border:1px solid var(--line);background:var(--surface);cursor:pointer}' +
+          '#lt-mod .att-month{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:23px;min-width:190px;text-align:center}' +
+          '#lt-mod .att-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}' +
+          '#lt-mod .att-cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;font-size:12.5px;font-weight:600;color:var(--muted);margin-bottom:10px;text-align:center;text-transform:uppercase;letter-spacing:.04em}' +
+          '#lt-mod .att-day{min-height:74px;border-radius:13px;padding:9px 11px;position:relative;display:block}' +
+          '#lt-mod .att-day .att-num{font-family:"Fraunces",Georgia,serif;font-size:18px;font-weight:600;line-height:1}' +
+          '#lt-mod .att-day .att-flag{position:absolute;bottom:9px;left:11px;font-size:11.5px;font-weight:700;letter-spacing:.02em}' +
+          '#lt-mod .att-day.att-empty{background:var(--bg);color:var(--muted)}' +
+          '#lt-mod .att-day.att-worked{background:var(--green-soft);color:var(--green)}' +
+          '#lt-mod .att-day.att-late{background:var(--amber-soft);color:var(--amber-deep)}' +
+          '#lt-mod .att-day.att-wfh{background:rgba(13,148,136,0.12);color:#0F766E}' +
+          '#lt-mod .att-day.att-sick{background:var(--red-soft);color:var(--red)}' +
+          '#lt-mod .att-day.att-leave{background:rgba(40,90,180,0.10);color:#2D5BAF}' +
+          '#lt-mod .att-day.att-holiday{background:var(--bg);color:var(--muted)}' +
+          '#lt-mod .att-day.att-future{background:transparent;border:1px dashed var(--line);color:var(--muted)}' +
+          '#lt-mod .att-day.att-today{background:linear-gradient(135deg,#F3992E,#E8722B);box-shadow:0 6px 16px rgba(232,114,43,.35)}' +
+          '#lt-mod .att-day.att-today .att-num{color:#fff}' +
+          '#lt-mod .att-day.att-today .att-flag{color:#fff}' +
+          '#lt-mod .att-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:12.5px}' +
+          '#lt-mod .att-legend span{display:flex;align-items:center;gap:4px}' +
+          '#lt-mod .att-legend .swatch{display:inline-block;width:10px;height:10px;border-radius:2px}' +
+          '#lt-mod .att-rollup{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}' +
+          '#lt-mod .att-tile{background:#FBF6EC;border:1px solid #EFE6D5;border-radius:14px;padding:16px 18px}' +
+          '#lt-mod .att-tile .num{font-family:"Fraunces",Georgia,serif;font-size:30px;font-weight:700;line-height:1}' +
+          '#lt-mod .att-tile .lbl{font-size:13.5px;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}' +
           '#lt-mod .att-counts{display:flex;gap:20px;margin-bottom:12px}' +
           '#lt-mod .att-counts .v{font-size:18px;font-weight:600}' +
           '#lt-mod .att-counts .l{font-size:14.5px;color:var(--muted)}' +
@@ -102,13 +116,26 @@ window.fkModules['leaves-time'] = {
         '<p class="sec-lbl">My leave</p>' +
         '<div class="panel" id="ltLeavePanel"><div class="empty">Loading\u2026</div></div>' +
 
-        // My attendance (this period)
-        '<p class="sec-lbl">My attendance \u00b7 last 30 days</p>' +
-        '<div class="panel" style="padding:14px 15px" id="ltAttPanel">' +
-          '<div class="att-counts" id="ltAttCounts"><span class="l">Loading\u2026</span></div>' +
-          '<div class="cal-dow"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>' +
-          '<div class="cal" id="ltCal"></div>' +
-          '<div class="cal-key">Green on time \u00b7 amber late \u00b7 red unauthorised \u00b7 blue leave \u00b7 purple sick \u00b7 grey off.</div>' +
+        // My attendance (monthly calendar)
+        '<p class="sec-lbl">My attendance</p>' +
+        '<div class="att-cal" id="ltAttPanel">' +
+          '<div class="att-rollup" id="ltAttRollup"></div>' +
+          '<div class="att-cal-head">' +
+            '<div class="att-cal-nav">' +
+              '<button class="header-action-btn" id="ltAttPrev"><i class="ti ti-chevron-left"></i></button>' +
+              '<div id="ltAttMonthLabel" class="att-month">\u2014</div>' +
+              '<button class="header-action-btn" id="ltAttNext"><i class="ti ti-chevron-right"></i></button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="att-cal-dow"><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div></div>' +
+          '<div class="att-cal-grid" id="ltAttGrid"></div>' +
+          '<div class="att-legend">' +
+            '<span><span class="swatch" style="background:var(--green-soft)"></span>Worked (W)</span>' +
+            '<span><span class="swatch" style="background:var(--amber-soft)"></span>Late (L)</span>' +
+            '<span><span class="swatch" style="background:var(--red-soft)"></span>Sick (S)</span>' +
+            '<span><span class="swatch" style="background:rgba(40,90,180,0.10)"></span>Leave (A.L.)</span>' +
+            '<span><span class="swatch" style="background:var(--bg)"></span>Off (H)</span>' +
+          '</div>' +
         '</div>' +
 
         // Company holidays now live in a modal opened by the action button above.
@@ -217,48 +244,131 @@ window.fkModules['leaves-time'] = {
       } catch (e) { panel.innerHTML = '<div class="empty">Network error.</div>'; }
     }
 
+    // Monthly attendance calendar (ported from the profile Attendance drawer).
+    // Browses any calendar month via /api/attendance/me/month.
+    let attYear = new Date().getFullYear();
+    let attMonth = new Date().getMonth() + 1;
+
+    function fmtLtT(ts) {
+      if (!ts) return '\u2014';
+      try { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+      catch (e) { return '\u2014'; }
+    }
+    function ltDayMeta(rec) {
+      const s = rec ? rec.status : null;
+      if (s === 'on_time') return { label: 'On time', color: 'var(--green)' };
+      if (s === 'worked_voluntary') return { label: 'Worked (rest day)', color: 'var(--green)' };
+      if (s === 'late' || s === 'very_late') return { label: (rec.late_minutes || 0) + ' min late', color: 'var(--amber-deep)' };
+      if (s === 'on_leave') return { label: 'Approved leave', color: '#2D6CA8' };
+      if (s === 'off_sick') return { label: 'Off sick', color: 'var(--red)' };
+      if (s === 'off_holiday') return { label: 'Public holiday', color: '#2D6CA8' };
+      if (s === 'no_show') return { label: 'Absent \u2014 no login', color: 'var(--red)' };
+      if (s === 'pending') return { label: 'No login recorded', color: 'var(--muted)' };
+      if (s && s.indexOf('off_') === 0) return { label: 'Rest day', color: 'var(--muted)' };
+      return { label: (s || 'No record'), color: 'var(--muted)' };
+    }
+    function showLtDayModal(rec, ds) {
+      const m = ltDayMeta(rec);
+      const worked = rec && ['on_time', 'late', 'very_late', 'worked_voluntary'].indexOf(rec.status) >= 0;
+      let ov = document.getElementById('ltAttDayModal');
+      if (!ov) { ov = document.createElement('div'); ov.id = 'ltAttDayModal'; document.body.appendChild(ov); }
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(20,22,27,.5);display:flex;align-items:center;justify-content:center;z-index:200;padding:16px';
+      const line = (k, v, last) => '<div style="display:flex;justify-content:space-between;padding:10px 0' + (last ? '' : ';border-bottom:0.5px solid var(--line)') + '"><span style="color:var(--muted)">' + k + '</span><span style="font-weight:600">' + v + '</span></div>';
+      const rows =
+        '<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:0.5px solid var(--line)"><span style="color:var(--muted)">Status</span><span style="font-weight:600;color:' + m.color + '">' + m.label + '</span></div>' +
+        line('Logged in', worked ? fmtLtT(rec.first_login) : '\u2014') +
+        line('Logged out', worked ? fmtLtT(rec.last_logout) : '\u2014', !(worked && rec.active_minutes)) +
+        (worked && rec.active_minutes ? line('Active time', (Math.round(rec.active_minutes / 60 * 10) / 10) + ' h', true) : '');
+      ov.innerHTML =
+        '<div style="background:var(--surface);border-radius:14px;max-width:380px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.4);overflow:hidden">' +
+          '<div style="padding:15px 18px;border-bottom:0.5px solid var(--line);display:flex;align-items:center;justify-content:space-between">' +
+            '<div style="font-size:15px;font-weight:700">' + dOnly(ds) + '</div>' +
+            '<button id="ltAttModalClose" style="border:0.5px solid var(--line);background:var(--surface);border-radius:8px;width:30px;height:30px;cursor:pointer;color:var(--muted);font-size:15px">\u2715</button>' +
+          '</div>' +
+          '<div style="padding:4px 18px 16px">' + rows + '</div>' +
+        '</div>';
+      const close = () => { ov.style.display = 'none'; };
+      ov.onclick = (e) => { if (e.target === ov) close(); };
+      document.getElementById('ltAttModalClose').onclick = close;
+      ov.style.display = 'flex';
+    }
+
     async function loadAttendance() {
+      const grid = document.getElementById('ltAttGrid');
+      const rollup = document.getElementById('ltAttRollup');
+      const labelEl = document.getElementById('ltAttMonthLabel');
+      if (!grid || !rollup || !labelEl) return; // scaffold not in DOM
+      // Wire month navigation once.
+      const prev = document.getElementById('ltAttPrev');
+      const next = document.getElementById('ltAttNext');
+      if (prev && !prev._wired) { prev._wired = true; prev.addEventListener('click', () => { attMonth--; if (attMonth < 1) { attMonth = 12; attYear--; } loadAttendance(); }); }
+      if (next && !next._wired) { next._wired = true; next.addEventListener('click', () => { attMonth++; if (attMonth > 12) { attMonth = 1; attYear++; } loadAttendance(); }); }
+
+      labelEl.textContent = new Date(Date.UTC(attYear, attMonth - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      grid.innerHTML = '<div style="grid-column:span 7;color:var(--muted);text-align:center;padding:14px">Loading\u2026</div>';
+      rollup.innerHTML = '';
       try {
-        const r = await fetch('/api/attendance/me/week?days=30', { credentials: 'include' });
-        if (!r.ok) { $('ltAttCounts').innerHTML = '<span class="l">Cannot load attendance.</span>'; return; }
-        const data = await r.json();
-        const rows = (data.days || []).slice().reverse(); // oldest -> newest for the grid
-        let onTime = 0, late = 0, noShow = 0, leave = 0;
-        const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        const pdate = (s) => { const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
-        const todayD = new Date(); todayD.setHours(0, 0, 0, 0);
-        let cells = '';
-        if (rows.length) {
-          // Weekday-align the grid: lead with blanks up to the first day's weekday (Mon=0..Sun=6).
-          const first = pdate(rows[0].for_date);
-          const lead = first ? ((first.getDay() + 6) % 7) : 0;
-          for (let i = 0; i < lead; i++) cells += '<div class="d blank"></div>';
-          cells += rows.map((d, idx) => {
-            let cls = 'd';
-            if (d.status === 'on_time' || d.status === 'worked_voluntary') { cls += ' on_time'; onTime++; }
-            else if (d.status === 'late' || d.status === 'very_late' || (d.late_minutes > 0)) { cls += ' late'; late++; }
-            else if (d.status === 'not_yet_in') { cls += ' no_show'; noShow++; }
-            else if (d.status === 'on_leave') { cls += ' leave'; leave++; }
-            else if (d.status === 'off_sick') { cls += ' sick'; }
-            // off_* and pending stay grey
-            const dt = pdate(d.for_date);
-            const num = dt ? dt.getDate() : '';
-            const mon = (dt && (idx === 0 || dt.getDate() === 1)) ? MON[dt.getMonth()] : '';
-            const isToday = dt && dt.getTime() === todayD.getTime();
-            const title = dOnly(d.for_date) + ' \u00b7 ' + (d.status || 'pending') + (d.late_minutes > 0 ? ' (' + d.late_minutes + 'm late)' : '');
-            return '<div class="' + cls + (isToday ? ' today' : '') + '" title="' + title + '">' +
-              '<span class="mon">' + mon + '</span><span class="num">' + num + '</span></div>';
-          }).join('');
+        let days = [];
+        const r = await fetch('/api/attendance/me/month?year=' + attYear + '&month=' + attMonth, { credentials: 'include' });
+        if (r.ok) { const d = await r.json(); days = d.days || []; }
+
+        const first = new Date(Date.UTC(attYear, attMonth - 1, 1));
+        const firstDow = first.getUTCDay();
+        const leading = firstDow === 0 ? 6 : (firstDow - 1);
+        const daysInMonth = new Date(Date.UTC(attYear, attMonth, 0)).getUTCDate();
+        const today = new Date();
+        const todayIso = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+
+        const byDate = {};
+        for (const d of days) { byDate[String(d.for_date).slice(0, 10)] = d; }
+
+        let html = '';
+        for (let i = 0; i < leading; i++) html += '<div></div>';
+        for (let day = 1; day <= daysInMonth; day++) {
+          const dateStr = attYear + '-' + String(attMonth).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+          const rec = byDate[dateStr];
+          const status = rec ? rec.status : null;
+          let cls = 'att-day';
+          let flag = '';
+          if (dateStr > todayIso) { cls += ' att-future'; }
+          else if (dateStr === todayIso) { cls += ' att-today'; flag = 'Today'; }
+          else if (status === 'on_time' || status === 'worked_voluntary') { cls += ' att-worked'; flag = 'W'; }
+          else if (status === 'late' || status === 'very_late') { cls += ' att-late'; flag = 'L'; }
+          else if (status === 'on_leave') { cls += ' att-leave'; flag = 'A.L.'; }
+          else if (status === 'off_sick') { cls += ' att-sick'; flag = 'S'; }
+          else if (status === 'off_holiday') { cls += ' att-holiday'; flag = 'H'; }
+          else { cls += ' att-empty'; }
+          const clickable = rec && dateStr <= todayIso;
+          html += '<div class="' + cls + '"' + (clickable ? ' data-d="' + dateStr + '" style="cursor:pointer"' : '') + '><span class="att-num">' + day + '</span>' +
+            (flag ? '<div class="att-flag">' + flag + '</div>' : '') + '</div>';
         }
-        $('ltCal').innerHTML = cells || '<div class="empty" style="grid-column:1/-1">No attendance recorded in the last 30 days.</div>';
-        $('ltAttCounts').innerHTML =
-          (rows.length === 0
-            ? '<span class="l">Nothing yet for the last 30 days.</span>'
-            : '<div><span class="v" style="color:#3B6D11">' + onTime + '</span> <span class="l">on time</span></div>' +
-          '<div><span class="v" style="color:#9A5B1F">' + late + '</span> <span class="l">late</span></div>' +
-          (noShow ? '<div><span class="v" style="color:#A32D2D">' + noShow + '</span> <span class="l">unauthorised</span></div>' : '') +
-          '<div><span class="v">' + leave + '</span> <span class="l">leave</span></div>');
-      } catch (e) { $('ltAttCounts').innerHTML = '<span class="l">Network error.</span>'; }
+        grid.innerHTML = html;
+
+        let worked = 0, late = 0, al = 0, sick = 0;
+        for (const d of days) {
+          if (d.status === 'on_time' || d.status === 'worked_voluntary') worked++;
+          if (d.status === 'late' || d.status === 'very_late') { worked++; late++; }
+          if (d.status === 'on_leave') al++;
+          if (d.status === 'off_sick') sick++;
+        }
+        rollup.innerHTML =
+          '<div class="att-tile"><div class="num" style="color:var(--green)">' + worked + '</div><div class="lbl">Days worked</div></div>' +
+          '<div class="att-tile"><div class="num" style="color:var(--amber-deep)">' + late + '</div><div class="lbl">Late</div></div>' +
+          '<div class="att-tile"><div class="num" style="color:#2D5BAF">' + al + '</div><div class="lbl">Annual leave</div></div>' +
+          '<div class="att-tile"><div class="num" style="color:var(--red)">' + sick + '</div><div class="lbl">Sick</div></div>';
+
+        grid._byDate = byDate;
+        if (!grid._wiredClick) {
+          grid._wiredClick = true;
+          grid.addEventListener('click', (ev) => {
+            const cell = ev.target.closest('[data-d]');
+            if (!cell) return;
+            showLtDayModal(grid._byDate[cell.getAttribute('data-d')], cell.getAttribute('data-d'));
+          });
+        }
+      } catch (e) {
+        grid.innerHTML = '<div style="grid-column:span 7;color:var(--red);text-align:center;padding:14px">Failed to load</div>';
+      }
     }
 
     async function loadLateness() {

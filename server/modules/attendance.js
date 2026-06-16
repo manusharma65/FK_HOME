@@ -436,6 +436,67 @@ router.get('/me/week', async (req, res) => {
   }
 });
 
+// GET /api/attendance/me/month
+//   ?year=YYYY&month=M  (default: current London month)
+//   ?user_id=X          — view another user's month. Same permission rules as
+//                         /me/week (attendance.view.any, or .view.dept + same dept).
+//   Returns every attendance_day row in that calendar month (ASC) so the
+//   monthly calendar can browse any month, not just a rolling window.
+router.get('/me/month', async (req, res) => {
+  try {
+    const now = nowInLondon().date; // 'YYYY-MM-DD'
+    let year = parseInt(req.query.year, 10);
+    let month = parseInt(req.query.month, 10);
+    if (!Number.isFinite(year)) year = parseInt(now.slice(0, 4), 10);
+    if (!Number.isFinite(month) || month < 1 || month > 12) month = parseInt(now.slice(5, 7), 10);
+
+    let targetUserId = req.user.id;
+    if (req.query.user_id) {
+      const requested = parseInt(req.query.user_id, 10);
+      if (!Number.isFinite(requested)) {
+        return res.status(400).json({ error: 'user_id must be a number' });
+      }
+      if (requested !== req.user.id) {
+        const canAny = req.user.can('attendance.view.any');
+        const canDept = req.user.can('attendance.view.dept');
+        if (!canAny && !canDept) {
+          return res.status(403).json({ error: 'Cannot view other users' });
+        }
+        if (canDept && !canAny) {
+          const sameDept = await db.query(
+            `SELECT 1 FROM user_department_memberships m1
+             JOIN user_department_memberships m2 ON m1.department_id = m2.department_id
+             WHERE m1.user_id = $1 AND m2.user_id = $2
+               AND m1.deleted_at IS NULL AND m2.deleted_at IS NULL
+             LIMIT 1`,
+            [req.user.id, requested]
+          );
+          if (sameDept.rows.length === 0) {
+            return res.status(403).json({ error: 'User is not in your department' });
+          }
+        }
+        targetUserId = requested;
+      }
+    }
+
+    const r = await db.query(
+      `SELECT for_date, status, late_minutes, active_minutes, idle_minutes,
+              first_login, last_logout, weekend_pay_status, is_paid,
+              sick_notified_hours
+       FROM attendance_day
+       WHERE user_id = $1
+         AND EXTRACT(YEAR FROM for_date) = $2
+         AND EXTRACT(MONTH FROM for_date) = $3
+       ORDER BY for_date ASC`,
+      [targetUserId, year, month]
+    );
+    res.json({ days: r.rows, user_id: targetUserId, year, month });
+  } catch (err) {
+    console.error('[me/month] failed:', err.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
 // GET /api/attendance/debug/sick
 //   Read-only. Shows exactly why the 30-day grid colours days as sick: the
 //   caller's sick_log rows, the days currently stored as off_sick, and whether
