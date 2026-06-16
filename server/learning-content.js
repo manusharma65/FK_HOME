@@ -591,4 +591,341 @@ const reference = [
   }
 ];
 
-module.exports = { course, reference };
+const stockinCourse = {
+  slug: 'stockin-coordinator',
+  title: 'Stock-In — Despatch Coordinator',
+  department: 'logistics',
+  competency_key: 'stockin_ready',
+  recert_months: 12,
+  sessions: [
+    {
+      title: 'The role, and the one principle',
+      est: 14, tier: 1,
+      objective: 'Understand that stock-in is a remote desk job, where the line sits between you and the warehouse, and the principle the whole job hangs off.',
+      body_html:
+        '<p>Stock-in is a <b>desk job</b>, done remotely. The warehouse \u2014 in the UK \u2014 unloads, counts and physically puts stock away. You never do. Your job is the <b>data and the paperwork</b>: build the Purchase Order, hand the warehouse the right list, verify what they report back, and commit it to Linnworks so inventory is correct.</p>' +
+        '<p><b>The principle the whole job hangs off:</b> we should receive exactly what we paid for. The PO is your claim of what is owed. Every count, every check, every escalation exists to prove that claim or expose where it broke.</p>',
+      checks: [
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'The warehouse messages you a photo of two crushed cartons and asks what to do with them. You are at a desk, in another country. What is the right response?',
+          options: [
+            { text: 'Decide from the photo whether the contents are still sellable and tell them', correct: false, fb: 'You cannot judge sellable condition of physical goods from a photo a continent away. That assessment is theirs, hands-on.' },
+            { text: 'They assess and record the damage through their own goods-in process and report the actual sellable count; you record that actual and escalate any shortfall to your manager', correct: true, fb: 'The physical call is theirs; your job is to act on the numbers they report and surface any gap.', cost: 'Reaching across the world to run their physical process slows them down and blurs who is accountable for the count.' },
+            { text: 'Tell them to count the damaged cartons as received so the PO still matches', correct: false, fb: 'Never massage a count to fit the PO. Damage is exactly what the process is meant to surface.' },
+            { text: 'Tell them to bin the cartons straight away', correct: false, fb: 'Not your call, and not the process \u2014 damaged stock is quarantined and recorded, not binned on a remote say-so.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'Which single statement best describes what you are accountable for?',
+          options: [
+            { text: 'Physically receiving and counting the stock accurately', correct: false, fb: 'That is the warehouse. You never count physical stock.' },
+            { text: 'Making the Linnworks record match what we paid for \u2014 and exposing it when it does not', correct: true, fb: 'You own the data truth, not the box.', cost: 'If you think the job is the boxes, you will undervalue the part that actually matters: the record.' },
+            { text: 'Making sure the warehouse hits its unloading targets', correct: false, fb: 'Not your remit. You do not manage warehouse productivity.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'Read these four statements about your role. Three are consistent with each other; one contradicts the rest. Which is the odd one out?',
+          options: [
+            { text: 'You never physically handle stock', correct: false, fb: 'Consistent with the role.' },
+            { text: 'You build the PO from the paid invoice', correct: false, fb: 'Consistent with the role.' },
+            { text: 'You personally unload and count each container', correct: true, fb: 'This one contradicts the other three. You are a remote desk role; unloading and counting is the warehouse\u2019s job.', cost: 'If you cannot spot which statement breaks the pattern, you will miss the same kind of contradiction in a delivery sheet.' },
+            { text: 'You commit the receipt in Linnworks after verification', correct: false, fb: 'Consistent with the role.' },
+          ] },
+      ],
+    },
+    {
+      title: 'Raising the PO from the invoice',
+      est: 14, tier: 1,
+      objective: 'Build the Purchase Order from the paid invoice \u2014 the source of truth \u2014 with cost on every line, and resist the wrong-number traps.',
+      body_html:
+        '<p>Once final payment is made to the supplier, you build the Purchase Order in Linnworks <b>from the paid invoice</b> \u2014 every SKU, every quantity, and the <b>cost</b> on each line. Not from the proforma, not from a chat message, not from the packing list. The invoice is what we paid; the PO is what we are owed.</p>' +
+        '<p>Put the <b>cost on the PO line now</b>, from the invoice in front of you. It saves keying a price later at stock-in \u2014 and stops a \u00a30 slipping into inventory valuation.</p>',
+      checks: [
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'The supplier\u2019s proforma quoted 500 units. After negotiation you paid for 450. The packing list that arrives later says 460 are on the truck. What quantity goes on the Purchase Order?',
+          options: [
+            { text: '500 \u2014 the original proforma', correct: false, fb: 'The proforma is a quote, not what we paid. Irrelevant once the deal is done.' },
+            { text: '450 \u2014 the paid invoice', correct: true, fb: 'The PO is built from what we PAID for. The container claiming 460 is a +10 you will surface at counting \u2014 not something you bake in early.', cost: 'Build from 460 and you have quietly accepted a 10-unit over-ship as \u2018expected\u2019 \u2014 the discrepancy check can never catch it.' },
+            { text: '460 \u2014 the packing list, since that is what is coming', correct: false, fb: 'The packing list is the supplier\u2019s claim of what they shipped \u2014 not proof, and not what we paid. If it differs from the invoice, that is a flag, not a correction.' },
+            { text: 'Wait until the warehouse counts, then enter that number', correct: false, fb: 'Then the PO can never be \u2018wrong\u2019 \u2014 you have removed the whole point of it. The PO must exist before the goods, as the thing reality is checked against.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'You are building a PO with 6 SKUs. On one line the invoice cost is smudged and unreadable. What do you do?',
+          options: [
+            { text: 'Leave the cost blank / \u00a30 and fix it later', correct: false, fb: 'A \u00a30 cost flows into stock valuation and margin. \u2018Later\u2019 is how it becomes permanent.' },
+            { text: 'Estimate it from the retail price', correct: false, fb: 'Retail is not cost. You would be inventing a margin-distorting number.' },
+            { text: 'Get the correct cost confirmed from the invoice or supplier before completing that line', correct: true, fb: 'The cost has one correct source. Confirm it, do not guess it.', cost: 'A guessed cost silently corrupts every margin report that SKU ever appears in.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'A PO line is for 240 units at \u00a32.00 each. The invoice total for that line reads \u00a34.80. Before you accept it, what should you notice?',
+          options: [
+            { text: 'Looks fine \u2014 enter it as \u00a34.80', correct: false, fb: '240 \u00d7 \u00a32.00 = \u00a3480, not \u00a34.80. You have just accepted a figure that is out by a hundred-fold.' },
+            { text: '240 \u00d7 \u00a32.00 = \u00a3480 \u2014 the \u00a34.80 is almost certainly a misplaced decimal; query it before accepting', correct: true, fb: 'A quick sanity-multiply catches a decimal error that would otherwise wreck the line value.', cost: 'Numbers that do not survive a five-second multiply are exactly the ones that corrupt your stock valuation.' },
+            { text: 'Adjust the unit cost down to 2p so it matches \u00a34.80', correct: false, fb: 'You would be bending the unit cost to fit a wrong total \u2014 inventing a second error to hide the first.' },
+          ] },
+      ],
+    },
+    {
+      title: 'The packing list to the warehouse',
+      est: 12, tier: 1,
+      objective: 'Send the warehouse the right list at the right time, and never confuse cartons with pieces.',
+      body_html:
+        '<p>A day before the container lands, you send the warehouse a <b>packing list</b>: barcode, item name, quantity, number of boxes, and number of cartons. They check physically against this.</p>' +
+        '<p><b>A carton is not a piece.</b> One carton can hold many units. The warehouse counts <b>pieces</b> against your number, so the packing list must state pieces \u2014 get the carton-to-piece maths right or the count is meaningless.</p>',
+      checks: [
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'SKU FK-YOGA-M ships as 12 cartons. Each carton holds 24 pieces. What piece quantity do you put on the packing list for this SKU?',
+          options: [
+            { text: '12', correct: false, fb: 'That is cartons, not pieces. The warehouse would \u2018receive 12\u2019 and 276 units would vanish from the record.' },
+            { text: '24', correct: false, fb: 'That is one carton\u2019s contents, not the shipment.' },
+            { text: '288', correct: true, fb: '12 \u00d7 24. Pieces is what gets counted and stocked in.', cost: 'Carton/piece confusion is the single most common goods-in counting error \u2014 it hides hundreds of units.' },
+            { text: '36', correct: false, fb: 'That is 12 + 24. There is no scenario where you add them.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'Which of these does NOT belong on the packing list you send the warehouse?',
+          options: [
+            { text: 'Barcode', correct: false, fb: 'Belongs \u2014 it is how they identify each line.' },
+            { text: 'Unit cost / price', correct: true, fb: 'Price lives on the invoice and the PO, never on the warehouse packing list. They count goods; they have no business with cost.', cost: 'Putting cost on a warehouse-facing sheet leaks commercial data to people who do not need it.' },
+            { text: 'Number of cartons', correct: false, fb: 'Belongs \u2014 it helps them reconcile cartons to pieces.' },
+            { text: 'Item name', correct: false, fb: 'Belongs \u2014 barcode plus name reduces mis-identification.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'The supplier\u2019s note for SKU-A says: 8 cartons, 18 pieces per carton, and writes the total as 124. What do you put on the packing list, and do you flag anything?',
+          options: [
+            { text: 'Put 124 \u2014 it is the supplier\u2019s stated total', correct: false, fb: '8 \u00d7 18 = 144. The supplier\u2019s own total contradicts their own carton figures. Copying 124 propagates their error.' },
+            { text: 'Put 144 (8 \u00d7 18) and flag the supplier\u2019s inconsistent total before the goods ship', correct: true, fb: 'You spotted the contradiction, used the figure that is actually supported, and raised it \u2014 that is the job.', cost: 'A learner who does not multiply-check the supplier\u2019s numbers will let their arithmetic mistakes become your stock errors.' },
+            { text: 'Put 144 and say nothing', correct: false, fb: 'The maths is right, but a silent fix leaves an unexplained mismatch between the note and your list. Flag it.' },
+          ] },
+      ],
+    },
+    {
+      title: 'Verifying the count, authorising put-away',
+      est: 15, tier: 2,
+      objective: 'Verify the warehouse\u2019s reported count (you cannot recount), record actual not assumed, and respect the order of operations.',
+      body_html:
+        '<p>The warehouse counts and marks your packing list: against what you said was coming, here is what we actually got \u2014 full or short. <b>You verify that report</b> (you do not recount \u2014 you cannot, you are remote) and then <b>authorise put-away</b>.</p>' +
+        '<p>Record <b>actual</b>, never assumed. If they received less than the PO, you stock in the actual figure and <b>escalate the gap</b> \u2014 you never edit the number to make it match.</p>',
+      checks: [
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'You expected 288 of a SKU. The warehouse has counted, marked the sheet \u2018264 received\u2019, and signed it. What do you do?',
+          options: [
+            { text: 'Change the PO to 264 so everything reconciles cleanly', correct: false, fb: 'That erases the evidence of a 24-unit shortfall. Now nobody knows we were short-shipped.' },
+            { text: 'Proceed with the actual 264, and escalate the 24-unit shortfall to your manager', correct: true, fb: 'Actual goes in; the gap gets raised. That is the whole control.', cost: 'Adjusting to match the PO is how short-shipments go unclaimed and money walks out the door.' },
+            { text: 'Tell the warehouse to recount until they find the missing 24', correct: false, fb: 'They have counted and signed. A short-ship is a supplier issue to claim, not a counting failure to bully away.' },
+            { text: 'Refuse the whole delivery', correct: false, fb: 'Disproportionate and not your call \u2014 you accept the actual and escalate.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'The warehouse has counted and marked the sheet, but has not put anything away yet. Can you start stocking in to Linnworks now?',
+          options: [
+            { text: 'Yes \u2014 you have the quantities, that is enough', correct: false, fb: 'You are missing the locations. Stock-in needs barcode, location AND quantity \u2014 and locations only exist after put-away.' },
+            { text: 'No \u2014 authorise put-away first; you stock in from the delivery sheet, which only exists once they have put it away', correct: true, fb: 'Verify count \u2192 authorise put-away \u2192 warehouse returns the delivery sheet (with locations) \u2192 then you stock in.', cost: 'Stock in before put-away and you are inventing locations \u2014 pickers get sent to empty shelves.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'Totals match (288 received, 288 expected) \u2014 but one SKU is 10 short and a different SKU is 10 over. The warehouse asks if it is fine since it \u2018nets out\u2019.',
+          options: [
+            { text: 'Yes, the totals match, so record it and move on', correct: false, fb: 'Two SKUs are wrong. Netting hides a supplier mis-pack and will cause two future stock errors.' },
+            { text: 'No \u2014 record each SKU\u2019s actual figure and escalate both the short and the over', correct: true, fb: 'Stock is per-SKU, never a pooled total. A +10/-10 is two problems, not zero.', cost: '\u2018It nets out\u2019 is how mis-packs enter your inventory and surface later as phantom stock and mis-picks.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'Read carefully. The warehouse reports: \u2018SKU-B expected 200, received 220. SKU-C expected 150, received 150.\u2019 Which line needs a discrepancy raised \u2014 and is it short or over?',
+          options: [
+            { text: 'SKU-B, short', correct: false, fb: 'Read again: SKU-B received 220 against 200 expected. That is over, not short.' },
+            { text: 'SKU-B, over by 20', correct: true, fb: '220 vs 200 is a +20. SKU-C matches exactly, so it is clean.', cost: 'Misreading \u2018over\u2019 as \u2018short\u2019 sends the wrong claim to the supplier and makes you look like you cannot read your own sheets.' },
+            { text: 'SKU-C, over', correct: false, fb: 'SKU-C is 150 vs 150 \u2014 exact. Look again.' },
+            { text: 'Neither \u2014 totals are close enough', correct: false, fb: 'A 20-unit over on SKU-B is a real discrepancy, not a rounding nicety.' },
+          ] },
+      ],
+    },
+    {
+      title: 'Stocking in to Linnworks',
+      est: 16, tier: 2,
+      objective: 'Commit the receipt correctly from the delivery sheet \u2014 the right source, the must-tick box, and the \u00a30-price rule.',
+      body_html:
+        '<p>Now you commit it. Open the <b>PO on one side</b> and the <b>Stock In</b> screen on the other, and work from the <b>delivery sheet</b> the warehouse returned (barcode, location, quantity). For each line you <b>enter the barcode, the location and the quantity</b> \u2014 you are typing them in from the sheet, not scanning anything.</p>' +
+        '<p>Make sure <b>\u201cDeliver in purchase order\u201d is ticked.</b> That is what links the receipt to the PO. With it ticked, Linnworks puts the item into inventory at that location and quantity. Work through every line until the whole sheet is in.</p>' +
+        '<p>Price is usually fetched automatically. If it shows <b>\u00a30</b>, key it in from the invoice you hold \u2014 never leave it.</p>',
+      checks: [
+        { type: 'scenario',
+          prompt: 'Which sheet do you stock in FROM?',
+          options: [
+            { text: 'The packing list you sent the warehouse', correct: false, fb: 'That is the expected list \u2014 no real locations, no confirmed actuals. Wrong source.' },
+            { text: 'The delivery sheet the warehouse returns after put-away', correct: true, fb: 'It carries the real barcode \u2192 location \u2192 quantity. That is what Linnworks needs.', cost: 'Stock in from the packing list and your locations are guesses \u2014 pickers get routed to the wrong shelves.' },
+            { text: 'The supplier\u2019s invoice', correct: false, fb: 'The invoice built the PO and holds the cost \u2014 it has no location data.' },
+          ] },
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'You stock in six lines. On two of them you forget to tick \u2018Deliver in purchase order\u2019. What actually happens?',
+          options: [
+            { text: 'Nothing \u2014 the tick is cosmetic', correct: false, fb: 'It is not cosmetic; it is the link to the PO.' },
+            { text: 'Those two items are not marked against the PO, so the PO still reads as undelivered and your numbers will not reconcile', correct: true, fb: 'The stock may move but the receipt is not tied to the PO \u2014 reconciliation breaks and the second checker will catch a PO that looks part-delivered.', cost: 'An untied receipt means the PO never closes \u2014 \u2018received but not on PO\u2019 stock is exactly where audits fail.' },
+            { text: 'Linnworks blocks the entry until you tick it', correct: false, fb: 'It will not save you \u2014 the box can be left unticked, which is precisely why it is drilled.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'You enter a barcode and the price field shows \u00a30.00. The invoice in your folder lists this SKU\u2019s cost. What do you do?',
+          options: [
+            { text: 'Leave it at \u00a30 \u2014 pricing is not your job', correct: false, fb: 'A \u00a30 cost corrupts stock valuation and every margin calc for this SKU.' },
+            { text: 'Key the cost in from the invoice you hold, then continue', correct: true, fb: 'You have the one correct source in your hand \u2014 use it.', cost: '\u00a30 costs are silent: nothing breaks visibly, but every profitability number using that SKU is now wrong.' },
+            { text: 'Use the last selling price you remember', correct: false, fb: 'Selling price is not cost. Do not invent a figure.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'Three facts: verifying the count comes before authorising put-away; put-away comes before the delivery sheet exists; you stock in from the delivery sheet. What is the earliest moment you could possibly stock in?',
+          options: [
+            { text: 'As soon as the container is counted', correct: false, fb: 'Counting is before put-away, and put-away is before the delivery sheet \u2014 so you still have no sheet to stock in from.' },
+            { text: 'Only after put-away is done and the delivery sheet exists', correct: true, fb: 'Chain the three facts and the delivery sheet is the gate \u2014 nothing can be stocked in before it.', cost: 'If you cannot follow a three-step dependency, you will try to stock in with no locations and create phantom shelf data.' },
+            { text: 'Any time after the PO is raised', correct: false, fb: 'The PO is far upstream. The blocking step is the delivery sheet, which only the warehouse can produce after put-away.' },
+          ] },
+      ],
+    },
+    {
+      title: 'Confirming the PO, and the second check',
+      est: 13, tier: 2,
+      objective: 'Close the PO out, escalate what will not reconcile, and understand who verifies you and what that check can and cannot catch.',
+      body_html:
+        '<p>Once every line is in, confirm the <b>whole PO has been delivered</b> in Linnworks. Anything that will not reconcile \u2014 a line short, a barcode that will not match, a price you cannot source \u2014 goes to <b>your manager</b>. You do not self-correct discrepancies.</p>' +
+        '<p>Then a <b>second office coordinator</b> independently reconfirms \u2014 never you re-checking your own work, and never the warehouse. They open inventory, <b>enter each barcode</b>, and confirm the <b>location, the quantity, and the plan (batch) number</b> are right.</p>',
+      checks: [
+        { type: 'scenario',
+          prompt: 'Who performs the second check on your stock-in?',
+          options: [
+            { text: 'You, re-reading your own entries', correct: false, fb: 'Self-checking catches almost nothing \u2014 you repeat your own blind spots. The point is independence.' },
+            { text: 'The warehouse operative who put the stock away', correct: false, fb: 'They handled the physical side and cannot see your Linnworks entries. Also not independent of the put-away.' },
+            { text: 'A second office coordinator, independently', correct: true, fb: 'A different set of eyes in the office, checking the data you committed.', cost: 'Skip independence and a fat-fingered location or quantity sails straight into live inventory.' },
+            { text: 'Your manager signs off every one', correct: false, fb: 'Your manager is for escalations, not routine line-by-line verification.' },
+          ] },
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'What does that second coordinator actually verify \u2014 and what can they NOT verify?',
+          options: [
+            { text: 'They re-count the physical stock to confirm the quantity is truly there', correct: false, fb: 'They cannot \u2014 they are in the office, not the warehouse. They verify the record, not the shelf.' },
+            { text: 'They confirm the location, quantity and plan/batch number in the record are correct \u2014 they cannot re-validate the physical count', correct: true, fb: 'Their check catches data-entry errors. The physical count was the warehouse\u2019s job and already happened.', cost: 'Assuming the office check re-proves the physical count gives false confidence \u2014 two checks that catch different things, not the same thing twice.' },
+          ] },
+        { type: 'scenario',
+          prompt: '\u2018Plan number\u2019 on the check refers to\u2026',
+          options: [
+            { text: 'The aisle plan / floor layout of the warehouse', correct: false, fb: 'Nothing to do with warehouse layout.' },
+            { text: 'The supplier batch / plan reference for that order (e.g. Plan 4.1, Lily)', correct: true, fb: 'Each supplier order carries its own plan/batch number; the second checker confirms it is the right one.', cost: 'A wrong plan number means stock is traced to the wrong batch \u2014 a problem the day you need to trace a fault or a recall.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'A stock report shows a SKU split across locations A1 = 40, A2 = 40, A3 = 40, A7 = 40. The warehouse confirms aisle A has only three bays, A1 to A3. What is the issue?',
+          options: [
+            { text: 'Nothing \u2014 four locations, four counts, it adds up to 160', correct: false, fb: 'The total is not the point. A7 is named in a report for an aisle that has no seventh bay.' },
+            { text: 'A7 cannot exist in an aisle of three bays \u2014 the record has a location that is not real, so flag it', correct: true, fb: 'You cross-checked the data against a known constraint and caught an impossible location.', cost: 'A learner who does not notice an impossible location will trust any figure a screen shows them.' },
+            { text: 'Move the A7 stock to A1', correct: false, fb: 'You do not quietly \u2018fix\u2019 a phantom location by inventing a move. Flag it and find out what really happened.' },
+          ] },
+      ],
+    },
+    {
+      title: 'Returns, and the monthly count',
+      est: 13, tier: 2,
+      objective: 'Run returns through the same disciplined flow, and own the monthly count from report to reconciliation.',
+      body_html:
+        '<p><b>Returns that are fit to resell</b> come in too. The warehouse sends you their return list (often a <b>photo</b> \u2014 they are in the UK, you are not). You run the <b>same flow</b>: raise a PO, stock it in, make a <b>delivery sheet</b>, and <b>file it for audit</b> \u2014 tagged as a return. You also keep the warehouse\u2019s original list.</p>' +
+        '<p>Once a month you run the <b>full warehouse count</b>: pull the Linnworks stock report, <b>sort it location-wise</b>, send it to the warehouse to count physically, take it back, reconcile, and list any differences (plus or minus) to escalate to your manager.</p>',
+      checks: [
+        { type: 'scenario',
+          prompt: 'A resellable return arrives and the warehouse sends you a photo of their return sheet. Which is the complete, correct set of steps?',
+          options: [
+            { text: 'Just add the quantities back into Linnworks inventory directly', correct: false, fb: 'That skips the PO, the delivery sheet and the audit trail. No record of where it came from.' },
+            { text: 'Raise a PO, stock it in, make a delivery sheet, and file it tagged as a return \u2014 keeping the warehouse\u2019s list too', correct: true, fb: 'Identical discipline to a container, just labelled as a return.', cost: 'Returns stocked in \u2018quickly\u2019 with no delivery sheet are invisible to audit \u2014 the most common source of phantom resale stock.' },
+            { text: 'Email your manager to add the stock', correct: false, fb: 'This is your job, done through the normal flow \u2014 not an escalation.' },
+          ] },
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'Before sending the monthly stock report to the warehouse to count, what must you do, and why?',
+          options: [
+            { text: 'Send it as-is in SKU order \u2014 they will find everything', correct: false, fb: 'In SKU order the warehouse crisscrosses the whole building for each line. Slow and error-prone.' },
+            { text: 'Sort it location-wise, so the warehouse can count bay by bay in one walk', correct: true, fb: 'Location order lets them sweep the building systematically \u2014 faster and far more accurate.', cost: 'A SKU-ordered count sheet turns a clean count into a chaotic treasure hunt, and the numbers come back unreliable.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'The monthly count comes back: 3 SKUs over, 2 SKUs under. What do you do?',
+          options: [
+            { text: 'Adjust Linnworks to match the physical count so it is correct', correct: false, fb: 'Adjusting stock yourself, unsigned, is exactly where shrinkage and fraud hide. Not your call alone.' },
+            { text: 'List the differences (+/-) and escalate to your manager \u2014 adjustments wait for sign-off', correct: true, fb: 'You surface the discrepancies; the correction is authorised, not silent.', cost: 'Unsigned stock adjustments are an auditor\u2019s first red flag \u2014 every change needs a name against it.' },
+            { text: 'Ignore small differences and only report large ones', correct: false, fb: 'You do not get to decide what is \u2018small\u2019. Report all of it; let the sign-off judge.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'Last month\u2019s count found 6 discrepancies across 1,200 line-items. This month it is 60 across the same 1,200. What is the sensible read?',
+          options: [
+            { text: 'Just more errors this month \u2014 report them and move on', correct: false, fb: 'A ten-fold jump in the same-size count is not \u2018a few more\u2019. That scale of change points at a process problem, not bad luck.' },
+            { text: 'A 10\u00d7 jump on an unchanged base is a signal in itself \u2014 report the discrepancies AND flag that something in the process likely broke', correct: true, fb: 'You read the proportion, not just the raw number, and escalated the pattern as well as the items.', cost: 'A learner who only sees \u201860 errors\u2019 and not \u201810\u00d7 worse than normal\u2019 misses the warning that matters most.' },
+            { text: '60 out of 1,200 is only 5%, so it is within tolerance', correct: false, fb: 'Against last month\u2019s 0.5%, 5% is a tenfold deterioration \u2014 \u2018within tolerance\u2019 is exactly the wrong conclusion.' },
+          ] },
+      ],
+    },
+    {
+      title: 'Capstone \u2014 one delivery, start to finish',
+      est: 18, tier: 3,
+      objective: 'Put it all together under pressure: actual-not-assumed, tied to the PO, discrepancy surfaced, and never trust a flag over your own maths.',
+      body_html:
+        '<p>A real container, with the traps you have met now woven together. Read carefully \u2014 each answer assumes the steps before it were done right.</p>',
+      checks: [
+        { type: 'scenario', tag: 'Judgement',
+          prompt: 'You paid an invoice for 450 units across 3 SKUs and built the PO from it (cost on each line). SKU-A is 5 cartons \u00d7 30. The warehouse counts and marks: SKU-A received 144, not 150; SKU-B and SKU-C full. They sign, put away, and return a delivery sheet with locations. What is your next action?',
+          options: [
+            { text: 'Stock in SKU-A as 150 to match the PO, since it is \u2018close enough\u2019', correct: false, fb: 'Never. 144 is the actual. The 6-unit gap is a claim against the supplier, not a rounding error.' },
+            { text: 'Stock in the actuals (SKU-A at 144) from the delivery sheet with \u2018Deliver in purchase order\u2019 ticked, then escalate the 6-unit SKU-A shortfall to your manager', correct: true, fb: 'Actuals in, linked to the PO, gap escalated. Textbook.', cost: 'This is the whole course in one move: actual-not-assumed, tied to the PO, discrepancy surfaced.' },
+            { text: 'Hold the entire delivery until the 6 units are found', correct: false, fb: 'You do not freeze 444 good units over a 6-unit supplier shortfall. Stock the actuals, escalate the gap.' },
+          ] },
+        { type: 'scenario', tag: 'Aptitude',
+          prompt: 'Final glance before you confirm: the PO header says 450 units total; your stocked-in lines read SKU-A 144 + SKU-B 150 + SKU-C 150 = 444. Yet the PO is showing \u2018fully delivered\u2019. What does that tell you?',
+          options: [
+            { text: 'All good \u2014 the system says fully delivered, so it is', correct: false, fb: '444 is not 450. A PO that is 6 short cannot be truly \u2018fully delivered\u2019 \u2014 the flag and your numbers disagree.' },
+            { text: '444 \u2260 450, so a PO marked \u2018fully delivered\u2019 is contradicting your own figures \u2014 stop and investigate before trusting the flag', correct: true, fb: 'You added the lines, compared to the header, and refused to trust a status that the maths contradicts.', cost: 'Trusting a green \u2018delivered\u2019 flag over your own arithmetic is how a short-shipped PO gets quietly closed and the claim is lost.' },
+            { text: 'Edit a line up by 6 so the total hits 450', correct: false, fb: 'That is inventing stock to satisfy a flag \u2014 the exact fraud the whole process exists to prevent.' },
+          ] },
+        { type: 'scenario',
+          prompt: 'You finish stocking in. SKU-C\u2019s price came through as \u00a30 and you keyed it from the invoice. One barcode on SKU-B would not auto-match so you entered the SKU manually. The PO now shows fully delivered (and reconciles). What happens next?',
+          options: [
+            { text: 'You are done \u2014 close it and move on', correct: false, fb: 'Not yet. Every stock-in gets an independent second check before it is truly closed.' },
+            { text: 'A second office coordinator independently confirms location, quantity and plan number against the record', correct: true, fb: 'Independent verification is the final gate \u2014 especially after a manual SKU entry and a hand-keyed price.', cost: 'The manual entry and the \u00a30-fix are precisely the high-risk spots the second check exists to catch.' },
+            { text: 'You ask the warehouse to confirm your Linnworks entries', correct: false, fb: 'They cannot see or verify your data entries \u2014 the second check is an office one.' },
+          ] },
+        { type: 'free_text',
+          prompt: 'In your own words: a junior asks why they cannot just change the PO quantity to match what the warehouse actually counted \u2014 \u2018it makes everything reconcile.\u2019 What do you tell them?',
+          model_answer: 'The PO is what we paid for, so it is the evidence of what the supplier owes us. Edit it down to match a short delivery and you destroy that evidence \u2014 the shortfall disappears, no claim gets raised, and we eat the loss. The correct move is always: record the actual figure, leave the PO as the paid truth, and escalate the difference so it can be claimed. Reconciliation is not the goal \u2014 an accurate, honest record is, and a visible discrepancy is the record doing its job.',
+          pass_criteria: 'Must say the PO represents what we paid / is owed; editing it hides the shortfall and loses the supplier claim; correct action is record actual + escalate; an honest record beats a tidy reconciliation.' },
+      ],
+    },
+  ],
+};
+
+// ---- Knowledge Base reference items (department-scoped to logistics) ----
+const stockinReference = [
+  {
+    department: 'logistics', type: 'flow',
+    title: 'Stock-In \u2014 the flow at a glance',
+    body_html:
+      '<ol>' +
+      '<li>Raise the PO in Linnworks <b>from the paid invoice</b> (cost on every line).</li>' +
+      '<li>Send the warehouse a <b>packing list</b> a day ahead \u2014 barcode, name, pieces, boxes, cartons.</li>' +
+      '<li>Warehouse unloads, counts, marks <b>actual</b> on the sheet, signs.</li>' +
+      '<li>You <b>verify</b> the count and <b>authorise put-away</b>.</li>' +
+      '<li>Warehouse puts away and returns the <b>delivery sheet</b> (barcode, location, quantity).</li>' +
+      '<li>You <b>stock in</b> from the delivery sheet \u2014 enter barcode, location, quantity; tick <b>\u201cDeliver in purchase order\u201d</b>; key the cost if it shows \u00a30.</li>' +
+      '<li>Confirm the PO is <b>fully delivered</b>; escalate anything that will not reconcile to your manager.</li>' +
+      '<li>A <b>second office coordinator</b> reconfirms location, quantity and plan number.</li>' +
+      '</ol>',
+    config_json: { summary: 'The eight-step stock-in flow, PO to second check.' },
+    verified_on: '2026-06-16',
+  },
+  {
+    department: 'logistics', type: 'article',
+    title: 'Stock-In \u2014 the non-negotiables',
+    body_html:
+      '<ul>' +
+      '<li><b>Build the PO from the paid invoice</b> \u2014 not the proforma, chat, or packing list.</li>' +
+      '<li><b>Record actual, never assumed.</b> Never edit a number to make it match the PO.</li>' +
+      '<li><b>Cartons are not pieces.</b> Always state pieces; multiply-check the supplier\u2019s totals.</li>' +
+      '<li><b>Tick \u201cDeliver in purchase order\u201d</b> on every line, or the receipt is not tied to the PO.</li>' +
+      '<li><b>\u00a30 price \u2192 key it from the invoice.</b> Never leave a zero cost.</li>' +
+      '<li><b>Stock in from the delivery sheet</b> (it has the real locations), not the packing list.</li>' +
+      '<li><b>You never adjust stock yourself.</b> Discrepancies are listed and escalated to your manager for sign-off.</li>' +
+      '<li><b>Returns run the identical flow</b> \u2014 PO, stock-in, delivery sheet, filed and tagged as a return.</li>' +
+      '</ul>',
+    config_json: { summary: 'The rules you do not break, on one card.' },
+    verified_on: '2026-06-16',
+  },
+];
+
+
+module.exports = {
+  course, stockinCourse,
+  courses: [course, stockinCourse],
+  reference: reference.concat(stockinReference),
+};
+

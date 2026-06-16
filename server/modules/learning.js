@@ -40,7 +40,7 @@ async function ensureSchema() {
   }
 }
 async function init() {
-  try { await ensureSchema(); await seedCourse(content.course, 1); await seedReference(content.reference); }
+  try { await ensureSchema(); for (const c of (content.courses || [content.course])) await seedCourse(c, 1); await seedReference(content.reference); }
   catch (e) { console.error('[learning] init failed:', e.message); _ready = null; throw e; }
 }
 function ensureReady() { if (!_ready) _ready = init(); return _ready; }
@@ -376,6 +376,10 @@ router.post('/assign', async (req, res) => {
       return /logist|despatch|dispatch|warehouse|courier|shipping/.test(hay);
     return !d || hay.includes(d);
   }
+  // Owner is cross-discipline by definition — they see every course and every KB entry,
+  // regardless of department. Owner has no department membership, so the normal gate
+  // would otherwise show them nothing (the "coming soon" they were seeing).
+  const ownerSeesAll = (req) => !!(req && req.user && typeof req.user.inGroup === 'function' && req.user.inGroup('owner'));
 
   router.get('/my-courses', async (req, res) => {
     const fetch = () => db.query(
@@ -397,11 +401,14 @@ router.post('/assign', async (req, res) => {
           .concat(groups)
           .join(' ').toLowerCase();
         if (/logist|despatch|dispatch|warehouse|courier|shipping/.test(hay)) {
-          const c = await db.query(`SELECT id FROM lms_courses WHERE slug='logistics-dispatch' LIMIT 1`);
-          if (c.rows.length) {
-            await assignCourse(c.rows[0].id, req.user.id, req.user.id, 'onboarding', null);
-            rows = await fetch();
+          // assign every active logistics-discipline course (despatch + stock-in, and
+          // any future logistics course) the first time they open Academy.
+          const cs = await db.query(`SELECT id, department FROM lms_courses WHERE status='published'`);
+          for (const cc of cs.rows) {
+            if (/logist|despatch|dispatch|warehouse|courier|shipping/.test(String(cc.department || '').toLowerCase()))
+              await assignCourse(cc.id, req.user.id, req.user.id, 'onboarding', null);
           }
+          rows = await fetch();
         }
       } catch (e) { /* best-effort auto-assign; fall through with whatever we have */ }
     }
@@ -435,8 +442,9 @@ router.post('/assign', async (req, res) => {
     // r1.28 — scope the knowledge base to the VIEWER's own department(s). Was hardcoded
     // to 'logistics' (via a query-param default), so every employee saw logistics KB.
     const hay = await userDeptHay(req.user.id);
+    const all = ownerSeesAll(req);
     const rows = await db.query(`SELECT id,department,type,title,body_html,config_json,verified_on FROM lms_reference ORDER BY id`);
-    res.json(rows.rows.filter(r => courseVisible(hay, r.department, null)));
+    res.json(rows.rows.filter(r => all || courseVisible(hay, r.department, null)));
   });
 
   // r1.28 — courses available to THIS viewer's discipline, for the Academy "Available"
@@ -444,9 +452,10 @@ router.post('/assign', async (req, res) => {
   // see training for a department they belong to (none -> empty -> "nothing for you yet").
   router.get('/available', async (req, res) => {
     const hay = await userDeptHay(req.user.id);
+    const all = ownerSeesAll(req);
     const rows = await db.query(
-      `SELECT id, slug, title, department FROM lms_courses WHERE status='active' ORDER BY id`);
-    res.json(rows.rows.filter(c => courseVisible(hay, c.department, null)));
+      `SELECT id, slug, title, department FROM lms_courses WHERE status='published' ORDER BY id`);
+    res.json(rows.rows.filter(c => all || courseVisible(hay, c.department, null)));
   });
 
   // Manager: progress across everyone assigned to a course, WITH a first-attempt

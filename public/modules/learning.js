@@ -4,7 +4,7 @@
    correct flag; feedback comes back when an answer is graded. */
 (function () {
   const API = '/api/learning';
-  let assignmentId = null, courseId = null, perspective = 'tr';
+  let assignmentId = null, courseId = null, perspective = 'tr', myCourses = [];
   const passedChecks = {}; // sessionId -> Set(checkId)
 
   // ---- styles (scoped, Insights theme) ----
@@ -77,18 +77,25 @@
   function lms() { return el('lmsRoot'); }
 
   // ---------- trainee: course list ----------
-  function renderList(c) {
-    const segbar = perspective === 'mgr' ? '' : '';
+  function renderList(courses) {
+    if (!Array.isArray(courses)) courses = [courses];
+    myCourses = courses;
+    const cards = courses.map(function (c) {
+      return '<div class="card"><span class="cbadge" style="background:#C2562E">' + (c.department || '').toUpperCase() + '</span>' +
+        '<div><div class="ttl">' + c.title + '</div><div class="sub">assigned by HR' + (c.due_date ? ' · due ' + c.due_date : '') + '</div></div>' +
+        '<div class="right"><span class="chip ' + (c.status === 'completed' ? 'ok' : 'cur') + '">' + (c.status === 'completed' ? 'Complete' : 'In progress') + '</span>' +
+        '<button class="btn lmsOpen" data-cid="' + c.id + '">Open</button></div></div>';
+    }).join('');
+    const nDone = courses.filter(function (c) { return c.status === 'completed'; }).length;
     lms().innerHTML =
       seg() +
       '<div class="hero"><div class="ey">Learn · My Learning</div><h1>Your training</h1><p>The checks get harder as you go — by the end you\u2019re clearing real orders with buried problems.</p></div>' +
-      '<div class="sech"><h2>Assigned to you</h2><span class="n">' + (c.status === 'completed' ? 'Complete' : '1 in progress') + '</span></div>' +
-      '<div class="card"><span class="cbadge" style="background:#C2562E">' + (c.department || '').toUpperCase() + '</span>' +
-      '<div><div class="ttl">' + c.title + '</div><div class="sub">assigned by HR' + (c.due_date ? ' · due ' + c.due_date : '') + '</div></div>' +
-      '<div class="right"><span class="chip ' + (c.status === 'completed' ? 'ok' : 'cur') + '">' + (c.status === 'completed' ? 'Complete' : 'In progress') + '</span>' +
-      '<button class="btn" id="lmsOpen">Open</button></div></div>' +
-      '<div class="gate">You\u2019ll be marked <b>logistics-ready</b> once all sessions are complete <b>and</b> your manager signs you off.</div>';
-    el('lmsOpen').onclick = openCourse;
+      '<div class="sech"><h2>Assigned to you</h2><span class="n">' + (nDone === courses.length ? 'All complete' : (courses.length - nDone) + ' in progress') + '</span></div>' +
+      cards +
+      '<div class="gate">You\u2019ll be marked ready for each course once all its sessions are complete <b>and</b> your manager signs you off.</div>';
+    Array.from(document.querySelectorAll('.lmsOpen')).forEach(function (b) {
+      b.onclick = function () { courseId = parseInt(b.getAttribute('data-cid'), 10); openCourse(); };
+    });
   }
   function seg() {
     return '<div class="seg"><button id="segTr" class="' + (perspective === 'tr' ? 'on' : '') + '">New starter</button><button id="segMgr" class="' + (perspective === 'mgr' ? 'on' : '') + '">Manager</button></div>';
@@ -112,8 +119,10 @@
         '<div style="flex:1"><div class="ttl">' + s.title + '</div>' + (s.objective ? '<div class="sobj">' + s.objective + '</div>' : '') + '</div>' +
         '<div class="right">' + right + '</div></div>';
     });
+    const cur = myCourses.find(function (c) { return c.id === courseId; }) || {};
+    const dep = cur.department || 'logistics';
     lms().innerHTML = '<button class="back" id="bk">\u2039 Back</button>' +
-      '<div class="hero"><div class="ey">Logistics course</div><h1>Courier Selection &amp; Dispatch</h1><p>Pass each session\u2019s checks to unlock the next.</p></div>' +
+      '<div class="hero"><div class="ey">' + (dep.charAt(0).toUpperCase() + dep.slice(1)) + ' course</div><h1>' + (cur.title || 'Course') + '</h1><p>Pass each session\u2019s checks to unlock the next.</p></div>' +
       '<div class="sech"><h2>Sessions</h2></div>' + cards;
     el('bk').onclick = () => boot('learn');
     Array.from(document.querySelectorAll('.lmsS')).forEach(b => b.onclick = () => openSession(parseInt(b.getAttribute('data-s'), 10)));
@@ -291,8 +300,7 @@
       });
       return;
     }
-    courseId = courses[0].id;
-    renderList(courses[0]);
+    renderList(courses);
     wireSeg();
   }
 
