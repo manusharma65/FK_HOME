@@ -699,6 +699,43 @@ router.get('/overview/cashflow', requirePermission('accounts.view'), async (req,
   const received = Number(r.rows[0].received), spent = Number(r.rows[0].spent);
   res.json({ month, received, spent, net: Math.round((received - spent) * 100) / 100 });
 });
+
+// Expense breakdown for the spending donut: top expense accounts + "Other".
+router.get('/overview/spending', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT a.name, COALESCE(SUM(l.debit) - SUM(l.credit), 0) AS amt
+       FROM acc_account a
+       JOIN acc_journal_line l ON l.account_id = a.id
+       JOIN acc_journal j ON j.id = l.journal_id AND j.status = 'posted'
+      WHERE a.type = 'expense'
+      GROUP BY a.id, a.name
+     HAVING COALESCE(SUM(l.debit) - SUM(l.credit), 0) > 0
+      ORDER BY amt DESC`);
+  const rows = r.rows.map(x => ({ name: x.name, amount: Math.round(Number(x.amt) * 100) / 100 }));
+  const total = Math.round(rows.reduce((s, x) => s + x.amount, 0) * 100) / 100;
+  const segments = rows.slice(0, 5);
+  const other = Math.round(rows.slice(5).reduce((s, x) => s + x.amount, 0) * 100) / 100;
+  if (other > 0) segments.push({ name: 'Other', amount: other });
+  res.json({ total, segments });
+});
+
+// Recent reconcile activity: the latest coded/matched bank entries.
+router.get('/overview/recent', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT j.id, j.entry_date, j.narration,
+            COALESCE((SELECT l.debit - l.credit FROM acc_journal_line l JOIN acc_account a ON a.id = l.account_id
+                       WHERE l.journal_id = j.id AND a.system_tag = 'idfc_bank' LIMIT 1), 0) AS bank_delta,
+            (SELECT a.name FROM acc_journal_line l JOIN acc_account a ON a.id = l.account_id
+              WHERE l.journal_id = j.id AND (a.system_tag IS NULL OR a.system_tag <> 'idfc_bank')
+              ORDER BY (l.debit + l.credit) DESC LIMIT 1) AS account_name
+       FROM acc_journal j
+      WHERE j.source_type = 'bank' AND j.status = 'posted'
+      ORDER BY j.id DESC LIMIT 8`);
+  res.json(r.rows.map(x => ({
+    id: x.id, date: x.entry_date, account_name: x.account_name, narration: x.narration,
+    amount: Math.abs(Number(x.bank_delta)), direction: Number(x.bank_delta) >= 0 ? 'in' : 'out',
+  })));
+});
 router.get('/contacts', requirePermission('accounts.view'), async (req, res) => {
   const r = await db.query('SELECT * FROM acc_contact WHERE NOT is_archived ORDER BY name');
   res.json(r.rows);

@@ -69,17 +69,22 @@ window.fkModules = window.fkModules || {};
     .ov-l{font-size:12px;color:var(--muted)}
     .ov-bar{border-radius:5px 5px 0 0}
     .rec-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:12px;margin-bottom:12px;display:flex;overflow:hidden}
-    .rec-left{flex:0 0 60%;padding:13px 15px;display:flex;gap:10px;align-items:flex-start}
-    .rec-left-in{background:#F4F8EE}.rec-left-out{background:#FBF2EC}
+    .rec-card.rec-in{background:#F0F6E6;border-color:#DCE9C6}
+    .rec-card.rec-out{background:#FBEFE8;border-color:#F0DDD0}
+    .rec-left{flex:0 0 60%;padding:13px 15px;display:flex;gap:11px;align-items:center}
+    .rec-card.rec-in .rec-left{background:#E7F1D6}
+    .rec-card.rec-out .rec-left{background:#F8E6DA}
+    .rec-col{width:108px;text-align:right;flex-shrink:0}
+    .rec-hd{font-size:11px;color:var(--muted);margin-bottom:3px}
     .rec-divide{width:1px;background:var(--line,#E8E0D3)}
-    .rec-right{flex:1;padding:13px 15px;background:#FCFBF8}
+    .rec-right{flex:1;padding:13px 15px}
     .rec-ico{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
     .rec-ico-in{background:#EAF3DE;color:#3B6D11}.rec-ico-out{background:#FAECE7;color:#D85A30}
     .rec-amt{font-family:'Fraunces',Georgia,serif;font-weight:500;font-variant-numeric:tabular-nums;font-size:17px;margin-top:5px}
     .rec-seg{font-size:12.5px;color:var(--muted);cursor:pointer;padding:0 0 4px;border:none;border-bottom:2px solid transparent;background:none;font-family:inherit}
     .rec-seg.on{color:var(--ink);font-weight:500;border-bottom-color:var(--orange)}
     .rec-lbl{font-size:11px;color:var(--muted);margin-bottom:3px;display:block}
-    .rec-f{width:100%;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink);box-sizing:border-box}
+    .rec-f{width:100%;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:#fff;color:var(--ink);box-sizing:border-box}
     .rec-tab{padding:10px 18px;font-size:14px;font-family:inherit;border:none;background:none;color:var(--muted);cursor:pointer;border-radius:9px;display:inline-flex;align-items:center;gap:8px}
     .rec-tab.on{background:var(--ink);color:#fff;font-weight:500}
     .rec-cnt{font-size:11.5px;padding:1px 8px;border-radius:99px;background:rgba(0,0,0,.08)}.rec-tab.on .rec-cnt{background:rgba(255,255,255,.22)}
@@ -105,9 +110,11 @@ window.fkModules = window.fkModules || {};
   }
 
   async function renderOverview(body) {
-    const [o, op, sum, aging, cf] = await Promise.all([
+    const [o, op, sum, aging, cf, spend, recent] = await Promise.all([
       api('/overview'), api('/opening'), api('/bank/summary').catch(() => null),
       api('/reports/aging').catch(() => ({ receivables: [] })), api('/overview/cashflow').catch(() => null),
+      api('/overview/spending').catch(() => ({ total: 0, segments: [] })),
+      api('/overview/recent').catch(() => []),
     ]);
     const unmatched = sum && sum.counts ? sum.counts.unmatched : 0;
     const stmtBal = sum ? sum.statement_balance : o.bank;
@@ -146,6 +153,36 @@ window.fkModules = window.fkModules || {};
       : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Receivables aging</div><div class="acct-empty" style="padding:40px 8px">Nothing outstanding to age.</div></div>';
 
     const netGst = r2(o.output_gst - o.input_gst);
+    const palette = ['#639922', '#E8722B', '#EF9F27', '#D4537E', '#1D9E75', '#B4B2A9'];
+    const donutCard = (spend && spend.total > 0)
+      ? (() => {
+          let acc = 0; const stops = []; const legend = [];
+          spend.segments.forEach((s, i) => {
+            const pct = s.amount / spend.total * 100; const c = palette[i % palette.length];
+            stops.push(c + ' ' + acc.toFixed(2) + '% ' + (acc + pct).toFixed(2) + '%');
+            legend.push('<div style="display:flex;align-items:center;gap:8px;font-size:12.5px"><span style="width:10px;height:10px;border-radius:3px;flex-shrink:0;background:' + c + '"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(s.name) + '</span><span style="margin-left:auto;color:var(--muted)">' + Math.round(pct) + '%</span></div>');
+            acc += pct;
+          });
+          return '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:14px">Where money goes</div>' +
+            '<div style="display:flex;align-items:center;gap:18px">' +
+              '<div style="width:128px;height:128px;border-radius:50%;flex-shrink:0;background:conic-gradient(' + stops.join(',') + ');display:flex;align-items:center;justify-content:center">' +
+                '<div style="width:80px;height:80px;border-radius:50%;background:var(--card,#fff);display:flex;flex-direction:column;align-items:center;justify-content:center"><div class="ov-num" style="font-size:16px">' + fmtShort(spend.total) + '</div><div class="ov-l" style="font-size:10.5px">spent</div></div>' +
+              '</div>' +
+              '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:7px">' + legend.join('') + '</div>' +
+            '</div></div>';
+        })()
+      : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Where money goes</div><div class="acct-empty" style="padding:40px 8px">No spending recorded yet. Code some expenses to see the breakdown.</div></div>';
+
+    const dirIco = d => d === 'in' ? '<i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>' : '<i class="ti ti-arrow-up-right" style="color:#D85A30"></i>';
+    const recentCard = (recent && recent.length)
+      ? '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:14px">Recent activity</div>' +
+          '<div style="display:flex;flex-direction:column;gap:10px">' +
+            recent.map(t => '<div style="display:flex;align-items:center;gap:9px;font-size:12.5px">' + dirIco(t.direction) +
+              '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.account_name || t.narration || 'Bank entry') + '</span>' +
+              '<span style="margin-left:auto;white-space:nowrap;' + (t.direction === 'in' ? 'color:#3B6D11' : '') + '">' + (t.direction === 'in' ? '+' : '−') + inr(t.amount) + '</span></div>').join('') +
+          '</div></div>'
+      : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Recent activity</div><div class="acct-empty" style="padding:40px 8px">Nothing coded yet. Reconcile some transactions to see them here.</div></div>';
+
     const gstStat = (l, v, c) => '<div><div class="ov-l">' + l + '</div><div class="ov-num" style="font-size:22px' + (c ? ';color:' + c : '') + '">' + v + '</div></div>';
     const gstPanel = '<div class="ov-card" style="margin-bottom:13px">' +
       '<div style="font-size:13px;font-weight:500;margin-bottom:15px;display:flex;align-items:center;gap:7px"><i class="ti ti-receipt-tax" style="color:var(--muted)"></i>GST position</div>' +
@@ -156,10 +193,20 @@ window.fkModules = window.fkModules || {};
         gstStat('TDS to deposit', inr(o.tds_payable)) +
       '</div></div>';
 
+    const receivableCard = '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>FK Sports owes you</div><div class="ov-num" style="font-size:22px">' + inr(o.receivable) + '</div></div>';
+    const payableCard = '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-arrow-up-right" style="color:#D85A30"></i>Owed to suppliers</div><div class="ov-num" style="font-size:22px">' + inr(o.payable) + '</div></div>';
+    const netGstCard = '<div class="ov-card"><div class="ov-l" style="margin-bottom:6px">' + (netGst >= 0 ? 'Net GST payable' : 'Net GST reclaimable') + '</div><div class="ov-num" style="font-size:22px;color:' + (netGst >= 0 ? '#A32D2D' : '#3B6D11') + '">' + inr(Math.abs(netGst)) + '</div></div>';
+
     const drafts = o.draft_bills + o.draft_invoices;
     const openingStrip = op.exists
       ? '<span style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)"><i class="ti ti-circle-check" style="color:var(--green,#3B6D11)"></i>Opening balances set · ' + esc(String(op.date).slice(0, 10)) + ' <button class="acct-btn ghost" id="opEdit" style="padding:4px 9px;font-size:12px">Edit</button></span>'
       : '<button class="acct-btn primary" id="opSet" style="padding:7px 13px"><i class="ti ti-adjustments"></i>Set opening balances</button>';
+    const strip = '<div class="ov-card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">' +
+      '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">' +
+        '<button class="acct-btn" onclick="location.hash=\'#accounts/bills\'" style="padding:7px 13px"><i class="ti ti-plus"></i>New bill</button>' +
+        '<button class="acct-btn" onclick="location.hash=\'#accounts/invoices\'" style="padding:7px 13px"><i class="ti ti-plus"></i>New invoice</button>' +
+        (drafts ? '<span style="font-size:13px;color:var(--muted)"><strong style="font-weight:500;color:var(--ink)">' + drafts + '</strong> draft' + (drafts > 1 ? 's' : '') + ' to post</span>' : '') +
+      '</div>' + openingStrip + '</div>';
 
     body.innerHTML =
       '<div class="ov-card" style="border-left:4px solid #D4537E;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:13px">' +
@@ -171,19 +218,10 @@ window.fkModules = window.fkModules || {};
           '<div><div class="ov-num" style="font-size:20px">' + inr(o.bank) + '</div><div class="ov-l">Books balance</div></div>' +
           reconcileBtn +
         '</div></div>' +
-      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' +
-        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>FK Sports owes you</div><div class="ov-num" style="font-size:22px">' + inr(o.receivable) + '</div></div>' +
-        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-arrow-up-right" style="color:#D85A30"></i>Owed to suppliers</div><div class="ov-num" style="font-size:22px">' + inr(o.payable) + '</div></div>' +
-      '</div>' +
-      gstPanel +
-      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' + cashCard + agingCard + '</div>' +
-      '<div class="ov-card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">' +
-        '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">' +
-          '<button class="acct-btn" onclick="location.hash=\'#accounts/bills\'" style="padding:7px 13px"><i class="ti ti-plus"></i>New bill</button>' +
-          '<button class="acct-btn" onclick="location.hash=\'#accounts/invoices\'" style="padding:7px 13px"><i class="ti ti-plus"></i>New invoice</button>' +
-          (drafts ? '<span style="font-size:13px;color:var(--muted)"><strong style="font-weight:500;color:var(--ink)">' + drafts + '</strong> draft' + (drafts > 1 ? 's' : '') + ' to post</span>' : '') +
-        '</div>' + openingStrip +
-      '</div><div id="opFormWrap"></div>';
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' + donutCard + cashCard + '</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px;margin-bottom:13px">' + receivableCard + payableCard + netGstCard + '</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' + agingCard + recentCard + '</div>' +
+      gstPanel + strip + '<div id="opFormWrap"></div>';
     const setBtn = document.getElementById('opSet'); if (setBtn) setBtn.addEventListener('click', () => renderOpeningForm(document.getElementById('opFormWrap')));
     const editBtn = document.getElementById('opEdit'); if (editBtn) editBtn.addEventListener('click', () => renderOpeningForm(document.getElementById('opFormWrap'), op));
   }
@@ -517,7 +555,7 @@ window.fkModules = window.fkModules || {};
     window.__recAcctOpts = '<option value="">Choose account…</option>' +
       accounts.filter(a => a.system_tag !== 'idfc_bank')
         .map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
-    window.__recContactOpts = '<option value="">— who (optional) —</option>' +
+    window.__recContactOpts = '<option value="">— who (optional) —</option><option value="__add">＋ Add a contact…</option>' +
       (contacts || []).map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
     body.innerHTML =
       '<div id="recHeader"></div>' +
@@ -625,18 +663,19 @@ window.fkModules = window.fkModules || {};
     const isIn = amt >= 0;
     const ico = isIn ? 'ti-arrow-down-left' : 'ti-arrow-up-right';
     const left =
-      '<div class="rec-left ' + (isIn ? 'rec-left-in' : 'rec-left-out') + '">' +
-        (view === 'unmatched' ? '<input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()" style="margin-top:11px">' : '') +
+      '<div class="rec-left">' +
+        (view === 'unmatched' ? '<input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()">' : '') +
         '<div class="rec-ico ' + (isIn ? 'rec-ico-in' : 'rec-ico-out') + '"><i class="ti ' + ico + '"></i></div>' +
-        '<div style="min-width:0"><div style="font-size:11.5px;color:var(--muted)">' + esc(String(l.txn_date).slice(0, 10)) + '</div>' +
-          '<div style="font-size:13px">' + esc(l.description || '') + '</div>' +
-          '<div class="rec-amt" style="' + (isIn ? 'color:#3B6D11' : '') + '">' + inr(Math.abs(amt)) + '</div></div>' +
+        '<div style="flex:1;min-width:0"><div style="font-size:11.5px;color:var(--muted)">' + esc(String(l.txn_date).slice(0, 10)) + '</div>' +
+          '<div style="font-size:13px">' + esc(l.description || '') + '</div></div>' +
+        '<div class="rec-col"><div class="rec-hd">Spent</div>' + (isIn ? '<div style="color:#C2BEB4">—</div>' : '<div class="rec-amt">' + inr(Math.abs(amt)) + '</div>') + '</div>' +
+        '<div class="rec-col"><div class="rec-hd">Received</div>' + (isIn ? '<div class="rec-amt" style="color:#3B6D11">' + inr(amt) + '</div>' : '<div style="color:#C2BEB4">—</div>') + '</div>' +
       '</div>';
     if (view !== 'unmatched') {
-      const right = '<div class="rec-right" style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fff">' +
+      const right = '<div class="rec-right" style="display:flex;align-items:center;justify-content:space-between;gap:10px">' +
         '<span style="font-size:12.5px;color:var(--muted)">' + (view === 'matched' ? 'Reconciled' : 'Set aside') + '</span>' +
         '<button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
-      return '<div class="rec-card">' + left + '<div class="rec-divide"></div>' + right + '</div>';
+      return '<div class="rec-card ' + (isIn ? 'rec-in' : 'rec-out') + '">' + left + '<div class="rec-divide"></div>' + right + '</div>';
     }
     const matchOn = !!sugg;
     const matchPane =
@@ -650,7 +689,7 @@ window.fkModules = window.fkModules || {};
       '<div id="recpane-code-' + l.id + '" style="display:' + (matchOn ? 'none' : 'block') + '">' +
         '<div style="display:flex;gap:8px;margin-bottom:9px;flex-wrap:wrap">' +
           '<div style="flex:1;min-width:150px"><span class="rec-lbl">What account</span><select class="rec-acct rec-f" data-line="' + l.id + '">' + window.__recAcctOpts + '</select></div>' +
-          '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f">' + window.__recContactOpts + '</select></div>' +
+          '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f" onchange="window.__recWho(' + l.id + ')">' + window.__recContactOpts + '</select></div>' +
         '</div>' +
         '<div style="margin-bottom:11px"><span class="rec-lbl">Why</span><input id="recWhy-' + l.id + '" class="rec-f" placeholder="Description (optional)"></div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
@@ -662,7 +701,7 @@ window.fkModules = window.fkModules || {};
           '<button class="rec-seg' + (matchOn ? '' : ' on') + '" id="recseg-code-' + l.id + '" onclick="window.__recSeg(' + l.id + ",'code')\">Code</button>" +
         '</div>' + matchPane + codePane +
       '</div>';
-    return '<div class="rec-card">' + left + '<div class="rec-divide"></div>' + right + '</div>';
+    return '<div class="rec-card ' + (isIn ? 'rec-in' : 'rec-out') + '">' + left + '<div class="rec-divide"></div>' + right + '</div>';
   }
 
   window.__recSeg = function (id, mode) {
@@ -672,13 +711,31 @@ window.fkModules = window.fkModules || {};
     document.getElementById('recpane-code-' + id).style.display = mode === 'code' ? 'block' : 'none';
   };
 
+  window.__recWho = async function (id) {
+    const sel = document.getElementById('recWho-' + id);
+    if (!sel || sel.value !== '__add') return;
+    const name = (window.prompt('New contact name (a supplier or customer you can reuse)') || '').trim();
+    if (!name) { sel.value = ''; return; }
+    try {
+      const c = await api('/contacts', { method: 'POST', body: JSON.stringify({ name: name, kind: 'supplier' }) });
+      const fresh = await api('/contacts').catch(function () { return []; });
+      window.__recContactOpts = '<option value="">— who (optional) —</option><option value="__add">＋ Add a contact…</option>' +
+        fresh.map(function (x) { return '<option value="' + x.id + '">' + esc(x.name) + '</option>'; }).join('');
+      document.querySelectorAll('select[id^="recWho-"]').forEach(function (s) {
+        const keep = s.value === '__add' ? '' : s.value;
+        s.innerHTML = window.__recContactOpts; s.value = keep;
+      });
+      sel.value = String(c.id);
+    } catch (e) { alert(e.message); sel.value = ''; }
+  };
+
   window.__recCode = async function (id) {
     const sel = document.querySelector('.rec-acct[data-line="' + id + '"]');
     if (!sel || !sel.value) { alert('Pick an account to code this to.'); return; }
     const who = document.getElementById('recWho-' + id);
     const why = document.getElementById('recWhy-' + id);
     const payload = { account_id: Number(sel.value) };
-    if (who && who.value) payload.contact_id = Number(who.value);
+    if (who && who.value && who.value !== '__add') payload.contact_id = Number(who.value);
     if (why && why.value.trim()) payload.note = why.value.trim();
     try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify(payload) }); await loadSummary(); await loadRecList('unmatched'); }
     catch (e) { alert(e.message); }
