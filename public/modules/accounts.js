@@ -503,6 +503,7 @@ window.fkModules = window.fkModules || {};
         '<button class="acct-btn" id="rBS">Balance sheet</button>' +
         '<button class="acct-btn" id="rAR">AR aging</button>' +
         '<button class="acct-btn" id="rAP">AP aging</button>' +
+        '<button class="acct-btn" id="rCA">CA pack · GST &amp; TDS</button>' +
       '</div><div id="rOut"></div>';
     const out = document.getElementById('rOut');
     document.getElementById('rTB').addEventListener('click', async () => {
@@ -535,8 +536,114 @@ window.fkModules = window.fkModules || {};
     document.getElementById('rAP').addEventListener('click', async () => {
       const a = await api('/reports/aging'); out.innerHTML = agingTable('Payables — what you owe suppliers', a.payables);
     });
+    document.getElementById('rCA').addEventListener('click', () => renderCaPack(out));
     document.getElementById('rTB').click();
   }
+
+  function indianFy(d) {
+    const dt = d || new Date(); const y = dt.getFullYear();
+    const start = dt.getMonth() >= 3 ? y : y - 1; // Indian FY starts 1 April
+    return { from: start + '-04-01', to: (start + 1) + '-03-31' };
+  }
+  function toCsv(headers, rows) {
+    const c = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    return [headers.map(c).join(',')].concat(rows.map(r => r.map(c).join(','))).join('\n');
+  }
+  function downloadCsv(filename, csv) {
+    try {
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    } catch (e) { alert('Could not download: ' + e.message); }
+  }
+  const d10 = v => esc(String(v).slice(0, 10));
+  const pct = v => (Number(v) || 0) + '%';
+
+  function caTable(title, sub, dlKey, head, bodyRows, totalsRow, empty) {
+    return '<div class="acct-card" style="margin-bottom:14px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:0">' + title + '</h3>' +
+        (bodyRows ? '<button class="acct-btn" onclick="window.__caCsv(\'' + dlKey + '\')"><i class="ti ti-download"></i>Download CSV</button>' : '') + '</div>' +
+      (sub ? '<p style="color:var(--muted);font-size:12.5px;margin:3px 0 10px">' + sub + '</p>' : '') +
+      (bodyRows
+        ? '<table class="acct"><thead><tr>' + head + '</tr></thead><tbody>' + bodyRows + totalsRow + '</tbody></table>'
+        : '<div class="acct-empty" style="padding:20px 8px">' + empty + '</div>') +
+      '</div>';
+  }
+
+  async function renderCaPack(out) {
+    const fy = indianFy();
+    out.innerHTML =
+      '<div class="acct-card" style="margin-bottom:14px">' +
+        '<h3 style="margin:0 0 4px">CA pack — GST &amp; TDS</h3>' +
+        '<p style="color:var(--muted);font-size:13px;margin:0 0 12px">Registers for your accountant. Pick a period, then download each as CSV.</p>' +
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
+          '<div><span class="rec-lbl">From</span><input type="date" id="caFrom" class="rec-f" style="width:170px" value="' + fy.from + '"></div>' +
+          '<div><span class="rec-lbl">To</span><input type="date" id="caTo" class="rec-f" style="width:170px" value="' + fy.to + '"></div>' +
+          '<button class="acct-btn" id="caFyThis">This FY</button>' +
+          '<button class="acct-btn" id="caFyLast">Last FY</button>' +
+          '<button class="acct-btn primary" id="caRun"><i class="ti ti-refresh"></i>Show</button>' +
+        '</div>' +
+      '</div><div id="caOut"></div>';
+    const caOut = document.getElementById('caOut');
+    const setRange = (f, t) => { document.getElementById('caFrom').value = f; document.getElementById('caTo').value = t; };
+    document.getElementById('caFyThis').addEventListener('click', () => { const x = indianFy(); setRange(x.from, x.to); load(); });
+    document.getElementById('caFyLast').addEventListener('click', () => { const dt = new Date(); const x = indianFy(new Date(dt.getFullYear() - 1, dt.getMonth(), 1)); setRange(x.from, x.to); load(); });
+    document.getElementById('caRun').addEventListener('click', load);
+
+    async function load() {
+      const from = document.getElementById('caFrom').value, to = document.getElementById('caTo').value;
+      const q = '?from=' + from + '&to=' + to;
+      caOut.innerHTML = '<div class="acct-empty" style="padding:24px">Loading…</div>';
+      const [sales, purch, tds] = await Promise.all([
+        api('/reports/gst-sales' + q), api('/reports/gst-purchases' + q), api('/reports/tds' + q),
+      ]);
+      window.__caData = { sales, purch, tds, from, to };
+
+      const salesBody = sales.rows.map(r => '<tr><td>' + d10(r.invoice_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.gstin || '—') + '</td><td>' + (r.tax_treatment === 'export_zero' ? 'Export / zero' : 'Domestic GST') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.gst_rate) + '</td><td class="num">' + inr(r.gst_amount) + '</td><td class="num">' + inr(r.total) + '</td></tr>').join('');
+      const salesTot = '<tr style="font-weight:500"><td colspan="5">Total</td><td class="num">' + inr(sales.totals.taxable) + '</td><td></td><td class="num">' + inr(sales.totals.gst) + '</td><td class="num">' + inr(sales.totals.total) + '</td></tr>';
+      const salesCard = caTable('GST sales register · output GST', 'Posted sales invoices. Output GST is what you collected.', 'sales',
+        '<th>Date</th><th>Invoice</th><th>Customer</th><th>GSTIN</th><th>Treatment</th><th class="num">Taxable</th><th class="num">GST %</th><th class="num">GST</th><th class="num">Total</th>',
+        salesBody, salesTot, 'No sales invoices in this period.');
+
+      const purchBody = purch.rows.map(r => '<tr><td>' + d10(r.bill_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.gstin || '—') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.gst_rate) + '</td><td class="num">' + inr(r.gst_amount) + '</td><td class="num">' + inr(r.total) + '</td></tr>').join('');
+      const purchTot = '<tr style="font-weight:500"><td colspan="4">Total</td><td class="num">' + inr(purch.totals.taxable) + '</td><td></td><td class="num">' + inr(purch.totals.gst) + '</td><td class="num">' + inr(purch.totals.total) + '</td></tr>';
+      const purchCard = caTable('GST purchase register · input GST', 'Posted bills. Input GST is what you can reclaim.', 'purch',
+        '<th>Date</th><th>Bill</th><th>Supplier</th><th>GSTIN</th><th class="num">Taxable</th><th class="num">GST %</th><th class="num">GST</th><th class="num">Total</th>',
+        purchBody, purchTot, 'No bills in this period.');
+
+      const tdsBody = tds.rows.map(r => '<tr><td>' + d10(r.bill_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.tds_section || '—') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.tds_rate) + '</td><td class="num">' + inr(r.tds_amount) + '</td></tr>').join('');
+      const tdsTot = '<tr style="font-weight:500"><td colspan="4">Total</td><td class="num">' + inr(tds.totals.taxable) + '</td><td></td><td class="num">' + inr(tds.totals.tds) + '</td></tr>';
+      const tdsCard = caTable('TDS deducted', 'TDS withheld on supplier bills — what you owe the tax office.', 'tds',
+        '<th>Date</th><th>Bill</th><th>Supplier</th><th>Section</th><th class="num">Taxable</th><th class="num">TDS %</th><th class="num">TDS</th>',
+        tdsBody, tdsTot, 'No TDS deducted in this period.');
+
+      caOut.innerHTML = salesCard + purchCard + tdsCard;
+    }
+    load();
+  }
+
+  window.__caCsv = function (which) {
+    const d = window.__caData; if (!d) return '';
+    const tag = (d.from + '_' + d.to).replace(/-/g, '');
+    let name = '', csv = '';
+    if (which === 'sales') {
+      name = 'gst-sales_' + tag + '.csv';
+      csv = toCsv(['Date', 'Invoice #', 'Customer', 'GSTIN', 'Treatment', 'Taxable', 'GST %', 'GST', 'Total'],
+        d.sales.rows.map(r => [String(r.invoice_date).slice(0, 10), r.id, r.party, r.gstin || '', r.tax_treatment, r.taxable_amount, r.gst_rate, r.gst_amount, r.total]));
+    } else if (which === 'purch') {
+      name = 'gst-purchases_' + tag + '.csv';
+      csv = toCsv(['Date', 'Bill #', 'Supplier', 'GSTIN', 'Taxable', 'GST %', 'GST', 'Total'],
+        d.purch.rows.map(r => [String(r.bill_date).slice(0, 10), r.id, r.party, r.gstin || '', r.taxable_amount, r.gst_rate, r.gst_amount, r.total]));
+    } else if (which === 'tds') {
+      name = 'tds_' + tag + '.csv';
+      csv = toCsv(['Date', 'Bill #', 'Supplier', 'Section', 'Taxable', 'TDS %', 'TDS'],
+        d.tds.rows.map(r => [String(r.bill_date).slice(0, 10), r.id, r.party, r.tds_section || '', r.taxable_amount, r.tds_rate, r.tds_amount]));
+    } else { return ''; }
+    downloadCsv(name, csv);
+    return csv;
+  };
 
   function agingTable(title, rows) {
     if (!rows.length) return '<div class="acct-card"><h3>' + title + '</h3><div class="acct-empty">Nothing outstanding.</div></div>';

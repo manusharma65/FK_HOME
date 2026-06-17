@@ -1079,6 +1079,74 @@ router.get('/reports/aging', requirePermission('accounts.view'), async (req, res
   res.json({ receivables: ar.rows, payables: ap.rows });
 });
 
+// ---------- CA pack: GST registers + TDS summary (for the accountant) ----------
+function caPeriod(req) {
+  const from = req.query.from && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : '1900-01-01';
+  const to = req.query.to && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : '2999-12-31';
+  return [from, to];
+}
+const n2 = v => Math.round(Number(v || 0) * 100) / 100;
+
+// GSTR-1 style sales register (output GST) from posted invoices.
+router.get('/reports/gst-sales', requirePermission('accounts.view'), async (req, res) => {
+  const [from, to] = caPeriod(req);
+  const r = await db.query(
+    `SELECT i.id, i.invoice_date, COALESCE(c.name,'—') AS party, c.gstin, i.tax_treatment,
+            i.taxable_amount, i.gst_rate, i.gst_amount, i.amount_inr AS total
+       FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id
+      WHERE i.status IN ('posted','sent','paid') AND i.invoice_date BETWEEN $1 AND $2
+      ORDER BY i.invoice_date, i.id`, [from, to]);
+  const rows = r.rows;
+  res.json({
+    from, to, rows,
+    totals: {
+      taxable: n2(rows.reduce((s, x) => s + Number(x.taxable_amount), 0)),
+      gst: n2(rows.reduce((s, x) => s + Number(x.gst_amount), 0)),
+      total: n2(rows.reduce((s, x) => s + Number(x.total), 0)),
+    },
+  });
+});
+
+// GSTR-2 style purchase register (input GST) from posted bills.
+router.get('/reports/gst-purchases', requirePermission('accounts.view'), async (req, res) => {
+  const [from, to] = caPeriod(req);
+  const r = await db.query(
+    `SELECT b.id, b.bill_date, COALESCE(c.name,'—') AS party, c.gstin,
+            b.taxable_amount, b.gst_rate, b.gst_amount,
+            (b.taxable_amount + b.gst_amount) AS total
+       FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
+      WHERE b.status IN ('posted','paid') AND b.bill_date BETWEEN $1 AND $2
+      ORDER BY b.bill_date, b.id`, [from, to]);
+  const rows = r.rows;
+  res.json({
+    from, to, rows,
+    totals: {
+      taxable: n2(rows.reduce((s, x) => s + Number(x.taxable_amount), 0)),
+      gst: n2(rows.reduce((s, x) => s + Number(x.gst_amount), 0)),
+      total: n2(rows.reduce((s, x) => s + Number(x.total), 0)),
+    },
+  });
+});
+
+// TDS deducted on supplier payments.
+router.get('/reports/tds', requirePermission('accounts.view'), async (req, res) => {
+  const [from, to] = caPeriod(req);
+  const r = await db.query(
+    `SELECT b.id, b.bill_date, COALESCE(c.name,'—') AS party, c.gstin,
+            b.tds_section, b.taxable_amount, b.tds_rate, b.tds_amount
+       FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
+      WHERE b.status IN ('posted','paid') AND b.tds_amount > 0 AND b.bill_date BETWEEN $1 AND $2
+      ORDER BY b.bill_date, b.id`, [from, to]);
+  const rows = r.rows;
+  res.json({
+    from, to, rows,
+    totals: {
+      taxable: n2(rows.reduce((s, x) => s + Number(x.taxable_amount), 0)),
+      tds: n2(rows.reduce((s, x) => s + Number(x.tds_amount), 0)),
+    },
+  });
+});
+
 module.exports = router;
 // Cron tick called from server.js's 06:00 task job.
 module.exports.tickAccountsDailyTasks = tickAccountsDailyTasks;
