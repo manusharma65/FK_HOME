@@ -53,7 +53,7 @@ const monitoring = require('./server/modules/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r1.32';
+const VERSION = 'r1.34';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -264,6 +264,9 @@ async function start() {
     console.log('[boot] migrations applied');
     await seedInitialData();
     console.log('[boot] seed verified');
+    // r1.33 — seed the FK Enterprises chart of accounts (idempotent; ON CONFLICT DO NOTHING).
+    await accountsRoutes.engine.seedChartOfAccounts();
+    console.log('[boot] accounts chart verified');
     // r0.15 (HR-1.5) — one-time leave-balance backfill. Self-guards via system_state.
     await leaveEngine.runBackfillIfNeeded();
     // r0.33 — assign FK### Emp IDs to any staff without one. Idempotent.

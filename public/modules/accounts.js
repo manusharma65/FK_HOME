@@ -24,6 +24,7 @@ window.fkModules = window.fkModules || {};
     { key: 'invoices', hash: '#accounts/invoices', label: 'Invoices', icon: 'ti-receipt' },
     { key: 'reconcile', hash: '#accounts/reconcile', label: 'Reconcile', icon: 'ti-arrows-exchange' },
     { key: 'reports', hash: '#accounts/reports', label: 'Reports', icon: 'ti-chart-bar' },
+    { key: 'chart', hash: '#accounts/chart', label: 'Chart of accounts', icon: 'ti-list-details' },
   ];
   function activeTab(fullKey) {
     const seg = (fullKey || 'accounts').split('/')[1] || 'overview';
@@ -476,24 +477,64 @@ window.fkModules = window.fkModules || {};
       el.innerHTML = '<div class="acct-empty">' + (view === 'unmatched' ? 'Nothing to reconcile — import a statement above.' : 'Nothing here.') + '</div>';
       return;
     }
-    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th style="width:42%"></th></tr></thead><tbody>' +
-      lines.map(l => {
-        const amt = Number(l.amount);
-        const inCol = amt > 0 ? inr(amt) : '';
-        const outCol = amt < 0 ? inr(-amt) : '';
-        const action = view === 'unmatched'
-          ? '<div class="acct-actions" style="justify-content:flex-end">' +
-              '<select class="rec-acct" data-line="' + l.id + '" style="min-width:180px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + window.__recAcctOpts + '</select>' +
-              '<button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button>' +
-              '<button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Match…</button>' +
-              '<button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button></div>'
-          : '<div class="acct-actions" style="justify-content:flex-end"><button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
-        return '<tr><td style="white-space:nowrap">' + esc(String(l.txn_date).slice(0, 10)) + '</td>' +
-          '<td style="font-size:13px">' + esc(l.description || '') + '</td>' +
-          '<td class="num" style="color:var(--green,#3B6D11)">' + inCol + '</td>' +
-          '<td class="num">' + outCol + '</td><td id="recact-' + l.id + '">' + action + '</td></tr>';
-      }).join('') + '</tbody></table>';
+    const bulk = view === 'unmatched';
+    const bulkBar = bulk
+      ? '<div id="recBulkBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--canvas);border-radius:10px;padding:10px 14px;margin-bottom:12px">' +
+          '<span id="recBulkCount" style="font-size:14px;font-weight:500"></span>' +
+          '<span style="font-size:13px;color:var(--muted)">code all selected to</span>' +
+          '<select id="recBulkAcct" style="min-width:200px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + window.__recAcctOpts + '</select>' +
+          '<button class="acct-btn primary" onclick="window.__recBulkCode()">Code selected</button>' +
+          '<button class="acct-btn ghost" onclick="window.__recBulkClear()">Clear</button>' +
+        '</div>'
+      : '';
+    const head = '<table class="acct"><thead><tr>' +
+      (bulk ? '<th style="width:34px"><input type="checkbox" id="recSelAll" title="Select all"></th>' : '') +
+      '<th>Date</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th style="width:42%"></th></tr></thead><tbody>';
+    const rows = lines.map(l => {
+      const amt = Number(l.amount);
+      const inCol = amt > 0 ? inr(amt) : '';
+      const outCol = amt < 0 ? inr(-amt) : '';
+      const action = view === 'unmatched'
+        ? '<div class="acct-actions" style="justify-content:flex-end">' +
+            '<select class="rec-acct" data-line="' + l.id + '" style="min-width:180px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + window.__recAcctOpts + '</select>' +
+            '<button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button>' +
+            '<button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Match…</button>' +
+            '<button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button></div>'
+        : '<div class="acct-actions" style="justify-content:flex-end"><button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
+      return '<tr>' +
+        (bulk ? '<td><input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()"></td>' : '') +
+        '<td style="white-space:nowrap">' + esc(String(l.txn_date).slice(0, 10)) + '</td>' +
+        '<td style="font-size:13px">' + esc(l.description || '') + '</td>' +
+        '<td class="num" style="color:var(--green,#3B6D11)">' + inCol + '</td>' +
+        '<td class="num">' + outCol + '</td><td id="recact-' + l.id + '">' + action + '</td></tr>';
+    }).join('');
+    el.innerHTML = bulkBar + head + rows + '</tbody></table>';
+    if (bulk) {
+      const selAll = document.getElementById('recSelAll');
+      if (selAll) selAll.addEventListener('change', (e) => {
+        document.querySelectorAll('.rec-chk').forEach(c => { c.checked = e.target.checked; });
+        window.__recSelChanged();
+      });
+    }
   }
+
+  // ---- bulk coding (tick several lines, code them together) ----
+  window.__recSelChanged = function () {
+    const checked = document.querySelectorAll('.rec-chk:checked');
+    const bar = document.getElementById('recBulkBar'); if (!bar) return;
+    if (checked.length) { bar.style.display = 'flex'; document.getElementById('recBulkCount').textContent = checked.length + ' line' + (checked.length > 1 ? 's' : '') + ' selected'; }
+    else { bar.style.display = 'none'; const sa = document.getElementById('recSelAll'); if (sa) sa.checked = false; }
+  };
+  window.__recBulkClear = function () { document.querySelectorAll('.rec-chk').forEach(c => { c.checked = false; }); const sa = document.getElementById('recSelAll'); if (sa) sa.checked = false; window.__recSelChanged(); };
+  window.__recBulkCode = async function () {
+    const ids = Array.from(document.querySelectorAll('.rec-chk:checked')).map(c => Number(c.getAttribute('data-line')));
+    if (!ids.length) return;
+    const sel = document.getElementById('recBulkAcct');
+    try {
+      await api('/bank/code-bulk', { method: 'POST', body: JSON.stringify({ line_ids: ids, account_id: sel ? Number(sel.value) : null }) });
+      await loadSummary(); await loadRecList('unmatched');
+    } catch (e) { alert(e.message); }
+  };
 
   function currentRecView() {
     const a = document.querySelector('[data-recview]:not(.ghost)');
@@ -559,6 +600,102 @@ window.fkModules = window.fkModules || {};
     } catch (err) { msg.className = 'acct-msg err'; msg.textContent = err.message; }
   }
 
+  // ---------------- Chart of accounts ----------------
+  const TYPE_ORDER = ['asset', 'liability', 'equity', 'income', 'expense'];
+  const TYPE_LABEL = { asset: 'Assets', liability: 'Liabilities', equity: 'Equity', income: 'Income', expense: 'Expenses' };
+  const TAX_LABEL = { none: 'No GST', gst18: 'GST 18%', gst12: 'GST 12%', gst5: 'GST 5%', zero: 'Zero-rated' };
+  let coaShowArchived = false;
+
+  // Natural balance: assets/expenses are debit-positive, the rest credit-positive.
+  function coaBalance(a) { const net = Number(a.net || 0); return (a.type === 'asset' || a.type === 'expense') ? net : -net; }
+
+  async function renderChart(body) {
+    const all = await api('/accounts/all');
+    window.__coaAll = all;
+    const visible = all.filter(a => coaShowArchived || !a.is_archived);
+    let html =
+      '<div class="acct-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">' +
+        '<div><h3 style="margin:0">Chart of accounts</h3><div style="font-size:13px;color:var(--muted);margin-top:3px">The accounts your bills, invoices and bank coding post to. Control accounts (🔒) are fixed; the rest you can add, rename or archive.</div></div>' +
+        '<div class="acct-actions">' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)"><input type="checkbox" id="coaArch"' + (coaShowArchived ? ' checked' : '') + '> Show archived</label>' +
+          '<button class="acct-btn primary" id="coaAdd"><i class="ti ti-plus"></i>Add account</button>' +
+        '</div>' +
+      '</div><div id="coaFormWrap"></div></div>';
+
+    for (const t of TYPE_ORDER) {
+      const rows = visible.filter(a => a.type === t);
+      if (!rows.length) continue;
+      html += '<div class="acct-card"><h3>' + TYPE_LABEL[t] + '</h3><table class="acct"><thead><tr>' +
+        '<th style="width:80px">Code</th><th>Name</th><th>Tax</th><th class="num">Balance</th><th style="width:180px"></th></tr></thead><tbody>' +
+        rows.map(a => {
+          const lock = a.is_system ? ' <span title="Control account — fixed" style="opacity:.6">🔒</span>' : '';
+          const arch = a.is_archived ? ' <span class="acct-pill p-void">Archived</span>' : '';
+          const acts = a.is_archived
+            ? '<button class="acct-btn ghost" onclick="window.__coaUnarchive(' + a.id + ')"><i class="ti ti-arrow-back-up"></i>Restore</button>'
+            : '<button class="acct-btn" onclick="window.__coaEdit(' + a.id + ')"><i class="ti ti-pencil"></i>Edit</button>' +
+              (a.is_system ? '' : '<button class="acct-btn ghost" onclick="window.__coaArchive(' + a.id + ')">Archive</button>');
+          return '<tr' + (a.is_archived ? ' style="opacity:.55"' : '') + '>' +
+            '<td style="font-variant-numeric:tabular-nums">' + esc(a.code) + '</td>' +
+            '<td>' + esc(a.name) + lock + arch + (a.description ? '<div style="font-size:12px;color:var(--muted)">' + esc(a.description) + '</div>' : '') + '</td>' +
+            '<td style="font-size:13px;color:var(--muted)">' + (TAX_LABEL[a.tax_default] || 'No GST') + '</td>' +
+            '<td class="num">' + inr(coaBalance(a)) + '</td>' +
+            '<td><div class="acct-actions" style="justify-content:flex-end">' + acts + '</div></td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    body.innerHTML = html;
+    document.getElementById('coaArch').addEventListener('change', (e) => { coaShowArchived = e.target.checked; renderChart(body); });
+    document.getElementById('coaAdd').addEventListener('click', () => coaOpenForm(null));
+  }
+
+  function coaOpenForm(acct) {
+    const wrap = document.getElementById('coaFormWrap'); if (!wrap) return;
+    const isEdit = !!acct, sys = !!(acct && acct.is_system);
+    const v = acct || { code: '', name: '', type: 'expense', tax_default: 'none', description: '' };
+    const typeOpts = TYPE_ORDER.map(t => '<option value="' + t + '"' + (v.type === t ? ' selected' : '') + '>' + TYPE_LABEL[t] + '</option>').join('');
+    const taxOpts = Object.keys(TAX_LABEL).map(k => '<option value="' + k + '"' + (v.tax_default === k ? ' selected' : '') + '>' + TAX_LABEL[k] + '</option>').join('');
+    wrap.innerHTML = '<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line,#E8E0D3)">' +
+      '<div class="acct-form">' +
+        '<div class="acct-field"><label>Code</label><input id="coaCode" value="' + esc(v.code) + '"' + (sys ? ' disabled' : '') + '></div>' +
+        '<div class="acct-field"><label>Name</label><input id="coaName" value="' + esc(v.name) + '"></div>' +
+        '<div class="acct-field"><label>Type</label><select id="coaType"' + (sys ? ' disabled' : '') + '>' + typeOpts + '</select></div>' +
+        '<div class="acct-field"><label>Default tax</label><select id="coaTax">' + taxOpts + '</select></div>' +
+        '<div class="acct-field" style="grid-column:1/-1"><label>Description (optional)</label><input id="coaDesc" value="' + esc(v.description || '') + '"></div>' +
+      '</div>' +
+      (sys ? '<div style="font-size:12px;color:var(--muted);margin-top:8px">This is a control account — its code and type are fixed because the ledger posts to it. You can still rename it, add a description or change its default tax.</div>' : '') +
+      '<div class="acct-actions" style="margin-top:12px">' +
+        '<button class="acct-btn primary" id="coaSave">' + (isEdit ? 'Save changes' : 'Add account') + '</button>' +
+        '<button class="acct-btn ghost" id="coaCancel">Cancel</button>' +
+        '<span class="acct-msg" id="coaMsg"></span>' +
+      '</div></div>';
+    document.getElementById('coaCancel').addEventListener('click', () => { wrap.innerHTML = ''; });
+    document.getElementById('coaSave').addEventListener('click', () => coaSave(isEdit ? acct.id : null, sys));
+  }
+
+  async function coaSave(id, sys) {
+    const msg = document.getElementById('coaMsg'); msg.className = 'acct-msg'; msg.textContent = '';
+    const payload = {
+      name: document.getElementById('coaName').value.trim(),
+      tax_default: document.getElementById('coaTax').value,
+      description: document.getElementById('coaDesc').value.trim() || null,
+    };
+    if (!sys) { payload.code = document.getElementById('coaCode').value.trim(); payload.type = document.getElementById('coaType').value; }
+    try {
+      if (id) await api('/accounts/' + id, { method: 'PATCH', body: JSON.stringify(payload) });
+      else await api('/accounts', { method: 'POST', body: JSON.stringify(payload) });
+      accountsCache = null; // coding dropdowns must pick up the change
+      await renderChart(document.getElementById('acctBody'));
+    } catch (e) { msg.className = 'acct-msg err'; msg.textContent = e.message; }
+  }
+
+  window.__coaEdit = function (id) { const a = (window.__coaAll || []).find(x => x.id === id); coaOpenForm(a); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  window.__coaArchive = async function (id) {
+    if (!confirm('Archive this account? It stays in your history but won\u2019t show when coding.')) return;
+    try { await api('/accounts/' + id + '/archive', { method: 'POST' }); accountsCache = null; await renderChart(document.getElementById('acctBody')); } catch (e) { alert(e.message); }
+  };
+  window.__coaUnarchive = async function (id) {
+    try { await api('/accounts/' + id + '/unarchive', { method: 'POST' }); accountsCache = null; await renderChart(document.getElementById('acctBody')); } catch (e) { alert(e.message); }
+  };
+
   window.fkModules['accounts'] = {
     title: 'Accounts',
     render() { return STYLE + '<div class="acct-wrap"><div class="acct-ctx">FK Enterprises · India books · INR</div><div id="acctTabs"></div><div id="acctBody"></div></div>'; },
@@ -573,6 +710,7 @@ window.fkModules = window.fkModules || {};
         else if (tab === 'invoices') await renderInvoices(body);
         else if (tab === 'reconcile') await renderReconcile(body);
         else if (tab === 'reports') await renderReports(body);
+        else if (tab === 'chart') await renderChart(body);
       } catch (e) {
         body.innerHTML = '<div class="acct-card"><div class="acct-msg err">Could not load: ' + esc(e.message) + '</div></div>';
       }

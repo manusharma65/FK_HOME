@@ -293,7 +293,7 @@ async function profitAndLoss(conn, from, to) {
             AND ($1::date IS NULL OR j.entry_date >= $1::date)
             AND ($2::date IS NULL OR j.entry_date <= $2::date)
       WHERE a.type IN ('income','expense')
-      GROUP BY a.type, a.code, a.name ORDER BY a.sort`,
+      GROUP BY a.id, a.type, a.code, a.name ORDER BY a.sort`,
     [from || null, to || null]
   );
   let income = 0, expense = 0;
@@ -498,6 +498,99 @@ router.use(requireAuth);
 router.get('/accounts', requirePermission('accounts.view'), async (req, res) => {
   const r = await db.query('SELECT * FROM acc_account WHERE NOT is_archived ORDER BY sort, code');
   res.json(r.rows);
+});
+
+const ACCT_TYPES = ['asset', 'liability', 'equity', 'income', 'expense'];
+const TAX_DEFAULTS = ['none', 'gst18', 'gst12', 'gst5', 'zero'];
+
+// Full chart for the management screen: every account incl. archived, each with
+// its year-to-date net balance and whether it's a locked control account.
+router.get('/accounts/all', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT a.*,
+            COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0) AS net,
+            (a.system_tag IS NOT NULL) AS is_system
+       FROM acc_account a
+       LEFT JOIN acc_journal_line l ON l.account_id = a.id
+      GROUP BY a.id
+      ORDER BY a.sort, a.code`);
+  res.json(r.rows);
+});
+
+router.post('/accounts', requirePermission('accounts.post'), async (req, res) => {
+  const { code, name, type, tax_default = 'none', description = null } = req.body || {};
+  if (!code || !String(code).trim()) return res.status(400).json({ error: 'Code is required.' });
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'Name is required.' });
+  if (!ACCT_TYPES.includes(type)) return res.status(400).json({ error: 'Pick an account type.' });
+  if (!TAX_DEFAULTS.includes(tax_default)) return res.status(400).json({ error: 'Invalid tax default.' });
+  try {
+    const dup = await db.query('SELECT 1 FROM acc_account WHERE lower(code) = lower($1)', [String(code).trim()]);
+    if (dup.rows.length) return res.status(400).json({ error: 'That code is already in use.' });
+    const s = await db.query('SELECT COALESCE(MAX(sort), 0) + 10 AS s FROM acc_account WHERE type = $1', [type]);
+    const r = await db.query(
+      `INSERT INTO acc_account (code, name, type, tax_default, description, sort)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [String(code).trim(), String(name).trim(), type, tax_default, description, s.rows[0].s]);
+    await logAudit({ req, module: 'accounts', action: 'account.create', target_type: 'acc_account', target_id: r.rows[0].id });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.patch('/accounts/:id', requirePermission('accounts.post'), async (req, res) => {
+  const { name, type, tax_default, description, code } = req.body || {};
+  try {
+    const cur = await db.query('SELECT * FROM acc_account WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Account not found.' });
+    const acct = cur.rows[0];
+    const isSystem = acct.system_tag !== null;
+    // Control accounts are resolved by tag during posting, so their name, description
+    // and tax default are editable but their type + code stay locked.
+    if (type !== undefined && type !== acct.type) {
+      if (isSystem) return res.status(400).json({ error: 'A control account\u2019s type can\u2019t be changed.' });
+      if (!ACCT_TYPES.includes(type)) return res.status(400).json({ error: 'Pick an account type.' });
+    }
+    if (code !== undefined && String(code).trim() !== acct.code) {
+      if (isSystem) return res.status(400).json({ error: 'A control account\u2019s code can\u2019t be changed.' });
+      const dup = await db.query('SELECT 1 FROM acc_account WHERE lower(code) = lower($1) AND id <> $2', [String(code).trim(), acct.id]);
+      if (dup.rows.length) return res.status(400).json({ error: 'That code is already in use.' });
+    }
+    if (tax_default !== undefined && !TAX_DEFAULTS.includes(tax_default)) return res.status(400).json({ error: 'Invalid tax default.' });
+    const r = await db.query(
+      `UPDATE acc_account SET
+         name        = COALESCE($2, name),
+         type        = COALESCE($3, type),
+         tax_default = COALESCE($4, tax_default),
+         description = $5,
+         code        = COALESCE($6, code)
+       WHERE id = $1 RETURNING *`,
+      [acct.id,
+       name !== undefined ? String(name).trim() : null,
+       (type !== undefined && !isSystem) ? type : null,
+       tax_default !== undefined ? tax_default : null,
+       description !== undefined ? description : acct.description,
+       (code !== undefined && !isSystem) ? String(code).trim() : null]);
+    await logAudit({ req, module: 'accounts', action: 'account.edit', target_type: 'acc_account', target_id: acct.id });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Archive hides an account from coding dropdowns but keeps its history (Xero-style).
+// Control accounts can never be archived — the ledger posts to them.
+router.post('/accounts/:id/archive', requirePermission('accounts.post'), async (req, res) => {
+  try {
+    const cur = await db.query('SELECT * FROM acc_account WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Account not found.' });
+    if (cur.rows[0].system_tag !== null) return res.status(400).json({ error: 'A control account can\u2019t be archived \u2014 the ledger needs it.' });
+    await db.query('UPDATE acc_account SET is_archived = TRUE WHERE id = $1', [req.params.id]);
+    await logAudit({ req, module: 'accounts', action: 'account.archive', target_type: 'acc_account', target_id: Number(req.params.id) });
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.post('/accounts/:id/unarchive', requirePermission('accounts.post'), async (req, res) => {
+  await db.query('UPDATE acc_account SET is_archived = FALSE WHERE id = $1', [req.params.id]);
+  await logAudit({ req, module: 'accounts', action: 'account.unarchive', target_type: 'acc_account', target_id: Number(req.params.id) });
+  res.json({ ok: true });
 });
 
 router.post('/bills', requirePermission('accounts.post'), async (req, res) => {
@@ -747,25 +840,51 @@ router.get('/bank/summary', requirePermission('accounts.view'), async (req, res)
   res.json({ statement_balance: r2(stmt), books_balance: books, difference: r2(stmt - books), counts: c });
 });
 // Code a bank line to an account → posts the bank journal and marks it reconciled.
+// Code one unmatched bank line to an account: money in -> credit the account,
+// money out -> debit it, the bank control account takes the other leg.
+// Returns the new journal id. Caller owns the BEGIN/COMMIT.
+async function codeBankLine(client, lineId, accountId, userId) {
+  const lr = await client.query('SELECT * FROM acc_bank_line WHERE id = $1 FOR UPDATE', [lineId]);
+  if (!lr.rows.length) throw new Error('Line not found.');
+  const line = lr.rows[0];
+  if (line.status !== 'unmatched') throw new Error('Line ' + line.id + ' is already reconciled.');
+  const amt = Number(line.amount);
+  const lines = amt >= 0
+    ? [{ tag: 'idfc_bank', debit: amt }, { account_id: accountId, credit: amt }]   // money in
+    : [{ tag: 'idfc_bank', credit: -amt }, { account_id: accountId, debit: -amt }]; // money out
+  const jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Bank: ' + (line.description || ''), created_by: userId, lines });
+  await client.query("UPDATE acc_bank_line SET status='matched', match_type='manual', matched_journal_id=$2 WHERE id=$1", [line.id, jid]);
+  return jid;
+}
+
 router.post('/bank/lines/:id/code', requirePermission('accounts.reconcile'), async (req, res) => {
   const { account_id } = req.body || {};
   if (!account_id) return res.status(400).json({ error: 'Pick an account to code this to.' });
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
-    const lr = await client.query('SELECT * FROM acc_bank_line WHERE id = $1 FOR UPDATE', [req.params.id]);
-    if (!lr.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Line not found.' }); }
-    const line = lr.rows[0];
-    if (line.status !== 'unmatched') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'That line is already reconciled.' }); }
-    const amt = Number(line.amount);
-    const lines = amt >= 0
-      ? [{ tag: 'idfc_bank', debit: amt }, { account_id, credit: amt }]   // money in
-      : [{ tag: 'idfc_bank', credit: -amt }, { account_id, debit: -amt }]; // money out
-    const jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Bank: ' + (line.description || ''), created_by: req.user.id, lines });
-    await client.query("UPDATE acc_bank_line SET status='matched', match_type='manual', matched_journal_id=$2 WHERE id=$1", [line.id, jid]);
+    const jid = await codeBankLine(client, req.params.id, account_id, req.user.id);
     await client.query('COMMIT');
-    await logAudit({ req, module: 'accounts', action: 'bank.code', target_type: 'acc_bank_line', target_id: line.id });
+    await logAudit({ req, module: 'accounts', action: 'bank.code', target_type: 'acc_bank_line', target_id: Number(req.params.id) });
     res.json({ ok: true, journal_id: jid });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+
+// Bulk coding: tick several unmatched lines, code them all to one account at once.
+// All-or-nothing — if any line is already reconciled the whole batch rolls back.
+router.post('/bank/code-bulk', requirePermission('accounts.reconcile'), async (req, res) => {
+  const { line_ids, account_id } = req.body || {};
+  if (!account_id) return res.status(400).json({ error: 'Pick an account to code these to.' });
+  if (!Array.isArray(line_ids) || !line_ids.length) return res.status(400).json({ error: 'No lines selected.' });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    let coded = 0;
+    for (const id of line_ids) { await codeBankLine(client, id, account_id, req.user.id); coded++; }
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'bank.code_bulk', target_type: 'acc_bank_line', target_id: null });
+    res.json({ ok: true, coded });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
   finally { client.release(); }
 });
