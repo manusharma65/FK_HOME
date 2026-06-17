@@ -15,8 +15,14 @@
 // ---------------------------------------------------------------------------
 
 const express = require('express');
+const multer = require('multer');
+const crypto = require('crypto');
+const ExcelJS = require('exceljs');
 const { db } = require('../db');
 const { requireAuth, requirePermission, logAudit } = require('../auth');
+
+const sha = (x) => crypto.createHash('sha1').update(x).digest('hex');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
 const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -426,6 +432,66 @@ async function tickAccountsDailyTasks() {
   return generateAccountsDailyTasks(db, {});
 }
 
+// ===========================================================================
+// Bank statement import (IDFC FIRST xlsx)
+// ===========================================================================
+const MONTHS = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
+function parseDmy(s) {
+  const m = String(s || '').trim().match(/^(\d{2})-([A-Za-z]{3})-(\d{4})$/);
+  if (!m) return null;
+  const mm = MONTHS[m[2].toLowerCase()];
+  return mm ? `${m[3]}-${mm}-${m[1]}` : null;
+}
+function cellNum(v) {
+  if (v == null || v === '') return null;
+  const n = Number(String(v).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+function cellStr(v) {
+  if (v == null) return null;
+  if (typeof v === 'object' && v.text != null) return String(v.text).trim();   // exceljs rich text
+  if (typeof v === 'object' && v.result != null) return String(v.result).trim(); // formula cell
+  return String(v).trim();
+}
+
+// Parse an IDFC FIRST "Account Statement" workbook (Buffer) into normalised lines.
+// Layout confirmed against a real export: metadata rows, a summary block, then a
+// header row "Transaction Date | Value Date | Particulars | Cheque No. | Debit | Credit | Balance".
+async function parseBankStatement(buffer) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer);
+  const ws = wb.worksheets.find(w => /statement/i.test(w.name)) || wb.worksheets[0];
+  const rows = [];
+  ws.eachRow({ includeEmpty: true }, (row) => { rows.push(row.values || []); }); // values[1] = col A
+  let account = null, periodFrom = null, periodTo = null;
+  for (const r of rows) {
+    const a = (cellStr(r[1]) || '').toUpperCase();
+    if (a === 'ACCOUNT NUMBER') account = cellStr(r[2]);
+    if (a === 'STATEMENT PERIOD') {
+      const m = (cellStr(r[2]) || '').match(/(\d{2}-[A-Za-z]{3}-\d{4})\s*TO\s*(\d{2}-[A-Za-z]{3}-\d{4})/i);
+      if (m) { periodFrom = parseDmy(m[1]); periodTo = parseDmy(m[2]); }
+    }
+  }
+  let hdr = -1;
+  for (let i = 0; i < rows.length; i++) { if (cellStr(rows[i][1]) === 'Transaction Date') { hdr = i; break; } }
+  if (hdr < 0) throw new Error('Could not find the transaction table — is this an IDFC statement export?');
+  const dpat = /^\d{2}-[A-Za-z]{3}-\d{4}$/;
+  const lines = [];
+  for (let i = hdr + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const td = cellStr(r[1]);
+    if (!td || !dpat.test(td)) continue;
+    const debit = cellNum(r[5]) || 0;
+    const credit = cellNum(r[6]) || 0;
+    const amount = r2(credit - debit); // signed: + received, − spent
+    const description = cellStr(r[3]);
+    const balance = cellNum(r[7]);
+    const row_hash = sha([account, td, description, amount, balance].join('|'));
+    lines.push({ txn_date: parseDmy(td), description, ref: cellStr(r[4]), amount, running_balance: balance, row_hash });
+  }
+  return { account, periodFrom, periodTo, lines };
+}
+
 
 router.use(requireAuth);
 
@@ -568,18 +634,247 @@ router.post('/invoices/:id/void', requirePermission('accounts.post'), async (req
   res.json({ ok: true });
 });
 
-router.post('/opening', requirePermission('accounts.period.lock'), async (req, res) => {
+// Opening balances. Owner + accounts team. Editable: re-posting reverses the
+// previous opening entry and posts a fresh one, so the ledger stays auditable.
+router.get('/opening', requirePermission('accounts.view'), async (req, res) => {
+  const j = await db.query("SELECT id, entry_date FROM acc_journal WHERE source_type='opening' AND status='posted' ORDER BY id DESC LIMIT 1");
+  if (!j.rows.length) return res.json({ exists: false });
+  const lines = await db.query(
+    `SELECT a.system_tag, a.code, a.name, l.debit, l.credit
+       FROM acc_journal_line l JOIN acc_account a ON a.id = l.account_id
+      WHERE l.journal_id = $1 ORDER BY l.id`, [j.rows[0].id]);
+  res.json({ exists: true, journal_id: j.rows[0].id, date: j.rows[0].entry_date, lines: lines.rows });
+});
+router.post('/opening', requirePermission('accounts.post'), async (req, res) => {
+  const items = (req.body.items || []).filter(it => Number(it.debit || 0) !== 0 || Number(it.credit || 0) !== 0);
+  if (!items.length) return res.status(400).json({ error: 'Enter at least one opening balance.' });
+  const date = req.body.date || '2026-03-31';
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
-    const journalId = await postOpeningBalances(client, {
-      date: req.body.date, items: req.body.items || [], created_by: req.user.id,
-    });
+    const prev = await client.query("SELECT id FROM acc_journal WHERE source_type='opening' AND status='posted'");
+    for (const r of prev.rows) {
+      await reverseJournal(client, r.id, { reason: 'Opening balances edited', created_by: req.user.id, date });
+    }
+    const journalId = await postOpeningBalances(client, { date, items, created_by: req.user.id });
     await client.query('COMMIT');
-    await logAudit({ req, module: 'accounts', action: 'opening.post', target_type: 'acc_journal', target_id: journalId });
+    await logAudit({ req, module: 'accounts', action: prev.rows.length ? 'opening.edit' : 'opening.set', target_type: 'acc_journal', target_id: journalId });
     res.json({ ok: true, journal_id: journalId });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
   finally { client.release(); }
+});
+
+// --- bank statement import + reconcile worklist data ---
+router.post('/bank/import', requirePermission('accounts.reconcile'), upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+  const replace = String(req.body.replace || '') === 'true';
+  let parsed;
+  try { parsed = await parseBankStatement(req.file.buffer); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!parsed.lines.length) return res.status(400).json({ error: 'No transactions found in that file.' });
+  // Statement period: prefer the header, else fall back to the min/max transaction date.
+  const dates = parsed.lines.map(l => l.txn_date).filter(Boolean).sort();
+  const from = parsed.periodFrom || dates[0];
+  const to = parsed.periodTo || dates[dates.length - 1];
+  const fileHash = sha(req.file.buffer);
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    // Block any statement whose date range overlaps one already imported.
+    const ov = await client.query(
+      `SELECT i.id, i.filename, i.period_from, i.period_to,
+              (SELECT COUNT(*) FROM acc_bank_line l WHERE l.import_id = i.id AND l.status = 'matched') AS matched
+         FROM acc_bank_import i
+        WHERE i.period_from IS NOT NULL AND i.period_to IS NOT NULL
+          AND i.period_from <= $1::date AND i.period_to >= $2::date`,
+      [to, from]);
+    if (ov.rows.length && !replace) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'overlap', needs_replace: true,
+        message: 'A statement covering these dates has already been imported.',
+        overlaps: ov.rows.map(r => ({ id: r.id, filename: r.filename, period_from: r.period_from, period_to: r.period_to, matched: Number(r.matched) })),
+      });
+    }
+    if (ov.rows.length && replace) {
+      const lockedMatched = ov.rows.reduce((s, r) => s + Number(r.matched), 0);
+      if (lockedMatched > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'has_reconciled', message: `Can't replace — ${lockedMatched} line(s) in the existing statement are already reconciled. Unreconcile those first, then replace.` });
+      }
+      for (const r of ov.rows) await client.query('DELETE FROM acc_bank_import WHERE id = $1', [r.id]); // cascade clears its lines
+    }
+    const imp = await client.query(
+      `INSERT INTO acc_bank_import (filename, hash, period_from, period_to, row_count, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (hash) DO NOTHING RETURNING id`,
+      [req.file.originalname, fileHash, from, to, parsed.lines.length, req.user.id]);
+    if (!imp.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'duplicate', message: 'This exact statement has already been imported.' }); }
+    const importId = imp.rows[0].id;
+    for (const l of parsed.lines) {
+      await client.query(
+        `INSERT INTO acc_bank_line (import_id, txn_date, description, ref, amount, running_balance, row_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [importId, l.txn_date, l.description, l.ref, l.amount, l.running_balance, l.row_hash]);
+    }
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'bank.import', target_type: 'acc_bank_import', target_id: importId });
+    res.json({ ok: true, import_id: importId, account: parsed.account, lines: parsed.lines.length, period_from: from, period_to: to, replaced: ov.rows.length });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+router.get('/bank/imports', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT i.*, (SELECT COUNT(*) FROM acc_bank_line l WHERE l.import_id = i.id AND l.status = 'unmatched') AS unmatched
+       FROM acc_bank_import i ORDER BY i.id DESC`);
+  res.json(r.rows);
+});
+router.get('/bank/lines', requirePermission('accounts.view'), async (req, res) => {
+  const params = []; const clauses = [];
+  if (req.query.status) { params.push(req.query.status); clauses.push('status = $' + params.length); }
+  if (req.query.import_id) { params.push(req.query.import_id); clauses.push('import_id = $' + params.length); }
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const r = await db.query(`SELECT * FROM acc_bank_line ${where} ORDER BY txn_date, id`, params);
+  res.json(r.rows);
+});
+// Two-balance reconcile header: bank's statement balance vs the books, + progress.
+router.get('/bank/summary', requirePermission('accounts.view'), async (req, res) => {
+  const last = await db.query("SELECT running_balance FROM acc_bank_line ORDER BY txn_date DESC, id DESC LIMIT 1");
+  const stmt = last.rows.length ? Number(last.rows[0].running_balance) : 0;
+  const books = await tagBalance('idfc_bank');
+  const counts = await db.query("SELECT status, COUNT(*) n FROM acc_bank_line GROUP BY status");
+  const c = { unmatched: 0, matched: 0, ignored: 0 };
+  counts.rows.forEach(r => { c[r.status] = Number(r.n); });
+  res.json({ statement_balance: r2(stmt), books_balance: books, difference: r2(stmt - books), counts: c });
+});
+// Code a bank line to an account → posts the bank journal and marks it reconciled.
+router.post('/bank/lines/:id/code', requirePermission('accounts.reconcile'), async (req, res) => {
+  const { account_id } = req.body || {};
+  if (!account_id) return res.status(400).json({ error: 'Pick an account to code this to.' });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const lr = await client.query('SELECT * FROM acc_bank_line WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (!lr.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Line not found.' }); }
+    const line = lr.rows[0];
+    if (line.status !== 'unmatched') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'That line is already reconciled.' }); }
+    const amt = Number(line.amount);
+    const lines = amt >= 0
+      ? [{ tag: 'idfc_bank', debit: amt }, { account_id, credit: amt }]   // money in
+      : [{ tag: 'idfc_bank', credit: -amt }, { account_id, debit: -amt }]; // money out
+    const jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Bank: ' + (line.description || ''), created_by: req.user.id, lines });
+    await client.query("UPDATE acc_bank_line SET status='matched', match_type='manual', matched_journal_id=$2 WHERE id=$1", [line.id, jid]);
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'bank.code', target_type: 'acc_bank_line', target_id: line.id });
+    res.json({ ok: true, journal_id: jid });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+router.post('/bank/lines/:id/ignore', requirePermission('accounts.reconcile'), async (req, res) => {
+  const r = await db.query("UPDATE acc_bank_line SET status='ignored' WHERE id=$1 AND status='unmatched' RETURNING id", [req.params.id]);
+  if (!r.rows.length) return res.status(400).json({ error: 'Only an unmatched line can be set aside.' });
+  res.json({ ok: true });
+});
+router.post('/bank/lines/:id/unmatch', requirePermission('accounts.reconcile'), async (req, res) => {
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const lr = await client.query('SELECT * FROM acc_bank_line WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (!lr.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Line not found.' }); }
+    const line = lr.rows[0];
+    if (line.status === 'ignored') {
+      await client.query("UPDATE acc_bank_line SET status='unmatched' WHERE id=$1", [line.id]);
+      await client.query('COMMIT'); return res.json({ ok: true });
+    }
+    if (line.status !== 'matched' || !line.matched_journal_id) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Nothing to undo on that line.' }); }
+    await reverseJournal(client, line.matched_journal_id, { reason: 'Bank line unreconciled', created_by: req.user.id, date: line.txn_date });
+    // If this line had settled an invoice/bill, re-open it.
+    await client.query("UPDATE acc_invoice SET status='posted', settled_journal_id=NULL WHERE settled_journal_id=$1", [line.matched_journal_id]);
+    await client.query("UPDATE acc_bill SET status='posted', settled_journal_id=NULL WHERE settled_journal_id=$1", [line.matched_journal_id]);
+    await client.query("UPDATE acc_bank_line SET status='unmatched', match_type=NULL, matched_journal_id=NULL WHERE id=$1", [line.id]);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+
+// Open documents to match a bank line against.
+router.get('/open-invoices', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT i.id, i.invoice_date, i.amount_inr, i.currency, i.taxable_amount, c.name AS contact_name
+       FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id
+      WHERE i.status = 'posted' ORDER BY i.invoice_date, i.id`);
+  res.json(r.rows);
+});
+router.get('/open-bills', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT b.id, b.bill_date, b.net_payable, c.name AS contact_name
+       FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
+      WHERE b.status = 'posted' ORDER BY b.bill_date, b.id`);
+  res.json(r.rows);
+});
+// Match a bank line to an invoice (receipt) or bill (payment); books any FX difference.
+router.post('/bank/lines/:id/match', requirePermission('accounts.reconcile'), async (req, res) => {
+  const { doc_type, doc_id } = req.body || {};
+  if (!['invoice', 'bill'].includes(doc_type) || !doc_id) return res.status(400).json({ error: 'Choose an invoice or bill to match.' });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const lr = await client.query('SELECT * FROM acc_bank_line WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (!lr.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Line not found.' }); }
+    const line = lr.rows[0];
+    if (line.status !== 'unmatched') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'That line is already reconciled.' }); }
+    const amt = Number(line.amount);
+    let lines, jid;
+    if (doc_type === 'invoice') {
+      if (amt <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A money-out line cannot settle a customer invoice.' }); }
+      const d = await client.query("SELECT * FROM acc_invoice WHERE id=$1 AND status='posted' FOR UPDATE", [doc_id]);
+      if (!d.rows.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Invoice not open.' }); }
+      const ar = Number(d.rows[0].amount_inr);
+      lines = [{ tag: 'idfc_bank', debit: amt }, { tag: 'accounts_receivable', credit: ar }];
+      const fx = r2(amt - ar);
+      if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx });
+      else if (fx < 0) lines.push({ tag: 'fx_gain_loss', debit: -fx });
+      jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Receipt settles invoice #' + doc_id, created_by: req.user.id, lines });
+      await client.query("UPDATE acc_invoice SET status='paid', settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
+    } else {
+      if (amt >= 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A money-in line cannot settle a supplier bill.' }); }
+      const paid = -amt;
+      const d = await client.query("SELECT * FROM acc_bill WHERE id=$1 AND status='posted' FOR UPDATE", [doc_id]);
+      if (!d.rows.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Bill not open.' }); }
+      const ap = Number(d.rows[0].net_payable);
+      lines = [{ tag: 'accounts_payable', debit: ap }, { tag: 'idfc_bank', credit: paid }];
+      const fx = r2(ap - paid);
+      if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx });
+      else if (fx < 0) lines.push({ tag: 'fx_gain_loss', debit: -fx });
+      jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Payment settles bill #' + doc_id, created_by: req.user.id, lines });
+      await client.query("UPDATE acc_bill SET status='paid', settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
+    }
+    await client.query("UPDATE acc_bank_line SET status='matched', match_type=$2, matched_journal_id=$3 WHERE id=$1", [line.id, doc_type, jid]);
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'bank.match', target_type: 'acc_bank_line', target_id: line.id });
+    res.json({ ok: true, journal_id: jid });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+// AR / AP aging — open invoices and bills bucketed by age.
+router.get('/reports/aging', requirePermission('accounts.view'), async (req, res) => {
+  const buckets = (col) => `
+      SUM(amt) AS total,
+      SUM(CASE WHEN CURRENT_DATE - ${col} <= 30 THEN amt ELSE 0 END) AS b0,
+      SUM(CASE WHEN CURRENT_DATE - ${col} BETWEEN 31 AND 60 THEN amt ELSE 0 END) AS b30,
+      SUM(CASE WHEN CURRENT_DATE - ${col} BETWEEN 61 AND 90 THEN amt ELSE 0 END) AS b60,
+      SUM(CASE WHEN CURRENT_DATE - ${col} > 90 THEN amt ELSE 0 END) AS b90`;
+  const ar = await db.query(
+    `SELECT contact, ${buckets('d')} FROM (
+        SELECT COALESCE(c.name,'—') AS contact, i.amount_inr AS amt, i.invoice_date AS d
+          FROM acc_invoice i LEFT JOIN acc_contact c ON c.id=i.contact_id
+         WHERE i.status='posted') x GROUP BY contact ORDER BY total DESC`);
+  const ap = await db.query(
+    `SELECT contact, ${buckets('d')} FROM (
+        SELECT COALESCE(c.name,'—') AS contact, b.net_payable AS amt, b.bill_date AS d
+          FROM acc_bill b LEFT JOIN acc_contact c ON c.id=b.contact_id
+         WHERE b.status='posted') x GROUP BY contact ORDER BY total DESC`);
+  res.json({ receivables: ar.rows, payables: ap.rows });
 });
 
 module.exports = router;
@@ -590,5 +885,5 @@ module.exports.engine = {
   seedChartOfAccounts, accountIdByTag, postJournal, computeBill, createBill, postBill,
   createInvoice, postInvoice, reverseJournal, trialBalance, profitAndLoss, balanceSheet,
   postOpeningBalances, lockPeriod, isPeriodLocked, period,
-  generateAccountsDailyTasks, weekdayName,
+  generateAccountsDailyTasks, weekdayName, parseBankStatement, parseDmy,
 };

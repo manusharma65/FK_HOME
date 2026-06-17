@@ -22,6 +22,7 @@ window.fkModules = window.fkModules || {};
     { key: 'overview', hash: '#accounts', label: 'Overview', icon: 'ti-layout-dashboard' },
     { key: 'bills', hash: '#accounts/bills', label: 'Bills', icon: 'ti-file-invoice' },
     { key: 'invoices', hash: '#accounts/invoices', label: 'Invoices', icon: 'ti-receipt' },
+    { key: 'reconcile', hash: '#accounts/reconcile', label: 'Reconcile', icon: 'ti-arrows-exchange' },
     { key: 'reports', hash: '#accounts/reports', label: 'Reports', icon: 'ti-chart-bar' },
   ];
   function activeTab(fullKey) {
@@ -72,8 +73,15 @@ window.fkModules = window.fkModules || {};
 
   // ---------------- Overview ----------------
   async function renderOverview(body) {
-    const o = await api('/overview');
+    const [o, op] = await Promise.all([api('/overview'), api('/opening')]);
     const kpi = (l, v) => '<div class="acct-kpi"><div class="l">' + l + '</div><div class="v">' + v + '</div></div>';
+    const openingCard = op.exists
+      ? '<div class="acct-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px">' +
+          '<div><h3 style="margin:0">Opening balances</h3><div style="font-size:13px;color:var(--muted);margin-top:3px">Set as at ' + esc(String(op.date).slice(0, 10)) + '</div></div>' +
+          '<button class="acct-btn" id="opEdit"><i class="ti ti-pencil"></i>Edit</button></div></div>'
+      : '<div class="acct-card" style="border-color:var(--orange)"><h3>Opening balances</h3>' +
+          '<div style="font-size:14px;color:var(--muted);margin-bottom:13px">Set your starting position as at 31 March 2026 — bank balance, what FK Sports owes you, and anything you owe out — so the books open from the right place.</div>' +
+          '<button class="acct-btn primary" id="opSet"><i class="ti ti-adjustments"></i>Set opening balances</button></div>';
     body.innerHTML =
       '<div class="acct-kpis">' +
         kpi('IDFC bank', inr(o.bank)) +
@@ -89,8 +97,112 @@ window.fkModules = window.fkModules || {};
         '<button class="acct-btn ghost" onclick="location.hash=\'#accounts/reports\'"><i class="ti ti-chart-bar"></i>Reports</button>' +
       '</div>' +
       ((o.draft_bills + o.draft_invoices) ? '<div class="acct-msg" style="margin-top:12px;color:var(--muted)">You have ' + (o.draft_bills + o.draft_invoices) + ' draft(s) waiting to be posted to the books.</div>' : '') +
-      '</div>';
+      '</div>' +
+      openingCard +
+      '<div id="opFormWrap"></div>';
+    const setBtn = document.getElementById('opSet'); if (setBtn) setBtn.addEventListener('click', () => renderOpeningForm(document.getElementById('opFormWrap')));
+    const editBtn = document.getElementById('opEdit'); if (editBtn) editBtn.addEventListener('click', () => renderOpeningForm(document.getElementById('opFormWrap'), op));
   }
+
+  // ---------------- Opening balances ----------------
+  const OPENING_FIELDS = [
+    { tag: 'idfc_bank', label: 'IDFC bank balance', side: 'debit' },
+    { tag: 'accounts_receivable', label: 'FK Sports owes FK Enterprises', side: 'debit' },
+    { tag: 'accounts_payable', label: 'Owed to suppliers', side: 'credit' },
+    { tag: 'input_gst', label: 'GST input credit carried forward', side: 'debit' },
+    { tag: 'output_gst', label: 'GST payable carried forward', side: 'credit' },
+    { tag: 'tds_payable', label: 'TDS payable carried forward', side: 'credit' },
+  ];
+  function opSideLabel(side) { return side === 'debit' ? 'asset' : 'owed'; }
+
+  async function renderOpeningForm(container, existing) {
+    const { accounts } = await lookups();
+    window.__opAcctOpts = accounts.map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
+    const pre = {}, others = [];
+    if (existing && existing.lines) {
+      for (const l of existing.lines) {
+        if (l.system_tag === 'opening_balance_equity') continue; // auto plug — never edited directly
+        const known = OPENING_FIELDS.find(f => f.tag === l.system_tag);
+        const amt = Number(l.debit) > 0 ? Number(l.debit) : Number(l.credit);
+        if (known) pre[l.system_tag] = amt; else others.push(l);
+      }
+    }
+    const date = existing && existing.date ? String(existing.date).slice(0, 10) : '2026-03-31';
+    const fieldRows = OPENING_FIELDS.map(f =>
+      '<div class="acct-field"><label>' + f.label + ' (' + opSideLabel(f.side) + ')</label>' +
+      '<input type="number" min="0" step="0.01" data-op-tag="' + f.tag + '" data-side="' + f.side + '" value="' + (pre[f.tag] || '') + '" oninput="window.__opCalc()"></div>').join('');
+    container.innerHTML =
+      '<div class="acct-card"><h3>' + (existing && existing.exists ? 'Edit opening balances' : 'Set opening balances') + '</h3>' +
+      (existing && existing.exists ? '<div class="acct-msg" style="color:var(--muted);margin:0 0 12px">Saving replaces the previous opening entry — the old one is reversed and kept for the record.</div>' : '') +
+      '<div class="acct-field" style="max-width:220px;margin-bottom:14px"><label>As at</label><input id="opDate" type="date" value="' + date + '"></div>' +
+      '<div class="acct-form">' + fieldRows + '</div>' +
+      '<div id="opOther"></div>' +
+      '<div class="acct-actions" style="margin-top:10px"><button class="acct-btn ghost" id="opAddLine"><i class="ti ti-plus"></i>Add another line</button></div>' +
+      '<div class="acct-net"><span style="color:var(--muted);font-size:13px">Balancing to Opening balance equity</span><span class="v" id="opPlug">₹0</span></div>' +
+      '<div class="acct-actions" style="margin-top:14px"><button class="acct-btn primary" id="opSave"><i class="ti ti-check"></i>' + (existing && existing.exists ? 'Save changes' : 'Post opening balances') + '</button><button class="acct-btn ghost" id="opCancel">Cancel</button></div>' +
+      '<div class="acct-msg" id="opMsg"></div></div>';
+    others.forEach(o => addOpeningLine(o));
+    document.getElementById('opAddLine').addEventListener('click', () => addOpeningLine());
+    document.getElementById('opCancel').addEventListener('click', () => { container.innerHTML = ''; });
+    document.getElementById('opSave').addEventListener('click', () => saveOpening(container));
+    window.__opCalc();
+    container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function addOpeningLine(line) {
+    const wrap = document.getElementById('opOther');
+    const row = document.createElement('div');
+    row.className = 'acct-form op-other-row'; row.style.marginTop = '10px';
+    row.innerHTML =
+      '<div class="acct-field"><label>Account</label><select class="op-acct">' + window.__opAcctOpts + '</select></div>' +
+      '<div class="acct-field"><label>Side</label><select class="op-side"><option value="debit">Debit (asset)</option><option value="credit">Credit (owed)</option></select></div>' +
+      '<div class="acct-field"><label>Amount (₹)</label><input class="op-amt" type="number" min="0" step="0.01" oninput="window.__opCalc()"></div>' +
+      '<div class="acct-field" style="align-self:end"><button class="acct-btn ghost op-del" title="Remove line"><i class="ti ti-trash"></i></button></div>';
+    wrap.appendChild(row);
+    if (line) {
+      const acc = (accountsCache || []).find(a => a.system_tag === line.system_tag);
+      if (acc) row.querySelector('.op-acct').value = acc.id;
+      const side = Number(line.debit) > 0 ? 'debit' : 'credit';
+      row.querySelector('.op-side').value = side;
+      row.querySelector('.op-amt').value = Number(line.debit) > 0 ? line.debit : line.credit;
+    }
+    row.querySelector('.op-side').addEventListener('change', () => window.__opCalc());
+    row.querySelector('.op-del').addEventListener('click', () => { row.remove(); window.__opCalc(); });
+    window.__opCalc();
+  }
+
+  window.__opCalc = function () {
+    let d = 0, c = 0;
+    document.querySelectorAll('[data-op-tag]').forEach(inp => {
+      const v = Number(inp.value || 0); if (!v) return;
+      if (inp.getAttribute('data-side') === 'debit') d += v; else c += v;
+    });
+    document.querySelectorAll('.op-other-row').forEach(row => {
+      const v = Number(row.querySelector('.op-amt').value || 0); if (!v) return;
+      if (row.querySelector('.op-side').value === 'debit') d += v; else c += v;
+    });
+    const plug = r2(d - c), el = document.getElementById('opPlug'); if (!el) return;
+    el.textContent = plug > 0 ? inr(plug) + ' (Cr)' : plug < 0 ? inr(-plug) + ' (Dr)' : '₹0 — already balanced';
+  };
+
+  async function saveOpening(container) {
+    const msg = document.getElementById('opMsg'); msg.className = 'acct-msg';
+    const items = [];
+    document.querySelectorAll('[data-op-tag]').forEach(inp => {
+      const v = Number(inp.value || 0); if (!v) return;
+      items.push({ tag: inp.getAttribute('data-op-tag'), [inp.getAttribute('data-side')]: v });
+    });
+    document.querySelectorAll('.op-other-row').forEach(row => {
+      const v = Number(row.querySelector('.op-amt').value || 0); if (!v) return;
+      items.push({ account_id: Number(row.querySelector('.op-acct').value), [row.querySelector('.op-side').value]: v });
+    });
+    if (!items.length) { msg.className = 'acct-msg err'; msg.textContent = 'Enter at least one balance.'; return; }
+    try {
+      await api('/opening', { method: 'POST', body: JSON.stringify({ date: document.getElementById('opDate').value, items }) });
+      const b = document.getElementById('acctBody'); if (b) await renderOverview(b);
+    } catch (e) { msg.className = 'acct-msg err'; msg.textContent = e.message; }
+  }
+
 
   // ---------------- Bills ----------------
   let contactsCache = null, accountsCache = null;
@@ -263,10 +375,12 @@ window.fkModules = window.fkModules || {};
   // ---------------- Reports ----------------
   async function renderReports(body) {
     body.innerHTML =
-      '<div class="acct-actions" style="margin-bottom:16px">' +
+      '<div class="acct-actions" style="margin-bottom:16px;flex-wrap:wrap">' +
         '<button class="acct-btn primary" id="rTB">Trial balance</button>' +
         '<button class="acct-btn" id="rPL">Profit &amp; loss</button>' +
         '<button class="acct-btn" id="rBS">Balance sheet</button>' +
+        '<button class="acct-btn" id="rAR">AR aging</button>' +
+        '<button class="acct-btn" id="rAP">AP aging</button>' +
       '</div><div id="rOut"></div>';
     const out = document.getElementById('rOut');
     document.getElementById('rTB').addEventListener('click', async () => {
@@ -293,7 +407,156 @@ window.fkModules = window.fkModules || {};
         '<tr><td>Equity (incl. profit ' + inr(bs.net_profit) + ')</td><td class="num">' + inr(bs.equity) + '</td></tr>' +
         '</tbody></table><div class="acct-msg ' + (bs.balanced ? 'ok' : 'err') + '">' + (bs.balanced ? 'Assets = liabilities + equity.' : 'Does not balance.') + '</div></div>';
     });
+    document.getElementById('rAR').addEventListener('click', async () => {
+      const a = await api('/reports/aging'); out.innerHTML = agingTable('Receivables — what FK Sports owes you', a.receivables);
+    });
+    document.getElementById('rAP').addEventListener('click', async () => {
+      const a = await api('/reports/aging'); out.innerHTML = agingTable('Payables — what you owe suppliers', a.payables);
+    });
     document.getElementById('rTB').click();
+  }
+
+  function agingTable(title, rows) {
+    if (!rows.length) return '<div class="acct-card"><h3>' + title + '</h3><div class="acct-empty">Nothing outstanding.</div></div>';
+    const cell = v => inr(Number(v || 0));
+    const tot = (k) => rows.reduce((s, r) => s + Number(r[k] || 0), 0);
+    return '<div class="acct-card"><h3>' + title + '</h3><table class="acct"><thead><tr>' +
+      '<th>Contact</th><th class="num">Current</th><th class="num">31–60</th><th class="num">61–90</th><th class="num">90+</th><th class="num">Total</th></tr></thead><tbody>' +
+      rows.map(r => '<tr><td>' + esc(r.contact) + '</td><td class="num">' + cell(r.b0) + '</td><td class="num">' + cell(r.b30) + '</td><td class="num">' + cell(r.b60) + '</td><td class="num">' + cell(r.b90) + '</td><td class="num">' + cell(r.total) + '</td></tr>').join('') +
+      '<tr style="font-weight:500"><td>Total</td><td class="num">' + cell(tot('b0')) + '</td><td class="num">' + cell(tot('b30')) + '</td><td class="num">' + cell(tot('b60')) + '</td><td class="num">' + cell(tot('b90')) + '</td><td class="num">' + cell(tot('total')) + '</td></tr>' +
+      '</tbody></table></div>';
+  }
+
+  // ---------------- Reconcile ----------------
+  async function renderReconcile(body) {
+    const { accounts } = await lookups();
+    window.__recAcctOpts = accounts.filter(a => a.system_tag !== 'idfc_bank')
+      .map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
+    body.innerHTML =
+      '<div id="recHeader"></div>' +
+      '<div class="acct-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">' +
+        '<div><h3 style="margin:0">Import a statement</h3><div style="font-size:13px;color:var(--muted);margin-top:3px">IDFC FIRST Excel export (.xlsx). A statement that overlaps one already imported will offer to replace it.</div></div>' +
+        '<label class="acct-btn primary" style="cursor:pointer"><i class="ti ti-upload"></i>Choose file<input id="recFile" type="file" accept=".xlsx" style="display:none"></label>' +
+      '</div><div class="acct-msg" id="recMsg"></div></div>' +
+      '<div class="acct-card"><div class="acct-actions" style="margin-bottom:12px">' +
+        '<button class="acct-btn" data-recview="unmatched">To reconcile</button>' +
+        '<button class="acct-btn ghost" data-recview="matched">Reconciled</button>' +
+        '<button class="acct-btn ghost" data-recview="ignored">Set aside</button>' +
+      '</div><div id="recList"><div class="acct-empty">Loading…</div></div></div>';
+    document.getElementById('recFile').addEventListener('change', uploadStatement);
+    body.querySelectorAll('[data-recview]').forEach(b => b.addEventListener('click', () => {
+      body.querySelectorAll('[data-recview]').forEach(x => x.classList.add('ghost'));
+      b.classList.remove('ghost'); loadRecList(b.getAttribute('data-recview'));
+    }));
+    await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched');
+  }
+
+  async function refreshOpenDocs() {
+    window.__recOpenInv = await api('/open-invoices').catch(() => []);
+    window.__recOpenBill = await api('/open-bills').catch(() => []);
+  }
+
+  async function loadSummary() {
+    const el = document.getElementById('recHeader'); if (!el) return;
+    const s = await api('/bank/summary');
+    const diffColour = s.difference === 0 ? 'var(--green,#3B6D11)' : 'var(--red)';
+    el.innerHTML = '<div class="acct-kpis">' +
+      '<div class="acct-kpi"><div class="l">Statement balance</div><div class="v">' + inr(s.statement_balance) + '</div></div>' +
+      '<div class="acct-kpi"><div class="l">Books balance</div><div class="v">' + inr(s.books_balance) + '</div></div>' +
+      '<div class="acct-kpi"><div class="l">Difference</div><div class="v" style="color:' + diffColour + '">' + inr(s.difference) + '</div></div>' +
+      '<div class="acct-kpi"><div class="l">To reconcile</div><div class="v">' + s.counts.unmatched + '</div></div>' +
+    '</div>';
+  }
+
+  async function loadRecList(view) {
+    const el = document.getElementById('recList'); if (!el) return;
+    el.innerHTML = '<div class="acct-empty">Loading…</div>';
+    const lines = await api('/bank/lines?status=' + view);
+    if (!lines.length) {
+      el.innerHTML = '<div class="acct-empty">' + (view === 'unmatched' ? 'Nothing to reconcile — import a statement above.' : 'Nothing here.') + '</div>';
+      return;
+    }
+    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th style="width:42%"></th></tr></thead><tbody>' +
+      lines.map(l => {
+        const amt = Number(l.amount);
+        const inCol = amt > 0 ? inr(amt) : '';
+        const outCol = amt < 0 ? inr(-amt) : '';
+        const action = view === 'unmatched'
+          ? '<div class="acct-actions" style="justify-content:flex-end">' +
+              '<select class="rec-acct" data-line="' + l.id + '" style="min-width:180px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + window.__recAcctOpts + '</select>' +
+              '<button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button>' +
+              '<button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Match…</button>' +
+              '<button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button></div>'
+          : '<div class="acct-actions" style="justify-content:flex-end"><button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
+        return '<tr><td style="white-space:nowrap">' + esc(String(l.txn_date).slice(0, 10)) + '</td>' +
+          '<td style="font-size:13px">' + esc(l.description || '') + '</td>' +
+          '<td class="num" style="color:var(--green,#3B6D11)">' + inCol + '</td>' +
+          '<td class="num">' + outCol + '</td><td id="recact-' + l.id + '">' + action + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  function currentRecView() {
+    const a = document.querySelector('[data-recview]:not(.ghost)');
+    return a ? a.getAttribute('data-recview') : 'unmatched';
+  }
+  window.__recCode = async function (id) {
+    const sel = document.querySelector('.rec-acct[data-line="' + id + '"]');
+    try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify({ account_id: sel ? Number(sel.value) : null }) }); await loadSummary(); await loadRecList('unmatched'); }
+    catch (e) { alert(e.message); }
+  };
+  window.__recIgnore = async function (id) {
+    try { await api('/bank/lines/' + id + '/ignore', { method: 'POST' }); await loadSummary(); await loadRecList('unmatched'); }
+    catch (e) { alert(e.message); }
+  };
+  window.__recUndo = async function (id) {
+    try { await api('/bank/lines/' + id + '/unmatch', { method: 'POST' }); await refreshOpenDocs(); await loadSummary(); await loadRecList(currentRecView()); }
+    catch (e) { alert(e.message); }
+  };
+  window.__recReload = function () { loadRecList(currentRecView()); };
+  window.__recMatch = function (id, amt) {
+    const type = amt > 0 ? 'invoice' : 'bill';
+    const docs = amt > 0 ? (window.__recOpenInv || []) : (window.__recOpenBill || []);
+    if (!docs.length) { alert(amt > 0 ? 'No open invoices to match against.' : 'No open bills to match against.'); return; }
+    const opts = docs.map(d => '<option value="' + d.id + '">' +
+      (type === 'invoice'
+        ? 'Inv #' + d.id + ' · ' + esc(d.contact_name || '—') + ' · ' + inr(d.amount_inr)
+        : 'Bill #' + d.id + ' · ' + esc(d.contact_name || '—') + ' · ' + inr(d.net_payable)) + '</option>').join('');
+    const cell = document.getElementById('recact-' + id);
+    if (cell) cell.innerHTML = '<div class="acct-actions" style="justify-content:flex-end">' +
+      '<select id="recMatchSel-' + id + '" style="min-width:230px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + opts + '</select>' +
+      '<button class="acct-btn primary" onclick="window.__recMatchConfirm(' + id + ",'" + type + "')\">Match</button>" +
+      '<button class="acct-btn ghost" onclick="window.__recReload()">Cancel</button></div>';
+  };
+  window.__recMatchConfirm = async function (id, type) {
+    const sel = document.getElementById('recMatchSel-' + id);
+    try {
+      await api('/bank/lines/' + id + '/match', { method: 'POST', body: JSON.stringify({ doc_type: type, doc_id: sel ? Number(sel.value) : null }) });
+      await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched');
+    } catch (e) { alert(e.message); }
+  };
+
+  async function uploadStatement(e) {
+    const file = e.target.files[0]; e.target.value = '';
+    if (!file) return;
+    const msg = document.getElementById('recMsg'); msg.className = 'acct-msg'; msg.textContent = 'Importing…';
+    const doUpload = async (replace) => {
+      const fd = new FormData(); fd.append('file', file); if (replace) fd.append('replace', 'true');
+      const r = await fetch(API + '/bank/import', { method: 'POST', credentials: 'include', body: fd });
+      return { r, data: await r.json().catch(() => ({})) };
+    };
+    try {
+      let { r, data } = await doUpload(false);
+      if (r.status === 409 && data.needs_replace) {
+        const ov = (data.overlaps || []).map(o => String(o.period_from).slice(0, 10) + ' to ' + String(o.period_to).slice(0, 10)).join(', ');
+        if (confirm('A statement covering these dates is already imported (' + ov + '). Replace it with this file?')) {
+          ({ r, data } = await doUpload(true));
+        } else { msg.textContent = ''; return; }
+      }
+      if (!r.ok) { msg.className = 'acct-msg err'; msg.textContent = data.message || data.error || 'Import failed.'; return; }
+      msg.className = 'acct-msg ok';
+      msg.textContent = 'Imported ' + data.lines + ' transactions' + (data.replaced ? ' (replaced the previous statement)' : '') + '.';
+      await loadSummary(); await loadRecList('unmatched');
+    } catch (err) { msg.className = 'acct-msg err'; msg.textContent = err.message; }
   }
 
   window.fkModules['accounts'] = {
@@ -308,6 +571,7 @@ window.fkModules = window.fkModules || {};
         if (tab === 'overview') await renderOverview(body);
         else if (tab === 'bills') await renderBills(body);
         else if (tab === 'invoices') await renderInvoices(body);
+        else if (tab === 'reconcile') await renderReconcile(body);
         else if (tab === 'reports') await renderReports(body);
       } catch (e) {
         body.innerHTML = '<div class="acct-card"><div class="acct-msg err">Could not load: ' + esc(e.message) + '</div></div>';
