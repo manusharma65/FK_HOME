@@ -48,11 +48,12 @@ const lifecycle = require('./server/modules/lifecycle');
 const dailyRoutes = require('./server/modules/daily');
 const mailRoutes = require('./server/modules/mail');
 const learningRoutes = require('./server/modules/learning');
+const accountsRoutes = require('./server/modules/accounts');
 const monitoring = require('./server/modules/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const VERSION = 'r1.30';
+const VERSION = 'r1.32';
 
 app.set('trust proxy', 1); // Railway sits behind a proxy
 app.use(express.json({ limit: '30mb' }));
@@ -98,6 +99,7 @@ app.use('/api/recruitment', recruitmentRoutes);
 app.use('/api/daily', dailyRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/learning', learningRoutes);
+app.use('/api/accounts', accountsRoutes);
 
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
@@ -227,6 +229,10 @@ function startCronJobs() {
     await lifecycle.tickBirthdayNudges()
       .then(r => console.log('[cron birthday nudge] nudged=' + r.nudged + ' candidates=' + r.candidates))
       .catch(e => console.error('[cron birthday nudge]', e.message));
+    // r1.32 — generate the Accounts team's weekday tasks (Mahima's routine).
+    await accountsRoutes.tickAccountsDailyTasks()
+      .then(r => console.log('[cron accounts tasks] created=' + r.created + ' weekday=' + r.weekday))
+      .catch(e => console.error('[cron accounts tasks]', e.message));
   });
 
   // Sunday 23:00 — close the week + score it.
