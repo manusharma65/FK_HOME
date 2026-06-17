@@ -684,6 +684,21 @@ router.get('/overview', requirePermission('accounts.view'), async (req, res) => 
     draft_invoices: Number(d.rows[0].invoices),
   });
 });
+
+// Money in vs out for the latest month that has bank data (cash basis, from the
+// imported statement). Powers the Overview cashflow graph.
+router.get('/overview/cashflow', requirePermission('accounts.view'), async (req, res) => {
+  const m = await db.query("SELECT to_char(max(txn_date),'YYYY-MM') AS month FROM acc_bank_line WHERE status <> 'ignored'");
+  const month = m.rows[0].month;
+  if (!month) return res.json({ month: null, received: 0, spent: 0, net: 0 });
+  const r = await db.query(
+    `SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS received,
+            COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS spent
+       FROM acc_bank_line
+      WHERE status <> 'ignored' AND to_char(txn_date,'YYYY-MM') = $1`, [month]);
+  const received = Number(r.rows[0].received), spent = Number(r.rows[0].spent);
+  res.json({ month, received, spent, net: Math.round((received - spent) * 100) / 100 });
+});
 router.get('/contacts', requirePermission('accounts.view'), async (req, res) => {
   const r = await db.query('SELECT * FROM acc_contact WHERE NOT is_archived ORDER BY name');
   res.json(r.rows);

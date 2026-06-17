@@ -64,6 +64,25 @@ window.fkModules = window.fkModules || {};
     .acct-net .v{font-size:19px;font-weight:500}
     .acct-msg{font-size:13px;margin-top:10px}.acct-msg.err{color:var(--red)}.acct-msg.ok{color:var(--green,#3B6D11)}
     .acct-empty{padding:18px;text-align:center;color:var(--muted);font-size:14px}
+    .ov-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:12px;padding:15px 17px}
+    .ov-num{font-family:'Fraunces',Georgia,serif;font-weight:500;font-variant-numeric:tabular-nums}
+    .ov-l{font-size:12px;color:var(--muted)}
+    .ov-bar{border-radius:5px 5px 0 0}
+    .rec-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:12px;margin-bottom:12px;display:flex;overflow:hidden}
+    .rec-left{flex:0 0 40%;padding:13px 15px;display:flex;gap:10px;align-items:flex-start}
+    .rec-divide{width:1px;background:var(--line,#E8E0D3)}
+    .rec-right{flex:1;padding:13px 15px;background:#FCFBF8}
+    .rec-ico{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+    .rec-ico-in{background:#EAF3DE;color:#3B6D11}.rec-ico-out{background:#FAECE7;color:#D85A30}
+    .rec-amt{font-family:'Fraunces',Georgia,serif;font-weight:500;font-variant-numeric:tabular-nums;font-size:17px;margin-top:5px}
+    .rec-seg{font-size:12.5px;color:var(--muted);cursor:pointer;padding:0 0 4px;border:none;border-bottom:2px solid transparent;background:none;font-family:inherit}
+    .rec-seg.on{color:var(--ink);font-weight:500;border-bottom-color:var(--orange)}
+    .rec-lbl{font-size:11px;color:var(--muted);margin-bottom:3px;display:block}
+    .rec-f{width:100%;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink);box-sizing:border-box}
+    .rec-tab{padding:10px 18px;font-size:14px;font-family:inherit;border:none;background:none;color:var(--muted);cursor:pointer;border-radius:9px;display:inline-flex;align-items:center;gap:8px}
+    .rec-tab.on{background:var(--ink);color:#fff;font-weight:500}
+    .rec-cnt{font-size:11.5px;padding:1px 8px;border-radius:99px;background:rgba(0,0,0,.08)}.rec-tab.on .rec-cnt{background:rgba(255,255,255,.22)}
+    .rec-pager .acct-btn{padding:7px 12px}.rec-pager .acct-btn.on{background:var(--ink);color:#fff;border-color:var(--ink)}
     </style>`;
 
   function tabBar(active) {
@@ -73,34 +92,85 @@ window.fkModules = window.fkModules || {};
   }
 
   // ---------------- Overview ----------------
+  // ---------------- Overview ----------------
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function monLabel(m) { if (!m) return ''; const [y, mm] = m.split('-'); return MONTHS[Number(mm) - 1] + ' ' + y; }
+  function fmtShort(n) {
+    n = Number(n || 0); const a = Math.abs(n); const sign = n < 0 ? '-' : '';
+    if (a >= 1e7) return sign + '₹' + (a / 1e7).toFixed(1) + 'Cr';
+    if (a >= 1e5) return sign + '₹' + (a / 1e5).toFixed(1) + 'L';
+    if (a >= 1e3) return sign + '₹' + Math.round(a / 1e3) + 'k';
+    return sign + '₹' + Math.round(a);
+  }
+  function bars(items, maxH) {
+    const max = Math.max(1, ...items.map(i => i.v));
+    return items.map(i => {
+      const h = i.v > 0 ? Math.max(4, Math.round(maxH * i.v / max)) : 2;
+      return '<div style="text-align:center"><div class="ov-bar" style="height:' + h + 'px;width:34px;background:' + i.c + '"></div>' +
+        '<div class="ov-l" style="margin-top:6px">' + i.l + '</div>' + (i.s ? '<div style="font-size:12px;font-weight:500;color:' + i.sc + '">' + i.s + '</div>' : '') + '</div>';
+    }).join('');
+  }
+
   async function renderOverview(body) {
-    const [o, op] = await Promise.all([api('/overview'), api('/opening')]);
-    const kpi = (l, v) => '<div class="acct-kpi"><div class="l">' + l + '</div><div class="v">' + v + '</div></div>';
-    const openingCard = op.exists
-      ? '<div class="acct-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px">' +
-          '<div><h3 style="margin:0">Opening balances</h3><div style="font-size:13px;color:var(--muted);margin-top:3px">Set as at ' + esc(String(op.date).slice(0, 10)) + '</div></div>' +
-          '<button class="acct-btn" id="opEdit"><i class="ti ti-pencil"></i>Edit</button></div></div>'
-      : '<div class="acct-card" style="border-color:var(--orange)"><h3>Opening balances</h3>' +
-          '<div style="font-size:14px;color:var(--muted);margin-bottom:13px">Set your starting position as at 31 March 2026 — bank balance, what FK Sports owes you, and anything you owe out — so the books open from the right place.</div>' +
-          '<button class="acct-btn primary" id="opSet"><i class="ti ti-adjustments"></i>Set opening balances</button></div>';
+    const [o, op, sum, aging, cf] = await Promise.all([
+      api('/overview'), api('/opening'), api('/bank/summary').catch(() => null),
+      api('/reports/aging').catch(() => ({ receivables: [] })), api('/overview/cashflow').catch(() => null),
+    ]);
+    const unmatched = sum && sum.counts ? sum.counts.unmatched : 0;
+    const stmtBal = sum ? sum.statement_balance : o.bank;
+    const reconcileBtn = unmatched > 0
+      ? '<button class="acct-btn primary" onclick="location.hash=\'#accounts/reconcile\'"><i class="ti ti-arrows-exchange"></i>Reconcile ' + unmatched + ' items</button>'
+      : '<span style="display:inline-flex;align-items:center;gap:7px;color:var(--green,#3B6D11);font-size:14px"><i class="ti ti-circle-check"></i>Reconciled</span>';
+
+    const ag = (aging.receivables || []).reduce((a, r) => ({
+      b0: a.b0 + Number(r.b0 || 0), b30: a.b30 + Number(r.b30 || 0), b60: a.b60 + Number(r.b60 || 0), b90: a.b90 + Number(r.b90 || 0),
+    }), { b0: 0, b30: 0, b60: 0, b90: 0 });
+    const agTotal = ag.b0 + ag.b30 + ag.b60 + ag.b90;
+
+    const cashCard = (cf && cf.month)
+      ? '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:13px">Money in vs out · ' + esc(monLabel(cf.month)) + '</div>' +
+          '<div style="display:flex;align-items:flex-end;gap:24px;height:104px;padding-left:4px">' +
+            bars([{ l: 'In', v: cf.received, c: '#639922', s: fmtShort(cf.received), sc: '#3B6D11' }, { l: 'Out', v: cf.spent, c: '#D85A30', s: fmtShort(cf.spent), sc: '#993C1D' }], 90) +
+            '<div style="border-left:1px dashed var(--line);align-self:stretch;margin:0 2px"></div>' +
+            '<div style="align-self:center"><div class="ov-l">Net</div><div class="ov-num" style="font-size:19px;color:' + (cf.net >= 0 ? '#3B6D11' : '#A32D2D') + '">' + (cf.net >= 0 ? '+' : '') + fmtShort(cf.net) + '</div></div>' +
+          '</div></div>'
+      : '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Money in vs out</div><div class="acct-empty" style="padding:24px 8px">Import a statement to see your cashflow.</div></div>';
+
+    const agingCard = agTotal > 0
+      ? '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:13px">Receivables aging</div>' +
+          '<div style="display:flex;align-items:flex-end;gap:14px;height:104px;justify-content:space-around">' +
+            bars([{ l: '0–30', v: ag.b0, c: '#639922' }, { l: '31–60', v: ag.b30, c: '#FAC775' }, { l: '61–90', v: ag.b60, c: '#EF9F27' }, { l: '90+', v: ag.b90, c: '#E24B4A' }], 90) +
+          '</div></div>'
+      : '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Receivables aging</div><div class="acct-empty" style="padding:24px 8px">Nothing outstanding to age.</div></div>';
+
+    const drafts = o.draft_bills + o.draft_invoices;
+    const openingStrip = op.exists
+      ? '<span style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)"><i class="ti ti-circle-check" style="color:var(--green,#3B6D11)"></i>Opening balances set · ' + esc(String(op.date).slice(0, 10)) + ' <button class="acct-btn ghost" id="opEdit" style="padding:4px 9px;font-size:12px">Edit</button></span>'
+      : '<button class="acct-btn primary" id="opSet" style="padding:7px 13px"><i class="ti ti-adjustments"></i>Set opening balances</button>';
+
     body.innerHTML =
-      '<div class="acct-kpis">' +
-        kpi('IDFC bank', inr(o.bank)) +
-        kpi('FK Sports owes', inr(o.receivable)) +
-        kpi('Owed to suppliers', inr(o.payable)) +
-        kpi('Net GST', inr(r2(o.output_gst - o.input_gst))) +
-        kpi('TDS to deposit', inr(o.tds_payable)) +
-        kpi('Drafts to post', (o.draft_bills + o.draft_invoices)) +
+      '<div class="ov-card" style="border-left:4px solid #D4537E;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:13px">' +
+        '<div style="display:flex;align-items:center;gap:13px"><div style="width:42px;height:42px;border-radius:10px;background:var(--canvas,#F4EFE7);display:flex;align-items:center;justify-content:center;color:#D4537E;font-size:20px"><i class="ti ti-building-bank"></i></div>' +
+          '<div><div style="font-weight:500;font-size:15px">IDFC FIRST Bank</div><div class="ov-l">FK Enterprises · current account</div></div></div>' +
+        '<div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">' +
+          '<div><div class="ov-num" style="font-size:20px">' + inr(stmtBal) + '</div><div class="ov-l">Statement balance</div></div>' +
+          '<div style="width:1px;align-self:stretch;background:var(--line,#E8E0D3)"></div>' +
+          '<div><div class="ov-num" style="font-size:20px">' + inr(o.bank) + '</div><div class="ov-l">Books balance</div></div>' +
+          reconcileBtn +
+        '</div></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:13px;margin-bottom:13px">' +
+        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>FK Sports owes you</div><div class="ov-num" style="font-size:21px">' + inr(o.receivable) + '</div></div>' +
+        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><i class="ti ti-arrow-up-right" style="color:#D85A30"></i>Owed to suppliers</div><div class="ov-num" style="font-size:21px">' + inr(o.payable) + '</div></div>' +
+        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><i class="ti ti-receipt-tax" style="color:var(--muted)"></i>Net GST payable</div><div class="ov-num" style="font-size:21px">' + inr(r2(o.output_gst - o.input_gst)) + '</div><div class="ov-l" style="margin-top:3px">output ' + inr(o.output_gst) + ' − input ' + inr(o.input_gst) + '</div></div>' +
       '</div>' +
-      '<div class="acct-card"><h3>Quick actions</h3><div class="acct-actions">' +
-        '<button class="acct-btn primary" onclick="location.hash=\'#accounts/bills\'"><i class="ti ti-plus"></i>New bill</button>' +
-        '<button class="acct-btn" onclick="location.hash=\'#accounts/invoices\'"><i class="ti ti-plus"></i>New invoice</button>' +
-        '<button class="acct-btn ghost" onclick="location.hash=\'#accounts/reports\'"><i class="ti ti-chart-bar"></i>Reports</button>' +
-      '</div>' +
-      ((o.draft_bills + o.draft_invoices) ? '<div class="acct-msg" style="margin-top:12px;color:var(--muted)">You have ' + (o.draft_bills + o.draft_invoices) + ' draft(s) waiting to be posted to the books.</div>' : '') +
-      '</div>' +
-      openingCard +
-      '<div id="opFormWrap"></div>';
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' + cashCard + agingCard + '</div>' +
+      '<div class="ov-card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">' +
+        '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">' +
+          '<button class="acct-btn" onclick="location.hash=\'#accounts/bills\'" style="padding:7px 13px"><i class="ti ti-plus"></i>New bill</button>' +
+          '<button class="acct-btn" onclick="location.hash=\'#accounts/invoices\'" style="padding:7px 13px"><i class="ti ti-plus"></i>New invoice</button>' +
+          (drafts ? '<span style="font-size:13px;color:var(--muted)"><strong style="font-weight:500;color:var(--ink)">' + drafts + '</strong> draft' + (drafts > 1 ? 's' : '') + ' to post</span>' : '') +
+        '</div>' + openingStrip +
+      '</div><div id="opFormWrap"></div>';
     const setBtn = document.getElementById('opSet'); if (setBtn) setBtn.addEventListener('click', () => renderOpeningForm(document.getElementById('opFormWrap')));
     const editBtn = document.getElementById('opEdit'); if (editBtn) editBtn.addEventListener('click', () => renderOpeningForm(document.getElementById('opFormWrap'), op));
   }
@@ -431,8 +501,9 @@ window.fkModules = window.fkModules || {};
   // ---------------- Reconcile ----------------
   async function renderReconcile(body) {
     const { accounts, contacts } = await lookups();
-    window.__recAcctOpts = accounts.filter(a => a.system_tag !== 'idfc_bank')
-      .map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
+    window.__recAcctOpts = '<option value="">Choose account…</option>' +
+      accounts.filter(a => a.system_tag !== 'idfc_bank')
+        .map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
     window.__recContactOpts = '<option value="">— who (optional) —</option>' +
       (contacts || []).map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
     body.innerHTML =
@@ -441,15 +512,16 @@ window.fkModules = window.fkModules || {};
         '<div><h3 style="margin:0">Import a statement</h3><div style="font-size:13px;color:var(--muted);margin-top:3px">IDFC FIRST Excel export (.xlsx). A statement that overlaps one already imported will offer to replace it.</div></div>' +
         '<label class="acct-btn primary" style="cursor:pointer"><i class="ti ti-upload"></i>Choose file<input id="recFile" type="file" accept=".xlsx" style="display:none"></label>' +
       '</div><div class="acct-msg" id="recMsg"></div></div>' +
-      '<div class="acct-card"><div class="acct-actions" style="margin-bottom:12px">' +
-        '<button class="acct-btn" data-recview="unmatched">To reconcile</button>' +
-        '<button class="acct-btn ghost" data-recview="matched">Reconciled</button>' +
-        '<button class="acct-btn ghost" data-recview="ignored">Set aside</button>' +
-      '</div><div id="recList"><div class="acct-empty">Loading…</div></div></div>';
+      '<div style="display:flex;gap:6px;background:var(--canvas,#F1EADF);padding:5px;border-radius:11px;width:fit-content;margin-bottom:16px">' +
+        '<button class="rec-tab on" data-recview="unmatched">To reconcile <span class="rec-cnt" id="recCnt-unmatched">0</span></button>' +
+        '<button class="rec-tab" data-recview="matched">Reconciled <span class="rec-cnt" id="recCnt-matched">0</span></button>' +
+        '<button class="rec-tab" data-recview="ignored">Set aside <span class="rec-cnt" id="recCnt-ignored">0</span></button>' +
+      '</div>' +
+      '<div id="recList"><div class="acct-empty">Loading…</div></div>';
     document.getElementById('recFile').addEventListener('change', uploadStatement);
     body.querySelectorAll('[data-recview]').forEach(b => b.addEventListener('click', () => {
-      body.querySelectorAll('[data-recview]').forEach(x => x.classList.add('ghost'));
-      b.classList.remove('ghost'); loadRecList(b.getAttribute('data-recview'));
+      body.querySelectorAll('[data-recview]').forEach(x => x.classList.remove('on'));
+      b.classList.add('on'); loadRecList(b.getAttribute('data-recview'));
     }));
     await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched');
   }
@@ -469,124 +541,160 @@ window.fkModules = window.fkModules || {};
       '<div class="acct-kpi"><div class="l">Difference</div><div class="v" style="color:' + diffColour + '">' + inr(s.difference) + '</div></div>' +
       '<div class="acct-kpi"><div class="l">To reconcile</div><div class="v">' + s.counts.unmatched + '</div></div>' +
     '</div>';
+    ['unmatched', 'matched', 'ignored'].forEach(k => { const c = document.getElementById('recCnt-' + k); if (c) c.textContent = s.counts[k]; });
   }
 
+  const REC_PAGE = 50;
   async function loadRecList(view) {
     const el = document.getElementById('recList'); if (!el) return;
     el.innerHTML = '<div class="acct-empty">Loading…</div>';
     const lines = await api('/bank/lines?status=' + view);
-    if (!lines.length) {
-      el.innerHTML = '<div class="acct-empty">' + (view === 'unmatched' ? 'Nothing to reconcile — import a statement above.' : 'Nothing here.') + '</div>';
+    const suggMap = {};
+    if (view === 'unmatched') { (await api('/bank/suggestions').catch(() => [])).forEach(s => { suggMap[s.line_id] = s; }); }
+    window.__recState = { view, lines, suggMap, page: 1 };
+    renderRecPage();
+  }
+
+  function currentRecView() { return (window.__recState && window.__recState.view) || 'unmatched'; }
+
+  function renderRecPage() {
+    const el = document.getElementById('recList'); const st = window.__recState; if (!el || !st) return;
+    if (!st.lines.length) {
+      el.innerHTML = '<div class="acct-empty">' + (st.view === 'unmatched' ? 'Nothing to reconcile — import a statement above.' : 'Nothing here.') + '</div>';
       return;
     }
-    const bulk = view === 'unmatched';
-    // Suggested matches (only meaningful for the queue).
-    const suggMap = {};
-    if (bulk) {
-      const sugg = await api('/bank/suggestions').catch(() => []);
-      (sugg || []).forEach(s => { suggMap[s.line_id] = s; });
-    }
-    const fieldCss = 'padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)';
-    const bulkBar = bulk
-      ? '<div id="recBulkBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--canvas);border-radius:10px;padding:10px 14px;margin-bottom:12px">' +
-          '<span id="recBulkCount" style="font-size:14px;font-weight:500"></span>' +
-          '<span style="font-size:13px;color:var(--muted)">code all selected to</span>' +
-          '<select id="recBulkAcct" style="min-width:200px;' + fieldCss + '">' + window.__recAcctOpts + '</select>' +
-          '<button class="acct-btn primary" onclick="window.__recBulkCode()">Code selected</button>' +
-          '<button class="acct-btn ghost" onclick="window.__recBulkClear()">Clear</button>' +
-        '</div>'
+    const pages = Math.ceil(st.lines.length / REC_PAGE);
+    if (st.page > pages) st.page = pages;
+    const start = (st.page - 1) * REC_PAGE;
+    const slice = st.lines.slice(start, start + REC_PAGE);
+    const bulk = st.view === 'unmatched';
+    const toolbar = bulk
+      ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap"><label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);cursor:pointer"><input type="checkbox" id="recSelAll" onchange="window.__recSelAll(this.checked)"> Select all on this page</label>' +
+          '<div id="recBulkBar" style="display:none;align-items:center;gap:9px;flex-wrap:wrap;background:var(--canvas);border-radius:10px;padding:8px 12px">' +
+            '<span id="recBulkCount" style="font-size:13px;font-weight:500"></span>' +
+            '<span style="font-size:12.5px;color:var(--muted)">code to</span>' +
+            '<select id="recBulkAcct" class="rec-f" style="width:auto;min-width:190px">' + window.__recAcctOpts + '</select>' +
+            '<button class="acct-btn primary" style="padding:7px 13px" onclick="window.__recBulkCode()">Code selected</button>' +
+            '<button class="acct-btn ghost" style="padding:7px 9px" onclick="window.__recBulkClear()">Clear</button>' +
+          '</div></div>'
       : '';
-    const head = '<table class="acct"><thead><tr>' +
-      (bulk ? '<th style="width:34px"><input type="checkbox" id="recSelAll" title="Select all"></th>' : '') +
-      '<th>Date</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th style="width:46%"></th></tr></thead><tbody>';
-    const rows = lines.map(l => {
-      const amt = Number(l.amount);
-      const inCol = amt > 0 ? inr(amt) : '';
-      const outCol = amt < 0 ? inr(-amt) : '';
-      let action;
-      if (view === 'unmatched') {
-        const s = suggMap[l.id];
-        const chip = s
-          ? '<div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;margin-bottom:6px;font-size:13px">' +
-              '<span style="color:var(--muted)">Looks like <strong>' + (s.doc_type === 'invoice' ? 'Inv #' : 'Bill #') + s.doc_id + '</strong>' +
-              (s.contact_name ? ' · ' + esc(s.contact_name) : '') + ' · ' + inr(s.amount) + '</span>' +
-              '<button class="acct-btn primary" style="padding:5px 12px" onclick="window.__recMatchDoc(' + l.id + ",'" + s.doc_type + "'," + s.doc_id + ')">Match</button>' +
-            '</div>'
-          : '';
-        action = '<div>' + chip +
-          '<div class="acct-actions" style="justify-content:flex-end">' +
-            '<select class="rec-acct" data-line="' + l.id + '" style="min-width:170px;' + fieldCss + '">' + window.__recAcctOpts + '</select>' +
-            '<button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button>' +
-            '<button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Match…</button>' +
-            '<button class="acct-btn ghost" onclick="window.__recDetails(' + l.id + ')" title="Add who / why">+ note</button>' +
-            '<button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button></div>' +
-          '<div id="recdet-' + l.id + '" style="display:none;gap:8px;justify-content:flex-end;margin-top:8px">' +
-            '<select id="recWho-' + l.id + '" style="min-width:150px;' + fieldCss + '">' + window.__recContactOpts + '</select>' +
-            '<input id="recWhy-' + l.id + '" placeholder="Why / note (optional)" style="min-width:200px;' + fieldCss + '">' +
-          '</div></div>';
-      } else {
-        action = '<div class="acct-actions" style="justify-content:flex-end"><button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
-      }
-      return '<tr>' +
-        (bulk ? '<td><input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()"></td>' : '') +
-        '<td style="white-space:nowrap">' + esc(String(l.txn_date).slice(0, 10)) + '</td>' +
-        '<td style="font-size:13px">' + esc(l.description || '') + '</td>' +
-        '<td class="num" style="color:var(--green,#3B6D11)">' + inCol + '</td>' +
-        '<td class="num">' + outCol + '</td><td id="recact-' + l.id + '">' + action + '</td></tr>';
-    }).join('');
-    el.innerHTML = bulkBar + head + rows + '</tbody></table>';
-    if (bulk) {
-      const selAll = document.getElementById('recSelAll');
-      if (selAll) selAll.addEventListener('change', (e) => {
-        document.querySelectorAll('.rec-chk').forEach(c => { c.checked = e.target.checked; });
-        window.__recSelChanged();
-      });
+    el.innerHTML = toolbar + slice.map(l => recCard(l, st.suggMap[l.id], st.view)).join('') + pager(st.page, pages, st.lines.length, start, slice.length);
+  }
+
+  function pager(page, pages, total, start, shown) {
+    if (pages <= 1) return '<div style="font-size:12.5px;color:var(--muted);margin-top:6px">' + total + ' line' + (total === 1 ? '' : 's') + '</div>';
+    let nums = '';
+    const set = new Set([1, pages, page, page - 1, page + 1]);
+    let last = 0;
+    for (let n = 1; n <= pages; n++) {
+      if (!set.has(n) || n < 1) continue;
+      if (last && n - last > 1) nums += '<span style="color:var(--muted);padding:0 4px">…</span>';
+      nums += '<button class="acct-btn' + (n === page ? ' on' : '') + '" onclick="window.__recGoPage(' + n + ')">' + n + '</button>';
+      last = n;
     }
+    return '<div class="rec-pager" style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;flex-wrap:wrap;gap:10px">' +
+      '<span style="font-size:12.5px;color:var(--muted)">Showing ' + (start + 1) + '–' + (start + shown) + ' of ' + total + '</span>' +
+      '<div style="display:flex;gap:5px;align-items:center">' +
+        '<button class="acct-btn" onclick="window.__recGoPage(' + (page - 1) + ')"' + (page === 1 ? ' disabled' : '') + '>‹ Prev</button>' + nums +
+        '<button class="acct-btn" onclick="window.__recGoPage(' + (page + 1) + ')"' + (page === pages ? ' disabled' : '') + '>Next ›</button>' +
+      '</div></div>';
   }
 
-  window.__recDetails = function (id) {
-    const d = document.getElementById('recdet-' + id); if (!d) return;
-    d.style.display = (d.style.display === 'none' || !d.style.display) ? 'flex' : 'none';
-  };
-  window.__recMatchDoc = async function (id, type, docId) {
-    try {
-      await api('/bank/lines/' + id + '/match', { method: 'POST', body: JSON.stringify({ doc_type: type, doc_id: docId }) });
-      await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched');
-    } catch (e) { alert(e.message); }
+  window.__recGoPage = function (n) {
+    const st = window.__recState; if (!st) return;
+    const pages = Math.ceil(st.lines.length / REC_PAGE);
+    st.page = Math.max(1, Math.min(pages, n)); renderRecPage();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // ---- bulk coding (tick several lines, code them together) ----
-  window.__recSelChanged = function () {
-    const checked = document.querySelectorAll('.rec-chk:checked');
-    const bar = document.getElementById('recBulkBar'); if (!bar) return;
-    if (checked.length) { bar.style.display = 'flex'; document.getElementById('recBulkCount').textContent = checked.length + ' line' + (checked.length > 1 ? 's' : '') + ' selected'; }
-    else { bar.style.display = 'none'; const sa = document.getElementById('recSelAll'); if (sa) sa.checked = false; }
-  };
-  window.__recBulkClear = function () { document.querySelectorAll('.rec-chk').forEach(c => { c.checked = false; }); const sa = document.getElementById('recSelAll'); if (sa) sa.checked = false; window.__recSelChanged(); };
-  window.__recBulkCode = async function () {
-    const ids = Array.from(document.querySelectorAll('.rec-chk:checked')).map(c => Number(c.getAttribute('data-line')));
-    if (!ids.length) return;
-    const sel = document.getElementById('recBulkAcct');
-    try {
-      await api('/bank/code-bulk', { method: 'POST', body: JSON.stringify({ line_ids: ids, account_id: sel ? Number(sel.value) : null }) });
-      await loadSummary(); await loadRecList('unmatched');
-    } catch (e) { alert(e.message); }
-  };
-
-  function currentRecView() {
-    const a = document.querySelector('[data-recview]:not(.ghost)');
-    return a ? a.getAttribute('data-recview') : 'unmatched';
+  function recCard(l, sugg, view) {
+    const amt = Number(l.amount);
+    const isIn = amt >= 0;
+    const ico = isIn ? 'ti-arrow-down-left' : 'ti-arrow-up-right';
+    const left =
+      '<div class="rec-left">' +
+        (view === 'unmatched' ? '<input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()" style="margin-top:11px">' : '') +
+        '<div class="rec-ico ' + (isIn ? 'rec-ico-in' : 'rec-ico-out') + '"><i class="ti ' + ico + '"></i></div>' +
+        '<div style="min-width:0"><div style="font-size:11.5px;color:var(--muted)">' + esc(String(l.txn_date).slice(0, 10)) + '</div>' +
+          '<div style="font-size:13px">' + esc(l.description || '') + '</div>' +
+          '<div class="rec-amt" style="' + (isIn ? 'color:#3B6D11' : '') + '">' + inr(Math.abs(amt)) + '</div></div>' +
+      '</div>';
+    if (view !== 'unmatched') {
+      const right = '<div class="rec-right" style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fff">' +
+        '<span style="font-size:12.5px;color:var(--muted)">' + (view === 'matched' ? 'Reconciled' : 'Set aside') + '</span>' +
+        '<button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
+      return '<div class="rec-card">' + left + '<div class="rec-divide"></div>' + right + '</div>';
+    }
+    const matchOn = !!sugg;
+    const matchPane =
+      '<div id="recpane-match-' + l.id + '" style="display:' + (matchOn ? 'block' : 'none') + '">' +
+        (sugg
+          ? '<div style="background:#EAF3DE;border-radius:8px;padding:8px 11px;font-size:12.5px;color:#3B6D11;margin-bottom:10px">' + (sugg.doc_type === 'invoice' ? 'Invoice #' : 'Bill #') + sugg.doc_id + (sugg.contact_name ? ' · ' + esc(sugg.contact_name) : '') + ' · ' + inr(sugg.amount) + '</div>' +
+            '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Find another…</button><button class="acct-btn primary" onclick="window.__recMatchDoc(' + l.id + ",'" + sugg.doc_type + "'," + sugg.doc_id + ')">Match</button></div>'
+          : '<div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">No suggested match.</div><div style="display:flex;justify-content:flex-end"><button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Find &amp; match…</button></div>') +
+      '</div>';
+    const codePane =
+      '<div id="recpane-code-' + l.id + '" style="display:' + (matchOn ? 'none' : 'block') + '">' +
+        '<div style="display:flex;gap:8px;margin-bottom:9px">' +
+          '<div style="flex:1"><span class="rec-lbl">What account</span><select class="rec-acct rec-f" data-line="' + l.id + '">' + window.__recAcctOpts + '</select></div>' +
+          '<div style="flex:1"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f">' + window.__recContactOpts + '</select></div>' +
+        '</div>' +
+        '<div style="margin-bottom:11px"><span class="rec-lbl">Why</span><input id="recWhy-' + l.id + '" class="rec-f" placeholder="Description (optional)"></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
+      '</div>';
+    const right =
+      '<div class="rec-right" id="recright-' + l.id + '">' +
+        '<div style="display:flex;gap:16px;margin-bottom:11px;border-bottom:1px solid #EFE7DA">' +
+          '<button class="rec-seg' + (matchOn ? ' on' : '') + '" id="recseg-match-' + l.id + '" onclick="window.__recSeg(' + l.id + ",'match')\">Match</button>" +
+          '<button class="rec-seg' + (matchOn ? '' : ' on') + '" id="recseg-code-' + l.id + '" onclick="window.__recSeg(' + l.id + ",'code')\">Code</button>" +
+        '</div>' + matchPane + codePane +
+      '</div>';
+    return '<div class="rec-card">' + left + '<div class="rec-divide"></div>' + right + '</div>';
   }
+
+  window.__recSeg = function (id, mode) {
+    document.getElementById('recseg-match-' + id).classList.toggle('on', mode === 'match');
+    document.getElementById('recseg-code-' + id).classList.toggle('on', mode === 'code');
+    document.getElementById('recpane-match-' + id).style.display = mode === 'match' ? 'block' : 'none';
+    document.getElementById('recpane-code-' + id).style.display = mode === 'code' ? 'block' : 'none';
+  };
+
   window.__recCode = async function (id) {
     const sel = document.querySelector('.rec-acct[data-line="' + id + '"]');
+    if (!sel || !sel.value) { alert('Pick an account to code this to.'); return; }
     const who = document.getElementById('recWho-' + id);
     const why = document.getElementById('recWhy-' + id);
-    const payload = { account_id: sel ? Number(sel.value) : null };
+    const payload = { account_id: Number(sel.value) };
     if (who && who.value) payload.contact_id = Number(who.value);
     if (why && why.value.trim()) payload.note = why.value.trim();
     try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify(payload) }); await loadSummary(); await loadRecList('unmatched'); }
     catch (e) { alert(e.message); }
   };
+
+  window.__recMatchDoc = async function (id, type, docId) {
+    try { await api('/bank/lines/' + id + '/match', { method: 'POST', body: JSON.stringify({ doc_type: type, doc_id: docId }) }); await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched'); }
+    catch (e) { alert(e.message); }
+  };
+
+  window.__recMatch = function (id, amt) {
+    const type = amt > 0 ? 'invoice' : 'bill';
+    const docs = amt > 0 ? (window.__recOpenInv || []) : (window.__recOpenBill || []);
+    const pane = document.getElementById('recpane-match-' + id);
+    if (!pane) return;
+    if (!docs.length) { pane.innerHTML = '<div style="font-size:12.5px;color:var(--muted)">No open ' + (amt > 0 ? 'invoices' : 'bills') + ' to match against.</div>'; return; }
+    const opts = docs.map(d => '<option value="' + d.id + '">' + (type === 'invoice'
+      ? 'Inv #' + d.id + ' · ' + esc(d.contact_name || '—') + ' · ' + inr(d.amount_inr)
+      : 'Bill #' + d.id + ' · ' + esc(d.contact_name || '—') + ' · ' + inr(d.net_payable)) + '</option>').join('');
+    pane.innerHTML = '<select id="recMatchSel-' + id + '" class="rec-f" style="margin-bottom:10px">' + opts + '</select>' +
+      '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="acct-btn ghost" onclick="window.__recReload()">Cancel</button><button class="acct-btn primary" onclick="window.__recMatchConfirm(' + id + ",'" + type + "')\">Match</button></div>";
+  };
+
+  window.__recMatchConfirm = async function (id, type) {
+    const sel = document.getElementById('recMatchSel-' + id);
+    try { await api('/bank/lines/' + id + '/match', { method: 'POST', body: JSON.stringify({ doc_type: type, doc_id: sel ? Number(sel.value) : null }) }); await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched'); }
+    catch (e) { alert(e.message); }
+  };
+
   window.__recIgnore = async function (id) {
     try { await api('/bank/lines/' + id + '/ignore', { method: 'POST' }); await loadSummary(); await loadRecList('unmatched'); }
     catch (e) { alert(e.message); }
@@ -595,27 +703,23 @@ window.fkModules = window.fkModules || {};
     try { await api('/bank/lines/' + id + '/unmatch', { method: 'POST' }); await refreshOpenDocs(); await loadSummary(); await loadRecList(currentRecView()); }
     catch (e) { alert(e.message); }
   };
-  window.__recReload = function () { loadRecList(currentRecView()); };
-  window.__recMatch = function (id, amt) {
-    const type = amt > 0 ? 'invoice' : 'bill';
-    const docs = amt > 0 ? (window.__recOpenInv || []) : (window.__recOpenBill || []);
-    if (!docs.length) { alert(amt > 0 ? 'No open invoices to match against.' : 'No open bills to match against.'); return; }
-    const opts = docs.map(d => '<option value="' + d.id + '">' +
-      (type === 'invoice'
-        ? 'Inv #' + d.id + ' · ' + esc(d.contact_name || '—') + ' · ' + inr(d.amount_inr)
-        : 'Bill #' + d.id + ' · ' + esc(d.contact_name || '—') + ' · ' + inr(d.net_payable)) + '</option>').join('');
-    const cell = document.getElementById('recact-' + id);
-    if (cell) cell.innerHTML = '<div class="acct-actions" style="justify-content:flex-end">' +
-      '<select id="recMatchSel-' + id + '" style="min-width:230px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + opts + '</select>' +
-      '<button class="acct-btn primary" onclick="window.__recMatchConfirm(' + id + ",'" + type + "')\">Match</button>" +
-      '<button class="acct-btn ghost" onclick="window.__recReload()">Cancel</button></div>';
+  window.__recReload = function () { renderRecPage(); };
+
+  window.__recSelAll = function (on) { document.querySelectorAll('.rec-chk').forEach(c => { c.checked = on; }); window.__recSelChanged(); };
+  window.__recSelChanged = function () {
+    const checked = document.querySelectorAll('.rec-chk:checked');
+    const bar = document.getElementById('recBulkBar'); if (!bar) return;
+    if (checked.length) { bar.style.display = 'flex'; document.getElementById('recBulkCount').textContent = checked.length + ' selected'; }
+    else { bar.style.display = 'none'; const sa = document.getElementById('recSelAll'); if (sa) sa.checked = false; }
   };
-  window.__recMatchConfirm = async function (id, type) {
-    const sel = document.getElementById('recMatchSel-' + id);
-    try {
-      await api('/bank/lines/' + id + '/match', { method: 'POST', body: JSON.stringify({ doc_type: type, doc_id: sel ? Number(sel.value) : null }) });
-      await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched');
-    } catch (e) { alert(e.message); }
+  window.__recBulkClear = function () { document.querySelectorAll('.rec-chk').forEach(c => { c.checked = false; }); const sa = document.getElementById('recSelAll'); if (sa) sa.checked = false; window.__recSelChanged(); };
+  window.__recBulkCode = async function () {
+    const ids = Array.from(document.querySelectorAll('.rec-chk:checked')).map(c => Number(c.getAttribute('data-line')));
+    if (!ids.length) return;
+    const sel = document.getElementById('recBulkAcct');
+    if (!sel || !sel.value) { alert('Pick an account to code these to.'); return; }
+    try { await api('/bank/code-bulk', { method: 'POST', body: JSON.stringify({ line_ids: ids, account_id: Number(sel.value) }) }); await loadSummary(); await loadRecList('unmatched'); }
+    catch (e) { alert(e.message); }
   };
 
   async function uploadStatement(e) {
