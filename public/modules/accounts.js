@@ -69,7 +69,8 @@ window.fkModules = window.fkModules || {};
     .ov-l{font-size:12px;color:var(--muted)}
     .ov-bar{border-radius:5px 5px 0 0}
     .rec-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:12px;margin-bottom:12px;display:flex;overflow:hidden}
-    .rec-left{flex:0 0 40%;padding:13px 15px;display:flex;gap:10px;align-items:flex-start}
+    .rec-left{flex:0 0 60%;padding:13px 15px;display:flex;gap:10px;align-items:flex-start}
+    .rec-left-in{background:#F4F8EE}.rec-left-out{background:#FBF2EC}
     .rec-divide{width:1px;background:var(--line,#E8E0D3)}
     .rec-right{flex:1;padding:13px 15px;background:#FCFBF8}
     .rec-ico{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
@@ -102,14 +103,6 @@ window.fkModules = window.fkModules || {};
     if (a >= 1e3) return sign + '₹' + Math.round(a / 1e3) + 'k';
     return sign + '₹' + Math.round(a);
   }
-  function bars(items, maxH) {
-    const max = Math.max(1, ...items.map(i => i.v));
-    return items.map(i => {
-      const h = i.v > 0 ? Math.max(4, Math.round(maxH * i.v / max)) : 2;
-      return '<div style="text-align:center"><div class="ov-bar" style="height:' + h + 'px;width:34px;background:' + i.c + '"></div>' +
-        '<div class="ov-l" style="margin-top:6px">' + i.l + '</div>' + (i.s ? '<div style="font-size:12px;font-weight:500;color:' + i.sc + '">' + i.s + '</div>' : '') + '</div>';
-    }).join('');
-  }
 
   async function renderOverview(body) {
     const [o, op, sum, aging, cf] = await Promise.all([
@@ -127,21 +120,41 @@ window.fkModules = window.fkModules || {};
     }), { b0: 0, b30: 0, b60: 0, b90: 0 });
     const agTotal = ag.b0 + ag.b30 + ag.b60 + ag.b90;
 
+    const plot = (items, maxH, w, gap) => {
+      const max = Math.max(1, ...items.map(i => i.v));
+      const b = items.map(i => '<div class="ov-bar" style="height:' + (i.v > 0 ? Math.max(4, Math.round(maxH * i.v / max)) : 2) + 'px;width:' + w + 'px;background:' + i.c + '"></div>').join('');
+      const l = items.map(i => '<div style="width:' + w + 'px;text-align:center"><div class="ov-l">' + i.l + '</div>' + (i.s ? '<div style="font-size:12px;font-weight:500;color:' + i.sc + '">' + i.s + '</div>' : '') + '</div>').join('');
+      return '<div><div style="display:flex;gap:' + gap + 'px;align-items:flex-end;height:110px">' + b + '</div>' +
+        '<div style="display:flex;gap:' + gap + 'px;margin-top:8px">' + l + '</div></div>';
+    };
+    const graphStyle = 'min-height:212px';
+
     const cashCard = (cf && cf.month)
-      ? '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:13px">Money in vs out · ' + esc(monLabel(cf.month)) + '</div>' +
-          '<div style="display:flex;align-items:flex-end;gap:24px;height:104px;padding-left:4px">' +
-            bars([{ l: 'In', v: cf.received, c: '#639922', s: fmtShort(cf.received), sc: '#3B6D11' }, { l: 'Out', v: cf.spent, c: '#D85A30', s: fmtShort(cf.spent), sc: '#993C1D' }], 90) +
-            '<div style="border-left:1px dashed var(--line);align-self:stretch;margin:0 2px"></div>' +
-            '<div style="align-self:center"><div class="ov-l">Net</div><div class="ov-num" style="font-size:19px;color:' + (cf.net >= 0 ? '#3B6D11' : '#A32D2D') + '">' + (cf.net >= 0 ? '+' : '') + fmtShort(cf.net) + '</div></div>' +
+      ? '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:18px">Money in vs out · ' + esc(monLabel(cf.month)) + '</div>' +
+          '<div style="display:flex;gap:30px;align-items:center">' +
+            plot([{ l: 'In', v: cf.received, c: '#639922', s: fmtShort(cf.received), sc: '#3B6D11' }, { l: 'Out', v: cf.spent, c: '#D85A30', s: fmtShort(cf.spent), sc: '#993C1D' }], 100, 46, 20) +
+            '<div style="border-left:1px dashed var(--line);align-self:stretch;margin:0"></div>' +
+            '<div><div class="ov-l">Net this month</div><div class="ov-num" style="font-size:20px;color:' + (cf.net >= 0 ? '#3B6D11' : '#A32D2D') + '">' + (cf.net >= 0 ? '+' : '') + fmtShort(cf.net) + '</div></div>' +
           '</div></div>'
-      : '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Money in vs out</div><div class="acct-empty" style="padding:24px 8px">Import a statement to see your cashflow.</div></div>';
+      : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Money in vs out</div><div class="acct-empty" style="padding:40px 8px">Import a statement to see your cashflow.</div></div>';
 
     const agingCard = agTotal > 0
-      ? '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:13px">Receivables aging</div>' +
-          '<div style="display:flex;align-items:flex-end;gap:14px;height:104px;justify-content:space-around">' +
-            bars([{ l: '0–30', v: ag.b0, c: '#639922' }, { l: '31–60', v: ag.b30, c: '#FAC775' }, { l: '61–90', v: ag.b60, c: '#EF9F27' }, { l: '90+', v: ag.b90, c: '#E24B4A' }], 90) +
+      ? '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:18px">Receivables aging</div>' +
+          '<div style="display:flex;justify-content:center">' +
+            plot([{ l: '0–30', v: ag.b0, c: '#639922' }, { l: '31–60', v: ag.b30, c: '#FAC775' }, { l: '61–90', v: ag.b60, c: '#EF9F27' }, { l: '90+', v: ag.b90, c: '#E24B4A' }], 100, 40, 18) +
           '</div></div>'
-      : '<div class="ov-card"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Receivables aging</div><div class="acct-empty" style="padding:24px 8px">Nothing outstanding to age.</div></div>';
+      : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Receivables aging</div><div class="acct-empty" style="padding:40px 8px">Nothing outstanding to age.</div></div>';
+
+    const netGst = r2(o.output_gst - o.input_gst);
+    const gstStat = (l, v, c) => '<div><div class="ov-l">' + l + '</div><div class="ov-num" style="font-size:22px' + (c ? ';color:' + c : '') + '">' + v + '</div></div>';
+    const gstPanel = '<div class="ov-card" style="margin-bottom:13px">' +
+      '<div style="font-size:13px;font-weight:500;margin-bottom:15px;display:flex;align-items:center;gap:7px"><i class="ti ti-receipt-tax" style="color:var(--muted)"></i>GST position</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:18px">' +
+        gstStat('Output GST (collected)', inr(o.output_gst)) +
+        gstStat('Input GST (paid)', inr(o.input_gst)) +
+        gstStat(netGst >= 0 ? 'Net GST payable' : 'Net GST reclaimable', inr(Math.abs(netGst)), netGst >= 0 ? '#A32D2D' : '#3B6D11') +
+        gstStat('TDS to deposit', inr(o.tds_payable)) +
+      '</div></div>';
 
     const drafts = o.draft_bills + o.draft_invoices;
     const openingStrip = op.exists
@@ -158,11 +171,11 @@ window.fkModules = window.fkModules || {};
           '<div><div class="ov-num" style="font-size:20px">' + inr(o.bank) + '</div><div class="ov-l">Books balance</div></div>' +
           reconcileBtn +
         '</div></div>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:13px;margin-bottom:13px">' +
-        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>FK Sports owes you</div><div class="ov-num" style="font-size:21px">' + inr(o.receivable) + '</div></div>' +
-        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><i class="ti ti-arrow-up-right" style="color:#D85A30"></i>Owed to suppliers</div><div class="ov-num" style="font-size:21px">' + inr(o.payable) + '</div></div>' +
-        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:5px"><i class="ti ti-receipt-tax" style="color:var(--muted)"></i>Net GST payable</div><div class="ov-num" style="font-size:21px">' + inr(r2(o.output_gst - o.input_gst)) + '</div><div class="ov-l" style="margin-top:3px">output ' + inr(o.output_gst) + ' − input ' + inr(o.input_gst) + '</div></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' +
+        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>FK Sports owes you</div><div class="ov-num" style="font-size:22px">' + inr(o.receivable) + '</div></div>' +
+        '<div class="ov-card"><div class="ov-l" style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-arrow-up-right" style="color:#D85A30"></i>Owed to suppliers</div><div class="ov-num" style="font-size:22px">' + inr(o.payable) + '</div></div>' +
       '</div>' +
+      gstPanel +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:13px">' + cashCard + agingCard + '</div>' +
       '<div class="ov-card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">' +
         '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">' +
@@ -612,7 +625,7 @@ window.fkModules = window.fkModules || {};
     const isIn = amt >= 0;
     const ico = isIn ? 'ti-arrow-down-left' : 'ti-arrow-up-right';
     const left =
-      '<div class="rec-left">' +
+      '<div class="rec-left ' + (isIn ? 'rec-left-in' : 'rec-left-out') + '">' +
         (view === 'unmatched' ? '<input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()" style="margin-top:11px">' : '') +
         '<div class="rec-ico ' + (isIn ? 'rec-ico-in' : 'rec-ico-out') + '"><i class="ti ' + ico + '"></i></div>' +
         '<div style="min-width:0"><div style="font-size:11.5px;color:var(--muted)">' + esc(String(l.txn_date).slice(0, 10)) + '</div>' +
@@ -635,9 +648,9 @@ window.fkModules = window.fkModules || {};
       '</div>';
     const codePane =
       '<div id="recpane-code-' + l.id + '" style="display:' + (matchOn ? 'none' : 'block') + '">' +
-        '<div style="display:flex;gap:8px;margin-bottom:9px">' +
-          '<div style="flex:1"><span class="rec-lbl">What account</span><select class="rec-acct rec-f" data-line="' + l.id + '">' + window.__recAcctOpts + '</select></div>' +
-          '<div style="flex:1"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f">' + window.__recContactOpts + '</select></div>' +
+        '<div style="display:flex;gap:8px;margin-bottom:9px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:150px"><span class="rec-lbl">What account</span><select class="rec-acct rec-f" data-line="' + l.id + '">' + window.__recAcctOpts + '</select></div>' +
+          '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f">' + window.__recContactOpts + '</select></div>' +
         '</div>' +
         '<div style="margin-bottom:11px"><span class="rec-lbl">Why</span><input id="recWhy-' + l.id + '" class="rec-f" placeholder="Description (optional)"></div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
