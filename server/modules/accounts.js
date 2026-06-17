@@ -747,10 +747,51 @@ router.post('/contacts', requirePermission('accounts.post'), async (req, res) =>
     [String(name).trim(), kind || 'supplier', gstin || null]);
   res.json(r.rows[0]);
 });
+
+// ---------- File attachments (bills / invoices / bank lines) ----------
+const ATT_COLS = { bill: 'bill_id', invoice: 'invoice_id', bank: 'bank_line_id' };
+function attTarget(q) {
+  const found = Object.entries(ATT_COLS).filter(([k]) => q[k + '_id']);
+  if (found.length !== 1) return null;
+  return { col: found[0][1], val: q[found[0][0] + '_id'] };
+}
+router.get('/attachments', requirePermission('accounts.view'), async (req, res) => {
+  const t = attTarget(req.query);
+  if (!t) return res.status(400).json({ error: 'Pass exactly one of bill_id, invoice_id, bank_id.' });
+  const r = await db.query(
+    `SELECT id, filename, mime_type, size_bytes, uploaded_at FROM acc_attachment WHERE ${t.col} = $1 ORDER BY id`, [t.val]);
+  res.json(r.rows);
+});
+router.post('/attachments', requirePermission('accounts.post'), upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+  const t = attTarget(req.query);
+  if (!t) return res.status(400).json({ error: 'Pass exactly one of bill_id, invoice_id, bank_id.' });
+  if (!/^(application\/pdf|image\/(png|jpe?g|webp|gif))$/i.test(req.file.mimetype)) {
+    return res.status(400).json({ error: 'Only PDF or image files are allowed.' });
+  }
+  const r = await db.query(
+    `INSERT INTO acc_attachment (${t.col}, filename, mime_type, size_bytes, content, uploaded_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, filename, mime_type, size_bytes, uploaded_at`,
+    [t.val, req.file.originalname, req.file.mimetype, req.file.size, req.file.buffer, req.user.id]);
+  res.json(r.rows[0]);
+});
+router.get('/attachments/:id', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query('SELECT filename, mime_type, content FROM acc_attachment WHERE id = $1', [req.params.id]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Not found.' });
+  const f = r.rows[0];
+  res.setHeader('Content-Type', f.mime_type);
+  res.setHeader('Content-Disposition', 'inline; filename="' + String(f.filename).replace(/[\r\n"]/g, '') + '"');
+  res.send(f.content);
+});
+router.delete('/attachments/:id', requirePermission('accounts.post'), async (req, res) => {
+  await db.query('DELETE FROM acc_attachment WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+});
 router.get('/bills', requirePermission('accounts.view'), async (req, res) => {
   const where = req.query.status ? 'WHERE b.status = $1' : '';
   const r = await db.query(
-    `SELECT b.*, c.name AS contact_name, a.name AS category_name
+    `SELECT b.*, c.name AS contact_name, a.name AS category_name,
+            (SELECT COUNT(*) FROM acc_attachment x WHERE x.bill_id = b.id) AS att_count
        FROM acc_bill b
        LEFT JOIN acc_contact c ON c.id = b.contact_id
        LEFT JOIN acc_account a ON a.id = b.category_account_id
@@ -761,7 +802,8 @@ router.get('/bills', requirePermission('accounts.view'), async (req, res) => {
 router.get('/invoices', requirePermission('accounts.view'), async (req, res) => {
   const where = req.query.status ? 'WHERE i.status = $1' : '';
   const r = await db.query(
-    `SELECT i.*, c.name AS contact_name
+    `SELECT i.*, c.name AS contact_name,
+            (SELECT COUNT(*) FROM acc_attachment x WHERE x.invoice_id = i.id) AS att_count
        FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id
        ${where} ORDER BY i.invoice_date DESC, i.id DESC`,
     req.query.status ? [req.query.status] : []);
@@ -878,7 +920,7 @@ router.get('/bank/lines', requirePermission('accounts.view'), async (req, res) =
   if (req.query.status) { params.push(req.query.status); clauses.push('status = $' + params.length); }
   if (req.query.import_id) { params.push(req.query.import_id); clauses.push('import_id = $' + params.length); }
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
-  const r = await db.query(`SELECT * FROM acc_bank_line ${where} ORDER BY txn_date, id`, params);
+  const r = await db.query(`SELECT *, (SELECT COUNT(*) FROM acc_attachment a WHERE a.bank_line_id = acc_bank_line.id) AS att_count FROM acc_bank_line ${where} ORDER BY txn_date, id`, params);
   res.json(r.rows);
 });
 // Two-balance reconcile header: bank's statement balance vs the books, + progress.

@@ -18,6 +18,41 @@ window.fkModules = window.fkModules || {};
     return data;
   }
 
+  // ---------- File attachments (shared across bills / invoices / reconcile) ----------
+  // kind ∈ {bill, invoice, bank}. Renders a paperclip control; chips load lazily.
+  function attControl(kind, id, count) {
+    const c = Number(count || 0);
+    return '<span class="att-wrap" id="att-' + kind + '-' + id + '">' +
+      (c > 0 ? '<button class="att-count" onclick="window.__att(\'' + kind + '\',' + id + ')"><i class="ti ti-paperclip"></i>' + c + '</button>' : '') +
+      '<button class="att-add" onclick="window.__attAdd(\'' + kind + '\',' + id + ')"><i class="ti ti-paperclip"></i>Attach</button></span>';
+  }
+  window.__att = async function (kind, id) {
+    const wrap = document.getElementById('att-' + kind + '-' + id); if (!wrap) return;
+    let files = [];
+    try { files = await api('/attachments?' + kind + '_id=' + id); } catch (e) { alert(e.message); return; }
+    const chips = files.map(f => '<span class="att-chip"><a href="' + API + '/attachments/' + f.id + '" target="_blank" rel="noopener"><i class="ti ti-file"></i>' + esc(f.filename) + '</a><button title="Remove" onclick="window.__attDel(\'' + kind + '\',' + id + ',' + f.id + ')">✕</button></span>').join('');
+    wrap.innerHTML = chips + '<button class="att-add" onclick="window.__attAdd(\'' + kind + '\',' + id + ')"><i class="ti ti-paperclip"></i>Attach</button>';
+  };
+  window.__attAdd = function (kind, id) {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'application/pdf,image/*'; inp.style.display = 'none';
+    inp.onchange = function () { if (inp.files && inp.files[0]) window.__attUpload(kind, id, inp.files[0]); inp.remove(); };
+    document.body.appendChild(inp); inp.click();
+  };
+  window.__attUpload = async function (kind, id, file) {
+    const fd = new FormData(); fd.append('file', file);
+    try {
+      const r = await fetch(API + '/attachments?' + kind + '_id=' + id, { method: 'POST', credentials: 'include', body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'Upload failed');
+      await window.__att(kind, id);
+    } catch (e) { alert(e.message); }
+  };
+  window.__attDel = async function (kind, id, attId) {
+    if (!window.confirm('Remove this file?')) return;
+    try { await api('/attachments/' + attId, { method: 'DELETE' }); await window.__att(kind, id); } catch (e) { alert(e.message); }
+  };
+
   const TABS = [
     { key: 'overview', hash: '#accounts', label: 'Overview', icon: 'ti-layout-dashboard' },
     { key: 'bills', hash: '#accounts/bills', label: 'Bills', icon: 'ti-file-invoice' },
@@ -68,9 +103,9 @@ window.fkModules = window.fkModules || {};
     .ov-num{font-family:'Fraunces',Georgia,serif;font-weight:500;font-variant-numeric:tabular-nums}
     .ov-l{font-size:12px;color:var(--muted)}
     .ov-bar{border-radius:5px 5px 0 0}
-    .rec-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:12px;margin-bottom:12px;display:flex;overflow:hidden}
-    .rec-card.rec-in{background:#F0F6E6;border-color:#DCE9C6}
-    .rec-card.rec-out{background:#FBEFE8;border-color:#F0DDD0}
+    .rec-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:14px;margin-bottom:14px;display:flex;overflow:hidden;box-shadow:0 1px 2px rgba(20,22,27,.05)}
+    .rec-card.rec-in{background:#F0F6E6;border-color:#D5E5BD}
+    .rec-card.rec-out{background:#FBEFE8;border-color:#EFD8C9}
     .rec-left{flex:0 0 60%;padding:13px 15px;display:flex;gap:11px;align-items:center}
     .rec-card.rec-in .rec-left{background:#E7F1D6}
     .rec-card.rec-out .rec-left{background:#F8E6DA}
@@ -89,6 +124,15 @@ window.fkModules = window.fkModules || {};
     .rec-tab.on{background:var(--ink);color:#fff;font-weight:500}
     .rec-cnt{font-size:11.5px;padding:1px 8px;border-radius:99px;background:rgba(0,0,0,.08)}.rec-tab.on .rec-cnt{background:rgba(255,255,255,.22)}
     .rec-pager .acct-btn{padding:7px 12px}.rec-pager .acct-btn.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+    .att-wrap{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .att-add{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-family:inherit;color:var(--muted);background:none;border:1px dashed var(--line,#D8D0C1);border-radius:7px;padding:4px 9px;cursor:pointer}
+    .att-add:hover{color:var(--ink);border-color:var(--muted)}
+    .att-count{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-family:inherit;color:var(--ink);background:var(--canvas,#F4EFE7);border:1px solid var(--line,#E8E0D3);border-radius:7px;padding:4px 9px;cursor:pointer}
+    .att-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:#fff;border:1px solid var(--line,#E8E0D3);border-radius:7px;padding:3px 4px 3px 9px;max-width:230px}
+    .att-chip a{display:inline-flex;align-items:center;gap:5px;color:var(--ink);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .att-chip a:hover{color:var(--orange)}
+    .att-chip button{border:none;background:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 4px}
+    .att-chip button:hover{color:var(--red,#A32D2D)}
     </style>`;
 
   function tabBar(active) {
@@ -398,9 +442,9 @@ window.fkModules = window.fkModules || {};
     const el = document.getElementById('bList'); if (!el) return;
     const bills = await api('/bills');
     if (!bills.length) { el.innerHTML = '<div class="acct-empty">No bills yet.</div>'; return; }
-    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Supplier</th><th>Category</th><th class="num">Net</th><th>Status</th><th></th></tr></thead><tbody>' +
+    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Supplier</th><th>Category</th><th class="num">Net</th><th>Status</th><th>Files</th><th></th></tr></thead><tbody>' +
       bills.map(b => '<tr><td>' + esc(String(b.bill_date).slice(0, 10)) + '</td><td>' + esc(b.contact_name || '—') + '</td><td>' + esc(b.category_name || '—') + '</td>' +
-        '<td class="num">' + inr(b.net_payable) + '</td><td>' + statusPill(b.status) + '</td><td class="acct-actions">' +
+        '<td class="num">' + inr(b.net_payable) + '</td><td>' + statusPill(b.status) + '</td><td>' + attControl('bill', b.id, b.att_count) + '</td><td class="acct-actions">' +
         (b.status === 'draft'
           ? '<button class="acct-btn primary" onclick="window.__acctBill(\'post\',' + b.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctBill(\'void\',' + b.id + ')">Void</button>'
           : b.status === 'posted'
@@ -477,11 +521,11 @@ window.fkModules = window.fkModules || {};
     const el = document.getElementById('iList'); if (!el) return;
     const invs = await api('/invoices');
     if (!invs.length) { el.innerHTML = '<div class="acct-empty">No invoices yet.</div>'; return; }
-    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Customer</th><th>Treatment</th><th class="num">Amount</th><th class="num">INR</th><th>Status</th><th></th></tr></thead><tbody>' +
+    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Customer</th><th>Treatment</th><th class="num">Amount</th><th class="num">INR</th><th>Status</th><th>Files</th><th></th></tr></thead><tbody>' +
       invs.map(i => '<tr><td>' + esc(String(i.invoice_date).slice(0, 10)) + '</td><td>' + esc(i.contact_name || '—') + '</td>' +
         '<td>' + (i.tax_treatment === 'export_zero' ? 'Export 0%' : 'Domestic GST') + '</td>' +
         '<td class="num">' + (i.currency === 'GBP' ? gbp(i.taxable_amount) : inr(i.taxable_amount)) + '</td>' +
-        '<td class="num">' + inr(i.amount_inr) + '</td><td>' + statusPill(i.status) + '</td><td class="acct-actions">' +
+        '<td class="num">' + inr(i.amount_inr) + '</td><td>' + statusPill(i.status) + '</td><td>' + attControl('invoice', i.id, i.att_count) + '</td><td class="acct-actions">' +
         (i.status === 'draft'
           ? '<button class="acct-btn primary" onclick="window.__acctInv(\'post\',' + i.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctInv(\'void\',' + i.id + ')">Void</button>'
           : i.status === 'posted'
@@ -599,6 +643,7 @@ window.fkModules = window.fkModules || {};
       const [sales, purch, tds] = await Promise.all([
         api('/reports/gst-sales' + q), api('/reports/gst-purchases' + q), api('/reports/tds' + q),
       ]);
+      [sales, purch, tds].forEach(x => { x.rows = x.rows || []; x.totals = x.totals || {}; });
       window.__caData = { sales, purch, tds, from, to };
 
       const salesBody = sales.rows.map(r => '<tr><td>' + d10(r.invoice_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.gstin || '—') + '</td><td>' + (r.tax_treatment === 'export_zero' ? 'Export / zero' : 'Domestic GST') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.gst_rate) + '</td><td class="num">' + inr(r.gst_amount) + '</td><td class="num">' + inr(r.total) + '</td></tr>').join('');
@@ -799,7 +844,9 @@ window.fkModules = window.fkModules || {};
           '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f" onchange="window.__recWho(' + l.id + ')">' + window.__recContactOpts + '</select></div>' +
         '</div>' +
         '<div style="margin-bottom:11px"><span class="rec-lbl">Why</span><input id="recWhy-' + l.id + '" class="rec-f" placeholder="Description (optional)"></div>' +
-        '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">' + attControl('bank', l.id, l.att_count) +
+          '<div style="display:flex;gap:8px;margin-left:auto"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
+        '</div>' +
       '</div>';
     const right =
       '<div class="rec-right" id="recright-' + l.id + '">' +
