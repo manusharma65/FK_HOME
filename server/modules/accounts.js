@@ -98,10 +98,10 @@ async function postJournal(client, j) {
   if (totalD !== totalC) throw new Error(`acc: journal does not balance (debits=${totalD}, credits=${totalC})`);
 
   const jr = await client.query(
-    `INSERT INTO acc_journal (entry_date, narration, source_type, source_id, status, reverses_journal_id, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    `INSERT INTO acc_journal (entry_date, narration, source_type, source_id, status, reverses_journal_id, created_by, contact_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
     [j.entry_date, j.narration || null, j.source_type, j.source_id || null,
-     j.status || 'posted', j.reverses_journal_id || null, j.created_by || null]
+     j.status || 'posted', j.reverses_journal_id || null, j.created_by || null, j.contact_id || null]
   );
   const journalId = jr.rows[0].id;
   for (const ln of lines) {
@@ -842,8 +842,9 @@ router.get('/bank/summary', requirePermission('accounts.view'), async (req, res)
 // Code a bank line to an account → posts the bank journal and marks it reconciled.
 // Code one unmatched bank line to an account: money in -> credit the account,
 // money out -> debit it, the bank control account takes the other leg.
+// opts.contactId (Who) and opts.note (Why) are optional, Xero-style.
 // Returns the new journal id. Caller owns the BEGIN/COMMIT.
-async function codeBankLine(client, lineId, accountId, userId) {
+async function codeBankLine(client, lineId, accountId, userId, opts = {}) {
   const lr = await client.query('SELECT * FROM acc_bank_line WHERE id = $1 FOR UPDATE', [lineId]);
   if (!lr.rows.length) throw new Error('Line not found.');
   const line = lr.rows[0];
@@ -852,18 +853,23 @@ async function codeBankLine(client, lineId, accountId, userId) {
   const lines = amt >= 0
     ? [{ tag: 'idfc_bank', debit: amt }, { account_id: accountId, credit: amt }]   // money in
     : [{ tag: 'idfc_bank', credit: -amt }, { account_id: accountId, debit: -amt }]; // money out
-  const jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Bank: ' + (line.description || ''), created_by: userId, lines });
+  const note = opts.note && String(opts.note).trim();
+  const jid = await postJournal(client, {
+    entry_date: line.txn_date, source_type: 'bank',
+    narration: note || ('Bank: ' + (line.description || '')),
+    created_by: userId, contact_id: opts.contactId || null, lines,
+  });
   await client.query("UPDATE acc_bank_line SET status='matched', match_type='manual', matched_journal_id=$2 WHERE id=$1", [line.id, jid]);
   return jid;
 }
 
 router.post('/bank/lines/:id/code', requirePermission('accounts.reconcile'), async (req, res) => {
-  const { account_id } = req.body || {};
+  const { account_id, contact_id, note } = req.body || {};
   if (!account_id) return res.status(400).json({ error: 'Pick an account to code this to.' });
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
-    const jid = await codeBankLine(client, req.params.id, account_id, req.user.id);
+    const jid = await codeBankLine(client, req.params.id, account_id, req.user.id, { contactId: contact_id || null, note: note || null });
     await client.query('COMMIT');
     await logAudit({ req, module: 'accounts', action: 'bank.code', target_type: 'acc_bank_line', target_id: Number(req.params.id) });
     res.json({ ok: true, journal_id: jid });
@@ -930,6 +936,31 @@ router.get('/open-bills', requirePermission('accounts.view'), async (req, res) =
        FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
       WHERE b.status = 'posted' ORDER BY b.bill_date, b.id`);
   res.json(r.rows);
+});
+
+// Suggested matches: for each unmatched line, the open invoice (money in) or bill
+// (money out) whose amount equals it to the paisa. Each open doc is offered once.
+// A one-tap accept on the client runs the normal match flow.
+router.get('/bank/suggestions', requirePermission('accounts.view'), async (req, res) => {
+  const [linesR, invR, billR] = await Promise.all([
+    db.query("SELECT id, amount FROM acc_bank_line WHERE status = 'unmatched' ORDER BY txn_date, id"),
+    db.query("SELECT i.id, i.amount_inr, c.name AS contact_name FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id WHERE i.status = 'posted' ORDER BY i.invoice_date, i.id"),
+    db.query("SELECT b.id, b.net_payable, c.name AS contact_name FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id WHERE b.status = 'posted' ORDER BY b.bill_date, b.id"),
+  ]);
+  const invs = invR.rows.slice(), bills = billR.rows.slice();
+  const usedInv = new Set(), usedBill = new Set();
+  const out = [];
+  for (const l of linesR.rows) {
+    const amt = Number(l.amount);
+    if (amt > 0) {
+      const m = invs.find(i => !usedInv.has(i.id) && Math.abs(Number(i.amount_inr) - amt) < 0.01);
+      if (m) { usedInv.add(m.id); out.push({ line_id: l.id, doc_type: 'invoice', doc_id: m.id, amount: amt, contact_name: m.contact_name || null }); }
+    } else if (amt < 0) {
+      const m = bills.find(b => !usedBill.has(b.id) && Math.abs(Number(b.net_payable) - (-amt)) < 0.01);
+      if (m) { usedBill.add(m.id); out.push({ line_id: l.id, doc_type: 'bill', doc_id: m.id, amount: -amt, contact_name: m.contact_name || null }); }
+    }
+  }
+  res.json(out);
 });
 // Match a bank line to an invoice (receipt) or bill (payment); books any FX difference.
 router.post('/bank/lines/:id/match', requirePermission('accounts.reconcile'), async (req, res) => {

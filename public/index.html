@@ -875,11 +875,16 @@
       </div>
         </div>
       </div>
-      <!-- ===== Finance (Accounts) — single door; tabs live on the page ===== -->
+      <!-- ===== Finance (Accounts) — own nav items, no in-page tabs ===== -->
       <div class="navgrp g-finance" id="grpFinance" style="display:none">
-        <div class="navgrp-h" onclick="location.hash='#accounts'" style="cursor:pointer">
-          <span class="navgrp-ico"><i class="ti ti-receipt-pound"></i></span>
-          <span class="navgrp-lbl">Finance</span>
+        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-receipt-pound"></i></span><span class="navgrp-lbl">Finance</span><span class="navgrp-cnt" id="cntFinance"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
+        <div class="navgrp-items">
+          <div class="nav-item" data-route="#accounts" onclick="location.hash='#accounts'"><i class="ti ti-layout-dashboard"></i><span>Overview</span></div>
+          <div class="nav-item" data-route="#accounts/bills" onclick="location.hash='#accounts/bills'"><i class="ti ti-file-invoice"></i><span>Bills</span></div>
+          <div class="nav-item" data-route="#accounts/invoices" onclick="location.hash='#accounts/invoices'"><i class="ti ti-receipt"></i><span>Invoices</span></div>
+          <div class="nav-item" data-route="#accounts/reconcile" onclick="location.hash='#accounts/reconcile'"><i class="ti ti-arrows-exchange"></i><span>Reconcile</span></div>
+          <div class="nav-item" data-route="#accounts/reports" onclick="location.hash='#accounts/reports'"><i class="ti ti-chart-bar"></i><span>Reports</span></div>
+          <div class="nav-item" data-route="#accounts/chart" onclick="location.hash='#accounts/chart'"><i class="ti ti-list-details"></i><span>Chart of accounts</span></div>
         </div>
       </div>
       <!-- ===== HR ===== -->
@@ -1762,7 +1767,7 @@ function render() {
     if (saved === '1') { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; }
     else setOpenHeight();
   }
-  ['grpHR', 'grpDay', 'grpSystem', 'grpYou', 'grpAcademy'].forEach(setupNavGroup);
+  ['grpHR', 'grpDay', 'grpSystem', 'grpYou', 'grpAcademy', 'grpFinance'].forEach(setupNavGroup);
   // Keep open groups correctly sized if the window resizes. Bind ONCE — render()
   // runs on every reload(), so an unguarded listener here would stack too.
   if (!window.__fkNavResizeBound) {

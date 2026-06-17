@@ -430,9 +430,11 @@ window.fkModules = window.fkModules || {};
 
   // ---------------- Reconcile ----------------
   async function renderReconcile(body) {
-    const { accounts } = await lookups();
+    const { accounts, contacts } = await lookups();
     window.__recAcctOpts = accounts.filter(a => a.system_tag !== 'idfc_bank')
       .map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
+    window.__recContactOpts = '<option value="">— who (optional) —</option>' +
+      (contacts || []).map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
     body.innerHTML =
       '<div id="recHeader"></div>' +
       '<div class="acct-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">' +
@@ -478,29 +480,53 @@ window.fkModules = window.fkModules || {};
       return;
     }
     const bulk = view === 'unmatched';
+    // Suggested matches (only meaningful for the queue).
+    const suggMap = {};
+    if (bulk) {
+      const sugg = await api('/bank/suggestions').catch(() => []);
+      (sugg || []).forEach(s => { suggMap[s.line_id] = s; });
+    }
+    const fieldCss = 'padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)';
     const bulkBar = bulk
       ? '<div id="recBulkBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--canvas);border-radius:10px;padding:10px 14px;margin-bottom:12px">' +
           '<span id="recBulkCount" style="font-size:14px;font-weight:500"></span>' +
           '<span style="font-size:13px;color:var(--muted)">code all selected to</span>' +
-          '<select id="recBulkAcct" style="min-width:200px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + window.__recAcctOpts + '</select>' +
+          '<select id="recBulkAcct" style="min-width:200px;' + fieldCss + '">' + window.__recAcctOpts + '</select>' +
           '<button class="acct-btn primary" onclick="window.__recBulkCode()">Code selected</button>' +
           '<button class="acct-btn ghost" onclick="window.__recBulkClear()">Clear</button>' +
         '</div>'
       : '';
     const head = '<table class="acct"><thead><tr>' +
       (bulk ? '<th style="width:34px"><input type="checkbox" id="recSelAll" title="Select all"></th>' : '') +
-      '<th>Date</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th style="width:42%"></th></tr></thead><tbody>';
+      '<th>Date</th><th>Description</th><th class="num">In</th><th class="num">Out</th><th style="width:46%"></th></tr></thead><tbody>';
     const rows = lines.map(l => {
       const amt = Number(l.amount);
       const inCol = amt > 0 ? inr(amt) : '';
       const outCol = amt < 0 ? inr(-amt) : '';
-      const action = view === 'unmatched'
-        ? '<div class="acct-actions" style="justify-content:flex-end">' +
-            '<select class="rec-acct" data-line="' + l.id + '" style="min-width:180px;padding:8px 10px;font-size:13px;font-family:inherit;border:1px solid var(--line,#D8D0C1);border-radius:8px;background:var(--bg);color:var(--ink)">' + window.__recAcctOpts + '</select>' +
+      let action;
+      if (view === 'unmatched') {
+        const s = suggMap[l.id];
+        const chip = s
+          ? '<div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;margin-bottom:6px;font-size:13px">' +
+              '<span style="color:var(--muted)">Looks like <strong>' + (s.doc_type === 'invoice' ? 'Inv #' : 'Bill #') + s.doc_id + '</strong>' +
+              (s.contact_name ? ' · ' + esc(s.contact_name) : '') + ' · ' + inr(s.amount) + '</span>' +
+              '<button class="acct-btn primary" style="padding:5px 12px" onclick="window.__recMatchDoc(' + l.id + ",'" + s.doc_type + "'," + s.doc_id + ')">Match</button>' +
+            '</div>'
+          : '';
+        action = '<div>' + chip +
+          '<div class="acct-actions" style="justify-content:flex-end">' +
+            '<select class="rec-acct" data-line="' + l.id + '" style="min-width:170px;' + fieldCss + '">' + window.__recAcctOpts + '</select>' +
             '<button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button>' +
             '<button class="acct-btn" onclick="window.__recMatch(' + l.id + ',' + amt + ')">Match…</button>' +
-            '<button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button></div>'
-        : '<div class="acct-actions" style="justify-content:flex-end"><button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
+            '<button class="acct-btn ghost" onclick="window.__recDetails(' + l.id + ')" title="Add who / why">+ note</button>' +
+            '<button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button></div>' +
+          '<div id="recdet-' + l.id + '" style="display:none;gap:8px;justify-content:flex-end;margin-top:8px">' +
+            '<select id="recWho-' + l.id + '" style="min-width:150px;' + fieldCss + '">' + window.__recContactOpts + '</select>' +
+            '<input id="recWhy-' + l.id + '" placeholder="Why / note (optional)" style="min-width:200px;' + fieldCss + '">' +
+          '</div></div>';
+      } else {
+        action = '<div class="acct-actions" style="justify-content:flex-end"><button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
+      }
       return '<tr>' +
         (bulk ? '<td><input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()"></td>' : '') +
         '<td style="white-space:nowrap">' + esc(String(l.txn_date).slice(0, 10)) + '</td>' +
@@ -517,6 +543,17 @@ window.fkModules = window.fkModules || {};
       });
     }
   }
+
+  window.__recDetails = function (id) {
+    const d = document.getElementById('recdet-' + id); if (!d) return;
+    d.style.display = (d.style.display === 'none' || !d.style.display) ? 'flex' : 'none';
+  };
+  window.__recMatchDoc = async function (id, type, docId) {
+    try {
+      await api('/bank/lines/' + id + '/match', { method: 'POST', body: JSON.stringify({ doc_type: type, doc_id: docId }) });
+      await refreshOpenDocs(); await loadSummary(); await loadRecList('unmatched');
+    } catch (e) { alert(e.message); }
+  };
 
   // ---- bulk coding (tick several lines, code them together) ----
   window.__recSelChanged = function () {
@@ -542,7 +579,12 @@ window.fkModules = window.fkModules || {};
   }
   window.__recCode = async function (id) {
     const sel = document.querySelector('.rec-acct[data-line="' + id + '"]');
-    try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify({ account_id: sel ? Number(sel.value) : null }) }); await loadSummary(); await loadRecList('unmatched'); }
+    const who = document.getElementById('recWho-' + id);
+    const why = document.getElementById('recWhy-' + id);
+    const payload = { account_id: sel ? Number(sel.value) : null };
+    if (who && who.value) payload.contact_id = Number(who.value);
+    if (why && why.value.trim()) payload.note = why.value.trim();
+    try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify(payload) }); await loadSummary(); await loadRecList('unmatched'); }
     catch (e) { alert(e.message); }
   };
   window.__recIgnore = async function (id) {
@@ -698,10 +740,9 @@ window.fkModules = window.fkModules || {};
 
   window.fkModules['accounts'] = {
     title: 'Accounts',
-    render() { return STYLE + '<div class="acct-wrap"><div class="acct-ctx">FK Enterprises · India books · INR</div><div id="acctTabs"></div><div id="acctBody"></div></div>'; },
+    render() { return STYLE + '<div class="acct-wrap"><div class="acct-ctx">FK Enterprises · India books · INR</div><div id="acctBody"></div></div>'; },
     async mount(el, ctx) {
       const tab = activeTab(ctx && ctx.fullKey);
-      document.getElementById('acctTabs').innerHTML = tabBar(tab);
       const body = document.getElementById('acctBody');
       body.innerHTML = '<div class="acct-empty">Loading…</div>';
       try {
