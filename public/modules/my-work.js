@@ -124,6 +124,16 @@ window.fkModules['my-work'] = {
                 '<option value="project">Project / piece of work</option>' +
                 '<option value="other">Other</option>' +
                 '<option value="request">Request</option>' +
+                ((function(){try{var ds=(typeof dash!=='undefined'&&dash&&dash.departments)?dash.departments:[];return ds.some(function(d){return (d.slug||d)==='accounts';});}catch(e){return false;}})() ? '<optgroup label="Accounts">'+
+                  '<option value="reconciliation">Reconciliation</option>'+
+                  '<option value="bill_entry">Bill entry</option>'+
+                  '<option value="billing">Billing / invoicing</option>'+
+                  '<option value="chasing">Chasing payments</option>'+
+                  '<option value="gst_tds">GST &amp; TDS prep</option>'+
+                  '<option value="month_end">Month-end close</option>'+
+                  '<option value="supplier_query">Supplier query</option>'+
+                  '<option value="ca_pack">CA pack</option>'+
+                '</optgroup>' : '') +
               '</select>' +
               '<select id="mwAssignee"><option value="">Myself</option></select>' +
             '</div>' +
