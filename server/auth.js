@@ -7,7 +7,14 @@ const { db } = require('./db');
 const SESSION_COOKIE = 'fk_session';
 // Restored to a long session after the r1.05 short-TTL change logged people out
 // mid-day. Clock-in "freshness" will be handled without touching the login session.
-const SESSION_TTL_HOURS = 24 * 14;
+// Login is IDLE-based, not a fixed clock. A session lives this many hours from the
+// last GENUINE user action, and every real request slides it forward (see
+// attachUserToRequest). Background traffic — the heartbeat and the 30s poll loop —
+// is tagged 'x-fk-bg' and does NOT slide it, so a tab left open overnight still
+// lapses and the person signs in next morning. 2h: a meeting or lunch keeps you in,
+// an overnight gap signs you out. This replaces the old fixed 14-day window, which
+// never expired; being activity-driven, it can't log out an active user mid-work.
+const SESSION_IDLE_HOURS = 2;
 
 function generateToken() {
   return crypto.randomBytes(32).toString('hex');
@@ -54,8 +61,22 @@ async function attachUserToRequest(req, res, next) {
       isManagerOf(slug) { return this.departments.some(d => d.slug === slug && (d.role === 'manager' || d.role === 'lead')); },
     };
 
-    // Touch last_seen + last_active fire-and-forget
-    db.query('UPDATE user_sessions SET last_seen_at = NOW() WHERE token = $1', [token]).catch(() => {});
+    // Touch last_seen + last_active fire-and-forget.
+    // Slide the login forward on GENUINE user activity only. Background traffic
+    // (heartbeat / poll loop, tagged 'x-fk-bg') refreshes presence below but must
+    // NOT extend the login, or a left-open tab would keep someone signed in forever.
+    const isBackground = req.headers['x-fk-bg'] === '1';
+    if (isBackground) {
+      db.query('UPDATE user_sessions SET last_seen_at = NOW() WHERE token = $1', [token]).catch(() => {});
+    } else {
+      db.query(
+        `UPDATE user_sessions
+            SET last_seen_at = NOW(),
+                expires_at  = NOW() + ($2 * INTERVAL '1 hour')
+          WHERE token = $1`,
+        [token, SESSION_IDLE_HOURS]
+      ).catch(() => {});
+    }
     db.query(
       `INSERT INTO user_status (user_id, status, last_active_at, changed_at)
        VALUES ($1, 'active', NOW(), NOW())
@@ -128,7 +149,7 @@ function requirePermission(slug) {
 
 async function createSession(userId, req) {
   const token = generateToken();
-  const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 3600 * 1000);
+  const expiresAt = new Date(Date.now() + SESSION_IDLE_HOURS * 3600 * 1000);
   await db.query(
     `INSERT INTO user_sessions (token, user_id, ip_address, user_agent, expires_at)
      VALUES ($1,$2,$3,$4,$5)`,

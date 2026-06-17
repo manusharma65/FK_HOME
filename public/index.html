@@ -167,23 +167,21 @@
   }
   .brand-name { font-size: 16px; font-weight: 500; color: #FAF7F2; }
   .user-pill {
-    padding: 13px 13px 13px 16px; background: #FFFDF9; border: 1px solid #ECE3D4; border-radius: 15px;
-    display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
-    position: relative; overflow: hidden; box-shadow: 0 5px 16px -11px rgba(60,40,20,.6);
+    padding: 9px 10px; background: #F1EFE8; border-radius: 8px;
+    display: flex; align-items: center; gap: 9px; margin-bottom: 12px;
   }
-  .user-pill::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--orange); }
   .avatar {
-    width: 46px; height: 46px; border-radius: 13px;
+    width: 28px; height: 28px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
-    font-family: var(--disp); font-weight: 700; font-size: 19px; color: var(--ink); position: relative; flex-shrink: 0;
+    font-weight: 500; font-size: 14px; color: var(--ink); position: relative; flex-shrink: 0;
   }
   .avatar .dot {
-    position: absolute; bottom: -3px; right: -3px;
-    width: 14px; height: 14px; border-radius: 50%;
-    border: 3px solid #FFFDF9;
+    position: absolute; bottom: -1px; right: -1px;
+    width: 8px; height: 8px; border-radius: 50%;
+    border: 1.5px solid #F1EFE8;
   }
-  .user-pill .name { font-family: var(--disp); font-size: 19px; font-weight: 600; color: var(--ink); line-height: 1.05; letter-spacing: -0.01em; }
-  .user-pill .role { font-size: 10.5px; font-weight: 800; color: #C2562E; margin-top: 4px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .user-pill .name { font-size: 15px; font-weight: 500; color: var(--ink); line-height: 1.2; }
+  .user-pill .role { font-size: 13px; color: #5F5E5A; margin-top: 1px; }
 
   .late-btn {
     padding: 10px 12px; background: var(--nav-elev-2); border: 1px solid var(--amber);
@@ -405,24 +403,6 @@
   .person-name { font-size: 14px; color: var(--ink); font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .03em; }
   .person-role { font-size: 12.5px; color: var(--muted); margin-top: 2px; font-weight: 500; }
   .person-late { color: var(--amber); }
-  /* r1.27 — Option D directory card for "Who's in today" */
-  .pcard { display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--bg);
-           border:0.5px solid var(--line); border-radius:12px; border-left:4px solid var(--line); }
-  .pcard.off { opacity:.62; }
-  .pcard-av { width:42px; height:42px; border-radius:12px; flex-shrink:0; display:flex;
-              align-items:center; justify-content:center; color:#fff; font-weight:600;
-              font-size:15px; letter-spacing:.02em; }
-  .pcard-main { flex:1; min-width:0; }
-  .pcard-name { font-family:'Fraunces',Georgia,serif; font-size:17px; font-weight:500;
-                color:var(--ink); line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .pcard-role { font-size:10.5px; color:var(--muted); margin-top:3px; font-weight:600;
-                text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .pcard-stat { display:flex; align-items:center; gap:6px; margin-top:5px; font-size:12.5px; font-weight:500; }
-  .pcard-stat .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
-  .pcard-msg { background:transparent; border:0.5px solid var(--line); border-radius:7px;
-               padding:5px 11px; font-size:13px; color:var(--muted); cursor:pointer; flex-shrink:0;
-               transition:background .12s,color .12s; }
-  .pcard-msg:hover { background:var(--amber); color:#fff; border-color:var(--amber); }
 
   /* Time off card */
   .timeoff-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
@@ -1273,9 +1253,19 @@
             </div>
           </div>
 
-          <!-- Daily report card removed (r1.28): the report is filed on the Today page
-               (My Day -> Today), which has logged items + proper submit. This was a weaker
-               duplicate writing a half-version of the same day. -->
+          <!-- Daily report card (new — HR-1) -->
+          <div class="card daily-report-card">
+            <div class="card-header">
+              <div class="card-title"><i class="ti ti-notes"></i> Daily report</div>
+              <span class="card-meta" id="dailyReportMeta">—</span>
+            </div>
+            <div class="auto-summary" id="dailyReportSummary">—</div>
+            <textarea id="dailyReportNotes" placeholder="What did you work on today? (free text — auto-saves)" maxlength="5000"></textarea>
+            <div class="footer">
+              <span id="dailyReportStatus">Not yet saved.</span>
+              <button class="save-btn" id="dailyReportSaveBtn" onclick="saveDailyReport()">Save</button>
+            </div>
+          </div>
 
         </div>
       </div>
@@ -1539,6 +1529,32 @@
 <script src="/modules/hr-today.js"></script>
 <script src="/modules/team-review.js"></script>
 <script>
+// --- Session activity tagging (r1.31) ---------------------------------------
+// Tag passive background polling — the heartbeat and the 30s/60s refresh loops —
+// with 'x-fk-bg' so the server can tell it apart from real user activity. Only a
+// GET to one of these polling endpoints counts as background; navigation and any
+// write (POST/PUT/DELETE) are genuine use and keep the login alive. This is what
+// lets a left-open idle tab lapse overnight without ever logging out an active
+// person mid-work. Pairs with SESSION_IDLE_HOURS in auth.js.
+(function () {
+  var BG = ['/api/me/heartbeat', '/api/me/dashboard', '/api/team/whos-on',
+            '/api/attendance/today', '/api/attendance/hr/today', '/api/attendance/dept/today',
+            '/api/notifications', '/api/chat/channels'];
+  var _fetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      init = init || {};
+      var method = (init.method || 'GET').toUpperCase();
+      var url = (typeof input === 'string') ? input : (input && input.url) || '';
+      if (method === 'GET' && BG.some(function (p) { return url.indexOf(p) !== -1; })) {
+        var h = new Headers(init.headers || {});
+        h.set('x-fk-bg', '1');
+        init.headers = h;
+      }
+    } catch (e) { /* never let tagging break a request */ }
+    return _fetch.call(this, input, init);
+  };
+})();
 (function(){
   function setHrBadge(){
     fetch('/api/daily/team',{credentials:'include'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
@@ -1810,7 +1826,7 @@ function applyStatusPill(s) {
   pill.className = 'status-pill';
   const map = {
     active: 'Active', idle: 'Idle', running_late: 'Running late',
-    on_break: 'On break', heads_down: 'Heads down', resting: 'Resting', off_sick: 'Off sick',
+    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Take rest',
     in_meeting: 'In meeting', wfh: 'Working from home',
     on_leave: 'On leave', offline: 'Active'
   };
@@ -2072,8 +2088,8 @@ function renderPeople(people) {
     list.classList.remove('scrollable');
     return;
   }
-  const inCount = people.filter(p => p.board_state === 'in').length;
-  meta.textContent = `${inCount} in today`;
+  const onCount = people.filter(p => p.status === 'active').length;
+  meta.textContent = `${onCount} of ${people.length} on`;
 
   // Show search box + scrollable list once there are more than 6 people
   if (people.length > 6) {
@@ -2100,45 +2116,34 @@ function filterPeople() {
   list.innerHTML = matches.map(renderPersonRow).join('');
 }
 function renderPersonRow(p) {
-  const deptColour = p.avatar_colour || '#B4B2A9';
-  const initials = (p.initials || String(p.full_name || p.name || '?').trim().slice(0, 2)).toUpperCase();
-  // Presence label + colour for people who ARE in today. 'resting' = the casual "Take rest"
-  // (at work, just on a breather) — distinct from off_sick, which is a dated day off.
-  const PRESENCE = {
-    active:       ['Active',            '#639922'],
-    resting:      ['Resting',           '#7E9AAE'],
-    on_break:     ['On break',          '#85B7EB'],
-    heads_down:   ['Heads down',        '#7F77DD'],
-    in_meeting:   ['In meeting',        '#378ADD'],
-    wfh:          ['Working from home', '#1D9E75'],
-    running_late: ['Running late',      '#EF9F27'],
-    idle:         ['Idle',              '#EF9F27'],
-    offline:      ['Away',              '#B4B2A9'],
+  const statusColour = {
+    active: '#639922', idle: '#EF9F27', running_late: '#EF9F27',
+    on_break: '#85B7EB', heads_down: '#7F77DD', off_sick: '#A32D2D',
+    in_meeting: '#378ADD', wfh: '#1D9E75',
+    on_leave: '#888780', offline: '#B4B2A9'
+  }[p.status] || '#B4B2A9';
+  const STATUS_BADGE = {
+    heads_down: ['Heads down', '#7F77DD'],
+    in_meeting: ['In meeting', '#378ADD'],
+    on_break:   ['On break',   '#85B7EB'],
+    wfh:        ['WFH',        '#1D9E75'],
+    off_sick:   ['Take rest',  '#A32D2D'],
+    on_leave:   ['On leave',   '#888780'],
   };
-  const OFF_REASON = {
-    on_leave: 'On leave', off_sick: 'Off sick', off_holiday: 'On holiday',
-    off_cs_rota: 'Off (rota)', off_pattern: 'Off today',
-  };
-  let dotColour, statusText, cardOff = false;
-  if (p.board_state === 'off') {
-    cardOff = true; dotColour = '#B4B2A9';
-    statusText = OFF_REASON[p.off_reason] || 'Off today';
-  } else if (p.board_state === 'not_in') {
-    dotColour = '#C9C7BF'; statusText = 'Not in yet';
-  } else {
-    const pr = PRESENCE[p.status] || PRESENCE.active;
-    dotColour = pr[1];
-    statusText = (p.status === 'running_late' && p.status_note) ? p.status_note : pr[0];
-  }
+  const bd = STATUS_BADGE[p.status];
+  const badge = bd ? `<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:99px;white-space:nowrap;margin-right:8px;background:${bd[1]}1A;color:${bd[1]}">${bd[0]}</span>` : '';
+  const isLate = p.status === 'running_late';
+  const isOff = p.status === 'off_sick' || p.status === 'on_leave' || p.status === 'offline';
+  const role = isLate ? `<span class="person-late">${p.status_note || 'Running late'}</span>` : (p.role_label || '—');
   return `
-    <div class="pcard${cardOff ? ' off' : ''}" style="border-left-color:${deptColour}">
-      <div class="pcard-av" style="background:${cardOff ? '#B4B2A9' : deptColour}">${escapeHtml(initials)}</div>
-      <div class="pcard-main">
-        <div class="pcard-name">${escapeHtml(p.full_name || p.name)}</div>
-        <div class="pcard-role">${escapeHtml(p.role_label || '\u2014')}</div>
-        <div class="pcard-stat"><span class="dot" style="background:${dotColour}"></span>${escapeHtml(statusText)}</div>
+    <div class="person">
+      <span class="person-dot" style="background:${statusColour}"></span>
+      <div class="person-main">
+        <p class="person-name" style="${isOff ? 'color:var(--soft)' : ''}">${escapeHtml(p.full_name || p.name)}</p>
+        <p class="person-role">${role}</p>
       </div>
-      <button class="pcard-msg" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
+      ${badge}
+      <button class="person-msg-btn" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
     </div>`;
 }
 async function openDM(userId) {
@@ -2235,36 +2240,13 @@ function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;',
 
 // --- HEARTBEAT ---
 function startHeartbeat() {
-  // r1.27 — "active" means the person is at their computer with FK Home open, NOT that
-  // FK Home is the focused tab. The team works all day in Seller Central / Excel / email
-  // with FK Home in a background tab; the old `if (document.hidden) return` paused the
-  // heartbeat there, so the server saw no beat for 5 min and falsely flipped them to idle
-  // (and fired the 20-min idle alert). We now beat regardless of focus, and beat again on
-  // refocus to cover any browser background-timer throttling.
-  const beat = () => fetch('/api/me/heartbeat', {
-    method: 'POST', credentials: 'include',
-    headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
-  }).catch(()=>{});
-  // The FIRST beat of the day is what stamps the clock-in. fkClockInMaybe() must run
-  // AFTER that, or it sees "not clocked in yet" and the selfie only appears on a manual
-  // refresh. So fire the selfie check once the first beat lands.
-  beat().then(() => { if (window.fkClockInMaybe) window.fkClockInMaybe(); });
-  setInterval(beat, 30000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) beat(); });
-
-  // r1.27 — live refresh: the app used to only re-fetch after YOUR own actions, so other
-  // people's status changes and the evening auto-clock-out never showed without a manual
-  // refresh. Poll the dashboard + board every 45s — but skip while a modal is open or the
-  // user is typing, so it never wipes an in-progress action. Also refresh on refocus.
-  const canRefresh = () => {
-    if (document.hidden) return false;
-    if (document.querySelector('.modal-bg.on') || document.getElementById('fk-clockin-ovl') || document.querySelector('.mw-form.on')) return false;
-    const ae = document.activeElement;
-    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return false;
-    return true;
-  };
-  setInterval(() => { if (canRefresh() && typeof reload === 'function') reload().catch(()=>{}); }, 45000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && canRefresh() && typeof reload === 'function') reload().catch(()=>{}); });
+  setInterval(() => {
+    if (document.hidden) return;
+    fetch('/api/me/heartbeat', {
+      method: 'POST', credentials: 'include',
+      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
+    }).catch(()=>{});
+  }, 30000);
 }
 
 // --- MODALS ---
@@ -2331,7 +2313,7 @@ function openStatusModal() {
     { v: 'active',     label: 'Active',            desc: 'Working as usual',                      icon: 'ti-circle-filled' },
     { v: 'in_meeting', label: 'In meeting',        desc: 'In a call or meeting',                  icon: 'ti-users' },
     { v: 'heads_down', label: 'Heads down',        desc: 'Focus mode — please don\'t interrupt', icon: 'ti-headphones' },
-    { v: 'resting',    label: 'Take rest',         desc: 'A breather \u2014 flip back to Active when you return', icon: 'ti-bed' },
+    { v: 'off_sick',   label: 'Take rest',         desc: 'Resting \u2014 flip back to Active when you return', icon: 'ti-bed' },
     { v: 'wfh',        label: 'Working from home', desc: 'Asks for your location',                icon: 'ti-home' },
   ];
   const wrap = document.getElementById('statusOptions');
@@ -2397,13 +2379,14 @@ function wfhBlockedMessage() {
 }
 
 async function setStatus(s) {
-  if (s === 'resting') {
-    // r1.27 — "Take rest" is a momentary presence (a breather at work), NOT a sick day.
-    // It sets presence='resting' via /status only — never a sick_log, never attendance,
-    // and it never blocks leave. Flips back to Active when they return (or on next clock-in).
+  if (s === 'off_sick') {
+    // r1.25 — "Take rest" is a TEMPORARY presence status (rest a while, then flip
+    // back to Active), not a formal sick day. Set presence only via /status; do NOT
+    // call /me/sick (which marked the whole attendance day off_sick and left a stale
+    // "sick" on the manager's Company-today even after the person returned to Active).
     closeModal('statusModal');
     try {
-      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'resting' }) });
+      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'off_sick' }) });
       if (!r.ok) { alert('Failed to update'); return; }
       await reload();
     } catch (err) { alert('Network error'); }
@@ -3007,7 +2990,7 @@ function formatTime(t) {
 function statusLabel(s) {
   return ({
     on_time: 'On time', late: 'Late', very_late: 'Very late', not_yet_in: 'Not yet in',
-    on_leave: 'On leave', off_sick: 'Off sick',
+    on_leave: 'On leave', off_sick: 'Take rest',
     off_pattern: 'Off (pattern)', off_cs_rota: 'Off (rota)', off_holiday: 'Off (holiday)',
     worked_voluntary: 'Worked', pending: 'Not yet in'
   })[s] || s || '—';
@@ -3081,35 +3064,7 @@ let dailyReportLocked = false;
 let dailyReportSaveTimer = null;
 let dailyReportLastSavedText = '';
 
-// r1.28 — big, can't-miss reminder shown across the top of the content if YESTERDAY was
-// worked but the daily report was never submitted. Replaces the silent midnight auto-submit.
-// Dismissable for the session; returns next login while the report is still missing.
-function showDailyReportReminder() {
-  if (document.getElementById('fkReportReminder')) return;
-  try { if (sessionStorage.getItem('fkReportReminderDismissed') === '1') return; } catch (e) {}
-  fetch('/api/daily/reminder', { credentials: 'include' })
-    .then(r => r.ok ? r.json() : null)
-    .then(d => {
-      if (!d || !d.unsubmitted) return;
-      const host = document.querySelector('main.content') || document.body;
-      const bar = document.createElement('div');
-      bar.id = 'fkReportReminder';
-      bar.style.cssText = 'position:sticky;top:0;z-index:1500;background:#E8722B;color:#fff;padding:15px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 3px 12px rgba(0,0,0,.18);font-size:16px;font-weight:500';
-      bar.innerHTML =
-        '<i class="ti ti-alert-triangle" style="font-size:24px;flex-shrink:0"></i>' +
-        '<span style="flex:1;line-height:1.4">You didn\u2019t submit yesterday\u2019s report. Please finish it and submit \u2014 it won\u2019t submit itself.</span>' +
-        '<button id="fkReportGo" style="background:#fff;color:#C2562E;border:none;border-radius:10px;padding:10px 20px;font-weight:700;font-size:15px;cursor:pointer;flex-shrink:0">Submit it now</button>' +
-        '<button id="fkReportX" title="Hide for now" style="background:transparent;border:none;color:#fff;font-size:24px;cursor:pointer;line-height:1;flex-shrink:0">\u00d7</button>';
-      host.insertBefore(bar, host.firstChild);
-      document.getElementById('fkReportGo').onclick = () => { location.hash = '#today'; bar.remove(); };
-      document.getElementById('fkReportX').onclick = () => { try { sessionStorage.setItem('fkReportReminderDismissed', '1'); } catch (e) {} bar.remove(); };
-    }).catch(() => {});
-}
 async function loadDailyReport() {
-  // r1.28 — the home daily-report card was removed (filed on the Today page now). This
-  // function instead shows a big, can't-miss reminder if YESTERDAY was worked but never
-  // submitted. Guarded: if the old card somehow exists, it falls through harmlessly.
-  if (!document.getElementById('dailyReportNotes')) { showDailyReportReminder(); return; }
   try {
     const r = await fetch('/api/attendance/daily-report/today', { credentials: 'include' });
     if (!r.ok) return;
@@ -3152,17 +3107,12 @@ async function loadDailyReport() {
 }
 
 function refreshDailyReportSummary() {
-  // r1.28b — the home daily-report card was removed (filed on the Today page now),
-  // so #dailyReportSummary no longer exists. Guard, or this throws when
-  // loadAttendanceToday calls it.
-  const summary = document.getElementById('dailyReportSummary');
-  if (!summary) return;
   // Pull from the Today card data already in DOM (avoids extra API call)
   const inT = document.getElementById('todayIn').textContent;
   const act = document.getElementById('todayActive').textContent;
   const idl = document.getElementById('todayIdle').textContent;
   const brk = document.getElementById('todayBreak').textContent;
-  summary.innerHTML =
+  document.getElementById('dailyReportSummary').innerHTML =
     'In <b>' + inT + '</b> · Active <b>' + act + '</b> · Idle <b>' + idl + '</b> · Break <b>' + brk + '</b>';
 }
 
@@ -3504,7 +3454,7 @@ window.fkRenderCockpit = async function (isOwner, isManager) {
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmtD = (d) => { if (!d) return ''; const p = String(d).slice(0, 10).split('-'); if (p.length !== 3) return ''; const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (p[2] * 1) + ' ' + (M[p[1] * 1 - 1] || ''); };
   const av = (p) => '<div class="ck-av" style="background:' + (p.colour || p.avatar_colour || '#888') + '">' + esc(p.initials || '') + '</div>';
-  const STAT = { on_leave: 'On leave', resting: 'Resting', off_sick: 'Off sick', wfh: 'Working from home', off_holiday: 'On holiday' };
+  const STAT = { on_leave: 'On leave', off_sick: 'Take rest', wfh: 'Working from home', off_holiday: 'On holiday' };
 
   const waiting = data.waiting || [];
   const present = data.present || [];
