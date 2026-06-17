@@ -164,7 +164,7 @@ async function postBill(client, billId, userId) {
   const journalId = await postJournal(client, {
     entry_date: String(b.bill_date).slice(0, 10),
     narration: 'Purchase bill #' + billId,
-    source_type: 'bill', source_id: billId, created_by: userId, lines,
+    source_type: 'bill', source_id: billId, created_by: userId, contact_id: b.contact_id || null, lines,
   });
   await client.query(
     `UPDATE acc_bill SET status='posted', journal_id=$2, posted_at=NOW() WHERE id=$1`,
@@ -216,7 +216,7 @@ async function postInvoice(client, invoiceId, userId) {
   const journalId = await postJournal(client, {
     entry_date: String(inv.invoice_date).slice(0, 10),
     narration: 'Sales invoice #' + invoiceId,
-    source_type: 'invoice', source_id: invoiceId, created_by: userId, lines,
+    source_type: 'invoice', source_id: invoiceId, created_by: userId, contact_id: inv.contact_id || null, lines,
   });
   await client.query(
     `UPDATE acc_invoice SET status='posted', journal_id=$2, posted_at=NOW() WHERE id=$1`,
@@ -656,9 +656,28 @@ router.get('/reports/balance-sheet', requirePermission('accounts.view'), async (
 });
 
 router.post('/periods/:period/lock', requirePermission('accounts.period.lock'), async (req, res) => {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(req.params.period)) return res.status(400).json({ error: 'Period must be a real YYYY-MM month.' });
   await lockPeriod(db, req.params.period, req.user.id, req.body?.note);
   await logAudit({ req, module: 'accounts', action: 'period.lock', target_type: 'acc_period', target_id: req.params.period });
   res.json({ ok: true });
+});
+router.post('/periods/:period/unlock', requirePermission('accounts.period.lock'), async (req, res) => {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(req.params.period)) return res.status(400).json({ error: 'Period must be a real YYYY-MM month.' });
+  await db.query('DELETE FROM acc_period_lock WHERE period = $1', [req.params.period]);
+  await logAudit({ req, module: 'accounts', action: 'period.unlock', target_type: 'acc_period', target_id: req.params.period });
+  res.json({ ok: true });
+});
+// Months that have entries (or a lock), with filed status — for the month-end screen.
+router.get('/periods', requirePermission('accounts.view'), async (req, res) => {
+  const r = await db.query(
+    `SELECT COALESCE(m.period, pl.period) AS period,
+            COALESCE(m.entries, 0) AS entries,
+            (pl.period IS NOT NULL) AS locked, pl.locked_at, pl.note
+       FROM (SELECT to_char(entry_date, 'YYYY-MM') AS period, COUNT(*) AS entries
+               FROM acc_journal WHERE status = 'posted' GROUP BY 1) m
+       FULL OUTER JOIN acc_period_lock pl ON pl.period = m.period
+      ORDER BY 1 DESC`);
+  res.json(r.rows.map(x => ({ period: x.period, entries: Number(x.entries), locked: x.locked, locked_at: x.locked_at, note: x.note })));
 });
 
 // --- reads + lookups for the UI ---
@@ -1187,6 +1206,24 @@ router.get('/reports/tds', requirePermission('accounts.view'), async (req, res) 
       tds: n2(rows.reduce((s, x) => s + Number(x.tds_amount), 0)),
     },
   });
+});
+
+// Spend grouped by supplier (expense debits attributed to the journal's contact).
+router.get('/reports/spend-by-supplier', requirePermission('accounts.view'), async (req, res) => {
+  const [from, to] = caPeriod(req);
+  const r = await db.query(
+    `SELECT j.contact_id, COALESCE(c.name, '(unassigned)') AS supplier,
+            COALESCE(SUM(l.debit - l.credit), 0) AS spend
+       FROM acc_journal j
+       JOIN acc_journal_line l ON l.journal_id = j.id
+       JOIN acc_account a ON a.id = l.account_id AND a.type = 'expense'
+       LEFT JOIN acc_contact c ON c.id = j.contact_id
+      WHERE j.status = 'posted' AND j.entry_date BETWEEN $1 AND $2
+      GROUP BY j.contact_id, c.name
+     HAVING COALESCE(SUM(l.debit - l.credit), 0) <> 0
+      ORDER BY spend DESC`, [from, to]);
+  const rows = r.rows.map(x => ({ contact_id: x.contact_id, supplier: x.supplier, spend: n2(x.spend) }));
+  res.json({ from, to, rows, total: n2(rows.reduce((s, x) => s + x.spend, 0)) });
 });
 
 module.exports = router;

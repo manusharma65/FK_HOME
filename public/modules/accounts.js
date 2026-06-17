@@ -548,6 +548,8 @@ window.fkModules = window.fkModules || {};
         '<button class="acct-btn" id="rAR">AR aging</button>' +
         '<button class="acct-btn" id="rAP">AP aging</button>' +
         '<button class="acct-btn" id="rCA">CA pack · GST &amp; TDS</button>' +
+        '<button class="acct-btn" id="rSS">Spend by supplier</button>' +
+        '<button class="acct-btn" id="rPE">Month-end</button>' +
       '</div><div id="rOut"></div>';
     const out = document.getElementById('rOut');
     document.getElementById('rTB').addEventListener('click', async () => {
@@ -581,6 +583,8 @@ window.fkModules = window.fkModules || {};
       const a = await api('/reports/aging'); out.innerHTML = agingTable('Payables — what you owe suppliers', a.payables);
     });
     document.getElementById('rCA').addEventListener('click', () => renderCaPack(out));
+    document.getElementById('rSS').addEventListener('click', () => renderSpendSupplier(out));
+    document.getElementById('rPE').addEventListener('click', () => renderPeriods(out));
     document.getElementById('rTB').click();
   }
 
@@ -689,6 +693,79 @@ window.fkModules = window.fkModules || {};
     downloadCsv(name, csv);
     return csv;
   };
+
+  async function renderSpendSupplier(out) {
+    const fy = indianFy();
+    out.innerHTML =
+      '<div class="acct-card" style="margin-bottom:14px">' +
+        '<h3 style="margin:0 0 4px">Spend by supplier</h3>' +
+        '<p style="color:var(--muted);font-size:13px;margin:0 0 12px">Total expenses attributed to each supplier in the period. Coded transactions and bills both count.</p>' +
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
+          '<div><span class="rec-lbl">From</span><input type="date" id="ssFrom" class="rec-f" style="width:170px" value="' + fy.from + '"></div>' +
+          '<div><span class="rec-lbl">To</span><input type="date" id="ssTo" class="rec-f" style="width:170px" value="' + fy.to + '"></div>' +
+          '<button class="acct-btn" id="ssFy">This FY</button>' +
+          '<button class="acct-btn primary" id="ssRun"><i class="ti ti-refresh"></i>Show</button>' +
+        '</div>' +
+      '</div><div id="ssOut"></div>';
+    const ssOut = document.getElementById('ssOut');
+    document.getElementById('ssFy').addEventListener('click', () => { const x = indianFy(); document.getElementById('ssFrom').value = x.from; document.getElementById('ssTo').value = x.to; load(); });
+    document.getElementById('ssRun').addEventListener('click', load);
+    async function load() {
+      const from = document.getElementById('ssFrom').value, to = document.getElementById('ssTo').value;
+      ssOut.innerHTML = '<div class="acct-empty" style="padding:24px">Loading…</div>';
+      const d = await api('/reports/spend-by-supplier?from=' + from + '&to=' + to);
+      d.rows = d.rows || []; window.__ssData = d;
+      if (!d.rows.length) { ssOut.innerHTML = '<div class="acct-card"><div class="acct-empty" style="padding:24px">No spend recorded in this period.</div></div>'; return; }
+      const max = Math.max.apply(null, d.rows.map(r => r.spend).concat([1]));
+      const body = d.rows.map(r => {
+        const share = d.total ? Math.round(r.spend / d.total * 100) : 0;
+        return '<tr><td>' + esc(r.supplier) + '</td>' +
+          '<td style="width:42%"><div style="background:var(--canvas,#F4EFE7);border-radius:6px;height:16px;overflow:hidden"><div style="height:100%;width:' + Math.max(2, Math.round(r.spend / max * 100)) + '%;background:#639922"></div></div></td>' +
+          '<td class="num">' + inr(r.spend) + '</td><td class="num">' + share + '%</td></tr>';
+      }).join('');
+      ssOut.innerHTML = '<div class="acct-card">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:0">Spend by supplier</h3><button class="acct-btn" onclick="window.__ssCsv()"><i class="ti ti-download"></i>Download CSV</button></div>' +
+        '<table class="acct" style="margin-top:10px"><thead><tr><th>Supplier</th><th></th><th class="num">Spend</th><th class="num">Share</th></tr></thead><tbody>' + body +
+        '<tr style="font-weight:500"><td>Total</td><td></td><td class="num">' + inr(d.total) + '</td><td class="num">100%</td></tr>' +
+        '</tbody></table></div>';
+    }
+    load();
+  }
+  window.__ssCsv = function () {
+    const d = window.__ssData; if (!d) return '';
+    const csv = toCsv(['Supplier', 'Spend', 'Share %'], (d.rows || []).map(r => [r.supplier, r.spend, d.total ? Math.round(r.spend / d.total * 100) : 0]));
+    downloadCsv('spend-by-supplier_' + (d.from + '_' + d.to).replace(/-/g, '') + '.csv', csv);
+    return csv;
+  };
+
+  async function renderPeriods(out) {
+    const canLock = !!(window.fkUser && (window.fkUser.group_slugs || []).indexOf('owner') !== -1);
+    out.innerHTML = '<div id="peOut"><div class="acct-empty" style="padding:24px">Loading…</div></div>';
+    async function loadPeriods() {
+      const peOut = document.getElementById('peOut');
+      const rows = await api('/periods');
+      const list = rows.length ? rows.map(p => {
+        const badge = p.locked ? '<span class="acct-pill p-posted">Filed</span>' : '<span class="acct-pill p-draft">Open</span>';
+        const action = !canLock ? ''
+          : p.locked
+            ? '<button class="acct-btn" onclick="window.__periodUnlock(\'' + p.period + '\')"><i class="ti ti-lock-open"></i>Unlock</button>'
+            : '<button class="acct-btn primary" onclick="window.__periodLock(\'' + p.period + '\')"><i class="ti ti-lock"></i>File &amp; lock</button>';
+        return '<tr><td>' + esc(monLabel(p.period)) + '</td><td class="num">' + p.entries + '</td><td>' + badge + '</td><td class="acct-actions">' + action + '</td></tr>';
+      }).join('') : '<tr><td colspan="4" class="acct-empty" style="padding:18px">No posted entries yet.</td></tr>';
+      peOut.innerHTML = '<div class="acct-card"><h3 style="margin:0 0 4px">Month-end</h3>' +
+        '<p style="color:var(--muted);font-size:13px;margin:0 0 12px">Filing a month locks it — entries dated in that month can no longer be posted or edited. Post any corrections in the current open month.' + (canLock ? '' : ' Only the owner can file or unlock a month.') + '</p>' +
+        '<table class="acct"><thead><tr><th>Month</th><th class="num">Entries</th><th>Status</th><th></th></tr></thead><tbody>' + list + '</tbody></table></div>';
+    }
+    window.__periodLock = async function (period) {
+      if (!window.confirm('File ' + period + '? This locks the month so no more entries can be posted in it.')) return;
+      try { await api('/periods/' + period + '/lock', { method: 'POST', body: JSON.stringify({}) }); await loadPeriods(); } catch (e) { alert(e.message); }
+    };
+    window.__periodUnlock = async function (period) {
+      if (!window.confirm('Unlock ' + period + '? Entries dated in that month can be edited again.')) return;
+      try { await api('/periods/' + period + '/unlock', { method: 'POST', body: JSON.stringify({}) }); await loadPeriods(); } catch (e) { alert(e.message); }
+    };
+    await loadPeriods();
+  }
 
   function agingTable(title, rows) {
     if (!rows.length) return '<div class="acct-card"><h3>' + title + '</h3><div class="acct-empty">Nothing outstanding.</div></div>';
