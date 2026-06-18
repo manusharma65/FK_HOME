@@ -525,3 +525,4 @@ module.exports = router;
 // Exposed for unit tests (harmless extra props on the router function).
 module.exports.extractBodies = extractBodies;
 module.exports.inlineCidImages = inlineCidImages;
+module.exports.sendMail = sendMail;

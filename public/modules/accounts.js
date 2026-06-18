@@ -141,6 +141,36 @@ window.fkModules = window.fkModules || {};
     .att-chip a:hover{color:var(--orange)}
     .att-chip button{border:none;background:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 4px}
     .att-chip button:hover{color:var(--red,#A32D2D)}
+    .ca-seg{display:inline-flex;background:var(--canvas,#F4EFE7);border-radius:12px;padding:5px;gap:4px}
+    .ca-seg button{font-family:inherit;font-size:13.5px;font-weight:500;border:none;background:transparent;color:var(--muted);padding:8px 16px;border-radius:9px;cursor:pointer}
+    .ca-seg button.on{background:#fff;color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.07)}
+    .ca-pill{font-family:inherit;font-size:13px;border:1px solid var(--line,#E8E0D3);background:#fff;border-radius:9px;padding:8px 14px;cursor:pointer;color:var(--ink)}
+    .ca-pill.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+    .ca-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+    .ca-kpi{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:13px;padding:14px 16px}
+    .ca-kpi .l{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;margin-bottom:7px}
+    .ca-kpi .v{font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:600}
+    .ca-kpi .v.green{color:var(--green,#3B6D11)} .ca-kpi .v.coral{color:#993C1D}
+    .ca-kpi .d{font-size:11.5px;color:var(--muted);margin-top:2px}
+    .ca-send{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border-top:1px solid var(--line,#E8E0D3);padding-top:16px;margin-top:16px}
+    .ca-recip{font-size:13px;color:var(--muted)} .ca-recip b{color:var(--ink)} .ca-recip a{color:var(--orange,#E8722B);text-decoration:none;margin-left:6px;cursor:pointer}
+    .bill-2col{display:grid;grid-template-columns:1.08fr .92fr;gap:26px;align-items:start}
+    @media(max-width:880px){.bill-2col{grid-template-columns:1fr}}
+    .vch{background:linear-gradient(180deg,#fff,#fffdfa);border:1px solid var(--line,#E8E0D3);border-radius:14px;overflow:hidden;box-shadow:0 10px 30px -20px rgba(60,40,20,.45)}
+    .vch-top{background:var(--canvas,#F4EFE7);padding:15px 18px;border-bottom:1px dashed #d8cdba;display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+    .vch-tag{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
+    .vch-name{font-size:17px;font-weight:600;font-family:'Fraunces',Georgia,serif;margin-top:3px}
+    .vch-stamp{font-size:10.5px;font-weight:600;color:#993C1D;border:1.4px solid var(--coral,#D85A30);border-radius:7px;padding:3px 8px;transform:rotate(-4deg);letter-spacing:.04em;white-space:nowrap}
+    .vch-stamp.in{color:#1f4d8a;border-color:#3f6fb0}
+    .vch-lad{padding:6px 18px 2px}
+    .vch-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f1ebe0;font-size:13.5px}
+    .vch-row .lab small{color:var(--muted);display:block;font-size:11px;margin-top:1px}
+    .vch-row .val{font-family:'Fraunces',Georgia,serif;font-size:15px;font-weight:500}
+    .vch-chip{display:inline-flex;align-items:center;font-size:10.5px;font-weight:600;border-radius:20px;padding:2px 8px;margin-left:7px}
+    .vch-chip.add{background:#eaf3de;color:var(--green,#3B6D11)} .vch-chip.less{background:#fbe7de;color:#993C1D}
+    .vch-net{background:var(--ink,#14161B);color:#fff;display:flex;justify-content:space-between;align-items:center;padding:15px 18px}
+    .vch-net .l{font-size:12px;color:#cdc6ba} .vch-net .v{font-family:'Fraunces',Georgia,serif;font-size:24px;font-weight:600}
+    .vch-perf{height:13px;background:radial-gradient(circle at 6.5px -2px,transparent 5.5px,#fff 5.5px) repeat-x;background-size:13px 13px}
     </style>`;
 
   function tabBar(active) {
@@ -401,35 +431,56 @@ window.fkModules = window.fkModules || {};
     const supplierOpts = contacts.filter(c => c.kind !== 'customer').map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
     body.innerHTML =
       '<div class="acct-card"><h3>New bill</h3>' +
-        '<div class="acct-form">' +
-          '<div class="acct-field"><label>Supplier</label><select id="bSupplier"><option value="">— select —</option>' + supplierOpts + '<option value="__new">+ Add supplier…</option></select></div>' +
-          '<div class="acct-field"><label>Bill date</label><input id="bDate" type="date" value="' + today() + '"></div>' +
-          '<div class="acct-field"><label>Category</label><select id="bCat">' + expenses.map(a => '<option value="' + a.id + '">' + esc(a.name) + '</option>').join('') + '</select></div>' +
-          '<div class="acct-field"><label>Taxable amount (₹)</label><input id="bAmt" type="number" min="0" step="0.01" oninput="window.__acctBillCalc()"></div>' +
-          '<div class="acct-field"><label>GST rate %</label><input id="bGst" type="number" min="0" step="0.01" value="18" oninput="window.__acctBillCalc()"></div>' +
-          '<div class="acct-field"><label>TDS section</label><select id="bTdsSec" onchange="window.__acctBillCalc()">' +
-            '<option value="">None</option><option value="194C" data-rate="2">194C contractor (2%)</option>' +
-            '<option value="194J" data-rate="10">194J professional (10%)</option><option value="194I" data-rate="10">194I rent (10%)</option></select></div>' +
-          '<div class="acct-field"><label>TDS rate %</label><input id="bTds" type="number" min="0" step="0.01" value="0" oninput="window.__acctBillCalc()"></div>' +
+        '<div class="bill-2col">' +
+          '<div>' +
+            '<div class="acct-form">' +
+              '<div class="acct-field"><label>Supplier</label><select id="bSupplier"><option value="">— select —</option>' + supplierOpts + '<option value="__new">+ Add supplier…</option></select></div>' +
+              '<div class="acct-field"><label>Bill date</label><input id="bDate" type="date" value="' + today() + '"></div>' +
+              '<div class="acct-field"><label>Category</label><select id="bCat">' + expenses.map(a => '<option value="' + a.id + '">' + esc(a.name) + '</option>').join('') + '</select></div>' +
+              '<div class="acct-field"><label>Taxable amount (₹)</label><input id="bAmt" type="number" min="0" step="0.01" oninput="window.__acctBillCalc()"></div>' +
+              '<div class="acct-field"><label>GST rate %</label><input id="bGst" type="number" min="0" step="0.01" value="18" oninput="window.__acctBillCalc()"></div>' +
+              '<div class="acct-field"><label>TDS section</label><select id="bTdsSec" onchange="window.__acctBillCalc()">' +
+                '<option value="">None</option><option value="194C" data-rate="2">194C contractor (2%)</option>' +
+                '<option value="194J" data-rate="10">194J professional (10%)</option><option value="194I" data-rate="10">194I rent (10%)</option></select></div>' +
+              '<div class="acct-field"><label>TDS rate %</label><input id="bTds" type="number" min="0" step="0.01" value="0" oninput="window.__acctBillCalc()"></div>' +
+            '</div>' +
+            '<div class="acct-actions" style="margin-top:16px"><button class="acct-btn primary" id="bSave"><i class="ti ti-check"></i>Save as draft</button></div>' +
+            '<div class="acct-msg" id="bMsg"></div>' +
+          '</div>' +
+          '<div class="vch">' +
+            '<div class="vch-top"><div><div class="vch-tag">Supplier bill · draft</div><div class="vch-name" id="bvName">—</div></div><div class="vch-stamp">UNPAID</div></div>' +
+            '<div class="vch-lad">' +
+              '<div class="vch-row"><div class="lab">Taxable value</div><div class="val" id="bvTax">₹0</div></div>' +
+              '<div class="vch-row"><div class="lab">GST input <span class="vch-chip add" id="bvGstR">+0%</span><small>reclaimable on your CA pack</small></div><div class="val" style="color:var(--green,#3B6D11)" id="bvGst">+₹0</div></div>' +
+              '<div class="vch-row" id="bvTdsRow"><div class="lab">TDS withheld <span class="vch-chip less" id="bvTdsR">−0%</span><small id="bvTdsNote">you owe the tax office</small></div><div class="val" style="color:#993C1D" id="bvTds">−₹0</div></div>' +
+            '</div>' +
+            '<div class="vch-net"><div class="l">Net payable to supplier</div><div class="v" id="bvNet">₹0</div></div>' +
+            '<div class="vch-perf"></div>' +
+          '</div>' +
         '</div>' +
-        '<div class="acct-net"><span style="color:var(--muted);font-size:13px">Net payable to supplier</span><span class="v" id="bNet">₹0</span></div>' +
-        '<div class="acct-actions" style="margin-top:14px"><button class="acct-btn primary" id="bSave"><i class="ti ti-check"></i>Save as draft</button></div>' +
-        '<div class="acct-msg" id="bMsg"></div>' +
       '</div>' +
       '<div class="acct-card"><h3>Bills</h3><div id="bList"><div class="acct-empty">Loading…</div></div></div>';
 
     window.__acctBillCalc = function () {
       const amt = Number(document.getElementById('bAmt').value || 0);
-      const gst = r2(amt * Number(document.getElementById('bGst').value || 0) / 100);
-      const tds = r2(amt * Number(document.getElementById('bTds').value || 0) / 100);
-      document.getElementById('bNet').textContent = inr(r2(amt + gst - tds));
+      const gr = Number(document.getElementById('bGst').value || 0), tr = Number(document.getElementById('bTds').value || 0);
+      const gst = r2(amt * gr / 100), tds = r2(amt * tr / 100);
+      const sup = document.getElementById('bSupplier'); const supTxt = sup && sup.value && sup.value !== '__new' ? (sup.options[sup.selectedIndex] || {}).text : '';
+      const secSel = document.getElementById('bTdsSec'); const sec = secSel ? secSel.value : '';
+      document.getElementById('bvName').textContent = supTxt || '—';
+      document.getElementById('bvTax').textContent = inr(amt);
+      document.getElementById('bvGst').textContent = '+' + inr(gst); document.getElementById('bvGstR').textContent = '+' + gr + '%';
+      document.getElementById('bvTds').textContent = '−' + inr(tds); document.getElementById('bvTdsR').textContent = '−' + tr + '%';
+      document.getElementById('bvTdsRow').style.display = tds > 0 ? 'flex' : 'none';
+      document.getElementById('bvTdsNote').textContent = sec ? sec + ' · you owe the tax office' : 'you owe the tax office';
+      document.getElementById('bvNet').textContent = inr(r2(amt + gst - tds));
     };
     document.getElementById('bTdsSec').addEventListener('change', function () {
       const rate = this.options[this.selectedIndex].getAttribute('data-rate') || 0;
       document.getElementById('bTds').value = rate; window.__acctBillCalc();
     });
     document.getElementById('bSupplier').addEventListener('change', async function () {
-      if (this.value !== '__new') return;
+      if (this.value !== '__new') { window.__acctBillCalc(); return; }
       const name = prompt('New supplier name:'); this.value = '';
       if (!name) return;
       try { const c = await api('/contacts', { method: 'POST', body: JSON.stringify({ name, kind: 'supplier' }) }); contactsCache = null; await renderBills(body); document.getElementById('bSupplier').value = c.id; } catch (e) { alert(e.message); }
@@ -469,7 +520,7 @@ window.fkModules = window.fkModules || {};
         const netCell = inr(b.net_payable) + (b.status === 'posted' && settled > 0.5 ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + inr(out) + ' left</div>' : '');
         const cred = credByContact[b.contact_id] || 0;
         const acts = b.status === 'draft'
-          ? '<button class="acct-btn primary" onclick="window.__acctBill(\'post\',' + b.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctBill(\'void\',' + b.id + ')">Void</button>'
+          ? '<button class="acct-btn primary" onclick="window.__acctBill(\'post\',' + b.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctBill(\'delete\',' + b.id + ')">Delete</button>'
           : b.status === 'posted'
             ? ((out > 0.5 && cred > 0.5 ? '<button class="acct-btn" onclick="window.__billCredit(' + b.id + ',' + b.contact_id + ',' + out + ')">Apply ' + fmtShort(cred) + ' credit</button>' : '') +
                '<button class="acct-btn" onclick="window.__acctReverse(' + b.journal_id + ')">Reverse</button>')
@@ -512,7 +563,7 @@ window.fkModules = window.fkModules || {};
     } catch (e) { alert(e.message); }
   };
   window.__acctBill = async function (action, id) {
-    if (action === 'void' && !confirm('Void this draft bill? It will be kept but marked void.')) return;
+    if (action === 'delete' && !confirm('Delete this draft bill? It was never posted, so it will be removed completely.')) return;
     try { await api('/bills/' + id + '/' + action, { method: 'POST' }); await loadBillList(); } catch (e) { alert(e.message); }
   };
   window.__acctReverse = async function (journalId) {
@@ -527,18 +578,31 @@ window.fkModules = window.fkModules || {};
     const custOpts = contacts.filter(c => c.kind !== 'supplier').map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
     body.innerHTML =
       '<div class="acct-card"><h3>New invoice</h3>' +
-        '<div class="acct-form">' +
-          '<div class="acct-field"><label>Customer</label><select id="iCust"><option value="">— select —</option>' + custOpts + '<option value="__new">+ Add customer…</option></select></div>' +
-          '<div class="acct-field"><label>Invoice date</label><input id="iDate" type="date" value="' + today() + '"></div>' +
-          '<div class="acct-field"><label>Tax treatment</label><select id="iTreat" onchange="window.__acctInvCalc()"><option value="export_zero">Export — zero-rated (LUT)</option><option value="domestic_gst">Domestic — GST</option></select></div>' +
-          '<div class="acct-field"><label>Currency</label><select id="iCur" onchange="window.__acctInvCalc()"><option value="INR">INR</option><option value="GBP">GBP</option></select></div>' +
-          '<div class="acct-field"><label>FX rate → INR</label><input id="iFx" type="number" min="0" step="0.0001" value="1" oninput="window.__acctInvCalc()"></div>' +
-          '<div class="acct-field"><label>Amount</label><input id="iAmt" type="number" min="0" step="0.01" oninput="window.__acctInvCalc()"></div>' +
-          '<div class="acct-field" id="iGstWrap" style="display:none"><label>GST rate %</label><input id="iGst" type="number" min="0" step="0.01" value="18" oninput="window.__acctInvCalc()"></div>' +
+        '<div class="bill-2col">' +
+          '<div>' +
+            '<div class="acct-form">' +
+              '<div class="acct-field"><label>Customer</label><select id="iCust"><option value="">— select —</option>' + custOpts + '<option value="__new">+ Add customer…</option></select></div>' +
+              '<div class="acct-field"><label>Invoice date</label><input id="iDate" type="date" value="' + today() + '"></div>' +
+              '<div class="acct-field"><label>Tax treatment</label><select id="iTreat" onchange="window.__acctInvCalc()"><option value="export_zero">Export — zero-rated (LUT)</option><option value="domestic_gst">Domestic — GST</option></select></div>' +
+              '<div class="acct-field"><label>Currency</label><select id="iCur" onchange="window.__acctInvCalc()"><option value="INR">INR</option><option value="GBP">GBP</option></select></div>' +
+              '<div class="acct-field"><label>FX rate → INR</label><input id="iFx" type="number" min="0" step="0.0001" value="1" oninput="window.__acctInvCalc()"></div>' +
+              '<div class="acct-field"><label>Amount</label><input id="iAmt" type="number" min="0" step="0.01" oninput="window.__acctInvCalc()"></div>' +
+              '<div class="acct-field" id="iGstWrap" style="display:none"><label>GST rate %</label><input id="iGst" type="number" min="0" step="0.01" value="18" oninput="window.__acctInvCalc()"></div>' +
+            '</div>' +
+            '<div class="acct-actions" style="margin-top:16px"><button class="acct-btn primary" id="iSave"><i class="ti ti-check"></i>Save as draft</button></div>' +
+            '<div class="acct-msg" id="iMsg"></div>' +
+          '</div>' +
+          '<div class="vch">' +
+            '<div class="vch-top"><div><div class="vch-tag">Sales invoice · draft</div><div class="vch-name" id="ivName">—</div></div><div class="vch-stamp in">RECEIVABLE</div></div>' +
+            '<div class="vch-lad">' +
+              '<div class="vch-row"><div class="lab">Taxable value</div><div class="val" id="ivTax">₹0</div></div>' +
+              '<div class="vch-row" id="ivGstRow" style="display:none"><div class="lab">GST output <span class="vch-chip add" id="ivGstR">+0%</span><small>collected from customer</small></div><div class="val" style="color:var(--green,#3B6D11)" id="ivGst">+₹0</div></div>' +
+              '<div class="vch-row" id="ivFxRow" style="display:none"><div class="lab">FX to INR <span class="vch-chip add" id="ivFxR">×1</span><small>booked at this rate</small></div><div class="val" id="ivFxV">₹0</div></div>' +
+            '</div>' +
+            '<div class="vch-net"><div class="l">Booked to INR</div><div class="v" id="ivNet">₹0</div></div>' +
+            '<div class="vch-perf"></div>' +
+          '</div>' +
         '</div>' +
-        '<div class="acct-net"><span style="color:var(--muted);font-size:13px">Booked to INR</span><span class="v" id="iInr">₹0</span></div>' +
-        '<div class="acct-actions" style="margin-top:14px"><button class="acct-btn primary" id="iSave"><i class="ti ti-check"></i>Save as draft</button></div>' +
-        '<div class="acct-msg" id="iMsg"></div>' +
       '</div>' +
       '<div class="acct-card"><h3>Invoices</h3><div id="iList"><div class="acct-empty">Loading…</div></div></div>';
 
@@ -547,11 +611,23 @@ window.fkModules = window.fkModules || {};
       document.getElementById('iGstWrap').style.display = dom ? '' : 'none';
       const amt = Number(document.getElementById('iAmt').value || 0);
       const fx = Number(document.getElementById('iFx').value || 1);
-      const gst = dom ? r2(amt * Number(document.getElementById('iGst').value || 0) / 100) : 0;
-      document.getElementById('iInr').textContent = inr(r2((amt + gst) * fx));
+      const cur = document.getElementById('iCur').value;
+      const gstR = dom ? Number(document.getElementById('iGst').value || 0) : 0;
+      const gst = r2(amt * gstR / 100);
+      const money = v => cur === 'GBP' ? gbp(v) : inr(v);
+      const cust = document.getElementById('iCust'); const custTxt = cust && cust.value && cust.value !== '__new' ? (cust.options[cust.selectedIndex] || {}).text : '';
+      document.getElementById('ivName').textContent = custTxt || '—';
+      document.getElementById('ivTax').textContent = money(amt);
+      document.getElementById('ivGstRow').style.display = dom && gst > 0 ? 'flex' : 'none';
+      document.getElementById('ivGst').textContent = '+' + money(gst); document.getElementById('ivGstR').textContent = '+' + gstR + '%';
+      const subInr = r2((amt + gst) * fx);
+      document.getElementById('ivFxRow').style.display = (cur === 'GBP' || fx !== 1) ? 'flex' : 'none';
+      document.getElementById('ivFxR').textContent = '×' + fx;
+      document.getElementById('ivFxV').textContent = inr(subInr);
+      document.getElementById('ivNet').textContent = inr(subInr);
     };
     document.getElementById('iCust').addEventListener('change', async function () {
-      if (this.value !== '__new') return;
+      if (this.value !== '__new') { window.__acctInvCalc(); return; }
       const name = prompt('New customer name:'); this.value = '';
       if (!name) return;
       try { const c = await api('/contacts', { method: 'POST', body: JSON.stringify({ name, kind: 'customer' }) }); contactsCache = null; await renderInvoices(body); document.getElementById('iCust').value = c.id; } catch (e) { alert(e.message); }
@@ -590,7 +666,7 @@ window.fkModules = window.fkModules || {};
         const inrCell = inr(i.amount_inr) + (i.status === 'posted' && settled > 0.5 ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + inr(out) + ' left</div>' : '');
         const cred = credByContact[i.contact_id] || 0;
         const acts = i.status === 'draft'
-          ? '<button class="acct-btn primary" onclick="window.__acctInv(\'post\',' + i.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctInv(\'void\',' + i.id + ')">Void</button>'
+          ? '<button class="acct-btn primary" onclick="window.__acctInv(\'post\',' + i.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctInv(\'delete\',' + i.id + ')">Delete</button>'
           : i.status === 'posted'
             ? ((out > 0.5 && cred > 0.5 && (i.currency || 'INR') === 'INR' ? '<button class="acct-btn" onclick="window.__invCredit(' + i.id + ',' + i.contact_id + ',' + out + ')">Apply ' + fmtShort(cred) + ' credit</button>' : '') +
                '<button class="acct-btn" onclick="window.__acctReverse(' + i.journal_id + ')">Reverse</button>')
@@ -611,7 +687,7 @@ window.fkModules = window.fkModules || {};
     catch (e) { box.innerHTML = '<div style="padding:12px;color:#993C1D">' + esc(e.message) + '</div>'; }
   };
   window.__acctInv = async function (action, id) {
-    if (action === 'void' && !confirm('Void this draft invoice? It will be kept but marked void.')) return;
+    if (action === 'delete' && !confirm('Delete this draft invoice? It was never posted, so it will be removed completely.')) return;
     try { await api('/invoices/' + id + '/' + action, { method: 'POST' }); await loadInvoiceList(); } catch (e) { alert(e.message); }
   };
 
@@ -780,56 +856,129 @@ window.fkModules = window.fkModules || {};
   }
 
   async function renderCaPack(out) {
-    const fy = indianFy();
+    const pad = n => String(n).padStart(2, '0');
+    const monLbl = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monShort = ds => monLbl[Number(ds.slice(5, 7)) - 1];
+    const monthRange = (y, m0) => { const last = new Date(y, m0 + 1, 0).getDate(); return { from: y + '-' + pad(m0 + 1) + '-01', to: y + '-' + pad(m0 + 1) + '-' + pad(last), label: monLbl[m0] + ' ' + y }; };
+    const fyRange = s => ({ from: s + '-04-01', to: (s + 1) + '-03-31', label: 'FY ' + s + '–' + String(s + 1).slice(2) });
+    const quarterRange = (s, q) => q === 1 ? { from: s + '-04-01', to: s + '-06-30', label: 'Q1 FY' + s + '–' + String(s + 1).slice(2) }
+      : q === 2 ? { from: s + '-07-01', to: s + '-09-30', label: 'Q2 FY' + s + '–' + String(s + 1).slice(2) }
+      : q === 3 ? { from: s + '-10-01', to: s + '-12-31', label: 'Q3 FY' + s + '–' + String(s + 1).slice(2) }
+      : { from: (s + 1) + '-01-01', to: (s + 1) + '-03-31', label: 'Q4 FY' + s + '–' + String(s + 1).slice(2) };
+    const curStart = Number(indianFy().from.slice(0, 4));
+
     out.innerHTML =
       '<div class="acct-card" style="margin-bottom:14px">' +
         '<h3 style="margin:0 0 4px">CA pack — GST &amp; TDS</h3>' +
-        '<p style="color:var(--muted);font-size:13px;margin:0 0 12px">Registers for your accountant. Pick a period, then download each as CSV.</p>' +
-        '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
-          '<div><span class="rec-lbl">From</span><input type="date" id="caFrom" class="rec-f" style="width:170px" value="' + fy.from + '"></div>' +
-          '<div><span class="rec-lbl">To</span><input type="date" id="caTo" class="rec-f" style="width:170px" value="' + fy.to + '"></div>' +
-          '<button class="acct-btn" id="caFyThis">This FY</button>' +
-          '<button class="acct-btn" id="caFyLast">Last FY</button>' +
-          '<button class="acct-btn primary" id="caRun"><i class="ti ti-refresh"></i>Show</button>' +
+        '<p style="color:var(--muted);font-size:13px;margin:0 0 14px">Registers for your accountant. Pick a period — month, quarter or year — then download each as CSV, or email the whole pack in one click.</p>' +
+        '<div class="ca-seg"><button id="caSegM">Month</button><button id="caSegQ">Quarter</button><button id="caSegY" class="on">Financial year</button></div>' +
+        '<div id="caSub" style="margin-top:13px"></div>' +
+        '<div class="ca-send">' +
+          '<button class="acct-btn primary" onclick="window.__caEmail()"><i class="ti ti-mail-forward"></i>Email pack to CA</button>' +
+          '<div class="ca-recip" id="caRecip"></div>' +
+          '<div class="acct-msg" id="caSendMsg" style="margin:0"></div>' +
         '</div>' +
       '</div><div id="caOut"></div>';
     const caOut = document.getElementById('caOut');
-    const setRange = (f, t) => { document.getElementById('caFrom').value = f; document.getElementById('caTo').value = t; };
-    document.getElementById('caFyThis').addEventListener('click', () => { const x = indianFy(); setRange(x.from, x.to); load(); });
-    document.getElementById('caFyLast').addEventListener('click', () => { const dt = new Date(); const x = indianFy(new Date(dt.getFullYear() - 1, dt.getMonth(), 1)); setRange(x.from, x.to); load(); });
-    document.getElementById('caRun').addEventListener('click', load);
+
+    const st = await api('/settings').catch(() => ({}));
+    window.__caEmailAddr = (st && st.ca_email) || '';
+    updateRecip();
+
+    function setRange(from, to, label) { window.__caRange = { from, to, label }; load(); }
+    function setSeg(seg) { ['M', 'Q', 'Y'].forEach(s => document.getElementById('caSeg' + s).classList.toggle('on', s === seg.charAt(0).toUpperCase())); renderSub(seg); }
+    function renderSub(seg) {
+      const sub = document.getElementById('caSub');
+      if (seg === 'month') {
+        const now = new Date(); let opts = '';
+        for (let i = 0; i < 15; i++) { const dd = new Date(now.getFullYear(), now.getMonth() - i, 1); const r = monthRange(dd.getFullYear(), dd.getMonth()); opts += '<option value="' + r.from + '|' + r.to + '|' + r.label + '"' + (i === 0 ? ' selected' : '') + '>' + r.label + '</option>'; }
+        sub.innerHTML = '<select class="rec-f" id="caMonthSel" style="width:auto;min-width:160px">' + opts + '</select>';
+        const sel = document.getElementById('caMonthSel');
+        const apply = () => { const p = sel.value.split('|'); setRange(p[0], p[1], p[2]); };
+        sel.addEventListener('change', apply); apply();
+      } else if (seg === 'quarter') {
+        let fyopts = ''; for (let k = 0; k < 3; k++) { const s = curStart - k; fyopts += '<option value="' + s + '">FY ' + s + '–' + String(s + 1).slice(2) + '</option>'; }
+        sub.innerHTML = '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><select class="rec-f" id="caQFy" style="width:auto">' + fyopts + '</select><div id="caQPills" style="display:flex;gap:8px;flex-wrap:wrap"></div></div>';
+        const fySel = document.getElementById('caQFy'); let curQ = 1;
+        const draw = () => {
+          const s = Number(fySel.value), p = document.getElementById('caQPills');
+          p.innerHTML = [1, 2, 3, 4].map(q => { const r = quarterRange(s, q); return '<button class="ca-pill' + (q === curQ ? ' on' : '') + '" data-q="' + q + '">Q' + q + ' · ' + monShort(r.from) + '–' + monShort(r.to) + '</button>'; }).join('');
+          p.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => { curQ = Number(b.getAttribute('data-q')); draw(); const r = quarterRange(Number(fySel.value), curQ); setRange(r.from, r.to, r.label); }));
+        };
+        fySel.addEventListener('change', () => { draw(); const r = quarterRange(Number(fySel.value), curQ); setRange(r.from, r.to, r.label); });
+        draw(); const r0 = quarterRange(curStart, 1); setRange(r0.from, r0.to, r0.label);
+      } else {
+        let html = ''; for (let k = 0; k < 3; k++) { const s = curStart - k; html += '<button class="ca-pill' + (k === 0 ? ' on' : '') + '" data-fy="' + s + '">' + fyRange(s).label + '</button>'; }
+        sub.innerHTML = '<div style="display:flex;gap:8px;flex-wrap:wrap">' + html + '</div>';
+        sub.querySelectorAll('[data-fy]').forEach(b => b.addEventListener('click', () => { sub.querySelectorAll('[data-fy]').forEach(x => x.classList.remove('on')); b.classList.add('on'); const r = fyRange(Number(b.getAttribute('data-fy'))); setRange(r.from, r.to, r.label); }));
+        const r = fyRange(curStart); setRange(r.from, r.to, r.label);
+      }
+    }
+    document.getElementById('caSegM').addEventListener('click', () => setSeg('month'));
+    document.getElementById('caSegQ').addEventListener('click', () => setSeg('quarter'));
+    document.getElementById('caSegY').addEventListener('click', () => setSeg('year'));
 
     async function load() {
-      const from = document.getElementById('caFrom').value, to = document.getElementById('caTo').value;
-      const q = '?from=' + from + '&to=' + to;
+      const r = window.__caRange; if (!r) return;
+      const q = '?from=' + r.from + '&to=' + r.to;
       caOut.innerHTML = '<div class="acct-empty" style="padding:24px">Loading…</div>';
-      const [sales, purch, tds] = await Promise.all([
-        api('/reports/gst-sales' + q), api('/reports/gst-purchases' + q), api('/reports/tds' + q),
-      ]);
+      const [sales, purch, tds] = await Promise.all([api('/reports/gst-sales' + q), api('/reports/gst-purchases' + q), api('/reports/tds' + q)]);
       [sales, purch, tds].forEach(x => { x.rows = x.rows || []; x.totals = x.totals || {}; });
-      window.__caData = { sales, purch, tds, from, to };
+      window.__caData = { sales, purch, tds, from: r.from, to: r.to };
+      const kpi = (ic, l, v, d, cls) => '<div class="ca-kpi"><div class="l"><i class="ti ' + ic + '"></i>' + l + '</div><div class="v ' + (cls || '') + '">' + v + '</div><div class="d">' + d + '</div></div>';
+      const netGst = r2((Number(sales.totals.gst) || 0) - (Number(purch.totals.gst) || 0));
+      const kpis = '<div class="ca-kpis">' +
+        kpi('ti-arrow-down-left', 'Output GST', inr(sales.totals.gst || 0), 'collected · ' + r.label, '') +
+        kpi('ti-arrow-up-right', 'Input GST', inr(purch.totals.gst || 0), 'reclaimable', 'green') +
+        kpi('ti-scale', 'Net GST', (netGst < 0 ? '−' : '') + inr(Math.abs(netGst)), netGst < 0 ? 'credit carried' : 'payable', '') +
+        kpi('ti-receipt-tax', 'TDS deducted', inr(tds.totals.tds || 0), 'to deposit', 'coral') + '</div>';
 
-      const salesBody = sales.rows.map(r => '<tr><td>' + d10(r.invoice_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.gstin || '—') + '</td><td>' + (r.tax_treatment === 'export_zero' ? 'Export / zero' : 'Domestic GST') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.gst_rate) + '</td><td class="num">' + inr(r.gst_amount) + '</td><td class="num">' + inr(r.total) + '</td></tr>').join('');
+      const salesBody = sales.rows.map(rw => '<tr><td>' + d10(rw.invoice_date) + '</td><td>#' + rw.id + '</td><td>' + esc(rw.party) + '</td><td>' + esc(rw.gstin || '—') + '</td><td>' + (rw.tax_treatment === 'export_zero' ? 'Export / zero' : 'Domestic GST') + '</td><td class="num">' + inr(rw.taxable_amount) + '</td><td class="num">' + pct(rw.gst_rate) + '</td><td class="num">' + inr(rw.gst_amount) + '</td><td class="num">' + inr(rw.total) + '</td></tr>').join('');
       const salesTot = '<tr style="font-weight:500"><td colspan="5">Total</td><td class="num">' + inr(sales.totals.taxable) + '</td><td></td><td class="num">' + inr(sales.totals.gst) + '</td><td class="num">' + inr(sales.totals.total) + '</td></tr>';
       const salesCard = caTable('GST sales register · output GST', 'Posted sales invoices. Output GST is what you collected.', 'sales',
         '<th>Date</th><th>Invoice</th><th>Customer</th><th>GSTIN</th><th>Treatment</th><th class="num">Taxable</th><th class="num">GST %</th><th class="num">GST</th><th class="num">Total</th>',
-        salesBody, salesTot, 'No sales invoices in this period.');
+        salesBody, salesTot, 'No sales invoices in ' + r.label + '.');
 
-      const purchBody = purch.rows.map(r => '<tr><td>' + d10(r.bill_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.gstin || '—') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.gst_rate) + '</td><td class="num">' + inr(r.gst_amount) + '</td><td class="num">' + inr(r.total) + '</td></tr>').join('');
+      const purchBody = purch.rows.map(rw => '<tr><td>' + d10(rw.bill_date) + '</td><td>#' + rw.id + '</td><td>' + esc(rw.party) + '</td><td>' + esc(rw.gstin || '—') + '</td><td class="num">' + inr(rw.taxable_amount) + '</td><td class="num">' + pct(rw.gst_rate) + '</td><td class="num">' + inr(rw.gst_amount) + '</td><td class="num">' + inr(rw.total) + '</td></tr>').join('');
       const purchTot = '<tr style="font-weight:500"><td colspan="4">Total</td><td class="num">' + inr(purch.totals.taxable) + '</td><td></td><td class="num">' + inr(purch.totals.gst) + '</td><td class="num">' + inr(purch.totals.total) + '</td></tr>';
       const purchCard = caTable('GST purchase register · input GST', 'Posted bills. Input GST is what you can reclaim.', 'purch',
         '<th>Date</th><th>Bill</th><th>Supplier</th><th>GSTIN</th><th class="num">Taxable</th><th class="num">GST %</th><th class="num">GST</th><th class="num">Total</th>',
-        purchBody, purchTot, 'No bills in this period.');
+        purchBody, purchTot, 'No bills in ' + r.label + '.');
 
-      const tdsBody = tds.rows.map(r => '<tr><td>' + d10(r.bill_date) + '</td><td>#' + r.id + '</td><td>' + esc(r.party) + '</td><td>' + esc(r.tds_section || '—') + '</td><td class="num">' + inr(r.taxable_amount) + '</td><td class="num">' + pct(r.tds_rate) + '</td><td class="num">' + inr(r.tds_amount) + '</td></tr>').join('');
+      const tdsBody = tds.rows.map(rw => '<tr><td>' + d10(rw.bill_date) + '</td><td>#' + rw.id + '</td><td>' + esc(rw.party) + '</td><td>' + esc(rw.tds_section || '—') + '</td><td class="num">' + inr(rw.taxable_amount) + '</td><td class="num">' + pct(rw.tds_rate) + '</td><td class="num">' + inr(rw.tds_amount) + '</td></tr>').join('');
       const tdsTot = '<tr style="font-weight:500"><td colspan="4">Total</td><td class="num">' + inr(tds.totals.taxable) + '</td><td></td><td class="num">' + inr(tds.totals.tds) + '</td></tr>';
       const tdsCard = caTable('TDS deducted', 'TDS withheld on supplier bills — what you owe the tax office.', 'tds',
         '<th>Date</th><th>Bill</th><th>Supplier</th><th>Section</th><th class="num">Taxable</th><th class="num">TDS %</th><th class="num">TDS</th>',
-        tdsBody, tdsTot, 'No TDS deducted in this period.');
+        tdsBody, tdsTot, 'No TDS deducted in ' + r.label + '.');
 
-      caOut.innerHTML = salesCard + purchCard + tdsCard;
+      caOut.innerHTML = kpis + salesCard + purchCard + tdsCard;
     }
-    load();
+
+    function updateRecip() {
+      const el = document.getElementById('caRecip'); if (!el) return;
+      el.innerHTML = window.__caEmailAddr
+        ? 'To <b>' + esc(window.__caEmailAddr) + '</b><a onclick="window.__caChangeEmail()">change</a>'
+        : '<a onclick="window.__caChangeEmail()">Set your accountant\u2019s email</a>';
+    }
+    window.__caChangeEmail = async function () {
+      const e = (window.prompt('Your accountant\u2019s email — saved for next time', window.__caEmailAddr || '') || '').trim();
+      if (!e) return;
+      try { const r = await api('/settings', { method: 'PUT', body: JSON.stringify({ ca_email: e }) }); window.__caEmailAddr = r.ca_email; updateRecip(); } catch (err) { alert(err.message); }
+    };
+    window.__caEmail = async function () {
+      const r = window.__caRange; if (!r) return;
+      const msg = document.getElementById('caSendMsg');
+      let email = window.__caEmailAddr || '';
+      if (!email) { email = (window.prompt('Your accountant\u2019s email — saved for next time') || '').trim(); if (!email) return; }
+      if (msg) { msg.className = 'acct-msg'; msg.textContent = 'Sending…'; }
+      try {
+        const res = await api('/reports/ca-pack/email', { method: 'POST', body: JSON.stringify({ from: r.from, to: r.to, label: r.label, to_email: email }) });
+        window.__caEmailAddr = res.sent_to; updateRecip();
+        if (msg) { msg.className = 'acct-msg ok'; msg.textContent = 'Pack for ' + r.label + ' emailed to ' + res.sent_to + '.'; }
+      } catch (e) { if (msg) { msg.className = 'acct-msg err'; msg.textContent = e.message; } else alert(e.message); }
+    };
+
+    setSeg('year');
   }
 
   window.__caCsv = function (which) {

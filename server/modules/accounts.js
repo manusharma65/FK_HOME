@@ -1498,6 +1498,136 @@ router.get('/reports/tds', requirePermission('accounts.view'), async (req, res) 
   });
 });
 
+// ---------- CA pack: build CSVs + email the whole pack to the accountant ----------
+function csvCell(v) { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCsvStr(headers, rows) { return [headers.map(csvCell).join(','), ...rows.map(r => r.map(csvCell).join(','))].join('\r\n'); }
+const b64 = s => Buffer.from(s, 'utf8').toString('base64');
+
+async function gstSalesData(from, to) {
+  const r = await db.query(
+    `SELECT i.id, i.invoice_date, COALESCE(c.name,'—') AS party, c.gstin, i.tax_treatment,
+            i.taxable_amount, i.gst_rate, i.gst_amount, i.amount_inr AS total
+       FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id
+      WHERE i.status IN ('posted','sent','paid') AND i.invoice_date BETWEEN $1 AND $2
+      ORDER BY i.invoice_date, i.id`, [from, to]);
+  return r.rows;
+}
+async function gstPurchaseData(from, to) {
+  const r = await db.query(
+    `SELECT b.id, b.bill_date, COALESCE(c.name,'—') AS party, c.gstin,
+            b.taxable_amount, b.gst_rate, b.gst_amount, (b.taxable_amount + b.gst_amount) AS total
+       FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
+      WHERE b.status IN ('posted','paid') AND b.bill_date BETWEEN $1 AND $2
+      ORDER BY b.bill_date, b.id`, [from, to]);
+  return r.rows;
+}
+async function tdsData(from, to) {
+  const r = await db.query(
+    `SELECT b.id, b.bill_date, COALESCE(c.name,'—') AS party, b.tds_section, b.taxable_amount, b.tds_rate, b.tds_amount
+       FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
+      WHERE b.status IN ('posted','paid') AND b.tds_amount > 0 AND b.bill_date BETWEEN $1 AND $2
+      ORDER BY b.bill_date, b.id`, [from, to]);
+  return r.rows;
+}
+
+// Build the pack: 4 CSVs (GST sales, GST purchases, TDS, trial-balance+P&L snapshot) + a summary.
+async function buildCaPackFiles(from, to) {
+  const sales = await gstSalesData(from, to), purch = await gstPurchaseData(from, to), tds = await tdsData(from, to);
+  const tb = await trialBalance(db, to), pl = await profitAndLoss(db, from, to);
+  const sum = (arr, k) => r2(arr.reduce((s, x) => s + Number(x[k] || 0), 0));
+  const tag = (from + '_' + to).replace(/-/g, '');
+  const files = [
+    { filename: 'gst-sales_' + tag + '.csv', mimeType: 'text/csv',
+      dataB64: b64(toCsvStr(['Date', 'Invoice #', 'Customer', 'GSTIN', 'Treatment', 'Taxable', 'GST %', 'GST', 'Total'],
+        sales.map(r => [String(r.invoice_date).slice(0, 10), r.id, r.party, r.gstin || '', r.tax_treatment, r.taxable_amount, r.gst_rate, r.gst_amount, r.total]))) },
+    { filename: 'gst-purchases_' + tag + '.csv', mimeType: 'text/csv',
+      dataB64: b64(toCsvStr(['Date', 'Bill #', 'Supplier', 'GSTIN', 'Taxable', 'GST %', 'GST', 'Total'],
+        purch.map(r => [String(r.bill_date).slice(0, 10), r.id, r.party, r.gstin || '', r.taxable_amount, r.gst_rate, r.gst_amount, r.total]))) },
+    { filename: 'tds_' + tag + '.csv', mimeType: 'text/csv',
+      dataB64: b64(toCsvStr(['Date', 'Bill #', 'Supplier', 'Section', 'Taxable', 'TDS %', 'TDS'],
+        tds.map(r => [String(r.bill_date).slice(0, 10), r.id, r.party, r.tds_section || '', r.taxable_amount, r.tds_rate, r.tds_amount]))) },
+    { filename: 'trial-balance-and-pl_' + tag + '.csv', mimeType: 'text/csv',
+      dataB64: b64(
+        toCsvStr(['Trial balance as at', to], []) + '\r\n' +
+        toCsvStr(['Code', 'Account', 'Type', 'Debit', 'Credit'], tb.rows.map(r => [r.code, r.name, r.type, r.debit, r.credit])) + '\r\n' +
+        toCsvStr(['', 'Total', '', tb.total_debit, tb.total_credit], []) + '\r\n\r\n' +
+        toCsvStr(['Profit & loss', from + ' to ' + to], []) + '\r\n' +
+        toCsvStr(['Income', pl.income], []) + '\r\n' + toCsvStr(['Expense', pl.expense], []) + '\r\n' + toCsvStr(['Net profit', pl.net_profit], [])) },
+  ];
+  const summary = {
+    output_gst: sum(sales, 'gst_amount'), input_gst: sum(purch, 'gst_amount'),
+    tds: sum(tds, 'tds_amount'), sales_count: sales.length, purch_count: purch.length, tds_count: tds.length,
+    net_gst: r2(sum(sales, 'gst_amount') - sum(purch, 'gst_amount')),
+  };
+  return { files, summary };
+}
+
+// Injectable mailer so the send path is unit-testable without Gmail.
+let _testMailer = null;
+function _setMailer(fn) { _testMailer = fn; }
+async function sendViaMail(fromEmail, opts) { return (_testMailer || require('./mail').sendMail)(fromEmail, opts); }
+
+async function getSetting(key) { const r = await db.query('SELECT value FROM acc_setting WHERE key=$1', [key]); return r.rows.length ? r.rows[0].value : null; }
+async function setSetting(key, value, userId) {
+  await db.query(`INSERT INTO acc_setting (key, value, updated_by, updated_at) VALUES ($1,$2,$3,NOW())
+                  ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=NOW()`, [key, value, userId || null]);
+}
+
+router.get('/settings', requirePermission('accounts.view'), async (req, res) => {
+  res.json({ ca_email: await getSetting('ca_email') || '' });
+});
+router.put('/settings', requirePermission('accounts.post'), async (req, res) => {
+  const { ca_email } = req.body || {};
+  if (ca_email != null) {
+    const e = String(ca_email).trim();
+    if (e && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return res.status(400).json({ error: 'That does not look like an email address.' });
+    await setSetting('ca_email', e, req.user.id);
+  }
+  res.json({ ok: true, ca_email: await getSetting('ca_email') || '' });
+});
+
+const fmtINR = n => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+router.post('/reports/ca-pack/email', requirePermission('accounts.view'), async (req, res) => {
+  try {
+    const from = /^\d{4}-\d{2}-\d{2}$/.test((req.body || {}).from) ? req.body.from : null;
+    const to = /^\d{4}-\d{2}-\d{2}$/.test((req.body || {}).to) ? req.body.to : null;
+    if (!from || !to) return res.status(400).json({ error: 'Pick a valid period first.' });
+    let toEmail = String((req.body || {}).to_email || '').trim();
+    if (toEmail) { await setSetting('ca_email', toEmail, req.user.id); } else { toEmail = await getSetting('ca_email') || ''; }
+    if (!toEmail) return res.status(400).json({ error: 'Set your accountant\u2019s email first.' });
+    if (!req.user.email) return res.status(400).json({ error: 'Connect your mailbox in Mail before sending.' });
+    const { files, summary } = await buildCaPackFiles(from, to);
+    const label = (req.body || {}).label || (from + ' to ' + to);
+    const html =
+      '<p>Hi,</p><p>Please find the GST &amp; TDS pack for FK Enterprises for <b>' + label + '</b> attached.</p>' +
+      '<ul>' +
+      '<li>Output GST (sales): <b>' + fmtINR(summary.output_gst) + '</b> across ' + summary.sales_count + ' invoice(s)</li>' +
+      '<li>Input GST (purchases): <b>' + fmtINR(summary.input_gst) + '</b> across ' + summary.purch_count + ' bill(s)</li>' +
+      '<li>Net GST position: <b>' + fmtINR(summary.net_gst) + '</b></li>' +
+      '<li>TDS deducted: <b>' + fmtINR(summary.tds) + '</b> across ' + summary.tds_count + ' bill(s)</li>' +
+      '</ul><p>Four CSVs are attached: GST sales register, GST purchase register, TDS deducted, and a trial-balance + P&amp;L snapshot.</p>' +
+      '<p>Thanks.</p>';
+    const text = 'GST & TDS pack for FK Enterprises — ' + label + '. Output GST ' + fmtINR(summary.output_gst) + ', Input GST ' + fmtINR(summary.input_gst) + ', Net GST ' + fmtINR(summary.net_gst) + ', TDS ' + fmtINR(summary.tds) + '. CSVs attached.';
+    await sendViaMail(req.user.email, { to: toEmail, subject: 'FK Enterprises — GST & TDS pack · ' + label, html, text, attachments: files });
+    await logAudit({ req, module: 'accounts', action: 'capack.email', target_type: 'period', target_id: null, meta: { from, to, to_email: toEmail } });
+    res.json({ ok: true, sent_to: toEmail, files: files.map(f => f.filename), summary });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete a draft bill/invoice made in error (only drafts; posted docs must be reversed).
+router.post('/bills/:id/delete', requirePermission('accounts.post'), async (req, res) => {
+  const r = await db.query("DELETE FROM acc_bill WHERE id=$1 AND status='draft' RETURNING id", [req.params.id]);
+  if (!r.rows.length) return res.status(400).json({ error: 'Only a draft bill can be deleted. Post then reverse a posted one.' });
+  await logAudit({ req, module: 'accounts', action: 'bill.delete', target_type: 'acc_bill', target_id: req.params.id });
+  res.json({ ok: true });
+});
+router.post('/invoices/:id/delete', requirePermission('accounts.post'), async (req, res) => {
+  const r = await db.query("DELETE FROM acc_invoice WHERE id=$1 AND status='draft' RETURNING id", [req.params.id]);
+  if (!r.rows.length) return res.status(400).json({ error: 'Only a draft invoice can be deleted. Post then reverse a posted one.' });
+  await logAudit({ req, module: 'accounts', action: 'invoice.delete', target_type: 'acc_invoice', target_id: req.params.id });
+  res.json({ ok: true });
+});
+
 // Spend grouped by supplier (expense debits attributed to the journal's contact).
 router.get('/reports/spend-by-supplier', requirePermission('accounts.view'), async (req, res) => {
   const [from, to] = caPeriod(req);
@@ -1526,4 +1656,6 @@ module.exports.engine = {
   postOpeningBalances, lockPeriod, isPeriodLocked, period,
   generateAccountsDailyTasks, weekdayName, parseBankStatement, parseDmy,
   recordPrepayment, createManualCredit, applyCredit, availableCredit, settledFor, outstandingFor,
+  buildCaPackFiles, getSetting, setSetting,
 };
+module.exports._setMailer = _setMailer;
