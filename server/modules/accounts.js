@@ -1616,14 +1616,14 @@ router.post('/reports/ca-pack/email', requirePermission('accounts.view'), async 
 
 // Delete a draft bill/invoice made in error (only drafts; posted docs must be reversed).
 router.post('/bills/:id/delete', requirePermission('accounts.post'), async (req, res) => {
-  const r = await db.query("DELETE FROM acc_bill WHERE id=$1 AND status='draft' RETURNING id", [req.params.id]);
-  if (!r.rows.length) return res.status(400).json({ error: 'Only a draft bill can be deleted. Post then reverse a posted one.' });
+  const r = await db.query("DELETE FROM acc_bill WHERE id=$1 AND status IN ('draft','void') RETURNING id", [req.params.id]);
+  if (!r.rows.length) return res.status(400).json({ error: 'Only a draft or void bill can be deleted. Reverse a posted one instead.' });
   await logAudit({ req, module: 'accounts', action: 'bill.delete', target_type: 'acc_bill', target_id: req.params.id });
   res.json({ ok: true });
 });
 router.post('/invoices/:id/delete', requirePermission('accounts.post'), async (req, res) => {
-  const r = await db.query("DELETE FROM acc_invoice WHERE id=$1 AND status='draft' RETURNING id", [req.params.id]);
-  if (!r.rows.length) return res.status(400).json({ error: 'Only a draft invoice can be deleted. Post then reverse a posted one.' });
+  const r = await db.query("DELETE FROM acc_invoice WHERE id=$1 AND status IN ('draft','void') RETURNING id", [req.params.id]);
+  if (!r.rows.length) return res.status(400).json({ error: 'Only a draft or void invoice can be deleted. Reverse a posted one instead.' });
   await logAudit({ req, module: 'accounts', action: 'invoice.delete', target_type: 'acc_invoice', target_id: req.params.id });
   res.json({ ok: true });
 });

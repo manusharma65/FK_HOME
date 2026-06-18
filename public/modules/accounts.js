@@ -519,8 +519,11 @@ window.fkModules = window.fkModules || {};
         const settled = Number(b.settled || 0);
         const netCell = inr(b.net_payable) + (b.status === 'posted' && settled > 0.5 ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + inr(out) + ' left</div>' : '');
         const cred = credByContact[b.contact_id] || 0;
+        const delBtn = '<button class="acct-btn danger" onclick="window.__acctBill(\'delete\',' + b.id + ')">Delete</button>';
         const acts = b.status === 'draft'
-          ? '<button class="acct-btn primary" onclick="window.__acctBill(\'post\',' + b.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctBill(\'delete\',' + b.id + ')">Delete</button>'
+          ? '<button class="acct-btn primary" onclick="window.__acctBill(\'post\',' + b.id + ')">Post</button>' + delBtn
+          : b.status === 'void'
+            ? delBtn
           : b.status === 'posted'
             ? ((out > 0.5 && cred > 0.5 ? '<button class="acct-btn" onclick="window.__billCredit(' + b.id + ',' + b.contact_id + ',' + out + ')">Apply ' + fmtShort(cred) + ' credit</button>' : '') +
                '<button class="acct-btn" onclick="window.__acctReverse(' + b.journal_id + ')">Reverse</button>')
@@ -563,7 +566,7 @@ window.fkModules = window.fkModules || {};
     } catch (e) { alert(e.message); }
   };
   window.__acctBill = async function (action, id) {
-    if (action === 'delete' && !confirm('Delete this draft bill? It was never posted, so it will be removed completely.')) return;
+    if (action === 'delete' && !confirm('Delete this bill? It never posted to your ledger, so it will be removed completely.')) return;
     try { await api('/bills/' + id + '/' + action, { method: 'POST' }); await loadBillList(); } catch (e) { alert(e.message); }
   };
   window.__acctReverse = async function (journalId) {
@@ -665,8 +668,11 @@ window.fkModules = window.fkModules || {};
         const out = Number(i.outstanding != null ? i.outstanding : i.amount_inr), settled = Number(i.settled || 0);
         const inrCell = inr(i.amount_inr) + (i.status === 'posted' && settled > 0.5 ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + inr(out) + ' left</div>' : '');
         const cred = credByContact[i.contact_id] || 0;
+        const delBtnI = '<button class="acct-btn danger" onclick="window.__acctInv(\'delete\',' + i.id + ')">Delete</button>';
         const acts = i.status === 'draft'
-          ? '<button class="acct-btn primary" onclick="window.__acctInv(\'post\',' + i.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctInv(\'delete\',' + i.id + ')">Delete</button>'
+          ? '<button class="acct-btn primary" onclick="window.__acctInv(\'post\',' + i.id + ')">Post</button>' + delBtnI
+          : i.status === 'void'
+            ? delBtnI
           : i.status === 'posted'
             ? ((out > 0.5 && cred > 0.5 && (i.currency || 'INR') === 'INR' ? '<button class="acct-btn" onclick="window.__invCredit(' + i.id + ',' + i.contact_id + ',' + out + ')">Apply ' + fmtShort(cred) + ' credit</button>' : '') +
                '<button class="acct-btn" onclick="window.__acctReverse(' + i.journal_id + ')">Reverse</button>')
@@ -687,7 +693,7 @@ window.fkModules = window.fkModules || {};
     catch (e) { box.innerHTML = '<div style="padding:12px;color:#993C1D">' + esc(e.message) + '</div>'; }
   };
   window.__acctInv = async function (action, id) {
-    if (action === 'delete' && !confirm('Delete this draft invoice? It was never posted, so it will be removed completely.')) return;
+    if (action === 'delete' && !confirm('Delete this invoice? It never posted to your ledger, so it will be removed completely.')) return;
     try { await api('/invoices/' + id + '/' + action, { method: 'POST' }); await loadInvoiceList(); } catch (e) { alert(e.message); }
   };
 
