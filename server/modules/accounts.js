@@ -238,7 +238,7 @@ async function reverseJournal(client, journalId, opts = {}) {
   if (jr.rows[0].status === 'reversal') throw new Error('acc: cannot reverse a reversal');
   const lr = await client.query('SELECT * FROM acc_journal_line WHERE journal_id = $1', [journalId]);
 
-  const onDate = opts.date || new Date().toISOString().slice(0, 10);
+  const onDate = opts.date || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
   const lines = lr.rows.map(l => ({
     account_id: l.account_id,
     debit: Number(l.credit),   // swapped
@@ -617,11 +617,36 @@ router.post('/journals/:id/reverse', requirePermission('accounts.post'), async (
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
-    const newId = await reverseJournal(client, Number(req.params.id),
-      { reason: req.body?.reason, created_by: req.user.id });
+    const jid = Number(req.params.id);
+    const newId = await reverseJournal(client, jid, { reason: req.body?.reason, created_by: req.user.id });
+    // If this was a bill/invoice posting journal, mark the document reversed so it
+    // leaves the AP/AR subledger (open lists + aging filter on status='posted').
+    await client.query("UPDATE acc_bill    SET status='reversed' WHERE journal_id=$1 AND status='posted'", [jid]);
+    await client.query("UPDATE acc_invoice SET status='reversed' WHERE journal_id=$1 AND status='posted'", [jid]);
     await client.query('COMMIT');
     await logAudit({ req, module: 'accounts', action: 'journal.reverse', target_type: 'acc_journal', target_id: req.params.id, details: req.body?.reason || null });
     res.json({ ok: true, reversal_journal_id: newId });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+
+// Ad-hoc balanced journal (accruals, depreciation, corrections the CA needs).
+router.post('/journals', requirePermission('accounts.post'), async (req, res) => {
+  const { entry_date, narration, lines } = req.body || {};
+  if (!entry_date || !/^\d{4}-\d{2}-\d{2}$/.test(entry_date)) return res.status(400).json({ error: 'A valid date is required.' });
+  const clean = (lines || []).map(l => ({ account_id: Number(l.account_id), debit: r2(l.debit || 0), credit: r2(l.credit || 0), memo: l.memo || null }))
+    .filter(l => l.account_id && (l.debit > 0 || l.credit > 0));
+  if (clean.length < 2) return res.status(400).json({ error: 'A journal needs at least two lines.' });
+  if (clean.some(l => l.debit > 0 && l.credit > 0)) return res.status(400).json({ error: 'Each line is either a debit or a credit, not both.' });
+  const td = r2(clean.reduce((s, l) => s + l.debit, 0)), tc = r2(clean.reduce((s, l) => s + l.credit, 0));
+  if (td !== tc) return res.status(400).json({ error: 'Debits (₹' + td + ') must equal credits (₹' + tc + ').' });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const jid = await postJournal(client, { entry_date, narration: narration || 'Manual journal', source_type: 'manual', created_by: req.user.id, lines: clean });
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'journal.manual', target_type: 'acc_journal', target_id: jid });
+    res.json({ ok: true, journal_id: jid });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
   finally { client.release(); }
 });
@@ -661,7 +686,7 @@ router.post('/periods/:period/lock', requirePermission('accounts.period.lock'), 
   await logAudit({ req, module: 'accounts', action: 'period.lock', target_type: 'acc_period', target_id: req.params.period });
   res.json({ ok: true });
 });
-router.post('/periods/:period/unlock', requirePermission('accounts.period.lock'), async (req, res) => {
+router.post('/periods/:period/unlock', requirePermission('accounts.period.unlock'), async (req, res) => {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(req.params.period)) return res.status(400).json({ error: 'Period must be a real YYYY-MM month.' });
   await db.query('DELETE FROM acc_period_lock WHERE period = $1', [req.params.period]);
   await logAudit({ req, module: 'accounts', action: 'period.unlock', target_type: 'acc_period', target_id: req.params.period });
@@ -946,11 +971,14 @@ router.get('/bank/lines', requirePermission('accounts.view'), async (req, res) =
 router.get('/bank/summary', requirePermission('accounts.view'), async (req, res) => {
   const last = await db.query("SELECT running_balance FROM acc_bank_line ORDER BY txn_date DESC, id DESC LIMIT 1");
   const stmt = last.rows.length ? Number(last.rows[0].running_balance) : 0;
+  const first = await db.query("SELECT running_balance, amount FROM acc_bank_line ORDER BY txn_date ASC, id ASC LIMIT 1");
+  const broughtForward = first.rows.length && first.rows[0].running_balance != null
+    ? r2(Number(first.rows[0].running_balance) - Number(first.rows[0].amount)) : null;
   const books = await tagBalance('idfc_bank');
   const counts = await db.query("SELECT status, COUNT(*) n FROM acc_bank_line GROUP BY status");
   const c = { unmatched: 0, matched: 0, ignored: 0 };
   counts.rows.forEach(r => { c[r.status] = Number(r.n); });
-  res.json({ statement_balance: r2(stmt), books_balance: books, difference: r2(stmt - books), counts: c });
+  res.json({ statement_balance: r2(stmt), brought_forward: broughtForward, books_balance: books, difference: r2(stmt - books), counts: c });
 });
 // Code a bank line to an account → posts the bank journal and marks it reconciled.
 // Code one unmatched bank line to an account: money in -> credit the account,
@@ -1093,6 +1121,10 @@ router.post('/bank/lines/:id/match', requirePermission('accounts.reconcile'), as
       const d = await client.query("SELECT * FROM acc_invoice WHERE id=$1 AND status='posted' FOR UPDATE", [doc_id]);
       if (!d.rows.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Invoice not open.' }); }
       const ar = Number(d.rows[0].amount_inr);
+      if ((d.rows[0].currency || 'INR') === 'INR' && Math.abs(amt - ar) > 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This receipt (₹' + r2(amt) + ') does not equal invoice #' + doc_id + ' (₹' + r2(ar) + '). Partial or split settlements are not supported — match a line that equals the invoice total, or code it to an account instead.' });
+      }
       lines = [{ tag: 'idfc_bank', debit: amt }, { tag: 'accounts_receivable', credit: ar }];
       const fx = r2(amt - ar);
       if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx });
@@ -1105,6 +1137,10 @@ router.post('/bank/lines/:id/match', requirePermission('accounts.reconcile'), as
       const d = await client.query("SELECT * FROM acc_bill WHERE id=$1 AND status='posted' FOR UPDATE", [doc_id]);
       if (!d.rows.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Bill not open.' }); }
       const ap = Number(d.rows[0].net_payable);
+      if (Math.abs(paid - ap) > 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This payment (₹' + r2(paid) + ') does not equal bill #' + doc_id + ' (₹' + r2(ap) + '). Partial or split settlements are not supported — match a line that equals the bill total, or code it to an account instead.' });
+      }
       lines = [{ tag: 'accounts_payable', debit: ap }, { tag: 'idfc_bank', credit: paid }];
       const fx = r2(ap - paid);
       if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx });

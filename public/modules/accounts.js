@@ -207,7 +207,7 @@ window.fkModules = window.fkModules || {};
             legend.push('<div style="display:flex;align-items:center;gap:8px;font-size:12.5px"><span style="width:10px;height:10px;border-radius:3px;flex-shrink:0;background:' + c + '"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(s.name) + '</span><span style="margin-left:auto;color:var(--muted)">' + Math.round(pct) + '%</span></div>');
             acc += pct;
           });
-          return '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:14px">Where money goes</div>' +
+          return '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:14px">Where money goes · to date</div>' +
             '<div style="display:flex;align-items:center;gap:18px">' +
               '<div style="width:128px;height:128px;border-radius:50%;flex-shrink:0;background:conic-gradient(' + stops.join(',') + ');display:flex;align-items:center;justify-content:center">' +
                 '<div style="width:80px;height:80px;border-radius:50%;background:var(--card,#fff);display:flex;flex-direction:column;align-items:center;justify-content:center"><div class="ov-num" style="font-size:16px">' + fmtShort(spend.total) + '</div><div class="ov-l" style="font-size:10.5px">spent</div></div>' +
@@ -215,7 +215,7 @@ window.fkModules = window.fkModules || {};
               '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:7px">' + legend.join('') + '</div>' +
             '</div></div>';
         })()
-      : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Where money goes</div><div class="acct-empty" style="padding:40px 8px">No spending recorded yet. Code some expenses to see the breakdown.</div></div>';
+      : '<div class="ov-card" style="' + graphStyle + '"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Where money goes · to date</div><div class="acct-empty" style="padding:40px 8px">No spending recorded yet. Code some expenses to see the breakdown.</div></div>';
 
     const dirIco = d => d === 'in' ? '<i class="ti ti-arrow-down-left" style="color:#3B6D11"></i>' : '<i class="ti ti-arrow-up-right" style="color:#D85A30"></i>';
     const recentCard = (recent && recent.length)
@@ -293,13 +293,21 @@ window.fkModules = window.fkModules || {};
         if (known) pre[l.system_tag] = amt; else others.push(l);
       }
     }
+    let bfHint = '';
+    if (!(existing && existing.exists)) {
+      const sum = await api('/bank/summary').catch(() => null);
+      if (sum && sum.brought_forward != null) {
+        if (pre['idfc_bank'] == null) pre['idfc_bank'] = sum.brought_forward;
+        bfHint = '<div class="acct-msg" style="color:var(--muted);margin:0 0 12px;line-height:1.5">Suggested IDFC opening of <strong>' + inr(sum.brought_forward) + '</strong> — your statement\'s brought-forward balance (the figure <em>before</em> the first transaction). Don\'t enter the closing balance here, or coding the statement will double-count the year.</div>';
+      }
+    }
     const date = existing && existing.date ? String(existing.date).slice(0, 10) : '2026-03-31';
     const fieldRows = OPENING_FIELDS.map(f =>
       '<div class="acct-field"><label>' + f.label + ' (' + opSideLabel(f.side) + ')</label>' +
       '<input type="number" min="0" step="0.01" data-op-tag="' + f.tag + '" data-side="' + f.side + '" value="' + (pre[f.tag] || '') + '" oninput="window.__opCalc()"></div>').join('');
     container.innerHTML =
       '<div class="acct-card"><h3>' + (existing && existing.exists ? 'Edit opening balances' : 'Set opening balances') + '</h3>' +
-      (existing && existing.exists ? '<div class="acct-msg" style="color:var(--muted);margin:0 0 12px">Saving replaces the previous opening entry — the old one is reversed and kept for the record.</div>' : '') +
+      (existing && existing.exists ? '<div class="acct-msg" style="color:var(--muted);margin:0 0 12px">Saving replaces the previous opening entry — the old one is reversed and kept for the record.</div>' : '') + bfHint +
       '<div class="acct-field" style="max-width:220px;margin-bottom:14px"><label>As at</label><input id="opDate" type="date" value="' + date + '"></div>' +
       '<div class="acct-form">' + fieldRows + '</div>' +
       '<div id="opOther"></div>' +
@@ -550,6 +558,7 @@ window.fkModules = window.fkModules || {};
         '<button class="acct-btn" id="rCA">CA pack · GST &amp; TDS</button>' +
         '<button class="acct-btn" id="rSS">Spend by supplier</button>' +
         '<button class="acct-btn" id="rPE">Month-end</button>' +
+        '<button class="acct-btn" id="rMJ">Manual journal</button>' +
       '</div><div id="rOut"></div>';
     const out = document.getElementById('rOut');
     document.getElementById('rTB').addEventListener('click', async () => {
@@ -585,6 +594,7 @@ window.fkModules = window.fkModules || {};
     document.getElementById('rCA').addEventListener('click', () => renderCaPack(out));
     document.getElementById('rSS').addEventListener('click', () => renderSpendSupplier(out));
     document.getElementById('rPE').addEventListener('click', () => renderPeriods(out));
+    document.getElementById('rMJ').addEventListener('click', () => renderManualJournal(out));
     document.getElementById('rTB').click();
   }
 
@@ -765,6 +775,63 @@ window.fkModules = window.fkModules || {};
       try { await api('/periods/' + period + '/unlock', { method: 'POST', body: JSON.stringify({}) }); await loadPeriods(); } catch (e) { alert(e.message); }
     };
     await loadPeriods();
+  }
+
+  async function renderManualJournal(out) {
+    const { accounts } = await lookups();
+    window.__mjAcctOpts = accounts.map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
+    out.innerHTML =
+      '<div class="acct-card"><h3 style="margin:0 0 4px">Manual journal</h3>' +
+      '<p style="color:var(--muted);font-size:13px;margin:0 0 12px">A balanced entry for accruals, depreciation or corrections. Debits must equal credits before you can post.</p>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+        '<div><span class="rec-lbl">Date</span><input type="date" id="mjDate" class="rec-f" style="width:170px" value="' + today() + '"></div>' +
+        '<div style="flex:1;min-width:220px"><span class="rec-lbl">Narration</span><input id="mjNarr" class="rec-f" placeholder="What is this entry for?"></div>' +
+      '</div>' +
+      '<table class="acct"><thead><tr><th>Account</th><th class="num" style="width:150px">Debit</th><th class="num" style="width:150px">Credit</th><th style="width:40px"></th></tr></thead><tbody id="mjLines"></tbody>' +
+      '<tfoot><tr style="font-weight:500"><td>Total</td><td class="num" id="mjTD">₹0</td><td class="num" id="mjTC">₹0</td><td></td></tr></tfoot></table>' +
+      '<div class="acct-actions" style="margin-top:10px"><button class="acct-btn ghost" id="mjAdd"><i class="ti ti-plus"></i>Add line</button></div>' +
+      '<div class="acct-net"><span style="font-size:13px" id="mjBalMsg">Enter some amounts</span><span class="v" id="mjDiff">₹0</span></div>' +
+      '<div class="acct-actions" style="margin-top:12px"><button class="acct-btn primary" id="mjPost" disabled><i class="ti ti-check"></i>Post journal</button></div>' +
+      '<div class="acct-msg" id="mjMsg"></div></div>';
+    const linesEl = document.getElementById('mjLines');
+    window.__mjAddLine = function () {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td><select class="rec-f mj-acct">' + window.__mjAcctOpts + '</select></td>' +
+        '<td><input type="number" min="0" step="0.01" class="rec-f mj-d" oninput="window.__mjCalc()"></td>' +
+        '<td><input type="number" min="0" step="0.01" class="rec-f mj-c" oninput="window.__mjCalc()"></td>' +
+        '<td><button class="acct-btn ghost" onclick="this.closest(\'tr\').remove();window.__mjCalc()" style="padding:6px 9px">✕</button></td>';
+      linesEl.appendChild(tr);
+    };
+    window.__mjCalc = function () {
+      let td = 0, tc = 0;
+      linesEl.querySelectorAll('tr').forEach(tr => { td += Number(tr.querySelector('.mj-d').value || 0); tc += Number(tr.querySelector('.mj-c').value || 0); });
+      td = r2(td); tc = r2(tc);
+      document.getElementById('mjTD').textContent = inr(td);
+      document.getElementById('mjTC').textContent = inr(tc);
+      const diff = r2(td - tc);
+      document.getElementById('mjDiff').textContent = inr(Math.abs(diff));
+      const balanced = diff === 0 && td > 0;
+      const msg = document.getElementById('mjBalMsg');
+      msg.textContent = balanced ? 'Balanced ✓' : (td === 0 && tc === 0 ? 'Enter some amounts' : 'Out by ' + inr(Math.abs(diff)));
+      msg.style.color = balanced ? 'var(--green,#3B6D11)' : 'var(--muted)';
+      document.getElementById('mjPost').disabled = !balanced;
+    };
+    document.getElementById('mjAdd').addEventListener('click', () => window.__mjAddLine());
+    document.getElementById('mjPost').addEventListener('click', async () => {
+      const msg = document.getElementById('mjMsg'); msg.className = 'acct-msg';
+      const lines = [];
+      linesEl.querySelectorAll('tr').forEach(tr => {
+        const account_id = tr.querySelector('.mj-acct').value;
+        const debit = Number(tr.querySelector('.mj-d').value || 0), credit = Number(tr.querySelector('.mj-c').value || 0);
+        if (account_id && (debit > 0 || credit > 0)) lines.push({ account_id, debit, credit });
+      });
+      try {
+        await api('/journals', { method: 'POST', body: JSON.stringify({ entry_date: document.getElementById('mjDate').value, narration: document.getElementById('mjNarr').value, lines }) });
+        msg.className = 'acct-msg ok'; msg.textContent = 'Journal posted.';
+        renderManualJournal(out);
+      } catch (e) { msg.className = 'acct-msg err'; msg.textContent = e.message; }
+    });
+    window.__mjAddLine(); window.__mjAddLine(); window.__mjCalc();
   }
 
   function agingTable(title, rows) {
