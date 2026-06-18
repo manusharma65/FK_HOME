@@ -1556,17 +1556,33 @@
             '/api/notifications', '/api/chat/channels'];
   var _fetch = window.fetch;
   window.fetch = function (input, init) {
+    init = init || {};
+    var method = (init.method || 'GET').toUpperCase();
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
     try {
-      init = init || {};
-      var method = (init.method || 'GET').toUpperCase();
-      var url = (typeof input === 'string') ? input : (input && input.url) || '';
       if (method === 'GET' && BG.some(function (p) { return url.indexOf(p) !== -1; })) {
         var h = new Headers(init.headers || {});
         h.set('x-fk-bg', '1');
         init.headers = h;
       }
     } catch (e) { /* never let tagging break a request */ }
-    return _fetch.call(this, input, init);
+    return _fetch.call(this, input, init).then(function (resp) {
+      // Session-expiry guard: if any protected API call comes back 401, the login
+      // has lapsed — bounce to the login screen instead of leaving a stale "zombie"
+      // tab that still looks signed in until a manual refresh. Excludes the login
+      // and change-password calls, which return 401 for their own (non-session)
+      // reasons and surface their own errors.
+      try {
+        if (resp && resp.status === 401 && url.indexOf('/api/') !== -1
+            && url.indexOf('/api/auth/login') === -1
+            && url.indexOf('/api/auth/change-password') === -1
+            && !window.__fkSessionGone) {
+          window.__fkSessionGone = true;
+          window.location.href = '/login.html';
+        }
+      } catch (e) { /* never let the guard break a request */ }
+      return resp;
+    });
   };
 })();
 (function(){
@@ -2263,7 +2279,7 @@ function startHeartbeat() {
     if (document.hidden) return;
     fetch('/api/me/heartbeat', {
       method: 'POST', credentials: 'include',
-      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
+      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop', 'x-fk-bg': '1' }
     }).catch(()=>{});
   }, 30000);
 }
