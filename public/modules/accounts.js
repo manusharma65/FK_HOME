@@ -6,6 +6,16 @@ window.fkModules = window.fkModules || {};
 (function () {
   const API = '/api/accounts';
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  function whoOptsFor(line) {
+    const contacts = window.__recContacts || [];
+    const sug = String((line && line.suggested_payee) || '').trim();
+    const match = sug ? contacts.find(c => String(c.name || '').toLowerCase() === sug.toLowerCase()) : null;
+    let html = '<option value="">— who (optional) —</option>';
+    if (sug && !match) html += '<option value="__use" data-name="' + esc(sug) + '" selected>＋ Add &quot;' + esc(sug) + '&quot;</option>';
+    html += '<option value="__add">＋ Add a contact…</option>';
+    html += contacts.map(c => '<option value="' + c.id + '"' + (match && match.id === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('');
+    return html;
+  }
   const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   const gbp = (n) => '£' + Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -103,16 +113,13 @@ window.fkModules = window.fkModules || {};
     .ov-num{font-family:'Fraunces',Georgia,serif;font-weight:500;font-variant-numeric:tabular-nums}
     .ov-l{font-size:12px;color:var(--muted)}
     .ov-bar{border-radius:5px 5px 0 0}
-    .rec-card{background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);border-radius:14px;margin-bottom:14px;display:flex;overflow:hidden;box-shadow:0 1px 2px rgba(20,22,27,.05)}
-    .rec-card.rec-in{background:#F0F6E6;border-color:#D5E5BD}
-    .rec-card.rec-out{background:#FBEFE8;border-color:#EFD8C9}
-    .rec-left{flex:0 0 60%;padding:13px 15px;display:flex;gap:11px;align-items:center}
-    .rec-card.rec-in .rec-left{background:#E7F1D6}
-    .rec-card.rec-out .rec-left{background:#F8E6DA}
-    .rec-col{width:108px;text-align:right;flex-shrink:0}
+    .rec-card{display:flex;gap:14px;margin-bottom:14px;align-items:stretch}
+    .rec-tx{flex:0 0 48%;display:flex;gap:11px;align-items:center;padding:14px 15px;border-radius:12px;border:1px solid var(--line,#E8E0D3)}
+    .rec-tx.rec-in{background:#EAF2DC;border-color:#D5E5BD}
+    .rec-tx.rec-out{background:#FAE7DC;border-color:#EFD8C9}
+    .rec-code{flex:1;padding:14px 15px;border-radius:12px;background:var(--card,#fff);border:1px solid var(--line,#E8E0D3);box-shadow:0 1px 2px rgba(20,22,27,.05)}
+    .rec-col{width:104px;text-align:right;flex-shrink:0}
     .rec-hd{font-size:11px;color:var(--muted);margin-bottom:3px}
-    .rec-divide{width:1px;background:var(--line,#E8E0D3)}
-    .rec-right{flex:1;padding:13px 15px}
     .rec-ico{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
     .rec-ico-in{background:#EAF3DE;color:#3B6D11}.rec-ico-out{background:#FAECE7;color:#D85A30}
     .rec-amt{font-family:'Fraunces',Georgia,serif;font-weight:500;font-variant-numeric:tabular-nums;font-size:17px;margin-top:5px}
@@ -853,6 +860,8 @@ window.fkModules = window.fkModules || {};
         .map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
     window.__recContactOpts = '<option value="">— who (optional) —</option><option value="__add">＋ Add a contact…</option>' +
       (contacts || []).map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
+    window.__recContacts = contacts || [];
+    window.__recLineMap = {};
     body.innerHTML =
       '<div id="recHeader"></div>' +
       '<div class="acct-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">' +
@@ -921,6 +930,7 @@ window.fkModules = window.fkModules || {};
             '<span id="recBulkCount" style="font-size:13px;font-weight:500"></span>' +
             '<span style="font-size:12.5px;color:var(--muted)">code to</span>' +
             '<select id="recBulkAcct" class="rec-f" style="width:auto;min-width:190px">' + window.__recAcctOpts + '</select>' +
+            '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="recBulkAuto" checked> auto-fill who from the statement</label>' +
             '<button class="acct-btn primary" style="padding:7px 13px" onclick="window.__recBulkCode()">Code selected</button>' +
             '<button class="acct-btn ghost" style="padding:7px 9px" onclick="window.__recBulkClear()">Clear</button>' +
           '</div></div>'
@@ -958,8 +968,9 @@ window.fkModules = window.fkModules || {};
     const amt = Number(l.amount);
     const isIn = amt >= 0;
     const ico = isIn ? 'ti-arrow-down-left' : 'ti-arrow-up-right';
+    if (window.__recLineMap) window.__recLineMap[l.id] = l;
     const left =
-      '<div class="rec-left">' +
+      '<div class="rec-tx ' + (isIn ? 'rec-in' : 'rec-out') + '">' +
         (view === 'unmatched' ? '<input type="checkbox" class="rec-chk" data-line="' + l.id + '" onchange="window.__recSelChanged()">' : '') +
         '<div class="rec-ico ' + (isIn ? 'rec-ico-in' : 'rec-ico-out') + '"><i class="ti ' + ico + '"></i></div>' +
         '<div style="flex:1;min-width:0"><div style="font-size:11.5px;color:var(--muted)">' + esc(String(l.txn_date).slice(0, 10)) + '</div>' +
@@ -968,10 +979,10 @@ window.fkModules = window.fkModules || {};
         '<div class="rec-col"><div class="rec-hd">Received</div>' + (isIn ? '<div class="rec-amt" style="color:#3B6D11">' + inr(amt) + '</div>' : '<div style="color:#C2BEB4">—</div>') + '</div>' +
       '</div>';
     if (view !== 'unmatched') {
-      const right = '<div class="rec-right" style="display:flex;align-items:center;justify-content:space-between;gap:10px">' +
+      const right = '<div class="rec-code" style="display:flex;align-items:center;justify-content:space-between;gap:10px">' +
         '<span style="font-size:12.5px;color:var(--muted)">' + (view === 'matched' ? 'Reconciled' : 'Set aside') + '</span>' +
         '<button class="acct-btn ghost" onclick="window.__recUndo(' + l.id + ')"><i class="ti ti-arrow-back-up"></i>Undo</button></div>';
-      return '<div class="rec-card ' + (isIn ? 'rec-in' : 'rec-out') + '">' + left + '<div class="rec-divide"></div>' + right + '</div>';
+      return '<div class="rec-card">' + left + right + '</div>';
     }
     const matchOn = !!sugg;
     const matchPane =
@@ -985,7 +996,7 @@ window.fkModules = window.fkModules || {};
       '<div id="recpane-code-' + l.id + '" style="display:' + (matchOn ? 'none' : 'block') + '">' +
         '<div style="display:flex;gap:8px;margin-bottom:9px;flex-wrap:wrap">' +
           '<div style="flex:1;min-width:150px"><span class="rec-lbl">What account</span><select class="rec-acct rec-f" data-line="' + l.id + '">' + window.__recAcctOpts + '</select></div>' +
-          '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f" onchange="window.__recWho(' + l.id + ')">' + window.__recContactOpts + '</select></div>' +
+          '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f" onchange="window.__recWho(' + l.id + ')">' + whoOptsFor(l) + '</select></div>' +
         '</div>' +
         '<div style="margin-bottom:11px"><span class="rec-lbl">Why</span><input id="recWhy-' + l.id + '" class="rec-f" placeholder="Description (optional)"></div>' +
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">' + attControl('bank', l.id, l.att_count) +
@@ -993,13 +1004,13 @@ window.fkModules = window.fkModules || {};
         '</div>' +
       '</div>';
     const right =
-      '<div class="rec-right" id="recright-' + l.id + '">' +
+      '<div class="rec-code" id="recright-' + l.id + '">' +
         '<div style="display:flex;gap:16px;margin-bottom:11px;border-bottom:1px solid #EFE7DA">' +
           '<button class="rec-seg' + (matchOn ? ' on' : '') + '" id="recseg-match-' + l.id + '" onclick="window.__recSeg(' + l.id + ",'match')\">Match</button>" +
           '<button class="rec-seg' + (matchOn ? '' : ' on') + '" id="recseg-code-' + l.id + '" onclick="window.__recSeg(' + l.id + ",'code')\">Code</button>" +
         '</div>' + matchPane + codePane +
       '</div>';
-    return '<div class="rec-card ' + (isIn ? 'rec-in' : 'rec-out') + '">' + left + '<div class="rec-divide"></div>' + right + '</div>';
+    return '<div class="rec-card">' + left + right + '</div>';
   }
 
   window.__recSeg = function (id, mode) {
@@ -1016,12 +1027,12 @@ window.fkModules = window.fkModules || {};
     if (!name) { sel.value = ''; return; }
     try {
       const c = await api('/contacts', { method: 'POST', body: JSON.stringify({ name: name, kind: 'supplier' }) });
-      const fresh = await api('/contacts').catch(function () { return []; });
-      window.__recContactOpts = '<option value="">— who (optional) —</option><option value="__add">＋ Add a contact…</option>' +
-        fresh.map(function (x) { return '<option value="' + x.id + '">' + esc(x.name) + '</option>'; }).join('');
+      window.__recContacts = await api('/contacts').catch(function () { return window.__recContacts || []; });
       document.querySelectorAll('select[id^="recWho-"]').forEach(function (s) {
-        const keep = s.value === '__add' ? '' : s.value;
-        s.innerHTML = window.__recContactOpts; s.value = keep;
+        const lid = Number(s.id.replace('recWho-', ''));
+        const keep = (s.value === '__add') ? '' : s.value;
+        s.innerHTML = whoOptsFor((window.__recLineMap || {})[lid] || {});
+        if (keep) s.value = keep;
       });
       sel.value = String(c.id);
     } catch (e) { alert(e.message); sel.value = ''; }
@@ -1033,7 +1044,15 @@ window.fkModules = window.fkModules || {};
     const who = document.getElementById('recWho-' + id);
     const why = document.getElementById('recWhy-' + id);
     const payload = { account_id: Number(sel.value) };
-    if (who && who.value && who.value !== '__add') payload.contact_id = Number(who.value);
+    if (who && who.value === '__use') {
+      const opt = who.options[who.selectedIndex];
+      const nm = opt ? (opt.getAttribute('data-name') || '').trim() : '';
+      if (!nm) { alert('No name detected for this line — pick or add a contact, or leave Who blank.'); return; }
+      try { const c = await api('/contacts', { method: 'POST', body: JSON.stringify({ name: nm, kind: 'supplier' }) }); payload.contact_id = c.id; }
+      catch (e) { alert(e.message); return; }
+    } else if (who && who.value && who.value !== '__add') {
+      payload.contact_id = Number(who.value);
+    }
     if (why && why.value.trim()) payload.note = why.value.trim();
     try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify(payload) }); await loadSummary(); await loadRecList('unmatched'); }
     catch (e) { alert(e.message); }
@@ -1086,8 +1105,16 @@ window.fkModules = window.fkModules || {};
     if (!ids.length) return;
     const sel = document.getElementById('recBulkAcct');
     if (!sel || !sel.value) { alert('Pick an account to code these to.'); return; }
-    try { await api('/bank/code-bulk', { method: 'POST', body: JSON.stringify({ line_ids: ids, account_id: Number(sel.value) }) }); await loadSummary(); await loadRecList('unmatched'); }
-    catch (e) { alert(e.message); }
+    const autoEl = document.getElementById('recBulkAuto');
+    const autoWho = autoEl ? autoEl.checked : false;
+    try {
+      const r = await api('/bank/code-bulk', { method: 'POST', body: JSON.stringify({ line_ids: ids, account_id: Number(sel.value), auto_who: autoWho }) });
+      if (autoWho) {
+        const msg = document.getElementById('recMsg');
+        if (msg) { msg.className = 'acct-msg ok'; msg.textContent = 'Coded ' + r.coded + ' · ' + r.named + ' got a name from the statement' + (r.no_name ? ' · ' + r.no_name + ' had no name (left blank)' : '') + '.'; }
+      }
+      await loadSummary(); await loadRecList('unmatched');
+    } catch (e) { alert(e.message); }
   };
 
   async function uploadStatement(e) {

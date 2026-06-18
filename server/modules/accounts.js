@@ -786,7 +786,7 @@ router.get('/contacts', requirePermission('accounts.view'), async (req, res) => 
 });
 router.post('/contacts', requirePermission('accounts.post'), async (req, res) => {
   const { name, kind, gstin } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'Name required' });
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'A contact name is required.' });
   const r = await db.query('INSERT INTO acc_contact (name, kind, gstin) VALUES ($1,$2,$3) RETURNING *',
     [String(name).trim(), kind || 'supplier', gstin || null]);
   res.json(r.rows[0]);
@@ -965,7 +965,7 @@ router.get('/bank/lines', requirePermission('accounts.view'), async (req, res) =
   if (req.query.import_id) { params.push(req.query.import_id); clauses.push('import_id = $' + params.length); }
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
   const r = await db.query(`SELECT *, (SELECT COUNT(*) FROM acc_attachment a WHERE a.bank_line_id = acc_bank_line.id) AS att_count FROM acc_bank_line ${where} ORDER BY txn_date, id`, params);
-  res.json(r.rows);
+  res.json(r.rows.map(l => ({ ...l, suggested_payee: payeeFromNarration(l.description) })));
 });
 // Two-balance reconcile header: bank's statement balance vs the books, + progress.
 router.get('/bank/summary', requirePermission('accounts.view'), async (req, res) => {
@@ -1004,6 +1004,35 @@ async function codeBankLine(client, lineId, accountId, userId, opts = {}) {
   return jid;
 }
 
+// Best-effort payee extraction from an IDFC narration. Returns a clean name or null.
+function payeeFromNarration(desc) {
+  if (!desc) return null;
+  if (/^charge:/i.test(desc)) return null;            // bank charge — no counterparty
+  const p = String(desc).split('/').map(s => s.trim()).filter(Boolean);
+  const head = (p[0] || '').toUpperCase();
+  let name = null;
+  if (['IMPS', 'NEFT', 'RTGS', 'IFT'].includes(head)) name = p[2];
+  else if (head === 'BLKIFT') name = p[p.length - 1];
+  else if (head === 'BB') name = p[4];                 // cheque deposit
+  else if (head === 'BILLPAY') name = p[2];
+  else if (head === 'POS-VISA') name = p[1];
+  else if (head === 'REF' && p[1] === 'POS-VISA') name = p[2];
+  else if (head === 'OPT') name = p[1];                // statutory (CBDT etc.)
+  else if (/RETURN/i.test(head)) return null;
+  if (!name) return null;
+  name = String(name).replace(/\b(MR|MRS|MS|M\/S)\.?\s+/i, '').replace(/\s+/g, ' ').trim();
+  if (name.length < 2 || /^\d+$/.test(name)) return null;
+  return name;
+}
+async function findOrCreateContact(client, rawName, kind) {
+  const name = String(rawName || '').trim();
+  if (!name) throw new Error('No name to attach.');   // never create a blank contact
+  const ex = await client.query('SELECT id FROM acc_contact WHERE lower(name) = lower($1) LIMIT 1', [name]);
+  if (ex.rows.length) return ex.rows[0].id;
+  const ins = await client.query('INSERT INTO acc_contact (name, kind) VALUES ($1,$2) RETURNING id', [name, kind || 'supplier']);
+  return ins.rows[0].id;
+}
+
 router.post('/bank/lines/:id/code', requirePermission('accounts.reconcile'), async (req, res) => {
   const { account_id, contact_id, note } = req.body || {};
   if (!account_id) return res.status(400).json({ error: 'Pick an account to code this to.' });
@@ -1021,17 +1050,27 @@ router.post('/bank/lines/:id/code', requirePermission('accounts.reconcile'), asy
 // Bulk coding: tick several unmatched lines, code them all to one account at once.
 // All-or-nothing — if any line is already reconciled the whole batch rolls back.
 router.post('/bank/code-bulk', requirePermission('accounts.reconcile'), async (req, res) => {
-  const { line_ids, account_id } = req.body || {};
+  const { line_ids, account_id, auto_who } = req.body || {};
   if (!account_id) return res.status(400).json({ error: 'Pick an account to code these to.' });
   if (!Array.isArray(line_ids) || !line_ids.length) return res.status(400).json({ error: 'No lines selected.' });
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
-    let coded = 0;
-    for (const id of line_ids) { await codeBankLine(client, id, account_id, req.user.id); coded++; }
+    let coded = 0, named = 0, noName = 0;
+    for (const id of line_ids) {
+      let contactId = null;
+      if (auto_who) {
+        const lr = await client.query('SELECT description FROM acc_bank_line WHERE id = $1', [id]);
+        const nm = lr.rows.length ? payeeFromNarration(lr.rows[0].description) : null;
+        if (nm) { contactId = await findOrCreateContact(client, nm, 'supplier'); named++; }
+        else noName++;        // no name → leave the who blank, never create a blank contact
+      }
+      await codeBankLine(client, id, account_id, req.user.id, { contactId });
+      coded++;
+    }
     await client.query('COMMIT');
     await logAudit({ req, module: 'accounts', action: 'bank.code_bulk', target_type: 'acc_bank_line', target_id: null });
-    res.json({ ok: true, coded });
+    res.json({ ok: true, coded, named, no_name: noName });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
   finally { client.release(); }
 });
