@@ -147,9 +147,20 @@ window.fkModules['mail'] = {
     <aside class="mnav" id="mnav">
       <div class="mnav-hd"><span class="t">Mail</span><button class="collapse" id="collapseBtn" title="Collapse"><i class="ti ti-layout-sidebar-left-collapse"></i></button></div>
       <button class="composebtn" id="composeBtn"><i class="ti ti-pencil-plus"></i> Compose</button>
-      <div class="mboxsw" id="mboxsw"><div><div class="d1">Mailbox</div><div class="d2">Personal <span class="pill">you</span></div></div><i class="ti ti-chevron-down cv"></i>
-        <div class="swmenu" id="swmenu"><div class="it">Personal <span class="tag">you</span></div><div class="it dim">Customer Service <span class="tag">coming soon</span></div></div>
-      </div>
+     <div class="mboxsw" id="mboxsw">
+    <div>
+        <div class="d1">Mailbox</div>
+        <div class="d2" id="mboxLabel">
+            Personal <span class="pill">you</span>
+        </div>
+    </div>
+
+    <i class="ti ti-chevron-down cv"></i>
+
+    <div class="swmenu" id="swmenu">
+        <!-- Dynamically populated -->
+    </div>
+</div>
       <div class="msec">Mailbox</div>
       <div class="mni on" data-box="inbox"><i class="ti ti-inbox lead"></i> Inbox <span class="ct" id="ctInbox"></span></div>
       <div class="mni" data-box="sent"><i class="ti ti-send lead"></i> Sent</div>
@@ -264,6 +275,29 @@ window.fkModules['mail'] = {
   },
 
   async mount(root) {
+    // mail.js ke mount() function ke andar
+try {
+  const data = await j('/api/mail/mailboxes');
+  console.log("Mailboxes received:", data.mailboxes); // Console mein check karein
+  
+  const sw = $('#swmenu');
+  // 'it' class ka use karein jo aapke CSS mein define hai
+  sw.innerHTML = '<div class="it" data-slug="personal">Personal <span class="pill">you</span></div>' +
+    data.mailboxes.map(mb => 
+      `<div class="it" data-slug="${mb.slug}">${mb.display_name}</div>`
+    ).join('');
+    
+  // Click event
+  sw.querySelectorAll('.it').forEach(el => {
+    el.addEventListener('click', () => {
+      window.currentMailboxSlug = el.dataset.slug;
+      $('#mboxLabel').textContent = el.textContent;
+      loadBox(false);
+    });
+  });
+} catch (e) {
+  console.error("Error loading mailboxes:", e);
+}
     const $ = (s) => root.querySelector(s);
     const rowsEl = $('#mailRows'), subEl = $('#mailSub'), listTitle = $('#listTitle');
     const readEl = $('#mailRead'), mwrap = $('#mwrap'), toastEl = $('#mailToast');
@@ -312,7 +346,7 @@ window.fkModules['mail'] = {
     $('#expandBtn').addEventListener('click', () => mwrap.classList.remove('collapsed'));
     $('#mboxsw').addEventListener('click', (e) => { e.stopPropagation(); $('#swmenu').classList.toggle('show'); });
     document.addEventListener('click', () => { const s = $('#swmenu'); if (s) s.classList.remove('show'); });
-
+    
     // Labels
     function renderLabels() {
       const counts = {}; Object.values(labelMap).forEach(ids => ids.forEach(id => { counts[id] = (counts[id] || 0) + 1; }));
@@ -323,6 +357,36 @@ window.fkModules['mail'] = {
       }));
       $('#labelList').querySelectorAll('[data-del]').forEach(el => el.addEventListener('click', async (ev) => { ev.stopPropagation(); if (!confirm('Delete this label? It will be removed from all emails.')) return; try { await j('/api/mail/labels/' + el.dataset.del, { method: 'DELETE' }); await refreshLabels(); if (selectedId) openMessage(selectedId); toast('Label deleted'); } catch (e) { toast(e.message); } }));
     }
+    // Inside mount(root)
+async function initMailboxSwitcher() {
+  try {
+    const data = await j('/api/mail/mailboxes');
+    const swmenu = $('#swmenu');
+    
+    // Clear existing and add options
+    swmenu.innerHTML = data.mailboxes.map(mb => `
+      <div class="it" data-slug="${esc(mb.slug)}">
+        ${esc(mb.display_name)}
+        ${mb.department_name ? `<span class="tag">${esc(mb.department_name)}</span>` : ''}
+      </div>
+    `).join('');
+
+    // Add click event for switching
+    swmenu.querySelectorAll('.it').forEach(el => {
+      el.addEventListener('click', () => {
+        // Update state and reload
+        window.currentMailbox = el.dataset.slug;
+        $('#mboxLabel').innerHTML = el.textContent.trim();
+        loadBox(false);
+      });
+    });
+  } catch (e) {
+    console.error("Failed to load mailboxes", e);
+  }
+}
+
+// Call this at the end of your mount function
+initMailboxSwitcher();
     async function refreshLabels() { const [a, b] = await Promise.all([j('/api/mail/labels'), j('/api/mail/labelmap')]); labels = a.labels || []; labelMap = b.map || {}; renderLabels(); }
     let pickColour = SWATCHES[0];
     $('#swatches').innerHTML = SWATCHES.map((c, i) => '<span class="swatch' + (i === 0 ? ' on' : '') + '" data-c="' + c + '" style="background:' + c + '"></span>').join('');
