@@ -67,6 +67,7 @@ window.fkModules = window.fkModules || {};
     { key: 'overview', hash: '#accounts', label: 'Overview', icon: 'ti-layout-dashboard' },
     { key: 'bills', hash: '#accounts/bills', label: 'Bills', icon: 'ti-file-invoice' },
     { key: 'invoices', hash: '#accounts/invoices', label: 'Invoices', icon: 'ti-receipt' },
+    { key: 'credits', hash: '#accounts/credits', label: 'Credits', icon: 'ti-discount' },
     { key: 'reconcile', hash: '#accounts/reconcile', label: 'Reconcile', icon: 'ti-arrows-exchange' },
     { key: 'reports', hash: '#accounts/reports', label: 'Reports', icon: 'ti-chart-bar' },
     { key: 'chart', hash: '#accounts/chart', label: 'Chart of accounts', icon: 'ti-list-details' },
@@ -455,18 +456,61 @@ window.fkModules = window.fkModules || {};
 
   async function loadBillList() {
     const el = document.getElementById('bList'); if (!el) return;
-    const bills = await api('/bills');
+    let bills, openCredits;
+    try { [bills, openCredits] = await Promise.all([api('/bills'), api('/credits?kind=supplier&status=open').catch(() => [])]); }
+    catch (e) { el.innerHTML = '<div class="acct-empty">Could not load bills.</div>'; return; }
+    const credByContact = {};
+    (openCredits || []).forEach(c => { credByContact[c.contact_id] = r2((credByContact[c.contact_id] || 0) + Number(c.remaining_amount)); });
     if (!bills.length) { el.innerHTML = '<div class="acct-empty">No bills yet.</div>'; return; }
     el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Supplier</th><th>Category</th><th class="num">Net</th><th>Status</th><th>Files</th><th></th></tr></thead><tbody>' +
-      bills.map(b => '<tr><td>' + esc(String(b.bill_date).slice(0, 10)) + '</td><td>' + esc(b.contact_name || '—') + '</td><td>' + esc(b.category_name || '—') + '</td>' +
-        '<td class="num">' + inr(b.net_payable) + '</td><td>' + statusPill(b.status) + '</td><td>' + attControl('bill', b.id, b.att_count) + '</td><td class="acct-actions">' +
-        (b.status === 'draft'
+      bills.map(b => {
+        const out = Number(b.outstanding != null ? b.outstanding : b.net_payable);
+        const settled = Number(b.settled || 0);
+        const netCell = inr(b.net_payable) + (b.status === 'posted' && settled > 0.5 ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + inr(out) + ' left</div>' : '');
+        const cred = credByContact[b.contact_id] || 0;
+        const acts = b.status === 'draft'
           ? '<button class="acct-btn primary" onclick="window.__acctBill(\'post\',' + b.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctBill(\'void\',' + b.id + ')">Void</button>'
           : b.status === 'posted'
-            ? '<button class="acct-btn" onclick="window.__acctReverse(' + b.journal_id + ')">Reverse</button>'
-            : '') +
-        '</td></tr>').join('') + '</tbody></table>';
+            ? ((out > 0.5 && cred > 0.5 ? '<button class="acct-btn" onclick="window.__billCredit(' + b.id + ',' + b.contact_id + ',' + out + ')">Apply ' + fmtShort(cred) + ' credit</button>' : '') +
+               '<button class="acct-btn" onclick="window.__acctReverse(' + b.journal_id + ')">Reverse</button>')
+            : '';
+        return '<tr><td>' + esc(String(b.bill_date).slice(0, 10)) + '</td><td>' + esc(b.contact_name || '—') + '</td><td>' + esc(b.category_name || '—') + '</td>' +
+          '<td class="num">' + netCell + '</td><td>' + statusPill(b.status) + '</td><td>' + attControl('bill', b.id, b.att_count) + '</td><td class="acct-actions">' + acts + '</td></tr>' +
+          '<tr id="bcredrow-' + b.id + '" style="display:none"><td colspan="7" style="background:var(--canvas,#F4EFE7);padding:0"><div id="bcred-' + b.id + '"></div></td></tr>';
+      }).join('') + '</tbody></table>';
   }
+  window.__billCredit = async function (billId, contactId, outstanding) {
+    const row = document.getElementById('bcredrow-' + billId), box = document.getElementById('bcred-' + billId);
+    if (!row || !box) return;
+    if (row.style.display !== 'none') { row.style.display = 'none'; return; }
+    row.style.display = ''; box.innerHTML = '<div style="padding:12px;font-size:12.5px;color:var(--muted)">Loading credit…</div>';
+    try { const data = await api('/credits/available?contact_id=' + contactId + '&kind=supplier'); box.innerHTML = creditApplyHTML(data.credits || [], 'bill', billId, outstanding); }
+    catch (e) { box.innerHTML = '<div style="padding:12px;color:#993C1D">' + esc(e.message) + '</div>'; }
+  };
+  // Shared: render an apply panel + run the allocation (used by bills, invoices and the Credits tab).
+  function creditApplyHTML(credits, targetType, targetId, outstanding) {
+    if (!credits.length) return '<div style="padding:12px;font-size:12.5px;color:var(--muted)">No credit available for this contact.</div>';
+    const rows = credits.map(c => {
+      const def = r2(Math.min(Number(c.remaining_amount), Number(outstanding != null ? outstanding : c.remaining_amount)));
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid var(--line,#E8E0D3)">' +
+        '<div style="flex:1;font-size:12.5px"><b>' + inr(c.remaining_amount) + '</b> available<span style="color:var(--muted)"> · ' + esc(String(c.credit_date).slice(0, 10)) + ' · ' + (c.source_type === 'credit_note' ? 'credit note' : 'prepayment') + (c.narration ? ' · ' + esc(c.narration) : '') + '</span></div>' +
+        '<input id="capp-' + targetType + '-' + targetId + '-' + c.id + '" class="rec-f" type="number" min="0" step="0.01" value="' + def + '" style="width:120px">' +
+        '<button class="acct-btn primary" onclick="window.__applyCredit(' + c.id + ",'" + targetType + "'," + targetId + ')">Apply</button>' +
+      '</div>';
+    }).join('');
+    return '<div style="padding:4px 0 10px"><div style="padding:8px 12px;font-size:12px;color:var(--muted)">Outstanding <b style="color:var(--ink)">' + inr(outstanding) + '</b> — apply credit to reduce it.</div>' + rows + '</div>';
+  }
+  window.__applyCredit = async function (creditId, targetType, targetId) {
+    const inp = document.getElementById('capp-' + targetType + '-' + targetId + '-' + creditId);
+    const amount = inp ? Number(inp.value || 0) : null;
+    if (!amount || amount <= 0) { alert('Enter an amount to apply.'); return; }
+    try {
+      await api('/credits/' + creditId + '/apply', { method: 'POST', body: JSON.stringify({ target_type: targetType, target_id: targetId, amount: amount }) });
+      if (targetType === 'bill' && document.getElementById('bList')) await loadBillList();
+      if (targetType === 'invoice' && document.getElementById('iList')) await loadInvoiceList();
+      if (document.getElementById('crList')) await loadCreditsList();
+    } catch (e) { alert(e.message); }
+  };
   window.__acctBill = async function (action, id) {
     if (action === 'void' && !confirm('Void this draft bill? It will be kept but marked void.')) return;
     try { await api('/bills/' + id + '/' + action, { method: 'POST' }); await loadBillList(); } catch (e) { alert(e.message); }
@@ -534,26 +578,124 @@ window.fkModules = window.fkModules || {};
   }
   async function loadInvoiceList() {
     const el = document.getElementById('iList'); if (!el) return;
-    const invs = await api('/invoices');
+    let invs, openCredits;
+    try { [invs, openCredits] = await Promise.all([api('/invoices'), api('/credits?kind=customer&status=open').catch(() => [])]); }
+    catch (e) { el.innerHTML = '<div class="acct-empty">Could not load invoices.</div>'; return; }
+    const credByContact = {};
+    (openCredits || []).forEach(c => { credByContact[c.contact_id] = r2((credByContact[c.contact_id] || 0) + Number(c.remaining_amount)); });
     if (!invs.length) { el.innerHTML = '<div class="acct-empty">No invoices yet.</div>'; return; }
     el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Customer</th><th>Treatment</th><th class="num">Amount</th><th class="num">INR</th><th>Status</th><th>Files</th><th></th></tr></thead><tbody>' +
-      invs.map(i => '<tr><td>' + esc(String(i.invoice_date).slice(0, 10)) + '</td><td>' + esc(i.contact_name || '—') + '</td>' +
-        '<td>' + (i.tax_treatment === 'export_zero' ? 'Export 0%' : 'Domestic GST') + '</td>' +
-        '<td class="num">' + (i.currency === 'GBP' ? gbp(i.taxable_amount) : inr(i.taxable_amount)) + '</td>' +
-        '<td class="num">' + inr(i.amount_inr) + '</td><td>' + statusPill(i.status) + '</td><td>' + attControl('invoice', i.id, i.att_count) + '</td><td class="acct-actions">' +
-        (i.status === 'draft'
+      invs.map(i => {
+        const out = Number(i.outstanding != null ? i.outstanding : i.amount_inr), settled = Number(i.settled || 0);
+        const inrCell = inr(i.amount_inr) + (i.status === 'posted' && settled > 0.5 ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + inr(out) + ' left</div>' : '');
+        const cred = credByContact[i.contact_id] || 0;
+        const acts = i.status === 'draft'
           ? '<button class="acct-btn primary" onclick="window.__acctInv(\'post\',' + i.id + ')">Post</button><button class="acct-btn danger" onclick="window.__acctInv(\'void\',' + i.id + ')">Void</button>'
           : i.status === 'posted'
-            ? '<button class="acct-btn" onclick="window.__acctReverse(' + i.journal_id + ')">Reverse</button>'
-            : '') +
-        '</td></tr>').join('') + '</tbody></table>';
+            ? ((out > 0.5 && cred > 0.5 && (i.currency || 'INR') === 'INR' ? '<button class="acct-btn" onclick="window.__invCredit(' + i.id + ',' + i.contact_id + ',' + out + ')">Apply ' + fmtShort(cred) + ' credit</button>' : '') +
+               '<button class="acct-btn" onclick="window.__acctReverse(' + i.journal_id + ')">Reverse</button>')
+            : '';
+        return '<tr><td>' + esc(String(i.invoice_date).slice(0, 10)) + '</td><td>' + esc(i.contact_name || '—') + '</td>' +
+          '<td>' + (i.tax_treatment === 'export_zero' ? 'Export 0%' : 'Domestic GST') + '</td>' +
+          '<td class="num">' + (i.currency === 'GBP' ? gbp(i.taxable_amount) : inr(i.taxable_amount)) + '</td>' +
+          '<td class="num">' + inrCell + '</td><td>' + statusPill(i.status) + '</td><td>' + attControl('invoice', i.id, i.att_count) + '</td><td class="acct-actions">' + acts + '</td></tr>' +
+          '<tr id="icredrow-' + i.id + '" style="display:none"><td colspan="8" style="background:var(--canvas,#F4EFE7);padding:0"><div id="icred-' + i.id + '"></div></td></tr>';
+      }).join('') + '</tbody></table>';
   }
+  window.__invCredit = async function (invId, contactId, outstanding) {
+    const row = document.getElementById('icredrow-' + invId), box = document.getElementById('icred-' + invId);
+    if (!row || !box) return;
+    if (row.style.display !== 'none') { row.style.display = 'none'; return; }
+    row.style.display = ''; box.innerHTML = '<div style="padding:12px;font-size:12.5px;color:var(--muted)">Loading credit…</div>';
+    try { const data = await api('/credits/available?contact_id=' + contactId + '&kind=customer'); box.innerHTML = creditApplyHTML(data.credits || [], 'invoice', invId, outstanding); }
+    catch (e) { box.innerHTML = '<div style="padding:12px;color:#993C1D">' + esc(e.message) + '</div>'; }
+  };
   window.__acctInv = async function (action, id) {
     if (action === 'void' && !confirm('Void this draft invoice? It will be kept but marked void.')) return;
     try { await api('/invoices/' + id + '/' + action, { method: 'POST' }); await loadInvoiceList(); } catch (e) { alert(e.message); }
   };
 
   // ---------------- Reports ----------------
+  // ---------------- Credits (prepayments + credit notes) ----------------
+  async function renderCredits(body) {
+    const { contacts, accounts } = await lookups();
+    const contactOpts = contacts.map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
+    const acctOpts = accounts.map(a => '<option value="' + a.id + '">' + esc(a.code + ' · ' + a.name) + '</option>').join('');
+    body.innerHTML =
+      '<div class="acct-card"><h3>Add credit note</h3>' +
+        '<div style="font-size:12.5px;color:var(--muted);margin:-4px 0 14px;line-height:1.55">A non-cash credit against a contact — e.g. a supplier rebate or a customer goodwill credit. Cash advances and deposits are recorded as prepayments on the Reconcile tab.</div>' +
+        '<div class="acct-form">' +
+          '<div class="acct-field"><label>Type</label><select id="crKind"><option value="supplier">Supplier credit (reduces a bill)</option><option value="customer">Customer credit (reduces an invoice)</option></select></div>' +
+          '<div class="acct-field"><label>Contact</label><select id="crContact"><option value="">— select —</option>' + contactOpts + '</select></div>' +
+          '<div class="acct-field"><label>Amount (₹)</label><input id="crAmt" type="number" min="0" step="0.01"></div>' +
+          '<div class="acct-field"><label>From account</label><select id="crOffset">' + acctOpts + '</select></div>' +
+          '<div class="acct-field"><label>Date</label><input id="crDate" type="date" value="' + today() + '"></div>' +
+          '<div class="acct-field" style="grid-column:1/-1"><label>Note</label><input id="crNote" placeholder="Reason (optional)"></div>' +
+        '</div>' +
+        '<div class="acct-actions" style="margin-top:14px"><button class="acct-btn primary" id="crSave"><i class="ti ti-plus"></i>Add credit</button></div>' +
+        '<div class="acct-msg" id="crMsg"></div>' +
+      '</div>' +
+      '<div class="acct-card"><h3>Open credits</h3><div id="crList"><div class="acct-empty">Loading…</div></div></div>';
+    document.getElementById('crSave').addEventListener('click', async function () {
+      const msg = document.getElementById('crMsg'); msg.className = 'acct-msg';
+      try {
+        await api('/credits', { method: 'POST', body: JSON.stringify({
+          contact_id: document.getElementById('crContact').value || null,
+          kind: document.getElementById('crKind').value,
+          amount: Number(document.getElementById('crAmt').value || 0),
+          offset_account_id: document.getElementById('crOffset').value || null,
+          date: document.getElementById('crDate').value,
+          note: document.getElementById('crNote').value.trim() || null,
+        }) });
+        msg.className = 'acct-msg ok'; msg.textContent = 'Credit added.';
+        document.getElementById('crAmt').value = ''; document.getElementById('crNote').value = '';
+        await loadCreditsList();
+      } catch (e) { msg.className = 'acct-msg err'; msg.textContent = e.message; }
+    });
+    await loadCreditsList();
+  }
+  async function loadCreditsList() {
+    const el = document.getElementById('crList'); if (!el) return;
+    let credits;
+    try { credits = await api('/credits?status=open'); } catch (e) { el.innerHTML = '<div class="acct-empty">Could not load credits.</div>'; return; }
+    if (!credits.length) { el.innerHTML = '<div class="acct-empty">No open credits. Record a prepayment on the Reconcile tab, or add a credit note above.</div>'; return; }
+    el.innerHTML = '<table class="acct"><thead><tr><th>Date</th><th>Contact</th><th>Type</th><th>Source</th><th class="num">Remaining</th><th></th></tr></thead><tbody>' +
+      credits.map(c => '<tr><td>' + esc(String(c.credit_date).slice(0, 10)) + '</td><td>' + esc(c.contact_name) + '</td><td>' + (c.kind === 'supplier' ? 'Supplier' : 'Customer') + '</td><td>' + (c.source_type === 'credit_note' ? 'Credit note' : 'Prepayment') + '</td>' +
+        '<td class="num">' + inr(c.remaining_amount) + '</td><td class="acct-actions"><button class="acct-btn" onclick="window.__credApplyOpen(' + c.id + ',' + c.contact_id + ",'" + c.kind + "'," + c.remaining_amount + ')">Apply…</button></td></tr>' +
+        '<tr id="crtargrow-' + c.id + '" style="display:none"><td colspan="6" style="background:var(--canvas,#F4EFE7);padding:0"><div id="crtarg-' + c.id + '"></div></td></tr>'
+      ).join('') + '</tbody></table>';
+  }
+  function creditTargetsHTML(credit, docs) {
+    const tt = credit.kind === 'supplier' ? 'bill' : 'invoice';
+    if (!docs.length) return '<div style="padding:12px;font-size:12.5px;color:var(--muted)">No open ' + (tt === 'bill' ? 'bills' : 'invoices') + ' for this contact to apply against.</div>';
+    return docs.map(d => {
+      const out = Number(d.outstanding), def = r2(Math.min(Number(credit.remaining_amount), out));
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid var(--line,#E8E0D3)">' +
+        '<div style="flex:1;font-size:12.5px">' + (tt === 'bill' ? 'Bill #' : 'Inv #') + d.id + ' · ' + esc(String(tt === 'bill' ? d.bill_date : d.invoice_date).slice(0, 10)) + ' · <b>' + inr(out) + '</b> outstanding</div>' +
+        '<input id="ctap-' + credit.id + '-' + d.id + '" class="rec-f" type="number" min="0" step="0.01" value="' + def + '" style="width:120px">' +
+        '<button class="acct-btn primary" onclick="window.__credApply(' + credit.id + ",'" + tt + "'," + d.id + ')">Apply</button>' +
+      '</div>';
+    }).join('');
+  }
+  window.__credApplyOpen = async function (creditId, contactId, kind, remaining) {
+    const row = document.getElementById('crtargrow-' + creditId), box = document.getElementById('crtarg-' + creditId);
+    if (!row || !box) return;
+    if (row.style.display !== 'none') { row.style.display = 'none'; return; }
+    row.style.display = ''; box.innerHTML = '<div style="padding:12px;font-size:12.5px;color:var(--muted)">Loading…</div>';
+    try {
+      const docs = kind === 'supplier' ? await api('/open-bills') : await api('/open-invoices');
+      const mine = (docs || []).filter(d => Number(d.contact_id) === Number(contactId) && Number(d.outstanding) > 0.5);
+      box.innerHTML = creditTargetsHTML({ id: creditId, contact_id: contactId, kind: kind, remaining_amount: remaining }, mine);
+    } catch (e) { box.innerHTML = '<div style="padding:12px;color:#993C1D">' + esc(e.message) + '</div>'; }
+  };
+  window.__credApply = async function (creditId, tt, docId) {
+    const inp = document.getElementById('ctap-' + creditId + '-' + docId);
+    const amount = inp ? Number(inp.value || 0) : null;
+    if (!amount || amount <= 0) { alert('Enter an amount to apply.'); return; }
+    try { await api('/credits/' + creditId + '/apply', { method: 'POST', body: JSON.stringify({ target_type: tt, target_id: docId, amount: amount }) }); await loadCreditsList(); }
+    catch (e) { alert(e.message); }
+  };
+
   async function renderReports(body) {
     body.innerHTML =
       '<div class="acct-actions" style="margin-bottom:16px;flex-wrap:wrap">' +
@@ -999,8 +1141,9 @@ window.fkModules = window.fkModules || {};
           '<div style="flex:1;min-width:150px"><span class="rec-lbl">Who</span><select id="recWho-' + l.id + '" class="rec-f" onchange="window.__recWho(' + l.id + ')">' + whoOptsFor(l) + '</select></div>' +
         '</div>' +
         '<div style="margin-bottom:11px"><span class="rec-lbl">Why</span><input id="recWhy-' + l.id + '" class="rec-f" placeholder="Description (optional)"></div>' +
+        '<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;line-height:1.55">Advance paid or deposit taken? Pick the contact under <b>Who</b>, then <b>Prepayment</b> — it sits as credit you can apply to their bill or invoice later.</div>' +
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">' + attControl('bank', l.id, l.att_count) +
-          '<div style="display:flex;gap:8px;margin-left:auto"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
+          '<div style="display:flex;gap:8px;margin-left:auto"><button class="acct-btn ghost" onclick="window.__recIgnore(' + l.id + ')">Set aside</button><button class="acct-btn ghost" onclick="window.__recPrepay(' + l.id + ')">Prepayment</button><button class="acct-btn primary" onclick="window.__recCode(' + l.id + ')">Code</button></div>' +
         '</div>' +
       '</div>';
     const right =
@@ -1056,6 +1199,32 @@ window.fkModules = window.fkModules || {};
     if (why && why.value.trim()) payload.note = why.value.trim();
     try { await api('/bank/lines/' + id + '/code', { method: 'POST', body: JSON.stringify(payload) }); await loadSummary(); await loadRecList('unmatched'); }
     catch (e) { alert(e.message); }
+  };
+
+  async function resolveWhoContact(id) {
+    const who = document.getElementById('recWho-' + id);
+    if (!who) return null;
+    if (who.value === '__use') {
+      const opt = who.options[who.selectedIndex];
+      const nm = opt ? (opt.getAttribute('data-name') || '').trim() : '';
+      if (!nm) throw new Error('No name detected — pick or add a contact first.');
+      const c = await api('/contacts', { method: 'POST', body: JSON.stringify({ name: nm, kind: 'supplier' }) });
+      return c.id;
+    }
+    if (who.value && who.value !== '__add') return Number(who.value);
+    return null;
+  }
+
+  window.__recPrepay = async function (id) {
+    let contactId;
+    try { contactId = await resolveWhoContact(id); } catch (e) { alert(e.message); return; }
+    if (!contactId) { alert('Pick the contact this advance or deposit is for (under Who), then tap Prepayment.'); return; }
+    const why = document.getElementById('recWhy-' + id);
+    const note = why && why.value.trim() ? why.value.trim() : undefined;
+    try {
+      await api('/bank/lines/' + id + '/prepayment', { method: 'POST', body: JSON.stringify({ contact_id: contactId, note: note }) });
+      await loadSummary(); await loadRecList('unmatched');
+    } catch (e) { alert(e.message); }
   };
 
   window.__recMatchDoc = async function (id, type, docId) {
@@ -1248,6 +1417,7 @@ window.fkModules = window.fkModules || {};
         if (tab === 'overview') await renderOverview(body);
         else if (tab === 'bills') await renderBills(body);
         else if (tab === 'invoices') await renderInvoices(body);
+        else if (tab === 'credits') await renderCredits(body);
         else if (tab === 'reconcile') await renderReconcile(body);
         else if (tab === 'reports') await renderReports(body);
         else if (tab === 'chart') await renderChart(body);

@@ -792,6 +792,87 @@ router.post('/contacts', requirePermission('accounts.post'), async (req, res) =>
   res.json(r.rows[0]);
 });
 
+// Reconcile a bank line AS a prepayment / advance → becomes credit against the contact.
+router.post('/bank/lines/:id/prepayment', requirePermission('accounts.reconcile'), async (req, res) => {
+  const { contact_id, note } = req.body || {};
+  if (!contact_id) return res.status(400).json({ error: 'Pick the contact this prepayment is for.' });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const lr = await client.query('SELECT * FROM acc_bank_line WHERE id=$1 FOR UPDATE', [req.params.id]);
+    if (!lr.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Line not found.' }); }
+    const line = lr.rows[0];
+    if (line.status !== 'unmatched') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'That line is already reconciled.' }); }
+    const amt = Number(line.amount);
+    const kind = amt < 0 ? 'supplier' : 'customer';   // money out = advance to supplier; money in = deposit from customer
+    const out = await recordPrepayment(client, { contactId: Number(contact_id), kind, amount: Math.abs(amt), date: line.txn_date, bankLineId: line.id, userId: req.user.id, narration: note || null });
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'bank.prepayment', target_type: 'acc_bank_line', target_id: line.id });
+    res.json({ ok: true, ...out, kind });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+
+// Credits: list (optionally by contact), available total, create (credit note), apply, unapply.
+router.get('/credits', requirePermission('accounts.view'), async (req, res) => {
+  const params = [], cl = [];
+  if (req.query.contact_id) { params.push(req.query.contact_id); cl.push('c.contact_id = $' + params.length); }
+  if (req.query.kind) { params.push(req.query.kind); cl.push('c.kind = $' + params.length); }
+  if (req.query.status) { params.push(req.query.status); cl.push('c.status = $' + params.length); }
+  const where = cl.length ? 'WHERE ' + cl.join(' AND ') : '';
+  const r = await db.query(
+    `SELECT c.*, ct.name AS contact_name FROM acc_credit c JOIN acc_contact ct ON ct.id=c.contact_id ${where} ORDER BY c.credit_date DESC, c.id DESC`, params);
+  res.json(r.rows);
+});
+router.get('/credits/available', requirePermission('accounts.view'), async (req, res) => {
+  const { contact_id, kind } = req.query;
+  if (!contact_id || !kind) return res.json({ available: 0, credits: [] });
+  const total = await availableCredit(db, Number(contact_id), kind);
+  const list = await db.query("SELECT id, credit_date, amount, remaining_amount, source_type, narration FROM acc_credit WHERE contact_id=$1 AND kind=$2 AND status='open' AND remaining_amount>0.005 ORDER BY credit_date, id", [contact_id, kind]);
+  res.json({ available: total, credits: list.rows });
+});
+router.post('/credits', requirePermission('accounts.post'), async (req, res) => {
+  const { contact_id, kind, amount, offset_account_id, date, note } = req.body || {};
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const out = await createManualCredit(client, { contactId: Number(contact_id), kind, amount, offsetAccountId: offset_account_id, date: date || istToday(), userId: req.user.id, narration: note || null });
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'credit.create', target_type: 'acc_credit', target_id: out.creditId });
+    res.json({ ok: true, ...out });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+router.post('/credits/:id/apply', requirePermission('accounts.reconcile'), async (req, res) => {
+  const { target_type, target_id, amount } = req.body || {};
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const out = await applyCredit(client, { creditId: Number(req.params.id), targetType: target_type, targetId: Number(target_id), amount: amount != null ? Number(amount) : null, userId: req.user.id });
+    await client.query('COMMIT');
+    await logAudit({ req, module: 'accounts', action: 'credit.apply', target_type: 'acc_credit', target_id: req.params.id });
+    res.json({ ok: true, ...out });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+router.post('/credits/allocations/:settlementId/unapply', requirePermission('accounts.reconcile'), async (req, res) => {
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const sr = await client.query("SELECT * FROM acc_settlement WHERE id=$1 AND source='credit' FOR UPDATE", [req.params.settlementId]);
+    if (!sr.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Applied credit not found.' }); }
+    const s = sr.rows[0];
+    await reverseJournal(client, s.journal_id, { reason: 'Credit unapplied', created_by: req.user.id });
+    const tbl = s.target_type === 'bill' ? 'acc_bill' : 'acc_invoice';
+    await client.query(`UPDATE ${tbl} SET status='posted' WHERE id=$1 AND status='paid'`, [s.target_id]);
+    await client.query("UPDATE acc_credit SET remaining_amount = remaining_amount + $2, status='open' WHERE id=$1", [s.credit_id, s.amount]);
+    await client.query('DELETE FROM acc_settlement WHERE id=$1', [s.id]);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+
 // ---------- File attachments (bills / invoices / bank lines) ----------
 const ATT_COLS = { bill: 'bill_id', invoice: 'invoice_id', bank: 'bank_line_id' };
 function attTarget(q) {
@@ -835,7 +916,9 @@ router.get('/bills', requirePermission('accounts.view'), async (req, res) => {
   const where = req.query.status ? 'WHERE b.status = $1' : '';
   const r = await db.query(
     `SELECT b.*, c.name AS contact_name, a.name AS category_name,
-            (SELECT COUNT(*) FROM acc_attachment x WHERE x.bill_id = b.id) AS att_count
+            (SELECT COUNT(*) FROM acc_attachment x WHERE x.bill_id = b.id) AS att_count,
+            COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='bill' AND s.target_id=b.id),0) AS settled,
+            (b.net_payable - COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='bill' AND s.target_id=b.id),0)) AS outstanding
        FROM acc_bill b
        LEFT JOIN acc_contact c ON c.id = b.contact_id
        LEFT JOIN acc_account a ON a.id = b.category_account_id
@@ -847,7 +930,9 @@ router.get('/invoices', requirePermission('accounts.view'), async (req, res) => 
   const where = req.query.status ? 'WHERE i.status = $1' : '';
   const r = await db.query(
     `SELECT i.*, c.name AS contact_name,
-            (SELECT COUNT(*) FROM acc_attachment x WHERE x.invoice_id = i.id) AS att_count
+            (SELECT COUNT(*) FROM acc_attachment x WHERE x.invoice_id = i.id) AS att_count,
+            COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='invoice' AND s.target_id=i.id),0) AS settled,
+            (i.amount_inr - COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='invoice' AND s.target_id=i.id),0)) AS outstanding
        FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id
        ${where} ORDER BY i.invoice_date DESC, i.id DESC`,
     req.query.status ? [req.query.status] : []);
@@ -1033,6 +1118,105 @@ async function findOrCreateContact(client, rawName, kind) {
   return ins.rows[0].id;
 }
 
+function istToday() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); }
+
+// ---- Prepayments / contact credits + settlement ledger -------------------
+async function settledFor(client, targetType, targetId) {
+  const r = await client.query('SELECT COALESCE(SUM(amount),0) s FROM acc_settlement WHERE target_type=$1 AND target_id=$2', [targetType, targetId]);
+  return r2(Number(r.rows[0].s));
+}
+async function docPayable(client, targetType, targetId) {
+  if (targetType === 'bill') { const r = await client.query('SELECT net_payable FROM acc_bill WHERE id=$1', [targetId]); return r.rows.length ? r2(Number(r.rows[0].net_payable)) : 0; }
+  const r = await client.query('SELECT amount_inr FROM acc_invoice WHERE id=$1', [targetId]); return r.rows.length ? r2(Number(r.rows[0].amount_inr)) : 0;
+}
+async function outstandingFor(client, targetType, targetId) {
+  return r2((await docPayable(client, targetType, targetId)) - (await settledFor(client, targetType, targetId)));
+}
+async function availableCredit(client, contactId, kind) {
+  const r = await client.query("SELECT COALESCE(SUM(remaining_amount),0) s FROM acc_credit WHERE contact_id=$1 AND kind=$2 AND status='open'", [contactId, kind]);
+  return r2(Number(r.rows[0].s));
+}
+
+// Record an advance/deposit as available credit against a contact.
+async function recordPrepayment(client, { contactId, kind, amount, date, bankLineId, userId, narration }) {
+  const amt = r2(amount);
+  if (!contactId) throw new Error('Pick the contact this prepayment is for.');
+  if (!(amt > 0)) throw new Error('Prepayment amount must be positive.');
+  if (!['supplier', 'customer'].includes(kind)) throw new Error('Choose supplier or customer.');
+  const lines = kind === 'supplier'
+    ? [{ tag: 'prepayments', debit: amt }, { tag: 'idfc_bank', credit: amt }]
+    : [{ tag: 'idfc_bank', debit: amt }, { tag: 'prepayments', credit: amt }];
+  const journalId = await postJournal(client, {
+    entry_date: String(date).slice(0, 10),
+    narration: narration || ((kind === 'supplier' ? 'Advance paid' : 'Deposit received') + ' (prepayment)'),
+    source_type: 'bank', source_id: bankLineId || null, created_by: userId, contact_id: contactId, lines,
+  });
+  const cr = await client.query(
+    `INSERT INTO acc_credit (contact_id, kind, credit_date, amount, remaining_amount, source_type, bank_line_id, journal_id, narration, created_by)
+     VALUES ($1,$2,$3,$4,$4,'prepayment',$5,$6,$7,$8) RETURNING id`,
+    [contactId, kind, String(date).slice(0, 10), amt, bankLineId || null, journalId, narration || null, userId]
+  );
+  if (bankLineId) await client.query("UPDATE acc_bank_line SET status='matched', match_type='prepayment', matched_journal_id=$2 WHERE id=$1", [bankLineId, journalId]);
+  return { creditId: cr.rows[0].id, journalId };
+}
+
+// A non-cash credit note against a contact (offset account chosen by the user).
+async function createManualCredit(client, { contactId, kind, amount, offsetAccountId, date, userId, narration }) {
+  const amt = r2(amount);
+  if (!contactId) throw new Error('Pick the contact this credit is for.');
+  if (!(amt > 0)) throw new Error('Credit amount must be positive.');
+  if (!['supplier', 'customer'].includes(kind)) throw new Error('Choose supplier or customer.');
+  if (!offsetAccountId) throw new Error('Choose the account this credit comes from.');
+  const lines = kind === 'supplier'
+    ? [{ tag: 'prepayments', debit: amt }, { account_id: Number(offsetAccountId), credit: amt }]
+    : [{ account_id: Number(offsetAccountId), debit: amt }, { tag: 'prepayments', credit: amt }];
+  const journalId = await postJournal(client, {
+    entry_date: String(date).slice(0, 10), narration: narration || 'Credit note', source_type: 'manual', created_by: userId, contact_id: contactId, lines,
+  });
+  const cr = await client.query(
+    `INSERT INTO acc_credit (contact_id, kind, credit_date, amount, remaining_amount, source_type, journal_id, narration, created_by)
+     VALUES ($1,$2,$3,$4,$4,'credit_note',$5,$6,$7) RETURNING id`,
+    [contactId, kind, String(date).slice(0, 10), amt, journalId, narration || null, userId]
+  );
+  return { creditId: cr.rows[0].id, journalId };
+}
+
+// Apply (allocate) a contact's open credit to one of their open bills/invoices.
+async function applyCredit(client, { creditId, targetType, targetId, amount, userId }) {
+  if (!['bill', 'invoice'].includes(targetType)) throw new Error('Apply to a bill or invoice.');
+  const cr = await client.query('SELECT * FROM acc_credit WHERE id=$1 FOR UPDATE', [creditId]);
+  if (!cr.rows.length) throw new Error('Credit not found.');
+  const credit = cr.rows[0];
+  if (credit.status !== 'open') throw new Error('That credit is no longer open.');
+  const wantKind = targetType === 'bill' ? 'supplier' : 'customer';
+  if (credit.kind !== wantKind) throw new Error('A ' + credit.kind + ' credit cannot go on a ' + targetType + '.');
+  const tbl = targetType === 'bill' ? 'acc_bill' : 'acc_invoice';
+  const d = await client.query(`SELECT * FROM ${tbl} WHERE id=$1 AND status='posted' FOR UPDATE`, [targetId]);
+  if (!d.rows.length) throw new Error(targetType === 'bill' ? 'Bill is not open.' : 'Invoice is not open.');
+  if (d.rows[0].contact_id !== credit.contact_id) throw new Error('That credit belongs to a different contact.');
+  const payable = await docPayable(client, targetType, targetId);
+  const already = await settledFor(client, targetType, targetId);
+  const outstanding = r2(payable - already);
+  const amt = r2(amount != null ? amount : Math.min(Number(credit.remaining_amount), outstanding));
+  if (!(amt > 0)) throw new Error('Nothing to apply.');
+  if (amt > Number(credit.remaining_amount) + 0.01) throw new Error('Only ₹' + r2(credit.remaining_amount) + ' of credit remains.');
+  if (amt > outstanding + 0.01) throw new Error('That is more than the ₹' + outstanding + ' still outstanding.');
+  const lines = targetType === 'bill'
+    ? [{ tag: 'accounts_payable', debit: amt }, { tag: 'prepayments', credit: amt }]
+    : [{ tag: 'prepayments', debit: amt }, { tag: 'accounts_receivable', credit: amt }];
+  const journalId = await postJournal(client, {
+    entry_date: istToday(), narration: 'Credit applied to ' + targetType + ' #' + targetId, source_type: 'manual', created_by: userId, contact_id: credit.contact_id, lines,
+  });
+  await client.query(
+    `INSERT INTO acc_settlement (target_type, target_id, source, credit_id, amount, journal_id, created_by) VALUES ($1,$2,'credit',$3,$4,$5,$6)`,
+    [targetType, targetId, creditId, amt, journalId, userId]
+  );
+  const remaining = r2(Number(credit.remaining_amount) - amt);
+  await client.query("UPDATE acc_credit SET remaining_amount=$2, status=CASE WHEN $2<=0.005 THEN 'applied' ELSE 'open' END WHERE id=$1", [creditId, remaining]);
+  if (r2(already + amt) >= payable - 0.01) await client.query(`UPDATE ${tbl} SET status='paid' WHERE id=$1`, [targetId]);
+  return { journalId, applied: amt };
+}
+
 router.post('/bank/lines/:id/code', requirePermission('accounts.reconcile'), async (req, res) => {
   const { account_id, contact_id, note } = req.body || {};
   if (!account_id) return res.status(400).json({ error: 'Pick an account to code this to.' });
@@ -1091,8 +1275,30 @@ router.post('/bank/lines/:id/unmatch', requirePermission('accounts.reconcile'), 
       await client.query('COMMIT'); return res.json({ ok: true });
     }
     if (line.status !== 'matched' || !line.matched_journal_id) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Nothing to undo on that line.' }); }
+
+    // Case A — this line recorded a prepayment (created a contact credit).
+    const credit = await client.query('SELECT * FROM acc_credit WHERE bank_line_id=$1 FOR UPDATE', [line.id]);
+    if (credit.rows.length) {
+      const c = credit.rows[0];
+      if (Number(c.remaining_amount) !== Number(c.amount)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This prepayment has already been applied to a bill or invoice. Unapply that credit first, then undo.' });
+      }
+      await reverseJournal(client, line.matched_journal_id, { reason: 'Prepayment unreconciled', created_by: req.user.id, date: line.txn_date });
+      await client.query("UPDATE acc_credit SET status='void', remaining_amount=0 WHERE id=$1", [c.id]);
+      await client.query("UPDATE acc_bank_line SET status='unmatched', match_type=NULL, matched_journal_id=NULL WHERE id=$1", [line.id]);
+      await client.query('COMMIT'); return res.json({ ok: true });
+    }
+
+    // Case B — this line settled (possibly part-settled) a bill/invoice.
     await reverseJournal(client, line.matched_journal_id, { reason: 'Bank line unreconciled', created_by: req.user.id, date: line.txn_date });
-    // If this line had settled an invoice/bill, re-open it.
+    const setl = await client.query('SELECT * FROM acc_settlement WHERE bank_line_id=$1', [line.id]);
+    for (const s of setl.rows) {
+      const tbl = s.target_type === 'bill' ? 'acc_bill' : 'acc_invoice';
+      await client.query('DELETE FROM acc_settlement WHERE id=$1', [s.id]);
+      await client.query(`UPDATE ${tbl} SET status='posted', settled_journal_id=NULL WHERE id=$1 AND status<>'reversed'`, [s.target_id]);
+    }
+    // Legacy fallback (pre-ledger settlements linked only by settled_journal_id).
     await client.query("UPDATE acc_invoice SET status='posted', settled_journal_id=NULL WHERE settled_journal_id=$1", [line.matched_journal_id]);
     await client.query("UPDATE acc_bill SET status='posted', settled_journal_id=NULL WHERE settled_journal_id=$1", [line.matched_journal_id]);
     await client.query("UPDATE acc_bank_line SET status='unmatched', match_type=NULL, matched_journal_id=NULL WHERE id=$1", [line.id]);
@@ -1105,14 +1311,18 @@ router.post('/bank/lines/:id/unmatch', requirePermission('accounts.reconcile'), 
 // Open documents to match a bank line against.
 router.get('/open-invoices', requirePermission('accounts.view'), async (req, res) => {
   const r = await db.query(
-    `SELECT i.id, i.invoice_date, i.amount_inr, i.currency, i.taxable_amount, c.name AS contact_name
+    `SELECT i.id, i.invoice_date, i.amount_inr, i.currency, i.taxable_amount, i.contact_id, c.name AS contact_name,
+            COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='invoice' AND s.target_id=i.id),0) AS settled,
+            (i.amount_inr - COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='invoice' AND s.target_id=i.id),0)) AS outstanding
        FROM acc_invoice i LEFT JOIN acc_contact c ON c.id = i.contact_id
       WHERE i.status = 'posted' ORDER BY i.invoice_date, i.id`);
   res.json(r.rows);
 });
 router.get('/open-bills', requirePermission('accounts.view'), async (req, res) => {
   const r = await db.query(
-    `SELECT b.id, b.bill_date, b.net_payable, c.name AS contact_name
+    `SELECT b.id, b.bill_date, b.net_payable, b.contact_id, c.name AS contact_name,
+            COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='bill' AND s.target_id=b.id),0) AS settled,
+            (b.net_payable - COALESCE((SELECT SUM(amount) FROM acc_settlement s WHERE s.target_type='bill' AND s.target_id=b.id),0)) AS outstanding
        FROM acc_bill b LEFT JOIN acc_contact c ON c.id = b.contact_id
       WHERE b.status = 'posted' ORDER BY b.bill_date, b.id`);
   res.json(r.rows);
@@ -1154,38 +1364,43 @@ router.post('/bank/lines/:id/match', requirePermission('accounts.reconcile'), as
     const line = lr.rows[0];
     if (line.status !== 'unmatched') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'That line is already reconciled.' }); }
     const amt = Number(line.amount);
-    let lines, jid;
+    let jid, settleAmt;
     if (doc_type === 'invoice') {
       if (amt <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A money-out line cannot settle a customer invoice.' }); }
       const d = await client.query("SELECT * FROM acc_invoice WHERE id=$1 AND status='posted' FOR UPDATE", [doc_id]);
       if (!d.rows.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Invoice not open.' }); }
-      const ar = Number(d.rows[0].amount_inr);
-      if ((d.rows[0].currency || 'INR') === 'INR' && Math.abs(amt - ar) > 1) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'This receipt (₹' + r2(amt) + ') does not equal invoice #' + doc_id + ' (₹' + r2(ar) + '). Partial or split settlements are not supported — match a line that equals the invoice total, or code it to an account instead.' });
+      const inv = d.rows[0];
+      const payable = r2(Number(inv.amount_inr));
+      const already = await settledFor(client, 'invoice', doc_id);
+      const outstanding = r2(payable - already);
+      if ((inv.currency || 'INR') !== 'INR') {
+        if (already > 0.01) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A foreign-currency invoice must be settled in a single receipt; this one is already part-settled.' }); }
+        const lines = [{ tag: 'idfc_bank', debit: amt }, { tag: 'accounts_receivable', credit: payable }];
+        const fx = r2(amt - payable);
+        if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx }); else if (fx < 0) lines.push({ tag: 'fx_gain_loss', debit: -fx });
+        jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Receipt settles invoice #' + doc_id, created_by: req.user.id, lines });
+        settleAmt = payable;
+      } else {
+        if (amt > outstanding + 1) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'This receipt (₹' + r2(amt) + ') is more than the ₹' + outstanding + ' still owed on invoice #' + doc_id + '. Overpayments are not supported yet.' }); }
+        jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Receipt against invoice #' + doc_id, created_by: req.user.id, lines: [{ tag: 'idfc_bank', debit: amt }, { tag: 'accounts_receivable', credit: amt }] });
+        settleAmt = amt;
       }
-      lines = [{ tag: 'idfc_bank', debit: amt }, { tag: 'accounts_receivable', credit: ar }];
-      const fx = r2(amt - ar);
-      if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx });
-      else if (fx < 0) lines.push({ tag: 'fx_gain_loss', debit: -fx });
-      jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Receipt settles invoice #' + doc_id, created_by: req.user.id, lines });
-      await client.query("UPDATE acc_invoice SET status='paid', settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
+      await client.query("INSERT INTO acc_settlement (target_type,target_id,source,bank_line_id,amount,journal_id,created_by) VALUES ('invoice',$1,'bank',$2,$3,$4,$5)", [doc_id, line.id, settleAmt, jid, req.user.id]);
+      if (r2(already + settleAmt) >= payable - 1) await client.query("UPDATE acc_invoice SET status='paid', settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
+      else await client.query("UPDATE acc_invoice SET settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
     } else {
       if (amt >= 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A money-in line cannot settle a supplier bill.' }); }
       const paid = -amt;
       const d = await client.query("SELECT * FROM acc_bill WHERE id=$1 AND status='posted' FOR UPDATE", [doc_id]);
       if (!d.rows.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Bill not open.' }); }
-      const ap = Number(d.rows[0].net_payable);
-      if (Math.abs(paid - ap) > 1) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'This payment (₹' + r2(paid) + ') does not equal bill #' + doc_id + ' (₹' + r2(ap) + '). Partial or split settlements are not supported — match a line that equals the bill total, or code it to an account instead.' });
-      }
-      lines = [{ tag: 'accounts_payable', debit: ap }, { tag: 'idfc_bank', credit: paid }];
-      const fx = r2(ap - paid);
-      if (fx > 0) lines.push({ tag: 'fx_gain_loss', credit: fx });
-      else if (fx < 0) lines.push({ tag: 'fx_gain_loss', debit: -fx });
-      jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Payment settles bill #' + doc_id, created_by: req.user.id, lines });
-      await client.query("UPDATE acc_bill SET status='paid', settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
+      const payable = r2(Number(d.rows[0].net_payable));
+      const already = await settledFor(client, 'bill', doc_id);
+      const outstanding = r2(payable - already);
+      if (paid > outstanding + 1) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'This payment (₹' + r2(paid) + ') is more than the ₹' + outstanding + ' still owed on bill #' + doc_id + '. Overpayments are not supported yet.' }); }
+      jid = await postJournal(client, { entry_date: line.txn_date, source_type: 'bank', narration: 'Payment against bill #' + doc_id, created_by: req.user.id, lines: [{ tag: 'accounts_payable', debit: paid }, { tag: 'idfc_bank', credit: paid }] });
+      await client.query("INSERT INTO acc_settlement (target_type,target_id,source,bank_line_id,amount,journal_id,created_by) VALUES ('bill',$1,'bank',$2,$3,$4,$5)", [doc_id, line.id, paid, jid, req.user.id]);
+      if (r2(already + paid) >= payable - 1) await client.query("UPDATE acc_bill SET status='paid', settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
+      else await client.query("UPDATE acc_bill SET settled_journal_id=$2 WHERE id=$1", [doc_id, jid]);
     }
     await client.query("UPDATE acc_bank_line SET status='matched', match_type=$2, matched_journal_id=$3 WHERE id=$1", [line.id, doc_type, jid]);
     await client.query('COMMIT');
@@ -1310,4 +1525,5 @@ module.exports.engine = {
   createInvoice, postInvoice, reverseJournal, trialBalance, profitAndLoss, balanceSheet,
   postOpeningBalances, lockPeriod, isPeriodLocked, period,
   generateAccountsDailyTasks, weekdayName, parseBankStatement, parseDmy,
+  recordPrepayment, createManualCredit, applyCredit, availableCredit, settledFor, outstandingFor,
 };
