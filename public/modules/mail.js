@@ -147,8 +147,8 @@ window.fkModules['mail'] = {
     <aside class="mnav" id="mnav">
       <div class="mnav-hd"><span class="t">Mail</span><button class="collapse" id="collapseBtn" title="Collapse"><i class="ti ti-layout-sidebar-left-collapse"></i></button></div>
       <button class="composebtn" id="composeBtn"><i class="ti ti-pencil-plus"></i> Compose</button>
-      <div class="mboxsw" id="mboxsw"><div><div class="d1">Mailbox</div><div class="d2">Personal <span class="pill">you</span></div></div><i class="ti ti-chevron-down cv"></i>
-        <div class="swmenu" id="swmenu"><div class="it">Personal <span class="tag">you</span></div><div class="it dim">Customer Service <span class="tag">coming soon</span></div></div>
+      <div class="mboxsw" id="mboxsw"><div><div class="d1">Mailbox</div><div class="d2" id="mboxLabel">Personal <span class="pill">you</span></div></div><i class="ti ti-chevron-down cv"></i>
+        <div class="swmenu" id="swmenu"><div class="it" data-mbox="personal" data-name="Personal" data-personal="1">Personal <span class="tag">you</span></div></div>
       </div>
       <div class="msec">Mailbox</div>
       <div class="mni on" data-box="inbox"><i class="ti ti-inbox lead"></i> Inbox <span class="ct" id="ctInbox"></span></div>
@@ -286,7 +286,9 @@ window.fkModules['mail'] = {
     const fmtSize = (b) => !b ? '' : b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(0) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
     const toast = (m) => { toastEl.textContent = m; toastEl.classList.add('show'); setTimeout(() => toastEl.classList.remove('show'), 2200); };
     const labelById = (id) => labels.find(l => l.id === id);
-    const j = (url, opts) => fetch(url, Object.assign({ credentials: 'include' }, opts)).then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(d.error || ('Request failed (' + r.status + ').')); e.code = d.code; throw e; } return d; });
+    let currentMailbox = 'personal';
+    const _withMbox = (url) => { if (currentMailbox && currentMailbox !== 'personal' && typeof url === 'string' && url.indexOf('/api/mail/') === 0 && url.indexOf('/api/mail/mailboxes') !== 0) { return url + (url.indexOf('?') === -1 ? '?' : '&') + 'mailbox=' + encodeURIComponent(currentMailbox); } return url; };
+    const j = (url, opts) => fetch(_withMbox(url), Object.assign({ credentials: 'include' }, opts)).then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(d.error || ('Request failed (' + r.status + ').')); e.code = d.code; throw e; } return d; });
     const post = (url, body) => j(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file); });
     function downloadB64url(b64u, filename, mime) {
@@ -312,6 +314,34 @@ window.fkModules['mail'] = {
     $('#expandBtn').addEventListener('click', () => mwrap.classList.remove('collapsed'));
     $('#mboxsw').addEventListener('click', (e) => { e.stopPropagation(); $('#swmenu').classList.toggle('show'); });
     document.addEventListener('click', () => { const s = $('#swmenu'); if (s) s.classList.remove('show'); });
+
+    // ---- Mailbox switcher: load the inboxes this person can actually see ----
+    function bindMailboxItems() {
+      $('#swmenu').querySelectorAll('[data-mbox]').forEach(it => it.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        currentMailbox = it.dataset.mbox || 'personal';
+        const isPersonal = it.dataset.personal === '1';
+        $('#mboxLabel').innerHTML = esc(it.dataset.name) + (isPersonal ? ' <span class="pill">you</span>' : '');
+        $('#swmenu').classList.remove('show');
+        selectedId = null; sel.clear();
+        box = 'inbox';
+        loadBox();
+      }));
+    }
+    function renderMailboxList(boxes) {
+      const menu = $('#swmenu'); if (!menu || !boxes || !boxes.length) { bindMailboxItems(); return; }
+      menu.innerHTML = boxes.map(b => {
+        const slug = b.slug || (b.type === 'personal' ? 'personal' : '');
+        const isP = b.type === 'personal';
+        const tag = isP ? '<span class="tag">you</span>' : (b.department_name ? '<span class="tag">' + esc(b.department_name) + '</span>' : '');
+        return '<div class="it" data-mbox="' + esc(slug) + '" data-name="' + esc(b.display_name) + '" data-personal="' + (isP ? '1' : '0') + '">' + esc(b.display_name) + ' ' + tag + '</div>';
+      }).join('');
+      bindMailboxItems();
+    }
+    async function loadMailboxes() {
+      try { const r = await j('/api/mail/mailboxes'); renderMailboxList(r.mailboxes || []); }
+      catch (e) { bindMailboxItems(); }
+    }
 
     // Labels
     function renderLabels() {
@@ -619,6 +649,7 @@ window.fkModules['mail'] = {
     $('#sigSave').addEventListener('click', async () => { const v = $('#sigText').value; try { const out = await j('/api/mail/signature', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signature: v }) }); signature = (out && out.signature != null) ? out.signature : v; sigwrap.classList.remove('show'); toast('Signature saved'); } catch (e) { toast(e.message); } });
 
     // Boot
+    try { await loadMailboxes(); } catch (e) {}
     try { await refreshLabels(); } catch (e) {}
     try { notesMap = (await j('/api/mail/notes')).map || {}; } catch (e) {}
     try { const cd = await j('/api/mail/contacts'); contacts = cd.contacts || []; fillContacts(); } catch (e) {}
