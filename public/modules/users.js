@@ -338,31 +338,50 @@ window.fkModules['hr/users'] = {
       if($('rRestore')) $('rRestore').onclick=()=>restoreUser(id,u.full_name);
     }
     async function callOK(label, url, opts){
-      let r; try { r = await fetch(url, opts); } catch(e){ throw new Error(label+': network error'); }
-      if(!r.ok){ let m=''; try{ m=(await r.json()).error; }catch(e){} throw new Error(label+(m?': '+m:' failed ('+r.status+')')); }
+      let r; try { r = await fetch(url, opts); } catch(e){ const err=new Error(label+': network error'); err.label=label; throw err; }
+      if(!r.ok){ let m=''; try{ m=(await r.json()).error; }catch(e){} const err=new Error(label+(m?': '+m:' failed ('+r.status+')')); err.status=r.status; err.label=label; throw err; }
       return r;
     }
     async function saveRecord(id){
       const err=$('rErr'),ok=$('rOk'),btn=$('rSave'); err.classList.remove('on'); ok.classList.remove('on'); btn.disabled=true; btn.textContent='Saving…';
       const status=(el.querySelector('#rStatus .opt.on')||{}).dataset.st||'active';
       const J=(b)=>({method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(b)});
-      try{
-        await callOK('Status', '/api/admin/users/'+id, {method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({employment_status:status})});
-        const memberships=Array.from(el.querySelectorAll('#rDepts input[data-slug]:checked')).map(inp=>{const s=inp.dataset.slug;return{department_slug:s,role:el.querySelector('#rDepts select[data-role="'+s+'"]').value,is_primary:el.querySelector('#rDepts input[data-prim="'+s+'"]').checked};});
-        await callOK('Departments', '/api/admin/users/'+id+'/departments', J({memberships}));
-        const gs=Array.from(el.querySelectorAll('#rGroups input:checked')).map(x=>x.value);
-        await callOK('Groups', '/api/admin/users/'+id+'/groups', J({group_slugs:gs}));
-        const mgrVal=$('rMgr').value?parseInt($('rMgr').value,10):null;
-        await callOK('Manager', '/api/profile/'+id+'/manager', J({manager_user_id:mgrVal}));
-        const emp={id:id,hire_date:dOnly($('rHire').value)||null,employment_type:$('rType').value,work_pattern:$('rPat').value,probation_end_date:dOnly($('rProb').value)||null,notice_period_days:($('rNotice').value!==''?parseInt($('rNotice').value,10):null)};
-        if(status==='left') emp.last_working_day=dOnly($('rLwd').value)||null;
-        await callOK('Employment', '/api/admin/users/bulk-employment', {method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({updates:[emp]})});
-        // verify the manager actually stuck (catches any silent server-side reset)
-        try{ const ov2=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include',cache:'no-store'})).json(); const got=(ov2.user&&ov2.user.manager_user_id)||null; if(got!==mgrVal){ throw new Error('Manager: did not persist (expected '+mgrVal+', got '+(got||'none')+')'); } }catch(ve){ if(/did not persist/.test(ve.message)) throw ve; }
-        ok.textContent='Saved.'; ok.classList.add('on');
-        setTimeout(()=>{ $('usrModal').classList.remove('on'); loadUsers(); },700);
-      }catch(e){ err.textContent=e.message||'Save failed'; err.classList.add('on'); }
-      finally{ btn.disabled=false; btn.textContent='Save changes'; }
+      // Build every payload up front, then save each section independently. A section the
+      // viewer lacks permission for (e.g. HR editing groups) must not throw away the sections
+      // that DID save — a committed department change should never read back as "permission denied".
+      const memberships=Array.from(el.querySelectorAll('#rDepts input[data-slug]:checked')).map(inp=>{const s=inp.dataset.slug;return{department_slug:s,role:el.querySelector('#rDepts select[data-role="'+s+'"]').value,is_primary:el.querySelector('#rDepts input[data-prim="'+s+'"]').checked};});
+      const gs=Array.from(el.querySelectorAll('#rGroups input:checked')).map(x=>x.value);
+      const mgrVal=$('rMgr').value?parseInt($('rMgr').value,10):null;
+      const emp={id:id,hire_date:dOnly($('rHire').value)||null,employment_type:$('rType').value,work_pattern:$('rPat').value,probation_end_date:dOnly($('rProb').value)||null,notice_period_days:($('rNotice').value!==''?parseInt($('rNotice').value,10):null)};
+      if(status==='left') emp.last_working_day=dOnly($('rLwd').value)||null;
+      const sections=[
+        ['Status', ()=>callOK('Status','/api/admin/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({employment_status:status})})],
+        ['Department', ()=>callOK('Departments','/api/admin/users/'+id+'/departments',J({memberships}))],
+        ['Groups', ()=>callOK('Groups','/api/admin/users/'+id+'/groups',J({group_slugs:gs}))],
+        ['Manager', ()=>callOK('Manager','/api/profile/'+id+'/manager',J({manager_user_id:mgrVal}))],
+        ['Employment', ()=>callOK('Employment','/api/admin/users/bulk-employment',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({updates:[emp]})})],
+      ];
+      const saved=[], denied=[], failed=[];
+      for(const [name,fn] of sections){
+        try{ await fn(); saved.push(name); }
+        catch(e){ if(e&&e.status===403) denied.push(name); else failed.push(e.message||(name+' failed')); }
+      }
+      // Verify the manager actually stuck (only if we were allowed to set it).
+      if(saved.includes('Manager')){
+        try{ const ov2=await (await fetch('/api/profile/'+id+'/overview',{credentials:'include',cache:'no-store'})).json(); const got=(ov2.user&&ov2.user.manager_user_id)||null; if(got!==mgrVal) failed.push('Manager: did not persist (expected '+mgrVal+', got '+(got||'none')+')'); }catch(ve){}
+      }
+      btn.disabled=false; btn.textContent='Save changes';
+      if(failed.length){
+        err.innerHTML=failed.map(esc).join('<br>')+(saved.length?'<div style="margin-top:6px;color:var(--muted);font-weight:400">Saved: '+saved.join(', ')+'.</div>':'');
+        err.classList.add('on'); return;
+      }
+      if(denied.length){
+        // Everything the viewer was allowed to change saved; only the restricted bits were skipped.
+        ok.innerHTML='Saved '+saved.join(', ')+'. <span style="color:var(--muted)">You don\u2019t have permission to change: '+denied.join(', ')+' \u2014 ask the owner.</span>';
+        ok.classList.add('on'); setTimeout(()=>{ $('usrModal').classList.remove('on'); loadUsers(); },1400); return;
+      }
+      ok.textContent='Saved.'; ok.classList.add('on');
+      setTimeout(()=>{ $('usrModal').classList.remove('on'); loadUsers(); },700);
     }
     async function resetPassword(id,name){
       if(!confirm('Reset password for '+name+'? They will be forced to change it next login.')) return;

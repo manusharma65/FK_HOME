@@ -1273,10 +1273,10 @@
               <span class="card-meta" id="dailyReportMeta">—</span>
             </div>
             <div class="auto-summary" id="dailyReportSummary">—</div>
-            <textarea id="dailyReportNotes" placeholder="What did you work on today? (free text — auto-saves)" maxlength="5000"></textarea>
+            <textarea id="dailyReportNotes" placeholder="What did you work on today?" maxlength="5000"></textarea>
             <div class="footer">
-              <span id="dailyReportStatus">Not yet saved.</span>
-              <button class="save-btn" id="dailyReportSaveBtn" onclick="saveDailyReport()">Save</button>
+              <span id="dailyReportStatus">Not yet submitted.</span>
+              <button class="save-btn" id="dailyReportSaveBtn" onclick="saveDailyReport()">Submit report</button>
             </div>
           </div>
 
@@ -1639,6 +1639,7 @@ async function init() {
     fetchTeamChat();
     loadAttendanceToday();
     loadDailyReport();
+    refreshDailyBanner();    // r1.49 — show the submit-before-sign-out / missed-yesterday banner
     loadAttOverview();
     loadMyTasks();           // r0.10
     loadMyOnboarding();      // r0.10
@@ -2274,14 +2275,24 @@ function escapeAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
 // --- HEARTBEAT ---
+// Presence ping. Fires every 30s while FK Home is open in a tab — whether or not
+// that tab is focused — because staff work all day in other apps (Linnworks, email,
+// Amazon) with FK Home sitting in the background, and they are still AT their desk.
+// It is tagged x-fk-bg, so it keeps presence fresh WITHOUT keeping the login session
+// alive (the login still lapses on genuine inactivity — see the r1.31 bg tagging).
+// When the machine actually sleeps / locks / the browser closes, the browser suspends
+// timers and the ping stops, so a real away-from-desk still trips idle after 10 min.
 function startHeartbeat() {
-  setInterval(() => {
-    if (document.hidden) return;
+  function beat() {
     fetch('/api/me/heartbeat', {
       method: 'POST', credentials: 'include',
       headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop', 'x-fk-bg': '1' }
-    }).catch(()=>{});
-  }, 30000);
+    }).catch(() => {});
+  }
+  beat();                       // immediately, so presence is fresh on load
+  setInterval(beat, 30000);     // and every 30s thereafter, focused or not
+  // Coming back to the tab instantly clears any idle, rather than waiting for the next tick.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) beat(); });
 }
 
 // --- MODALS ---
@@ -2973,6 +2984,19 @@ document.addEventListener('click', (e) => {
 
 // --- LOGOUT ---
 async function logout() {
+  // r1.49 — you must submit today's report before signing out. Owner / HR / company-manager
+  // are exempt (they can sign out), but they still see the reminder banner.
+  try {
+    const rr = await fetch('/api/daily/reminder', { credentials: 'include' });
+    if (rr.ok) {
+      const d = await rr.json();
+      if (d.today_worked && !d.today_submitted && !_dailyExempt()) {
+        alert('Please submit today\u2019s report before you sign out.');
+        goToDailyReport();
+        return;
+      }
+    }
+  } catch (e) { /* if the check fails, never trap the user — let them out */ }
   try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' } }); } catch(e) {}
   window.location.href = '/login.html';
 }
@@ -3164,30 +3188,89 @@ async function saveDailyReport() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ notes })
+      body: JSON.stringify({ notes, submit: true })
     });
     const data = await r.json();
     if (!r.ok) {
-      status.textContent = data.error || 'Save failed';
+      status.textContent = data.error || 'Submit failed';
       btn.disabled = false;
-      btn.textContent = 'Save';
+      btn.textContent = 'Submit report';
       return;
     }
     dailyReportLastSavedText = notes;
-    btn.textContent = 'Saved';
+    btn.textContent = 'Submitted';
     btn.classList.add('saved');
-    status.textContent = 'Saved just now';
+    status.textContent = 'Submitted just now';
+    if (typeof refreshDailyBanner === 'function') refreshDailyBanner();
     setTimeout(() => {
       btn.disabled = false;
-      btn.textContent = 'Save';
+      btn.textContent = 'Submit report';
       btn.classList.remove('saved');
     }, 1500);
   } catch (err) {
     status.textContent = 'Network error';
     btn.disabled = false;
-    btn.textContent = 'Save';
+    btn.textContent = 'Submit report';
   }
 }
+
+// --- DAILY REPORT REMINDER BANNER + SIGN-OUT GATE (r1.49) ----
+// One server signal (/api/daily/reminder) drives both the big banner and the
+// logout gate: today_worked/today_submitted gate sign-out; yesterday "unsubmitted"
+// shows the big "you missed it" banner the next day.
+let _dailyReminder = null;
+let _dailyYDismissed = false;
+function _dailyExempt() {
+  const g = (window.me && me.group_slugs) || (window.fkUser && window.fkUser.group_slugs) || [];
+  return g.indexOf('owner') !== -1 || g.indexOf('hr-team') !== -1 || g.indexOf('company-manager') !== -1;
+}
+function ensureDailyBanner() {
+  let b = document.getElementById('fkDailyBanner');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'fkDailyBanner';
+    b.style.cssText = 'display:none;position:sticky;top:0;z-index:1200;padding:16px 22px;font-size:16px;font-weight:600;color:#fff;align-items:center;justify-content:space-between;gap:16px;box-shadow:0 2px 12px rgba(0,0,0,.15)';
+    b.innerHTML = '<span id="fkDailyBannerTxt" style="line-height:1.4"></span>' +
+      '<button id="fkDailyBannerBtn" style="background:#fff;color:#14161B;border:none;border-radius:9px;padding:10px 18px;font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap">Submit report</button>';
+    document.body.prepend(b);
+  }
+  return b;
+}
+function goToDailyReport() {
+  if (location.hash !== '#home') location.hash = '#home';
+  setTimeout(function () {
+    var ta = document.getElementById('dailyReportNotes');
+    if (ta) { try { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {} ta.focus(); }
+  }, 130);
+}
+async function refreshDailyBanner() {
+  try {
+    const r = await fetch('/api/daily/reminder', { credentials: 'include' });
+    if (!r.ok) return;
+    _dailyReminder = await r.json();
+    const b = ensureDailyBanner();
+    const txt = document.getElementById('fkDailyBannerTxt');
+    const btn = document.getElementById('fkDailyBannerBtn');
+    if (_dailyReminder.today_worked && !_dailyReminder.today_submitted) {
+      b.style.background = '#C2691B';
+      txt.textContent = 'Don\u2019t forget to submit today\u2019s report before you sign out.';
+      btn.textContent = 'Submit report';
+      btn.onclick = goToDailyReport;
+      b.style.display = 'flex';
+    } else if (_dailyReminder.unsubmitted && !_dailyYDismissed) {
+      let dt = 'yesterday';
+      try { dt = new Date(_dailyReminder.for_date + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }); } catch (e) {}
+      b.style.background = '#993C1D';
+      txt.textContent = 'You did not submit your daily report for ' + dt + '.';
+      btn.textContent = 'Dismiss';
+      btn.onclick = function () { _dailyYDismissed = true; b.style.display = 'none'; };
+      b.style.display = 'flex';
+    } else {
+      b.style.display = 'none';
+    }
+  } catch (e) { /* never block the app on the banner */ }
+}
+document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshDailyBanner(); });
 
 // --- COMPANY / TEAM TODAY (HR / owner / dept manager) --------
 let attOverviewMode = null;   // 'company' | 'dept' | null

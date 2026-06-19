@@ -440,18 +440,34 @@ router.get('/me', async (req, res) => {
 // yesterday" banner. Reports no longer auto-submit, so this is how a missed one is chased.
 router.get('/reminder', async (req, res) => {
   try {
-    const d = addDays(londonDate(), -1);
-    const a = await db.query(
-      `SELECT status, first_login FROM attendance_day WHERE user_id=$1 AND for_date=$2`, [req.user.id, d]);
-    const row = a.rows[0];
-    const offOrUnworked = !row || !row.first_login ||
-      ['on_leave','off_sick','off_holiday','off_pattern','off_cs_rota','no_show','pending'].includes(row.status);
-    if (offOrUnworked) return res.json({ unsubmitted: false });
-    const r = await db.query(
-      `SELECT submitted_at FROM daily_reports WHERE user_id=$1 AND for_date=$2`, [req.user.id, d]);
-    const submitted = r.rows.length > 0 && r.rows[0].submitted_at != null;
-    res.json({ unsubmitted: !submitted, for_date: d });
-  } catch (e) { res.json({ unsubmitted: false }); }
+    const uid = req.user.id;
+    const offList = ['on_leave','off_sick','off_holiday','off_pattern','off_cs_rota','no_show','pending'];
+    const leaveOnly = ['on_leave','off_sick','off_holiday','off_pattern','off_cs_rota'];
+
+    // Yesterday: worked but never submitted → drives the big "you missed it" banner.
+    const yd = addDays(londonDate(), -1);
+    const ya = await db.query(`SELECT status, first_login FROM attendance_day WHERE user_id=$1 AND for_date=$2`, [uid, yd]);
+    const yrow = ya.rows[0];
+    const yOff = !yrow || !yrow.first_login || offList.includes(yrow.status);
+    let yUnsubmitted = false;
+    if (!yOff) {
+      const r = await db.query(`SELECT submitted_at FROM daily_reports WHERE user_id=$1 AND for_date=$2`, [uid, yd]);
+      yUnsubmitted = !(r.rows.length > 0 && r.rows[0].submitted_at != null);
+    }
+
+    // Today: worked but not yet submitted → drives the submit-before-sign-out gate.
+    const td = londonDate();
+    const ta = await db.query(`SELECT status, first_login FROM attendance_day WHERE user_id=$1 AND for_date=$2`, [uid, td]);
+    const trow = ta.rows[0];
+    const todayWorked = !!(trow && trow.first_login) && !leaveOnly.includes(trow.status);
+    let todaySubmitted = false;
+    if (todayWorked) {
+      const tr = await db.query(`SELECT submitted_at FROM daily_reports WHERE user_id=$1 AND for_date=$2`, [uid, td]);
+      todaySubmitted = tr.rows.length > 0 && tr.rows[0].submitted_at != null;
+    }
+
+    res.json({ unsubmitted: yUnsubmitted, for_date: yd, today_worked: todayWorked, today_submitted: todaySubmitted });
+  } catch (e) { res.json({ unsubmitted: false, today_worked: false, today_submitted: true }); }
 });
 
 // Direct reports' days (HR today) — owner/manager only

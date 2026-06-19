@@ -108,10 +108,21 @@ router.post('/logout', async (req, res) => {
 router.post('/trust-device', requireAuth, async (req, res) => {
   if (!canTrustDevices(req.user)) return res.status(403).json({ error: 'Not permitted' });
   try {
+    const label = String((req.body && req.body.label) || '').trim().slice(0, 120);
+    if (!label) return res.status(400).json({ error: 'Give this computer a name so you can tell whose it is.' });
+    // If this machine already carries a trusted-device cookie, rename it in place rather
+    // than adding another row — otherwise every press makes a fresh duplicate.
+    const existingRaw = req.cookies && req.cookies.fk_device;
+    if (existingRaw) {
+      const upd = await db.query(
+        `UPDATE trusted_devices SET label=$1, revoked_at=NULL WHERE token_hash=$2 RETURNING id`,
+        [label, hashDeviceToken(existingRaw)]);
+      if (upd.rowCount) return res.json({ ok: true, renamed: true });
+    }
     const raw = crypto.randomBytes(32).toString('hex');
     await db.query(
       `INSERT INTO trusted_devices (token_hash, label, created_by) VALUES ($1, $2, $3)`,
-      [hashDeviceToken(raw), String((req.body && req.body.label) || 'Office device').slice(0, 120), req.user.id]
+      [hashDeviceToken(raw), label, req.user.id]
     );
     res.cookie('fk_device', raw, {
       httpOnly: true,

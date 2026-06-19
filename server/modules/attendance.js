@@ -1728,6 +1728,7 @@ router.get('/daily-report/today', async (req, res) => {
 // POST /api/daily-report — create or update today's report (upsert)
 router.post('/daily-report', requirePermission('daily_report.submit.own'), async (req, res) => {
   const { notes } = req.body || {};
+  const submit = !!(req.body && req.body.submit);
   if (typeof notes !== 'string') {
     return res.status(400).json({ error: 'notes (string) required' });
   }
@@ -1759,7 +1760,7 @@ router.post('/daily-report', requirePermission('daily_report.submit.own'), async
     const snapLast = londonClock(s.last_logout);
 
     if (existing.rows[0]) {
-      // Update path.
+      // Update path. A submit stamps submitted_at once and keeps it (later edits don't un-submit).
       await db.query(
         `UPDATE daily_reports
          SET notes = $1,
@@ -1768,11 +1769,12 @@ router.post('/daily-report', requirePermission('daily_report.submit.own'), async
              snapshot_active_min = $4,
              snapshot_idle_min = $5,
              snapshot_break_min = $6,
+             submitted_at = CASE WHEN $8::bool THEN COALESCE(submitted_at, NOW()) ELSE submitted_at END,
              updated_at = NOW()
          WHERE id = $7`,
         [notes, snapFirst, snapLast,
          s.active_minutes || 0, s.idle_minutes || 0, s.break_taken_minutes || 0,
-         existing.rows[0].id]
+         existing.rows[0].id, submit]
       );
     } else {
       // Insert path.
@@ -1780,14 +1782,14 @@ router.post('/daily-report', requirePermission('daily_report.submit.own'), async
         `INSERT INTO daily_reports
            (user_id, for_date, notes,
             snapshot_first_login, snapshot_last_logout,
-            snapshot_active_min, snapshot_idle_min, snapshot_break_min)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            snapshot_active_min, snapshot_idle_min, snapshot_break_min, submitted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $9::bool THEN NOW() ELSE NULL END)`,
         [req.user.id, today, notes, snapFirst, snapLast,
-         s.active_minutes || 0, s.idle_minutes || 0, s.break_taken_minutes || 0]
+         s.active_minutes || 0, s.idle_minutes || 0, s.break_taken_minutes || 0, submit]
       );
     }
 
-    res.json({ ok: true, for_date: today });
+    res.json({ ok: true, for_date: today, submitted: submit });
   } catch (err) {
     console.error('[daily-report POST] failed:', err.message);
     res.status(500).json({ error: 'Failed to save report' });

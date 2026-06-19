@@ -213,7 +213,7 @@
   async function completeSession(sid) {
     const out = await api('/session/' + sid + '/complete', { method: 'POST', body: JSON.stringify({ assignmentId }) });
     if (out.passed) openCourse();
-    else alert('Pass every check first (free-text answers are confirmed by your manager in the live version).');
+    else alert('Answer every check first \u2014 including writing something for any free-text question.');
   }
 
   // ---------- manager ----------

@@ -203,9 +203,11 @@ async function gradeCheck(assignmentId, checkId, answer) {
     result = chosen && chosen.correct ? 'pass' : 'fail';
     if (chosen) { feedback = chosen.fb || null; cost = chosen.cost || null; }
   } else {
-    // free_text: Ship 1 records it for manager/AI review; never auto-pass at the gate.
+    // free_text: recorded for the manager to confirm against the model answer.
+    // It satisfies the session gate (never blocks completion) but stays out of the
+    // auto-pass score — graded 'flagged' so the manager review queue still picks it up.
     result = 'flagged';
-    feedback = 'Saved for review. In the live version the AI grades this against the model answer; borderline answers go to your manager.';
+    feedback = 'Answer recorded \u2014 your manager confirms this against the model answer. You can carry on and complete the session.';
   }
   await db.query(
     `INSERT INTO lms_check_attempts (assignment_id,check_id,answer,result,graded_by)
@@ -215,15 +217,26 @@ async function gradeCheck(assignmentId, checkId, answer) {
   return { result, feedback, cost };
 }
 
-// A session passes only when every check in it has at least one passing attempt.
+// A session passes when every check is satisfied. Auto-graded checks (mcq/scenario)
+// need a passing attempt; free-text needs only a submitted answer — the manager
+// confirms it separately against the model answer (the competency sign-off), so a
+// free-text question never blocks the learner from completing the session.
 async function markSessionPassed(assignmentId, sessionId) {
-  const checks = await db.query(`SELECT id FROM lms_checks WHERE session_id=$1`, [sessionId]);
+  const checks = await db.query(`SELECT id, type FROM lms_checks WHERE session_id=$1`, [sessionId]);
   for (const k of checks.rows) {
-    const ok = await db.query(
-      `SELECT 1 FROM lms_check_attempts WHERE assignment_id=$1 AND check_id=$2 AND result='pass' LIMIT 1`,
-      [assignmentId, k.id]
-    );
-    if (!ok.rows.length) return { passed: false, reason: 'checks_incomplete' };
+    if (k.type === 'free_text') {
+      const sub = await db.query(
+        `SELECT 1 FROM lms_check_attempts WHERE assignment_id=$1 AND check_id=$2 LIMIT 1`,
+        [assignmentId, k.id]
+      );
+      if (!sub.rows.length) return { passed: false, reason: 'checks_incomplete' };
+    } else {
+      const ok = await db.query(
+        `SELECT 1 FROM lms_check_attempts WHERE assignment_id=$1 AND check_id=$2 AND result='pass' LIMIT 1`,
+        [assignmentId, k.id]
+      );
+      if (!ok.rows.length) return { passed: false, reason: 'checks_incomplete' };
+    }
   }
   await db.query(`UPDATE lms_progress SET status='passed', passed_at=now() WHERE assignment_id=$1 AND session_id=$2`, [assignmentId, sessionId]);
   // unlock the next session
