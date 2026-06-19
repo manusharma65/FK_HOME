@@ -61,22 +61,21 @@ async function attachUserToRequest(req, res, next) {
       isManagerOf(slug) { return this.departments.some(d => d.slug === slug && (d.role === 'manager' || d.role === 'lead')); },
     };
 
-    // Touch last_seen + last_active fire-and-forget.
-    // Slide the login forward on GENUINE user activity only. Background traffic
-    // (heartbeat / poll loop, tagged 'x-fk-bg') refreshes presence below but must
-    // NOT extend the login, or a left-open tab would keep someone signed in forever.
-    const isBackground = req.headers['x-fk-bg'] === '1';
-    if (isBackground) {
-      db.query('UPDATE user_sessions SET last_seen_at = NOW() WHERE token = $1', [token]).catch(() => {});
-    } else {
-      db.query(
-        `UPDATE user_sessions
-            SET last_seen_at = NOW(),
-                expires_at  = NOW() + ($2 * INTERVAL '1 hour')
-          WHERE token = $1`,
-        [token, SESSION_IDLE_HOURS]
-      ).catch(() => {});
-    }
+    // Touch presence on every authenticated request. The login slides forward on ANY
+    // traffic INCLUDING the background heartbeat — because "FK Home open + machine awake"
+    // is what presence means, and people work all day in other apps (Linnworks, email)
+    // with FK Home in a background tab. They must NOT be signed out for that. Genuine
+    // sign-out — 2h idle, shift end + idle, the 22:30 nightly close — is done actively,
+    // server-side, by the attendance cron (tickAutoClockout), which ends the session even
+    // while the client tab is asleep. So when the machine actually sleeps/closes, the
+    // heartbeat stops, this stops sliding, and the cron clocks them out + ends the session.
+    db.query(
+      `UPDATE user_sessions
+          SET last_seen_at = NOW(),
+              expires_at  = NOW() + ($2 * INTERVAL '1 hour')
+        WHERE token = $1`,
+      [token, SESSION_IDLE_HOURS]
+    ).catch(() => {});
     db.query(
       `INSERT INTO user_status (user_id, status, last_active_at, changed_at)
        VALUES ($1, 'active', NOW(), NOW())

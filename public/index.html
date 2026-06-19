@@ -1645,7 +1645,7 @@ async function init() {
     loadMyOnboarding();      // r0.10
     loadMyExit();            // offboarding — leaver nudge
     loadActiveExits();       // offboarding — HR exits-in-progress
-    startHeartbeat();
+    startPresence();
     startBreakCountdown();
     startPolling();
     fkRoute();               // r0.13 — set active nav item based on hash
@@ -2279,25 +2279,71 @@ function findOpenProfile(userId) {
 function escapeAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;'); }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// --- HEARTBEAT ---
-// Presence ping. Fires every 30s while FK Home is open in a tab — whether or not
-// that tab is focused — because staff work all day in other apps (Linnworks, email,
-// Amazon) with FK Home sitting in the background, and they are still AT their desk.
-// It is tagged x-fk-bg, so it keeps presence fresh WITHOUT keeping the login session
-// alive (the login still lapses on genuine inactivity — see the r1.31 bg tagging).
-// When the machine actually sleeps / locks / the browser closes, the browser suspends
-// timers and the ping stops, so a real away-from-desk still trips idle after 10 min.
+// --- PRESENCE ---
+// The heartbeat is a blunt signal: it only knows "FK Home tab open + machine awake", so
+// it can't tell "working in another app" from "walked away but PC still on". Where the
+// browser supports it (Chrome/Edge), we use the Idle Detection API instead, which reports
+// real user input ANYWHERE on the machine + whether the screen is locked — so any typing
+// in any app counts as present, and we only mark someone away when there's genuinely no
+// input or the screen is locked. Where it's unavailable or declined, we fall back to the
+// heartbeat, so nothing regresses.
+function beatNow() {
+  fetch('/api/me/heartbeat', {
+    method: 'POST', credentials: 'include',
+    headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop', 'x-fk-bg': '1' }
+  }).catch(() => {});
+}
+// Fallback presence: ping while the tab is open + machine awake. Returns a stop() handle
+// so we can hand over to idle-detection if the user opts in.
 function startHeartbeat() {
-  function beat() {
-    fetch('/api/me/heartbeat', {
-      method: 'POST', credentials: 'include',
-      headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop', 'x-fk-bg': '1' }
-    }).catch(() => {});
-  }
-  beat();                       // immediately, so presence is fresh on load
-  setInterval(beat, 30000);     // and every 30s thereafter, focused or not
-  // Coming back to the tab instantly clears any idle, rather than waiting for the next tick.
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) beat(); });
+  beatNow();
+  var id = setInterval(beatNow, 30000);
+  var vis = function () { if (!document.hidden) beatNow(); };
+  document.addEventListener('visibilitychange', vis);
+  return function stop() { clearInterval(id); document.removeEventListener('visibilitychange', vis); };
+}
+// True presence: ping only while the user is genuinely active anywhere and unlocked.
+async function startIdlePresence(stopFallback) {
+  try {
+    var detector = new IdleDetector();
+    var active = function () { return detector.userState === 'active' && detector.screenState === 'unlocked'; };
+    detector.addEventListener('change', function () { if (active()) beatNow(); });
+    await detector.start({ threshold: 60000 });   // min allowed; we measure idle in minutes anyway
+    if (typeof stopFallback === 'function') stopFallback();  // hand over from the blunt heartbeat
+    beatNow();
+    setInterval(function () { if (active()) beatNow(); }, 30000);
+    return true;
+  } catch (e) { return false; }
+}
+function showPresenceEnableBar(onEnable) {
+  if (document.getElementById('fkPresenceBar')) return;
+  var bar = document.createElement('div');
+  bar.id = 'fkPresenceBar';
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:1100;background:#2A2622;color:#fff;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px;font-size:14px;box-shadow:0 -2px 12px rgba(0,0,0,.2)';
+  bar.innerHTML = '<span>Turn on away-detection so you\u2019re counted present while you work in other apps \u2014 and only marked away when you actually step away.</span>' +
+    '<span style="white-space:nowrap"><button id="fkPresenceYes" style="background:#E8722B;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer">Turn on</button> ' +
+    '<button id="fkPresenceNo" style="background:transparent;color:#c9bcae;border:none;cursor:pointer;padding:8px">Not now</button></span>';
+  document.body.appendChild(bar);
+  document.getElementById('fkPresenceNo').onclick = function () { bar.remove(); };
+  document.getElementById('fkPresenceYes').onclick = async function () { await onEnable(); bar.remove(); };
+}
+function startPresence() {
+  var stopFallback = startHeartbeat();           // start presence immediately; never blank
+  if (!('IdleDetector' in window) || !window.isSecureContext) return;
+  (async function () {
+    var state = 'prompt';
+    try { state = (await navigator.permissions.query({ name: 'idle-detection' })).state; } catch (e) {}
+    if (state === 'denied') return;              // keep fallback
+    if (state === 'granted') { await startIdlePresence(stopFallback); return; }
+    // 'prompt' — needs a click. Keep fallback running; offer the one-time switch.
+    showPresenceEnableBar(async function () {
+      try {
+        var p = await IdleDetector.requestPermission();   // must be from this gesture
+        if (p === 'granted') return await startIdlePresence(stopFallback);
+      } catch (e) {}
+      return false;
+    });
+  })();
 }
 
 // --- MODALS ---

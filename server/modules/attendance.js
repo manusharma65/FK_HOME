@@ -1973,38 +1973,54 @@ async function idleMinutesFor(userId) {
   } catch (e) { return 0; }
 }
 
-async function autoClockOut(userId, dateStr, reason) {
+async function autoClockOut(userId, dateStr, reason, atTime) {
+  // atTime = when they actually went idle (their last_active_at). Backdate the logout to
+  // that, so attendance shows when they really stopped — not when the 5-min cron noticed.
   await db.query(
-    `UPDATE attendance_day SET last_logout = NOW(), updated_at = NOW()
-      WHERE user_id = $1 AND for_date = $2 AND last_logout IS NULL`, [userId, dateStr]);
+    `UPDATE attendance_day SET last_logout = COALESCE($3, NOW()), updated_at = NOW()
+      WHERE user_id = $1 AND for_date = $2 AND last_logout IS NULL`, [userId, dateStr, atTime || null]);
   await db.query(
     `INSERT INTO shift_log (user_id, event_type, status_before, status_after, note)
      VALUES ($1, 'logout', 'active', 'offline', $2)`, [userId, reason]);
   await db.query(`UPDATE user_status SET status = 'offline', changed_at = NOW() WHERE user_id = $1`, [userId]);
-  // NOTE: auto clock-out stamps ATTENDANCE only. It must never delete the login
-  // session — doing so logged people out mid-day (r1.05 incident). Removed.
+  // r1.50 — actually sign them OUT of the system, not just stamp attendance. The old
+  // r1.05 incident (people logged out mid-day) was caused by idle being measured wrongly;
+  // it is now presence-based and this only ever runs from the cron for genuinely-gone
+  // cases (2h idle, shift end + 30 min idle, 10h cap, idle past 22:30). An active person
+  // keeps a fresh presence ping, never reaches those, and is never touched here. Ending
+  // the session also guarantees a fresh login + selfie next morning.
+  await db.query(`DELETE FROM user_sessions WHERE user_id = $1`, [userId]);
 }
 
 async function tickAutoClockout() {
   try {
     const now = nowInLondon();
     const open = await db.query(
-      `SELECT user_id, first_login, shift_end_local
-         FROM attendance_day
-        WHERE for_date = $1 AND first_login IS NOT NULL AND last_logout IS NULL`, [now.date]);
+      `SELECT a.user_id, a.first_login, a.shift_end_local, us.last_active_at
+         FROM attendance_day a
+         LEFT JOIN user_status us ON us.user_id = a.user_id
+        WHERE a.for_date = $1 AND a.first_login IS NOT NULL AND a.last_logout IS NULL`, [now.date]);
     for (const r of open.rows) {
       const hoursIn = (Date.now() - new Date(r.first_login).getTime()) / 3600000;
-      let reason = null;
+      const idleMin = await idleMinutesFor(r.user_id);
+      let reason = null, atTime = null;
       if (hoursIn >= 10) reason = 'auto: 10h cap';
-      else if (r.shift_end_local && now.hhmm >= r.shift_end_local && (await idleMinutesFor(r.user_id)) >= 20) {
-        reason = 'auto: shift end + idle';
+      // Spec: shift finished AND the PC has been idle 30 min → sign them out (backdated to
+      // when they actually went idle).
+      else if (r.shift_end_local && now.hhmm >= r.shift_end_local && idleMin >= 30) {
+        reason = 'auto: shift end + idle'; atTime = r.last_active_at;
       }
-      // r1.27 — hard end-of-day close. Since "active" now means "FK Home open in the
-      // browser" (heartbeat fires even on a background tab), a tab left open overnight
-      // would otherwise never go idle. So past 22:30 London, clock out + set offline
-      // anyone still open. Runs server-side, so it works regardless of the client tab.
-      else if (now.hhmm >= '22:30') reason = 'auto: end of day';
-      if (reason) await autoClockOut(r.user_id, now.date, reason);
+      // Spec: idle for more than 2 hours → just sign them out of the system.
+      else if (idleMin >= 120) {
+        reason = 'auto: idle 2h'; atTime = r.last_active_at;
+      }
+      // Nightly close at 22:30 — but ONLY if they're idle, so we never boot someone who
+      // is genuinely still working late. A left-open idle tab gets closed; an active late
+      // worker is left alone (their own sleep/idle later triggers the 2h rule).
+      else if (now.hhmm >= '22:30' && idleMin >= 10) {
+        reason = 'auto: end of day'; atTime = r.last_active_at;
+      }
+      if (reason) await autoClockOut(r.user_id, now.date, reason, atTime);
     }
   } catch (e) { console.error('[tickAutoClockout]', e.message); }
 }
