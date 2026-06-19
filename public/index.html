@@ -1732,6 +1732,11 @@ function render() {
   let anySys = false;
   if (can('admin.settings.edit')) {
     show('navSysHolidays'); show('navSysAttPolicy'); show('navSysSettings'); anySys = true;
+  } else if (can('attendance.device.trust') || can('attendance.view.any')) {
+    // Device authorisation lives in Settings but is granted more widely (HR, Ops deputy,
+    // Head of Operations) than admin.settings.edit. Let them open Settings — they'll only
+    // see the "Trusted office devices" card; the admin-only cards stay hidden for them.
+    show('navSysSettings'); anySys = true;
   }
   if (can('admin.cs_rota.edit')) {
     show('navSysCsRota'); anySys = true;
@@ -3251,7 +3256,7 @@ async function refreshDailyBanner() {
     const b = ensureDailyBanner();
     const txt = document.getElementById('fkDailyBannerTxt');
     const btn = document.getElementById('fkDailyBannerBtn');
-    if (_dailyReminder.today_worked && !_dailyReminder.today_submitted) {
+    if (_dailyReminder.today_prompt) {
       b.style.background = '#C2691B';
       txt.textContent = 'Don\u2019t forget to submit today\u2019s report before you sign out.';
       btn.textContent = 'Submit report';

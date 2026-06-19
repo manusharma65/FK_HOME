@@ -140,9 +140,14 @@ router.post('/trust-device', requireAuth, async (req, res) => {
 // Owner: list / revoke trusted devices.
 router.get('/trusted-devices', requireAuth, async (req, res) => {
   if (!canTrustDevices(req.user)) return res.status(403).json({ error: 'Not permitted' });
+  const myHash = (req.cookies && req.cookies.fk_device) ? hashDeviceToken(req.cookies.fk_device) : null;
   const r = await db.query(
-    `SELECT id, label, created_at, last_seen_at FROM trusted_devices WHERE revoked_at IS NULL ORDER BY created_at DESC`);
-  res.json({ devices: r.rows });
+    `SELECT id, label, token_hash, created_at, last_seen_at FROM trusted_devices WHERE revoked_at IS NULL ORDER BY created_at DESC`);
+  const devices = r.rows.map(d => ({
+    id: d.id, label: d.label, created_at: d.created_at, last_seen_at: d.last_seen_at,
+    is_this_device: myHash != null && d.token_hash === myHash,
+  }));
+  res.json({ devices });
 });
 router.post('/trusted-devices/:id/revoke', requireAuth, async (req, res) => {
   if (!canTrustDevices(req.user)) return res.status(403).json({ error: 'Not permitted' });

@@ -457,7 +457,7 @@ router.get('/reminder', async (req, res) => {
 
     // Today: worked but not yet submitted → drives the submit-before-sign-out gate.
     const td = londonDate();
-    const ta = await db.query(`SELECT status, first_login FROM attendance_day WHERE user_id=$1 AND for_date=$2`, [uid, td]);
+    const ta = await db.query(`SELECT status, first_login, shift_end_local FROM attendance_day WHERE user_id=$1 AND for_date=$2`, [uid, td]);
     const trow = ta.rows[0];
     const todayWorked = !!(trow && trow.first_login) && !leaveOnly.includes(trow.status);
     let todaySubmitted = false;
@@ -466,8 +466,24 @@ router.get('/reminder', async (req, res) => {
       todaySubmitted = tr.rows.length > 0 && tr.rows[0].submitted_at != null;
     }
 
-    res.json({ unsubmitted: yUnsubmitted, for_date: yd, today_worked: todayWorked, today_submitted: todaySubmitted });
-  } catch (e) { res.json({ unsubmitted: false, today_worked: false, today_submitted: true }); }
+    // today_prompt: only show the "submit today's report" banner near the END of the shift —
+    // from 45 min before shift end onward — not first thing in the morning. The sign-out gate
+    // itself is unaffected (it only fires when someone actually signs out, i.e. end of day).
+    let todayPrompt = false;
+    if (todayWorked && !todaySubmitted) {
+      const lt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+      const [nh, nm] = lt.split(':').map(Number);
+      const nowMin = nh * 60 + nm;
+      let endMin = 16 * 60; // sensible fallback if no shift end on file
+      if (trow.shift_end_local) {
+        const parts = String(trow.shift_end_local).split(':');
+        endMin = (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
+      }
+      todayPrompt = nowMin >= (endMin - 45);
+    }
+
+    res.json({ unsubmitted: yUnsubmitted, for_date: yd, today_worked: todayWorked, today_submitted: todaySubmitted, today_prompt: todayPrompt });
+  } catch (e) { res.json({ unsubmitted: false, today_worked: false, today_submitted: true, today_prompt: false }); }
 });
 
 // Direct reports' days (HR today) — owner/manager only

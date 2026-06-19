@@ -19,7 +19,7 @@ window.fkModules['system/settings'] = {
   render() {
     return '' +
       '<div id="set-mod" class="fk-mod">' +
-        '<div class="card">' +
+        '<div class="card" id="setBreakCard" style="display:none">' +
           '<div class="card-head"><h2 style="margin:0">Team break</h2></div>' +
           '<div style="padding:18px">' +
             '<form id="breakForm" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:480px">' +
@@ -80,6 +80,7 @@ window.fkModules['system/settings'] = {
       try {
         const r = await fetch('/api/admin/break', { credentials: 'include' });
         if (r.ok) {
+          $('setBreakCard').style.display = '';
           const data = await r.json();
           if (data.break) {
             $('breakStart').value = data.break.start_time.slice(0, 5);
@@ -161,19 +162,27 @@ window.fkModules['system/settings'] = {
     // --- Trusted office devices (moved here from Attendance, r1.49). Self-gates on the
     // owner-only list endpoint; each PC is named so you can tell whose it is. ---
     (function setupDevices(){
+      let thisDevice = null;   // the row that matches the machine you're sitting at
       const fmtDate = (s) => { try { return new Date(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
       const escd = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      function syncTrustBtn() {
+        const tb = $('setTrustBtn'); if (!tb) return;
+        tb.textContent = thisDevice ? 'Rename this computer' : 'Authorise this computer';
+      }
       async function loadDevices() {
         try {
           const r = await fetch('/api/auth/trusted-devices', { credentials: 'include' });
           if (!r.ok) { $('setDevicesCard').style.display = 'none'; return; }
           $('setDevicesCard').style.display = '';
           const d = await r.json();
+          thisDevice = (d.devices || []).find(x => x.is_this_device) || null;
+          syncTrustBtn();
           const list = $('setDeviceList');
           if (!d.devices || !d.devices.length) { list.innerHTML = '<p style="font-size:13px;color:var(--muted)">No trusted devices yet.</p>'; return; }
           list.innerHTML = d.devices.map(dev =>
             '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid var(--line)">' +
-              '<div><div style="font-size:14px;font-weight:600;color:var(--ink)">' + escd(dev.label || 'Office device') + '</div>' +
+              '<div><div style="font-size:14px;font-weight:600;color:var(--ink)">' + escd(dev.label || 'Office device') +
+                (dev.is_this_device ? ' <span style="font-size:11px;font-weight:700;color:#fff;background:var(--green,#3AA76D);border-radius:6px;padding:2px 7px;margin-left:6px;vertical-align:middle">THIS COMPUTER</span>' : '') + '</div>' +
               '<div style="font-size:12px;color:var(--muted)">added ' + fmtDate(dev.created_at) + (dev.last_seen_at ? ' \u00b7 last seen ' + fmtDate(dev.last_seen_at) : '') + '</div></div>' +
               '<button class="btn" data-revoke="' + dev.id + '" style="font-size:13px;padding:7px 12px">Revoke</button>' +
             '</div>').join('');
@@ -187,9 +196,13 @@ window.fkModules['system/settings'] = {
       const tb = $('setTrustBtn');
       if (tb) tb.addEventListener('click', async () => {
         const res = $('setTrustResult');
-        const name = (window.prompt('Name this computer so you can tell whose it is \u2014 e.g. "Warehouse PC" or "Tanu\u2019s desk".') || '').trim();
+        const already = thisDevice ? thisDevice.label : '';
+        const msg = already
+          ? 'This computer is authorised as \u201c' + already + '\u201d. Enter a new name for it:'
+          : 'Name this computer so you can tell whose it is \u2014 e.g. "Warehouse PC" or "Tanu\u2019s desk".';
+        const name = (window.prompt(msg, already) || '').trim();
         if (!name) { res.innerHTML = '<span style="color:var(--muted)">Cancelled \u2014 a name is needed.</span>'; return; }
-        tb.disabled = true; tb.textContent = 'Authorising\u2026';
+        tb.disabled = true; tb.textContent = already ? 'Renaming\u2026' : 'Authorising\u2026';
         try {
           const r = await fetch('/api/auth/trust-device', {
             method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
@@ -198,7 +211,7 @@ window.fkModules['system/settings'] = {
           if (r.ok) { const d = await r.json().catch(() => ({})); res.innerHTML = '<span style="color:var(--green)">' + (d.renamed ? 'This computer is renamed \u201c' + escd(name) + '\u201d.' : 'This computer is now trusted as \u201c' + escd(name) + '\u201d.') + '</span>'; loadDevices(); }
           else { const d = await r.json().catch(() => ({})); res.innerHTML = '<span style="color:var(--red)">' + (d.error || 'Failed') + '</span>'; }
         } catch (e) { res.innerHTML = '<span style="color:var(--red)">Network error</span>'; }
-        tb.disabled = false; tb.textContent = 'Authorise this computer';
+        tb.disabled = false; syncTrustBtn();
       });
       loadDevices();
     })();
