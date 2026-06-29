@@ -104,12 +104,11 @@ const PERMISSIONS = [
   { slug: 'admin.settings.edit',             module: 'admin',      description: 'Edit system settings (review windows, probation length…)' },
   { slug: 'admin.backfill.run',              module: 'admin',      description: 'Run one-off backfill jobs (generate review schedules)' },
 
-  // r1.32 — Accounts (FK Enterprises India books). FINANCE module.
-  { slug: 'accounts.view',                   module: 'accounts',   description: 'View the FK Enterprises books (bills, invoices, reports)' },
-  { slug: 'accounts.post',                   module: 'accounts',   description: 'Create + post bills/invoices/journals and reverse them' },
-  { slug: 'accounts.reconcile',              module: 'accounts',   description: 'Import bank statements and reconcile lines' },
-  { slug: 'accounts.period.lock',            module: 'accounts',   description: 'Mark a month filed / locked (owner)' },
-  { slug: 'accounts.period.unlock',          module: 'accounts',   description: 'Unlock a filed month (owner only)' },
+  // Customer Service workspace
+  { slug: 'cs.tickets.view',                 module: 'cs',         description: 'Access the Customer Service agent workspace' },
+  { slug: 'cs.tickets.reply',                module: 'cs',         description: 'Send customer replies on CS tickets' },
+  { slug: 'cs.assign',                       module: 'cs',         description: 'Assign or reassign CS tickets' },
+  { slug: 'cs.templates.manage',             module: 'cs',         description: 'Create and edit CS response templates' },
 ];
 
 // ---------- Groups ----------
@@ -230,21 +229,11 @@ const GROUPS = [
       'attendance.cs_rota.upload','attendance.cs_rota.view',
       'attendance.view.dept','attendance.regularise.approve.dept',
       'daily_report.view.dept','daily_report.review.dept',
+      'cs.tickets.view','cs.tickets.reply','cs.assign','cs.templates.manage',
       // r0.9 — sees CS team profiles
       'profile.view.dept','profile.edit.dept',
       // r0.10 — CS lead reviews CS team
       'reviews.complete',
-    ]
-  },
-  {
-    slug: 'accounts-team',
-    name: 'Accounts Team',
-    description: 'Keeps the FK Enterprises India books. FINANCE module access; no HR/admin.',
-    is_system: true,
-    permissions: [
-      ...EMPLOYEE_BASE_PERMS,
-      'accounts.view','accounts.post','accounts.reconcile',
-      // period lock/unlock stay owner-only (owner = '*'); grant here later if Bobby wants Mahima to file.
     ]
   },
   {

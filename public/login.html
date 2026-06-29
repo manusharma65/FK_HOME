@@ -104,12 +104,16 @@ function clearError(){ errBox.classList.remove('on'); }
 form.addEventListener('submit', async (e) => {
   e.preventDefault(); clearError();
   btn.disabled = true; btn.textContent = 'Signing in…';
+  
+  // Dynamic calculation for device profiling to check workload optimization
+  const dynamicDeviceProfile = (window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(pointer: coarse)').matches)) ? 'mobile' : 'desktop';
+
   try {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-fk-device': ((window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(pointer: coarse)').matches)) ? 'mobile' : 'desktop')
+        'x-fk-device': dynamicDeviceProfile
       },
       credentials: 'include',
       body: JSON.stringify({
@@ -117,11 +121,45 @@ form.addEventListener('submit', async (e) => {
         password: document.getElementById('password').value
       })
     });
+    
     const data = await r.json();
-    if (!r.ok) { showError(data.error || 'Login failed'); btn.disabled = false; btn.textContent = 'Sign in'; return; }
+    if (!r.ok) { 
+      showError(data.error || 'Login failed'); 
+      btn.disabled = false; 
+      btn.textContent = 'Sign in'; 
+      return; 
+    }
+
+    // =========================================================================
+    // 🎯 SECURE DATA LOCAL REPOSITORY POPULATION ON SUCCESSFUL AUTHENTICATION
+    // =========================================================================
+    // Jab user password pass karke successfully auth validation clear karega,
+    // usi time hum uski permission identity cache memory mein inject kar denge.
+    const bootstrapSessionProfile = {
+      user: {
+        id: data.user.id,
+        name: data.user.name,
+        email: data.user.email,
+        role: data.user.role || 'agent' // E.g., 'agent', 'team lead', 'manager'
+      },
+      permissions: {
+        // Reassignment authorization is tightly bounded to role condition matrices
+        assign: ['lead', 'team lead', 'manager', 'senior'].includes(String(data.user.role).toLowerCase()),
+        templates: data.user.permissions?.templates || false,
+        manageNotes: data.user.permissions?.manageNotes || false
+      }
+    };
+
+    // Storing session profile safely so cs.js initialization module reads it immediately
+    window.localStorage.setItem('fk_cs_bootstrap', JSON.stringify(bootstrapSessionProfile));
+    
+    // Redirect cleanly to workspace container
     window.location.href = '/';
+    
   } catch (err) {
-    showError('Network error. Try again.'); btn.disabled = false; btn.textContent = 'Sign in';
+    showError('Network error. Try again.'); 
+    btn.disabled = false; 
+    btn.textContent = 'Sign in';
   }
 });
 </script>

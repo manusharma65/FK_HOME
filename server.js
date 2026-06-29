@@ -18,7 +18,7 @@
 //                                    will migrate modules into the shell).
 //                                    All standalone pages still work as before.
 // All real logic lives in /server/modules/. This file stays small on purpose.
-
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -28,7 +28,7 @@ const { initDb, db } = require('./server/db');
 const { runMigrations } = require('./server/schema');
 const { seedInitialData } = require('./server/schema/seed');
 const { attachUserToRequest } = require('./server/auth');
-
+const csRoutes = require('./server/modules/cs');
 const authRoutes = require('./server/modules/auth');
 const meRoutes = require('./server/modules/me');
 const teamRoutes = require('./server/modules/team');
@@ -100,6 +100,7 @@ app.use('/api/daily', dailyRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/learning', learningRoutes);
 app.use('/api/accounts', accountsRoutes);
+app.use('/api/cs', csRoutes);
 
 // 404 for unknown APIs (avoid SPA HTML fallback for /api/*)
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
@@ -178,6 +179,7 @@ function lastDueWeekdayDate(p, weekday, startHHMM) {
   if (back === 0 && p.hhmm < startHHMM) back = 7;   // it's the day but before the time → last week's
   return subtractDays(p.date, back);
 }
+
 
 // Run fn once per scheduled weekly occurrence, at or after startHHMM. If the
 // most recent occurrence was missed (server down that day), it runs on the next
@@ -287,5 +289,4 @@ async function start() {
     process.exit(1);
   }
 }
-
 start();

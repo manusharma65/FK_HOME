@@ -144,6 +144,16 @@ const TEMPLATES = {
     action_url: c => '#home',
     related_type: 'attendance_regularisation',
   },
+
+  // Customer Service
+  'cs.note.mention': {
+    title: c => (c.byName || 'Someone') + ' mentioned you on a CS ticket',
+    body:  c => (c.caseRef || 'Ticket') + ' \u00b7 ' + (c.subject || ''),
+    recipients: c => c.userIds || [],
+    action_url: c => c.ticketId ? '#cs/' + c.ticketId : '#cs',
+    related_type: 'cs_ticket',
+  },
+
   'hr.chronic_idle_flagged': {
     title: c => 'Chronic idle pattern: ' + (c.targetName || 'user'),
     body:  c => c.daysAffected + ' days with 2+ idle events in the last 14 days',

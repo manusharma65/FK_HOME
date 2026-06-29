@@ -167,21 +167,23 @@
   }
   .brand-name { font-size: 16px; font-weight: 500; color: #FAF7F2; }
   .user-pill {
-    padding: 9px 10px; background: #F1EFE8; border-radius: 8px;
-    display: flex; align-items: center; gap: 9px; margin-bottom: 12px;
+    padding: 13px 13px 13px 16px; background: #FFFDF9; border: 1px solid #ECE3D4; border-radius: 15px;
+    display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+    position: relative; overflow: hidden; box-shadow: 0 5px 16px -11px rgba(60,40,20,.6);
   }
+  .user-pill::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--orange); }
   .avatar {
-    width: 28px; height: 28px; border-radius: 50%;
+    width: 46px; height: 46px; border-radius: 13px;
     display: flex; align-items: center; justify-content: center;
-    font-weight: 500; font-size: 14px; color: var(--ink); position: relative; flex-shrink: 0;
+    font-family: var(--disp); font-weight: 700; font-size: 19px; color: var(--ink); position: relative; flex-shrink: 0;
   }
   .avatar .dot {
-    position: absolute; bottom: -1px; right: -1px;
-    width: 8px; height: 8px; border-radius: 50%;
-    border: 1.5px solid #F1EFE8;
+    position: absolute; bottom: -3px; right: -3px;
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 3px solid #FFFDF9;
   }
-  .user-pill .name { font-size: 15px; font-weight: 500; color: var(--ink); line-height: 1.2; }
-  .user-pill .role { font-size: 13px; color: #5F5E5A; margin-top: 1px; }
+  .user-pill .name { font-family: var(--disp); font-size: 19px; font-weight: 600; color: var(--ink); line-height: 1.05; letter-spacing: -0.01em; }
+  .user-pill .role { font-size: 10.5px; font-weight: 800; color: #C2562E; margin-top: 4px; letter-spacing: 0.1em; text-transform: uppercase; }
 
   .late-btn {
     padding: 10px 12px; background: var(--nav-elev-2); border: 1px solid var(--amber);
@@ -264,7 +266,6 @@
   .g-sys { --accent: #8B82E6; --soft: 139,130,230; }
   .g-you { --accent: #E67D5B; --soft: 230,125,91; }
   .g-academy { --accent: #0F9B8E; --soft: 15,155,142; }
-  .g-finance { --accent: #D4537E; --soft: 212,83,126; }
   .nav-spacer { height: 18px; }
 
   .sidebar-break {
@@ -404,6 +405,24 @@
   .person-name { font-size: 14px; color: var(--ink); font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .03em; }
   .person-role { font-size: 12.5px; color: var(--muted); margin-top: 2px; font-weight: 500; }
   .person-late { color: var(--amber); }
+  /* r1.27 — Option D directory card for "Who's in today" */
+  .pcard { display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--bg);
+           border:0.5px solid var(--line); border-radius:12px; border-left:4px solid var(--line); }
+  .pcard.off { opacity:.62; }
+  .pcard-av { width:42px; height:42px; border-radius:12px; flex-shrink:0; display:flex;
+              align-items:center; justify-content:center; color:#fff; font-weight:600;
+              font-size:15px; letter-spacing:.02em; }
+  .pcard-main { flex:1; min-width:0; }
+  .pcard-name { font-family:'Fraunces',Georgia,serif; font-size:17px; font-weight:500;
+                color:var(--ink); line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pcard-role { font-size:10.5px; color:var(--muted); margin-top:3px; font-weight:600;
+                text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pcard-stat { display:flex; align-items:center; gap:6px; margin-top:5px; font-size:12.5px; font-weight:500; }
+  .pcard-stat .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .pcard-msg { background:transparent; border:0.5px solid var(--line); border-radius:7px;
+               padding:5px 11px; font-size:13px; color:var(--muted); cursor:pointer; flex-shrink:0;
+               transition:background .12s,color .12s; }
+  .pcard-msg:hover { background:var(--amber); color:#fff; border-color:var(--amber); }
 
   /* Time off card */
   .timeoff-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
@@ -841,6 +860,29 @@
         <i class="ti ti-checkbox"></i>
         <span>My work</span>
       </div>
+      <div class="navgrp g-cs-workspace" id="grpCsModuleWorkspace">
+  
+  <div class="navgrp-h" id="csModulePanelToggleBtn" style="cursor: pointer;">
+    <span class="navgrp-ico" id="csCurrentModuleIcon"><i class="ti ti-layout-dashboard"></i></span>
+    <span class="navgrp-lbl" id="csCurrentActiveModuleLabel">Customer Service</span>
+    <span class="navgrp-cnt" id="cntCsWorkspace"></span>
+    <i class="ti ti-chevron-down navgrp-chev" id="csModulePanelChevron"></i>
+  </div>
+  
+  <div class="navgrp-items" id="csModulePanelContent" style="display: none; flex-direction: column;">
+    
+    <div class="nav-item cs-mod-select-item" data-mod-target="dashboard" style="cursor: pointer;">
+      <i class="ti ti-layout-dashboard"></i>
+      <span>Workspace</span>
+    </div>
+    
+    <div class="nav-item cs-mod-select-item" data-mod-target="management" style="cursor: pointer; margin-top: 2px;">
+      <i class="ti ti-chart-bar"></i>
+      <span>cs Dashboard</span>
+    </div>
+    
+  </div>
+</div>
       <div class="nav-item" id="navTeamWork" data-route="#team-work" style="display:none" onclick="location.hash='#team-work'">
         <i class="ti ti-users-group"></i>
         <span>Team work</span>
@@ -873,18 +915,6 @@
         <i class="ti ti-book"></i>
         <span>Knowledge Base</span>
       </div>
-        </div>
-      </div>
-      <!-- ===== Finance (Accounts) — own nav items, no in-page tabs ===== -->
-      <div class="navgrp g-finance" id="grpFinance" style="display:none">
-        <div class="navgrp-h"><span class="navgrp-ico"><i class="ti ti-receipt-pound"></i></span><span class="navgrp-lbl">Finance</span><span class="navgrp-cnt" id="cntFinance"></span><i class="ti ti-chevron-down navgrp-chev"></i></div>
-        <div class="navgrp-items">
-          <div class="nav-item" data-route="#accounts" onclick="location.hash='#accounts'"><i class="ti ti-layout-dashboard"></i><span>Overview</span></div>
-          <div class="nav-item" data-route="#accounts/bills" onclick="location.hash='#accounts/bills'"><i class="ti ti-file-invoice"></i><span>Bills</span></div>
-          <div class="nav-item" data-route="#accounts/invoices" onclick="location.hash='#accounts/invoices'"><i class="ti ti-receipt"></i><span>Invoices</span></div>
-          <div class="nav-item" data-route="#accounts/reconcile" onclick="location.hash='#accounts/reconcile'"><i class="ti ti-arrows-exchange"></i><span>Reconcile</span></div>
-          <div class="nav-item" data-route="#accounts/reports" onclick="location.hash='#accounts/reports'"><i class="ti ti-chart-bar"></i><span>Reports</span></div>
-          <div class="nav-item" data-route="#accounts/chart" onclick="location.hash='#accounts/chart'"><i class="ti ti-list-details"></i><span>Chart of accounts</span></div>
         </div>
       </div>
       <!-- ===== HR ===== -->
@@ -1266,19 +1296,9 @@
             </div>
           </div>
 
-          <!-- Daily report card (new — HR-1) -->
-          <div class="card daily-report-card">
-            <div class="card-header">
-              <div class="card-title"><i class="ti ti-notes"></i> Daily report</div>
-              <span class="card-meta" id="dailyReportMeta">—</span>
-            </div>
-            <div class="auto-summary" id="dailyReportSummary">—</div>
-            <textarea id="dailyReportNotes" placeholder="What did you work on today?" maxlength="5000"></textarea>
-            <div class="footer">
-              <span id="dailyReportStatus">Not yet submitted.</span>
-              <button class="save-btn" id="dailyReportSaveBtn" onclick="saveDailyReport()">Submit report</button>
-            </div>
-          </div>
+          <!-- Daily report card removed (r1.28): the report is filed on the Today page
+               (My Day -> Today), which has logged items + proper submit. This was a weaker
+               duplicate writing a half-version of the same day. -->
 
         </div>
       </div>
@@ -1519,7 +1539,6 @@
 
 <!-- r0.14 — Module system (loader + registered modules). Loaded before the
      main app script so window.fkLoadRoute and window.fkModules exist at boot. -->
-<script src="/modules/cs.js"></script>
 <script src="/modules/loader.js"></script>
 <script src="/modules/offboarding-tracker.js"></script>
 <script src="/modules/hr-insights.js"></script>
@@ -1536,7 +1555,6 @@
 <script src="/modules/approvals.js"></script>
 <script src="/modules/reports.js"></script>
 <script src="/modules/learning.js"></script>
-<script src="/modules/accounts.js"></script>
 <script src="/modules/attendance.js"></script>
 <script src="/modules/chat.js"></script>
 <script src="/modules/my-growth.js"></script>
@@ -1544,48 +1562,6 @@
 <script src="/modules/hr-today.js"></script>
 <script src="/modules/team-review.js"></script>
 <script>
-// --- Session activity tagging (r1.31) ---------------------------------------
-// Tag passive background polling — the heartbeat and the 30s/60s refresh loops —
-// with 'x-fk-bg' so the server can tell it apart from real user activity. Only a
-// GET to one of these polling endpoints counts as background; navigation and any
-// write (POST/PUT/DELETE) are genuine use and keep the login alive. This is what
-// lets a left-open idle tab lapse overnight without ever logging out an active
-// person mid-work. Pairs with SESSION_IDLE_HOURS in auth.js.
-(function () {
-  var BG = ['/api/me/heartbeat', '/api/me/dashboard', '/api/team/whos-on',
-            '/api/attendance/today', '/api/attendance/hr/today', '/api/attendance/dept/today',
-            '/api/notifications', '/api/chat/channels'];
-  var _fetch = window.fetch;
-  window.fetch = function (input, init) {
-    init = init || {};
-    var method = (init.method || 'GET').toUpperCase();
-    var url = (typeof input === 'string') ? input : (input && input.url) || '';
-    try {
-      if (method === 'GET' && BG.some(function (p) { return url.indexOf(p) !== -1; })) {
-        var h = new Headers(init.headers || {});
-        h.set('x-fk-bg', '1');
-        init.headers = h;
-      }
-    } catch (e) { /* never let tagging break a request */ }
-    return _fetch.call(this, input, init).then(function (resp) {
-      // Session-expiry guard: if any protected API call comes back 401, the login
-      // has lapsed — bounce to the login screen instead of leaving a stale "zombie"
-      // tab that still looks signed in until a manual refresh. Excludes the login
-      // and change-password calls, which return 401 for their own (non-session)
-      // reasons and surface their own errors.
-      try {
-        if (resp && resp.status === 401 && url.indexOf('/api/') !== -1
-            && url.indexOf('/api/auth/login') === -1
-            && url.indexOf('/api/auth/change-password') === -1
-            && !window.__fkSessionGone) {
-          window.__fkSessionGone = true;
-          window.location.href = '/login.html';
-        }
-      } catch (e) { /* never let the guard break a request */ }
-      return resp;
-    });
-  };
-})();
 (function(){
   function setHrBadge(){
     fetch('/api/daily/team',{credentials:'include'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
@@ -1604,8 +1580,235 @@
 <script src="/modules/recruitment.js"></script>
 <script src="/modules/team-work.js"></script>
 <script src="/modules/mail.js"></script>
+<script src="/modules/cs.js"></script>
+<script src="/modules/cs_dashboard.js"></script>
 <script src="/modules/clockin-modal.js"></script>
 <script>
+  // =========================================================================
+  // 🎯 CORE GLOBAL ACCORDION ROUTER ENGINE WITH CENTRAL SPA ROUTER BRIDGE
+  // =========================================================================
+  (function() {
+    if (window._globalNavGrpRouterInstance) {
+      document.removeEventListener('click', window._globalNavGrpRouterInstance, true);
+    }
+
+    window._globalNavGrpRouterInstance = function(e) {
+      // 1. MANAGEMENT FOR ACCORDION TOGGLE HEADER CLICK
+      const panelToggle = e.target.closest('#csModulePanelToggleBtn') || e.target.closest('.g-cs-workspace .navgrp-h');
+      if (panelToggle) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        const parentGroup = document.getElementById('grpCsModuleWorkspace') || e.target.closest('.g-cs-workspace');
+        const contentBlock = document.getElementById('csModulePanelContent') || parentGroup?.querySelector('.navgrp-items');
+
+        if (contentBlock && parentGroup) {
+          const isCurrentlyOpen = parentGroup.classList.contains('open') || contentBlock.style.display === 'flex';
+          if (!isCurrentlyOpen) {
+            contentBlock.style.setProperty('display', 'flex', 'important');
+            parentGroup.classList.add('open');
+            parentGroup.classList.remove('collapsed');
+          } else {
+            contentBlock.style.setProperty('display', 'none', 'important');
+            parentGroup.classList.add('collapsed');
+            parentGroup.classList.remove('open');
+          }
+        }
+        return;
+      }
+
+      // 2. MANAGEMENT FOR SELECTION NAV ITEMS CLICK
+      const selectItem = e.target.closest('.cs-mod-select-item');
+      if (selectItem) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        const targetModule = selectItem.getAttribute('data-mod-target');
+        const parentGroup = document.getElementById('grpCsModuleWorkspace') || document.querySelector('.g-cs-workspace');
+        const contentBlock = document.getElementById('csModulePanelContent') || parentGroup?.querySelector('.navgrp-items');
+
+        if (contentBlock) {
+          contentBlock.querySelectorAll('.cs-mod-select-item').forEach(btn => btn.classList.remove('on'));
+        }
+        selectItem.classList.add('on');
+
+        // Dynamic Routing state assignment
+        if (targetModule === 'dashboard') {
+          window.location.hash = '#cs'; 
+        } else if (targetModule === 'management') {
+          window.location.hash = '#cs_dashboard'; 
+        }
+
+        if (contentBlock && parentGroup) {
+          contentBlock.style.setProperty('display', 'none', 'important');
+          parentGroup.classList.add('collapsed');
+          parentGroup.classList.remove('open');
+        }
+        return;
+      }
+    };
+
+    document.addEventListener('click', window._globalNavGrpRouterInstance, true);
+
+    // CENTRAL APPLICATION ROUTER SWITCH BRIDGE (FIXES "COULD NOT LOAD" ERROR)
+    function syncActiveLabelState() {
+      const activeHash = window.location.hash;
+      const contentBlock = document.getElementById('csModulePanelContent');
+      const labelSpan = document.getElementById('csCurrentActiveModuleLabel');
+      const moduleViewport = document.getElementById('moduleView');
+      const homeViewport = document.getElementById('homeView');
+      
+      if (!contentBlock || !moduleViewport) return;
+
+      // Clean default highlighted layouts
+      contentBlock.querySelectorAll('.cs-mod-select-item').forEach(b => b.classList.remove('on'));
+
+      // Case A: Workspace Module Route (#cs)
+      if (activeHash === '#cs' || activeHash === '' || activeHash.startsWith('#cs/')) {
+        if (labelSpan) labelSpan.textContent = "Workspace";
+        contentBlock.querySelector('[data-mod-target="dashboard"]')?.classList.add('on');
+        
+        // Execute native framework routing mount if exists
+        if (window.fkModules && window.fkModules['cs']) {
+          if (homeViewport) homeViewport.style.display = 'none';
+          moduleViewport.style.display = 'block';
+          moduleViewport.innerHTML = window.fkModules['cs'].render();
+          window.fkModules['cs'].mount(moduleViewport);
+        }
+      } 
+      // Case B: Analytical Dashboard Module Route (#cs_dashboard)
+      else if (activeHash === '#cs_dashboard') {
+        if (labelSpan) labelSpan.textContent = "cs Dashboard";
+        contentBlock.querySelector('[data-mod-target="management"]')?.classList.add('on');
+        
+        // Render out your newly created cs_dashboard layout cleanly into the center container view
+        if (window.fkModules && window.fkModules['cs_dashboard']) {
+          if (homeViewport) homeViewport.style.display = 'none';
+          moduleViewport.style.display = 'block';
+          
+          // Execute framework mount protocols safely
+          moduleViewport.innerHTML = window.fkModules['cs_dashboard'].render();
+          window.fkModules['cs_dashboard'].mount(moduleViewport);
+        }
+      }
+    }
+
+    // Bind state changes to window shell listeners
+    window.addEventListener('hashchange', syncActiveLabelState);
+    window.addEventListener('DOMContentLoaded', syncActiveLabelState);
+    setTimeout(syncActiveLabelState, 250);
+  })();
+</script>
+<script>
+  (function() {
+    // Purane hooks ko safely clear karke override prevent karein
+    if (window._globalNavGrpRouterInstance) {
+      document.removeEventListener('click', window._globalNavGrpRouterInstance);
+    }
+
+    window._globalNavGrpRouterInstance = function(e) {
+      // 1. ACCORDION HEADER CLICK (OPEN/CLOSE DOWNWARD EXPAND)
+      const panelToggle = e.target.closest('#csModulePanelToggleBtn');
+      if (panelToggle) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        const contentBlock = document.getElementById('csModulePanelContent');
+        const chevronIcon = document.getElementById('csModulePanelChevron');
+
+        if (contentBlock) {
+          const isHidden = contentBlock.style.display === 'none' || contentBlock.style.display === '';
+          if (isHidden) {
+            contentBlock.style.setProperty('display', 'flex', 'important');
+            panelToggle.classList.add('open');
+            if (chevronIcon) chevronIcon.style.transform = 'rotate(-180deg)';
+          } else {
+            contentBlock.style.setProperty('display', 'none', 'important');
+            panelToggle.classList.remove('open');
+            if (chevronIcon) chevronIcon.style.transform = 'rotate(0deg)';
+          }
+        }
+        return;
+      }
+
+      // 2. INTERNAL SELECTION ITEM CLICK (WORKSPACE vs CS DASHBOARD)
+      const selectItem = e.target.closest('.cs-mod-select-item');
+      if (selectItem) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        const targetModule = selectItem.dataset.modTarget; // 'dashboard' or 'management'
+        const labelText = selectItem.querySelector('span').innerText.trim();
+
+        // Target active title text synchronize
+        const labelSpan = document.getElementById('csCurrentActiveModuleLabel');
+        if (labelSpan) labelSpan.textContent = labelText;
+
+        const contentBlock = document.getElementById('csModulePanelContent');
+        if (contentBlock) {
+          contentBlock.querySelectorAll('.cs-mod-select-item').forEach(btn => {
+            btn.classList.remove('on');
+          });
+          selectItem.classList.add('on'); // Highlight item
+          
+          // Selection perform hone ke baad panel wapas automatically collapse ho jaye
+          contentBlock.style.setProperty('display', 'none', 'important');
+          const chevronIcon = document.getElementById('csModulePanelChevron');
+          if (chevronIcon) chevronIcon.style.transform = 'rotate(0deg)';
+          const headingToggle = document.getElementById('csModulePanelToggleBtn');
+          if (headingToggle) headingToggle.classList.remove('open');
+        }
+
+        // 3. HARDWARE-LEVEL SPA HASH ROUTING SWITCH
+        if (targetModule === 'dashboard') {
+          // Workspace active file component load karne ke liye hash link badlein
+          window.location.hash = '#cs'; 
+
+          // Fallback force click automatic if layout is loaded
+          setTimeout(() => {
+            const allWorkBtn = document.querySelector('button[data-view="all_tickets"]');
+            if (allWorkBtn) allWorkBtn.click();
+          }, 150);
+
+        } else if (targetModule === 'management') {
+          // Analytical Dashboard loading engine hook
+          window.location.hash = '#cs_dashboard'; 
+        }
+        return;
+      }
+    };
+
+    // Absolute global root document setup
+    document.addEventListener('click', window._globalNavGrpRouterInstance);
+
+    // Initial state recovery engine on page load/reloads
+    function syncActiveLabelState() {
+      const activeHash = window.location.hash;
+      const labelSpan = document.getElementById('csCurrentActiveModuleLabel');
+      const contentBlock = document.getElementById('csModulePanelContent');
+      
+      if (!labelSpan) return;
+
+      if (activeHash === '#cs' || activeHash === '' || activeHash.startsWith('#cs/')) {
+        labelSpan.textContent = "Customer Service"; // Default branding indicator text
+        if (contentBlock) {
+          contentBlock.querySelectorAll('.cs-mod-select-item').forEach(b => b.classList.remove('on'));
+          contentBlock.querySelector('[data-mod-target="dashboard"]')?.classList.add('on');
+        }
+      } else if (activeHash === '#cs_dashboard') {
+        labelSpan.textContent = "cs Dashboard";
+        if (contentBlock) {
+          contentBlock.querySelectorAll('.cs-mod-select-item').forEach(b => b.classList.remove('on'));
+          contentBlock.querySelector('[data-mod-target="management"]')?.classList.add('on');
+        }
+      }
+    }
+
+    window.addEventListener('hashchange', syncActiveLabelState);
+    window.addEventListener('DOMContentLoaded', syncActiveLabelState);
+    setTimeout(syncActiveLabelState, 200); // Browser thread rendering safe buffer execution
+  })();
+
 // ===================================================================
 // FK Home — main app script
 // ===================================================================
@@ -1640,13 +1843,12 @@ async function init() {
     fetchTeamChat();
     loadAttendanceToday();
     loadDailyReport();
-    refreshDailyBanner();    // r1.49 — show the submit-before-sign-out / missed-yesterday banner
     loadAttOverview();
     loadMyTasks();           // r0.10
     loadMyOnboarding();      // r0.10
     loadMyExit();            // offboarding — leaver nudge
     loadActiveExits();       // offboarding — HR exits-in-progress
-    startPresence();
+    startHeartbeat();
     startBreakCountdown();
     startPolling();
     fkRoute();               // r0.13 — set active nav item based on hash
@@ -1682,6 +1884,7 @@ function render() {
   if (deptSlugs.includes('amazon')) show('navAmazon');
   if (deptSlugs.includes('google')) show('navGoogle');
   if (deptSlugs.includes('logistics')) show('navLogistics');
+  if (deptSlugs.includes('cs') || can('cs.tickets.view')) show('navCustomerService');
 
   // Team work — managers / leads / owner (anyone who can see a team's work)
   if (can('*') || can('leaves.approve.any') || can('leaves.approve.dept')
@@ -1724,20 +1927,10 @@ function render() {
   }
   if (anyHR) { const g = document.getElementById('grpHR'); if (g) g.style.display = ''; }
 
-  // r1.32 — Finance (Accounts) group: owner + anyone with accounts access.
-  if (can('*') || can('accounts.view')) {
-    const g = document.getElementById('grpFinance'); if (g) g.style.display = '';
-  }
-
   // SYSTEM section — owner-level mostly
   let anySys = false;
   if (can('admin.settings.edit')) {
     show('navSysHolidays'); show('navSysAttPolicy'); show('navSysSettings'); anySys = true;
-  } else if (can('attendance.device.trust') || can('attendance.view.any')) {
-    // Device authorisation lives in Settings but is granted more widely (HR, Ops deputy,
-    // Head of Operations) than admin.settings.edit. Let them open Settings — they'll only
-    // see the "Trusted office devices" card; the admin-only cards stay hidden for them.
-    show('navSysSettings'); anySys = true;
   }
   if (can('admin.cs_rota.edit')) {
     show('navSysCsRota'); anySys = true;
@@ -1790,7 +1983,7 @@ function render() {
     if (saved === '1') { grp.classList.add('collapsed'); items.style.maxHeight = '0px'; }
     else setOpenHeight();
   }
-  ['grpHR', 'grpDay', 'grpSystem', 'grpYou', 'grpAcademy', 'grpFinance'].forEach(setupNavGroup);
+  ['grpHR', 'grpDay', 'grpSystem', 'grpYou', 'grpAcademy'].forEach(setupNavGroup);
   // Keep open groups correctly sized if the window resizes. Bind ONCE — render()
   // runs on every reload(), so an unguarded listener here would stack too.
   if (!window.__fkNavResizeBound) {
@@ -1868,7 +2061,7 @@ function applyStatusPill(s) {
   pill.className = 'status-pill';
   const map = {
     active: 'Active', idle: 'Idle', running_late: 'Running late',
-    on_break: 'On break', heads_down: 'Heads down', off_sick: 'Take rest',
+    on_break: 'On break', heads_down: 'Heads down', resting: 'Resting', off_sick: 'Off sick',
     in_meeting: 'In meeting', wfh: 'Working from home',
     on_leave: 'On leave', offline: 'Active'
   };
@@ -2130,8 +2323,8 @@ function renderPeople(people) {
     list.classList.remove('scrollable');
     return;
   }
-  const onCount = people.filter(p => p.status === 'active').length;
-  meta.textContent = `${onCount} of ${people.length} on`;
+  const inCount = people.filter(p => p.board_state === 'in').length;
+  meta.textContent = `${inCount} in today`;
 
   // Show search box + scrollable list once there are more than 6 people
   if (people.length > 6) {
@@ -2158,34 +2351,45 @@ function filterPeople() {
   list.innerHTML = matches.map(renderPersonRow).join('');
 }
 function renderPersonRow(p) {
-  const statusColour = {
-    active: '#639922', idle: '#EF9F27', running_late: '#EF9F27',
-    on_break: '#85B7EB', heads_down: '#7F77DD', off_sick: '#A32D2D',
-    in_meeting: '#378ADD', wfh: '#1D9E75',
-    on_leave: '#888780', offline: '#B4B2A9'
-  }[p.status] || '#B4B2A9';
-  const STATUS_BADGE = {
-    heads_down: ['Heads down', '#7F77DD'],
-    in_meeting: ['In meeting', '#378ADD'],
-    on_break:   ['On break',   '#85B7EB'],
-    wfh:        ['WFH',        '#1D9E75'],
-    off_sick:   ['Take rest',  '#A32D2D'],
-    on_leave:   ['On leave',   '#888780'],
+  const deptColour = p.avatar_colour || '#B4B2A9';
+  const initials = (p.initials || String(p.full_name || p.name || '?').trim().slice(0, 2)).toUpperCase();
+  // Presence label + colour for people who ARE in today. 'resting' = the casual "Take rest"
+  // (at work, just on a breather) — distinct from off_sick, which is a dated day off.
+  const PRESENCE = {
+    active:       ['Active',            '#639922'],
+    resting:      ['Resting',           '#7E9AAE'],
+    on_break:     ['On break',          '#85B7EB'],
+    heads_down:   ['Heads down',        '#7F77DD'],
+    in_meeting:   ['In meeting',        '#378ADD'],
+    wfh:          ['Working from home', '#1D9E75'],
+    running_late: ['Running late',      '#EF9F27'],
+    idle:         ['Idle',              '#EF9F27'],
+    offline:      ['Away',              '#B4B2A9'],
   };
-  const bd = STATUS_BADGE[p.status];
-  const badge = bd ? `<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:99px;white-space:nowrap;margin-right:8px;background:${bd[1]}1A;color:${bd[1]}">${bd[0]}</span>` : '';
-  const isLate = p.status === 'running_late';
-  const isOff = p.status === 'off_sick' || p.status === 'on_leave' || p.status === 'offline';
-  const role = isLate ? `<span class="person-late">${p.status_note || 'Running late'}</span>` : (p.role_label || '—');
+  const OFF_REASON = {
+    on_leave: 'On leave', off_sick: 'Off sick', off_holiday: 'On holiday',
+    off_cs_rota: 'Off (rota)', off_pattern: 'Off today',
+  };
+  let dotColour, statusText, cardOff = false;
+  if (p.board_state === 'off') {
+    cardOff = true; dotColour = '#B4B2A9';
+    statusText = OFF_REASON[p.off_reason] || 'Off today';
+  } else if (p.board_state === 'not_in') {
+    dotColour = '#C9C7BF'; statusText = 'Not in yet';
+  } else {
+    const pr = PRESENCE[p.status] || PRESENCE.active;
+    dotColour = pr[1];
+    statusText = (p.status === 'running_late' && p.status_note) ? p.status_note : pr[0];
+  }
   return `
-    <div class="person">
-      <span class="person-dot" style="background:${statusColour}"></span>
-      <div class="person-main">
-        <p class="person-name" style="${isOff ? 'color:var(--soft)' : ''}">${escapeHtml(p.full_name || p.name)}</p>
-        <p class="person-role">${role}</p>
+    <div class="pcard${cardOff ? ' off' : ''}" style="border-left-color:${deptColour}">
+      <div class="pcard-av" style="background:${cardOff ? '#B4B2A9' : deptColour}">${escapeHtml(initials)}</div>
+      <div class="pcard-main">
+        <div class="pcard-name">${escapeHtml(p.full_name || p.name)}</div>
+        <div class="pcard-role">${escapeHtml(p.role_label || '\u2014')}</div>
+        <div class="pcard-stat"><span class="dot" style="background:${dotColour}"></span>${escapeHtml(statusText)}</div>
       </div>
-      ${badge}
-      <button class="person-msg-btn" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
+      <button class="pcard-msg" onclick="openDM(${p.id})" title="Message ${escapeAttr(p.name)}">Message</button>
     </div>`;
 }
 async function openDM(userId) {
@@ -2280,71 +2484,38 @@ function findOpenProfile(userId) {
 function escapeAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;'); }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// --- PRESENCE ---
-// The heartbeat is a blunt signal: it only knows "FK Home tab open + machine awake", so
-// it can't tell "working in another app" from "walked away but PC still on". Where the
-// browser supports it (Chrome/Edge), we use the Idle Detection API instead, which reports
-// real user input ANYWHERE on the machine + whether the screen is locked — so any typing
-// in any app counts as present, and we only mark someone away when there's genuinely no
-// input or the screen is locked. Where it's unavailable or declined, we fall back to the
-// heartbeat, so nothing regresses.
-function beatNow() {
-  fetch('/api/me/heartbeat', {
-    method: 'POST', credentials: 'include',
-    headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop', 'x-fk-bg': '1' }
-  }).catch(() => {});
-}
-// Fallback presence: ping while the tab is open + machine awake. Returns a stop() handle
-// so we can hand over to idle-detection if the user opts in.
+// --- HEARTBEAT ---
 function startHeartbeat() {
-  beatNow();
-  var id = setInterval(beatNow, 30000);
-  var vis = function () { if (!document.hidden) beatNow(); };
-  document.addEventListener('visibilitychange', vis);
-  return function stop() { clearInterval(id); document.removeEventListener('visibilitychange', vis); };
-}
-// True presence: ping only while the user is genuinely active anywhere and unlocked.
-async function startIdlePresence(stopFallback) {
-  try {
-    var detector = new IdleDetector();
-    var active = function () { return detector.userState === 'active' && detector.screenState === 'unlocked'; };
-    detector.addEventListener('change', function () { if (active()) beatNow(); });
-    await detector.start({ threshold: 60000 });   // min allowed; we measure idle in minutes anyway
-    if (typeof stopFallback === 'function') stopFallback();  // hand over from the blunt heartbeat
-    beatNow();
-    setInterval(function () { if (active()) beatNow(); }, 30000);
+  // r1.27 — "active" means the person is at their computer with FK Home open, NOT that
+  // FK Home is the focused tab. The team works all day in Seller Central / Excel / email
+  // with FK Home in a background tab; the old `if (document.hidden) return` paused the
+  // heartbeat there, so the server saw no beat for 5 min and falsely flipped them to idle
+  // (and fired the 20-min idle alert). We now beat regardless of focus, and beat again on
+  // refocus to cover any browser background-timer throttling.
+  const beat = () => fetch('/api/me/heartbeat', {
+    method: 'POST', credentials: 'include',
+    headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' }
+  }).catch(()=>{});
+  // The FIRST beat of the day is what stamps the clock-in. fkClockInMaybe() must run
+  // AFTER that, or it sees "not clocked in yet" and the selfie only appears on a manual
+  // refresh. So fire the selfie check once the first beat lands.
+  beat().then(() => { if (window.fkClockInMaybe) window.fkClockInMaybe(); });
+  setInterval(beat, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) beat(); });
+
+  // r1.27 — live refresh: the app used to only re-fetch after YOUR own actions, so other
+  // people's status changes and the evening auto-clock-out never showed without a manual
+  // refresh. Poll the dashboard + board every 45s — but skip while a modal is open or the
+  // user is typing, so it never wipes an in-progress action. Also refresh on refocus.
+  const canRefresh = () => {
+    if (document.hidden) return false;
+    if (document.querySelector('.modal-bg.on') || document.getElementById('fk-clockin-ovl') || document.querySelector('.mw-form.on')) return false;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return false;
     return true;
-  } catch (e) { return false; }
-}
-function showPresenceEnableBar(onEnable) {
-  if (document.getElementById('fkPresenceBar')) return;
-  var bar = document.createElement('div');
-  bar.id = 'fkPresenceBar';
-  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:1100;background:#2A2622;color:#fff;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px;font-size:14px;box-shadow:0 -2px 12px rgba(0,0,0,.2)';
-  bar.innerHTML = '<span>Turn on away-detection so you\u2019re counted present while you work in other apps \u2014 and only marked away when you actually step away.</span>' +
-    '<span style="white-space:nowrap"><button id="fkPresenceYes" style="background:#E8722B;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer">Turn on</button> ' +
-    '<button id="fkPresenceNo" style="background:transparent;color:#c9bcae;border:none;cursor:pointer;padding:8px">Not now</button></span>';
-  document.body.appendChild(bar);
-  document.getElementById('fkPresenceNo').onclick = function () { bar.remove(); };
-  document.getElementById('fkPresenceYes').onclick = async function () { await onEnable(); bar.remove(); };
-}
-function startPresence() {
-  var stopFallback = startHeartbeat();           // start presence immediately; never blank
-  if (!('IdleDetector' in window) || !window.isSecureContext) return;
-  (async function () {
-    var state = 'prompt';
-    try { state = (await navigator.permissions.query({ name: 'idle-detection' })).state; } catch (e) {}
-    if (state === 'denied') return;              // keep fallback
-    if (state === 'granted') { await startIdlePresence(stopFallback); return; }
-    // 'prompt' — needs a click. Keep fallback running; offer the one-time switch.
-    showPresenceEnableBar(async function () {
-      try {
-        var p = await IdleDetector.requestPermission();   // must be from this gesture
-        if (p === 'granted') return await startIdlePresence(stopFallback);
-      } catch (e) {}
-      return false;
-    });
-  })();
+  };
+  setInterval(() => { if (canRefresh() && typeof reload === 'function') reload().catch(()=>{}); }, 45000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && canRefresh() && typeof reload === 'function') reload().catch(()=>{}); });
 }
 
 // --- MODALS ---
@@ -2411,7 +2582,7 @@ function openStatusModal() {
     { v: 'active',     label: 'Active',            desc: 'Working as usual',                      icon: 'ti-circle-filled' },
     { v: 'in_meeting', label: 'In meeting',        desc: 'In a call or meeting',                  icon: 'ti-users' },
     { v: 'heads_down', label: 'Heads down',        desc: 'Focus mode — please don\'t interrupt', icon: 'ti-headphones' },
-    { v: 'off_sick',   label: 'Take rest',         desc: 'Resting \u2014 flip back to Active when you return', icon: 'ti-bed' },
+    { v: 'resting',    label: 'Take rest',         desc: 'A breather \u2014 flip back to Active when you return', icon: 'ti-bed' },
     { v: 'wfh',        label: 'Working from home', desc: 'Asks for your location',                icon: 'ti-home' },
   ];
   const wrap = document.getElementById('statusOptions');
@@ -2477,14 +2648,13 @@ function wfhBlockedMessage() {
 }
 
 async function setStatus(s) {
-  if (s === 'off_sick') {
-    // r1.25 — "Take rest" is a TEMPORARY presence status (rest a while, then flip
-    // back to Active), not a formal sick day. Set presence only via /status; do NOT
-    // call /me/sick (which marked the whole attendance day off_sick and left a stale
-    // "sick" on the manager's Company-today even after the person returned to Active).
+  if (s === 'resting') {
+    // r1.27 — "Take rest" is a momentary presence (a breather at work), NOT a sick day.
+    // It sets presence='resting' via /status only — never a sick_log, never attendance,
+    // and it never blocks leave. Flips back to Active when they return (or on next clock-in).
     closeModal('statusModal');
     try {
-      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'off_sick' }) });
+      const r = await fetch('/api/me/status', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ status: 'resting' }) });
       if (!r.ok) { alert('Failed to update'); return; }
       await reload();
     } catch (err) { alert('Network error'); }
@@ -3036,19 +3206,6 @@ document.addEventListener('click', (e) => {
 
 // --- LOGOUT ---
 async function logout() {
-  // r1.49 — you must submit today's report before signing out. Owner / HR / company-manager
-  // are exempt (they can sign out), but they still see the reminder banner.
-  try {
-    const rr = await fetch('/api/daily/reminder', { credentials: 'include' });
-    if (rr.ok) {
-      const d = await rr.json();
-      if (d.today_worked && !d.today_submitted && !_dailyExempt()) {
-        alert('Please submit today\u2019s report before you sign out.');
-        goToDailyReport();
-        return;
-      }
-    }
-  } catch (e) { /* if the check fails, never trap the user — let them out */ }
   try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: { 'x-fk-device': isMobileDevice() ? 'mobile' : 'desktop' } }); } catch(e) {}
   window.location.href = '/login.html';
 }
@@ -3101,7 +3258,7 @@ function formatTime(t) {
 function statusLabel(s) {
   return ({
     on_time: 'On time', late: 'Late', very_late: 'Very late', not_yet_in: 'Not yet in',
-    on_leave: 'On leave', off_sick: 'Take rest',
+    on_leave: 'On leave', off_sick: 'Off sick',
     off_pattern: 'Off (pattern)', off_cs_rota: 'Off (rota)', off_holiday: 'Off (holiday)',
     worked_voluntary: 'Worked', pending: 'Not yet in'
   })[s] || s || '—';
@@ -3175,7 +3332,35 @@ let dailyReportLocked = false;
 let dailyReportSaveTimer = null;
 let dailyReportLastSavedText = '';
 
+// r1.28 — big, can't-miss reminder shown across the top of the content if YESTERDAY was
+// worked but the daily report was never submitted. Replaces the silent midnight auto-submit.
+// Dismissable for the session; returns next login while the report is still missing.
+function showDailyReportReminder() {
+  if (document.getElementById('fkReportReminder')) return;
+  try { if (sessionStorage.getItem('fkReportReminderDismissed') === '1') return; } catch (e) {}
+  fetch('/api/daily/reminder', { credentials: 'include' })
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (!d || !d.unsubmitted) return;
+      const host = document.querySelector('main.content') || document.body;
+      const bar = document.createElement('div');
+      bar.id = 'fkReportReminder';
+      bar.style.cssText = 'position:sticky;top:0;z-index:1500;background:#E8722B;color:#fff;padding:15px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 3px 12px rgba(0,0,0,.18);font-size:16px;font-weight:500';
+      bar.innerHTML =
+        '<i class="ti ti-alert-triangle" style="font-size:24px;flex-shrink:0"></i>' +
+        '<span style="flex:1;line-height:1.4">You didn\u2019t submit yesterday\u2019s report. Please finish it and submit \u2014 it won\u2019t submit itself.</span>' +
+        '<button id="fkReportGo" style="background:#fff;color:#C2562E;border:none;border-radius:10px;padding:10px 20px;font-weight:700;font-size:15px;cursor:pointer;flex-shrink:0">Submit it now</button>' +
+        '<button id="fkReportX" title="Hide for now" style="background:transparent;border:none;color:#fff;font-size:24px;cursor:pointer;line-height:1;flex-shrink:0">\u00d7</button>';
+      host.insertBefore(bar, host.firstChild);
+      document.getElementById('fkReportGo').onclick = () => { location.hash = '#today'; bar.remove(); };
+      document.getElementById('fkReportX').onclick = () => { try { sessionStorage.setItem('fkReportReminderDismissed', '1'); } catch (e) {} bar.remove(); };
+    }).catch(() => {});
+}
 async function loadDailyReport() {
+  // r1.28 — the home daily-report card was removed (filed on the Today page now). This
+  // function instead shows a big, can't-miss reminder if YESTERDAY was worked but never
+  // submitted. Guarded: if the old card somehow exists, it falls through harmlessly.
+  if (!document.getElementById('dailyReportNotes')) { showDailyReportReminder(); return; }
   try {
     const r = await fetch('/api/attendance/daily-report/today', { credentials: 'include' });
     if (!r.ok) return;
@@ -3218,12 +3403,17 @@ async function loadDailyReport() {
 }
 
 function refreshDailyReportSummary() {
+  // r1.28b — the home daily-report card was removed (filed on the Today page now),
+  // so #dailyReportSummary no longer exists. Guard, or this throws when
+  // loadAttendanceToday calls it.
+  const summary = document.getElementById('dailyReportSummary');
+  if (!summary) return;
   // Pull from the Today card data already in DOM (avoids extra API call)
   const inT = document.getElementById('todayIn').textContent;
   const act = document.getElementById('todayActive').textContent;
   const idl = document.getElementById('todayIdle').textContent;
   const brk = document.getElementById('todayBreak').textContent;
-  document.getElementById('dailyReportSummary').innerHTML =
+  summary.innerHTML =
     'In <b>' + inT + '</b> · Active <b>' + act + '</b> · Idle <b>' + idl + '</b> · Break <b>' + brk + '</b>';
 }
 
@@ -3240,89 +3430,30 @@ async function saveDailyReport() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ notes, submit: true })
+      body: JSON.stringify({ notes })
     });
     const data = await r.json();
     if (!r.ok) {
-      status.textContent = data.error || 'Submit failed';
+      status.textContent = data.error || 'Save failed';
       btn.disabled = false;
-      btn.textContent = 'Submit report';
+      btn.textContent = 'Save';
       return;
     }
     dailyReportLastSavedText = notes;
-    btn.textContent = 'Submitted';
+    btn.textContent = 'Saved';
     btn.classList.add('saved');
-    status.textContent = 'Submitted just now';
-    if (typeof refreshDailyBanner === 'function') refreshDailyBanner();
+    status.textContent = 'Saved just now';
     setTimeout(() => {
       btn.disabled = false;
-      btn.textContent = 'Submit report';
+      btn.textContent = 'Save';
       btn.classList.remove('saved');
     }, 1500);
   } catch (err) {
     status.textContent = 'Network error';
     btn.disabled = false;
-    btn.textContent = 'Submit report';
+    btn.textContent = 'Save';
   }
 }
-
-// --- DAILY REPORT REMINDER BANNER + SIGN-OUT GATE (r1.49) ----
-// One server signal (/api/daily/reminder) drives both the big banner and the
-// logout gate: today_worked/today_submitted gate sign-out; yesterday "unsubmitted"
-// shows the big "you missed it" banner the next day.
-let _dailyReminder = null;
-let _dailyYDismissed = false;
-function _dailyExempt() {
-  const g = (window.me && me.group_slugs) || (window.fkUser && window.fkUser.group_slugs) || [];
-  return g.indexOf('owner') !== -1 || g.indexOf('hr-team') !== -1 || g.indexOf('company-manager') !== -1;
-}
-function ensureDailyBanner() {
-  let b = document.getElementById('fkDailyBanner');
-  if (!b) {
-    b = document.createElement('div');
-    b.id = 'fkDailyBanner';
-    b.style.cssText = 'display:none;position:sticky;top:0;z-index:1200;padding:16px 22px;font-size:16px;font-weight:600;color:#fff;align-items:center;justify-content:space-between;gap:16px;box-shadow:0 2px 12px rgba(0,0,0,.15)';
-    b.innerHTML = '<span id="fkDailyBannerTxt" style="line-height:1.4"></span>' +
-      '<button id="fkDailyBannerBtn" style="background:#fff;color:#14161B;border:none;border-radius:9px;padding:10px 18px;font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap">Submit report</button>';
-    document.body.prepend(b);
-  }
-  return b;
-}
-function goToDailyReport() {
-  if (location.hash !== '#home') location.hash = '#home';
-  setTimeout(function () {
-    var ta = document.getElementById('dailyReportNotes');
-    if (ta) { try { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {} ta.focus(); }
-  }, 130);
-}
-async function refreshDailyBanner() {
-  try {
-    const r = await fetch('/api/daily/reminder', { credentials: 'include' });
-    if (!r.ok) return;
-    _dailyReminder = await r.json();
-    const b = ensureDailyBanner();
-    const txt = document.getElementById('fkDailyBannerTxt');
-    const btn = document.getElementById('fkDailyBannerBtn');
-    if (_dailyReminder.today_prompt) {
-      b.style.background = '#C2691B';
-      txt.textContent = 'Don\u2019t forget to submit today\u2019s report before you sign out.';
-      btn.textContent = 'Submit report';
-      btn.onclick = goToDailyReport;
-      b.style.display = 'flex';
-    } else if (_dailyReminder.unsubmitted && !_dailyYDismissed) {
-      let dt = 'yesterday';
-      try { dt = new Date(_dailyReminder.for_date + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }); } catch (e) {}
-      b.style.background = '#993C1D';
-      txt.textContent = 'You did not submit your daily report for ' + dt + '.';
-      btn.textContent = 'Dismiss';
-      btn.onclick = function () { _dailyYDismissed = true; b.style.display = 'none'; };
-      b.style.display = 'flex';
-    } else {
-      b.style.display = 'none';
-    }
-  } catch (e) { /* never block the app on the banner */ }
-}
-document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshDailyBanner(); });
 
 // --- COMPANY / TEAM TODAY (HR / owner / dept manager) --------
 let attOverviewMode = null;   // 'company' | 'dept' | null
@@ -3624,7 +3755,7 @@ window.fkRenderCockpit = async function (isOwner, isManager) {
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmtD = (d) => { if (!d) return ''; const p = String(d).slice(0, 10).split('-'); if (p.length !== 3) return ''; const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (p[2] * 1) + ' ' + (M[p[1] * 1 - 1] || ''); };
   const av = (p) => '<div class="ck-av" style="background:' + (p.colour || p.avatar_colour || '#888') + '">' + esc(p.initials || '') + '</div>';
-  const STAT = { on_leave: 'On leave', off_sick: 'Take rest', wfh: 'Working from home', off_holiday: 'On holiday' };
+  const STAT = { on_leave: 'On leave', resting: 'Resting', off_sick: 'Off sick', wfh: 'Working from home', off_holiday: 'On holiday' };
 
   const waiting = data.waiting || [];
   const present = data.present || [];
