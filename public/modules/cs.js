@@ -2037,29 +2037,46 @@ function renderAttachments(attachments) {
   if (!attachments || attachments.length === 0) return '';
   const list = typeof attachments === 'string' ? JSON.parse(attachments) : attachments;
   if (!list.length) return '';
+  
   const imgs = [], files = [];
   list.forEach(a => {
     const mime = a.mime || a.type || '';
-    const src  = a.data || a.url || '';
+    // 🎯 FIX: Agar backend se sirf raw data aa raha hai bina proper prefix ke, toh yahan treat karein
+    let src  = a.data || a.url || '';
     const name = a.name || 'attachment';
+
+    // Safe check: Agar base64 data hai par usme data:image prefix missing hai toh add karein
+    if (src.startsWith('data:') === false && (mime.startsWith('image/') || src.length > 500)) {
+      src = `data:${mime || 'image/jpeg'};base64,${src}`;
+    }
+
     if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(name)) {
       imgs.push({ src, name });
     } else {
       files.push({ src, name, mime });
     }
   });
+
   let html = '';
   if (imgs.length) {
-    html += '<div class="cs-msg-img-grid">' +
-      imgs.map(i => '<img class="cs-msg-thumb" src="' + esc(i.src) + '" alt="' + esc(i.name) + '" title="' + esc(i.name) + '" data-lightbox="' + esc(i.src) + '">').join('') +
+    html += '<div class="cs-msg-img-grid" style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">' +
+      imgs.map(i => `
+        <img class="cs-msg-thumb" 
+             src="${i.src}" 
+             alt="${esc(i.name)}" 
+             title="${esc(i.name)}" 
+             data-lightbox="${i.src}" 
+             style="width: 120px; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(0,0,0,0.1); cursor: pointer;"
+             onerror="this.onerror=null; console.error('Image load failed:', this.src); this.style.border='2px solid red';" />
+      `).join('') +
     '</div>';
   }
   if (files.length) {
     html += '<div class="cs-msg-file-list">' +
       files.map(f => {
         const ext = (f.name.split('.').pop() || 'file').toUpperCase().slice(0, 6);
-        const dlAttr = f.src ? 'href="' + esc(f.src) + '" download="' + esc(f.name) + '"' : '';
-        return '<a class="cs-msg-file-chip" ' + dlAttr + ' target="_blank" rel="noopener"><span class="cs-msg-file-ext">' + esc(ext) + '</span><span class="cs-msg-file-name">' + esc(f.name) + '</span><i class="ti ti-download" style="font-size:13px;flex:none;opacity:.6"></i></a>';
+        const dlAttr = f.src ? `href="${esc(f.src)}"` : '';
+        return `<a class="cs-msg-file-chip" ${dlAttr} download="${esc(f.name)}" target="_blank" rel="noopener"><span class="cs-msg-file-ext">${esc(ext)}</span><span class="cs-msg-file-name">${esc(f.name)}</span></a>`;
       }).join('') +
     '</div>';
   }
@@ -2072,11 +2089,14 @@ function renderTimeline(data) {
   let prevDay = null;
 
   events.forEach((ev, idx) => {
-    const isNewest = idx === events.length - 1; // last in array = newest (sorted asc, oldest first)
+    const isNewest = idx === events.length - 1; // Last element in array = newest
+    
+    // 1. CUSTOMER MESSAGES OR AGENT REPLIES CHANNEL
     if (ev.kind === 'message') {
       const m = ev.data;
       const d = dayLabel(m.at);
       if (d && d !== prevDay) { out += `<div class="cs-day-sep">${esc(d)}</div>`; prevDay = d; }
+      
       const pendingCls = m.pending ? ' pending' : '';
       const isReply = m.dir === 'out';
       const newestCls = isNewest ? ' cs-msg-newest' : '';
@@ -2084,21 +2104,36 @@ function renderTimeline(data) {
       const newestBadge = isNewest ? `<span class="cs-msg-newest-badge">${isReply ? 'Latest Reply' : 'Latest Message'}</span>` : '';
       const msgAtts = m.attachments ? renderAttachments(m.attachments) : '';
 
+      // 🎯 FIXED: Agar outbound reply hai toh sender name dynamic "You" ya database creator name aayega, warna customer name.
+      const displayName = isReply ? (m.who || (bootstrap.user && bootstrap.user.name) || 'You') : (m.who || 'Customer');
+
       out += `<div class="cs-msg ${esc(m.dir)}${newestCls}">
-                <div class="cs-msg-meta"><span class="who">${esc(m.who)}</span><span>${esc(m.at)}</span>${statusTag}${newestBadge}</div>
+                <div class="cs-msg-meta">
+                  <span class="who" style="font-weight:700; color:#2B2017;">${esc(displayName)}</span>
+                  <span>${esc(m.at || 'Just now')}</span>
+                  ${statusTag}${newestBadge}
+                </div>
                 <div class="cs-msg-bubble${pendingCls}">${esc(m.body)}${msgAtts}</div>
               </div>`;
     } 
+    // 2. INTERNAL TEAM NOTES CHANNEL
     else if (ev.kind === 'team-note') {
       const n = ev.data;
       const newestCls = isNewest ? ' cs-tl-note-newest' : '';
       const noteAtts = n.attachments ? renderAttachments(n.attachments) : '';
+      
+      // 🎯 FIXED: Note jis individual system agent ne submit kiya hai (`authorName`), exact usi ka profile label display hoga.
+      const noteAuthor = n.authorName || (String(n.authorId) === String(bootstrap.user?.id) ? ((bootstrap.user && bootstrap.user.name) || 'You') : 'Team Member');
+
       out += `<div class="cs-tl-note${newestCls}">
-                <div class="cs-tl-note-head"><i class="ti ti-note"></i> Internal note · ${esc(n.authorName)}</div>
+                <div class="cs-tl-note-head" style="color:#8A6A1E; font-weight:700;">
+                  <i class="ti ti-note"></i> Internal note · ${esc(noteAuthor)}
+                </div>
                 <div class="cs-tl-note-body">${highlightMentions(n.body)}${noteAtts}</div>
                 <div class="cs-tl-note-time">${esc(noteTimeLabel(n.createdAt))}</div>
               </div>`;
     } 
+    // 3. SYSTEM LIFECYCLE EVENTS OVERVIEW CHANNEL
     else if (ev.kind === 'system') {
       out += `<div class="cs-tl-sys">${systemEventText(ev.data)} <span style="color:var(--soft)">· ${esc(noteTimeLabel(ev.data.at))}</span></div>`;
     }
@@ -2295,6 +2330,58 @@ function renderTimeline(data) {
       const attachBtn = $('#csPNoteAttachBtn');
       if (attachBtn) attachBtn.addEventListener('click', () => $('#csPersonalNoteFile').click());
     }
+    async function handleTeamNoteSubmit() {
+  const body = $('#csNoteInput').value.trim();
+  if (!body || !selectedId) return;
+
+  try {
+    if (useApi) {
+      const endpoint = '/cases/' + selectedId + '/notes';
+      if (editingNoteId) {
+        await api(endpoint + '/' + editingNoteId, { 
+          method: 'PATCH', 
+          body: JSON.stringify({ body, attachments: notePendingAttachments, kind: 'team' }) 
+        });
+      } else {
+        await api(endpoint, { 
+          method: 'POST', 
+          body: JSON.stringify({ body, attachments: notePendingAttachments, kind: 'team' }) 
+        });
+      }
+    } else {
+      // Local development simulation stream mutation
+      const d = localStore[selectedId] || (localStore[selectedId] = { thread: [], notes: { team: [], personal: {} }, assignmentLog: [] });
+      if (!d.notes || Array.isArray(d.notes)) d.notes = { team: [], personal: {} };
+      
+      if (editingNoteId) {
+        const n = d.notes.team.find((x) => x.id === editingNoteId);
+        if (n) { n.body = body; n.attachments = notePendingAttachments.slice(); }
+      } else {
+        d.notes.team.push({ 
+          id: Date.now(), 
+          authorId: bootstrap.user.id || 1, 
+          authorName: bootstrap.user.name || 'You', 
+          body, 
+          attachments: notePendingAttachments.slice(), // 👈 Captures files+images
+          canEdit: true, 
+          createdAt: new Date().toISOString() 
+        });
+      }
+    }
+
+    // Resetting inputs fields state channels cleanly
+    $('#csNoteInput').value = '';
+    notePendingAttachments = [];
+    editingNoteId = null;
+    $('#csNoteSave').textContent = 'Add note';
+    renderPendingAtts();
+    
+    toast('Team note saved successfully');
+    refreshCase(selectedId, { resetDrafts: false });
+  } catch (e) { 
+    toast(e.message); 
+  }
+}
 
     function wirePersonalNoteActions() {
       const toggleBtn = $('#csPNoteToggle');
@@ -2332,6 +2419,54 @@ function renderTimeline(data) {
         } catch (e) { toast(e.message || 'Could not delete personal note'); }
       });
     }
+
+
+    // Triggered on #csCompose submission or direct click
+async function handleCustomerReplySubmit() {
+  if (slashActive) return;
+  const text = $('#csReply').value.trim();
+  if (!text || !selectedId) return;
+  if (pendingReply) { toast('Already sending a reply — wait or undo first'); return; }
+
+  const item = queue.find((c) => c.id === selectedId);
+  $('#csReply').value = '';
+
+  // 🟢 Snapshot capture handles both files & images safely
+  const replyAttsSnapshot = replyPendingAttachments.slice();
+  replyPendingAttachments = [];
+  renderReplyPendingAtts();
+
+  // Local state preview simulation mapping
+  const msgId = 'pending-' + Date.now();
+  const d = localStore[selectedId] || (localStore[selectedId] = { thread: [], notes: { team: [], personal: [] }, assignmentLog: [] });
+  
+  d.thread.push({ 
+    id: msgId, 
+    dir: 'out', 
+    who: 'You', 
+    at: 'Just now', 
+    createdAt: new Date().toISOString(), 
+    body: text, 
+    attachments: replyAttsSnapshot, // 👈 Pushed inside local UI layer instantly
+    pending: true 
+  });
+
+  if (selectedId) refreshCase(selectedId, { resetDrafts: false });
+
+  // Start back-end API persistence call sequence
+  try {
+    if (useApi) {
+      await api('/cases/' + selectedId + '/reply', { 
+        method: 'POST', 
+        body: JSON.stringify({ body: text, attachments: replyAttsSnapshot }) 
+      });
+    }
+    toast('Reply sent successfully ✓');
+    await loadQueue();
+  } catch (err) {
+    toast('Error: ' + err.message);
+  }
+}
 
     async function fetchCase(id) {
       if (useApi) return api('/cases/' + encodeURIComponent(id));
@@ -3021,25 +3156,39 @@ function renderTimeline(data) {
       if (!silent) toast('Reply canceled — text restored');
     }
 
-    async function commitPendingReply() {
-      if (!pendingReply) return;
-      const { caseId, text, msgId, attachments: replyAtts } = pendingReply;
-      pendingReply = null;
-      $('#csUndoToast').classList.remove('show');
-      try {
-        if (useApi) {
-          await api('/cases/' + caseId + '/reply', { method: 'POST', body: JSON.stringify({ body: text, attachments: replyAtts || [] }) });
-        } else {
-          const d = localStore[caseId];
-          if (d) { const msg = d.thread.find((m) => m.id === msgId); if (msg) msg.pending = false; }
-          const item = (queue.find((c) => c.id === caseId)) || SAMPLE_QUEUE.find((c) => c.id === caseId);
-          if (item) item.slaDueAt = null;
+async function commitPendingReply() {
+  if (!pendingReply) return;
+  const { caseId, text, msgId, attachments: replyAtts } = pendingReply;
+  pendingReply = null;
+  $('#csUndoToast').classList.remove('show');
+  
+  try {
+    if (useApi) {
+      await api('/cases/' + caseId + '/reply', { 
+        method: 'POST', 
+        body: JSON.stringify({ body: text, attachments: replyAtts || [] }) 
+      });
+    } else {
+      // 🟢 FIX: Local/Simulation storage mein attachments permanently link karein
+      const d = localStore[caseId];
+      if (d) { 
+        const msg = d.thread.find((m) => m.id === msgId); 
+        if (msg) {
+          msg.pending = false; 
+          msg.attachments = replyAtts; // 👈 Ye line lagana zaroori hai!
         }
-        toast('Reply sent — SLA timer stopped');
-        await loadQueue();
-        if (caseId === selectedId) refreshCase(caseId, { resetDrafts: false });
-      } catch (err) { toast(err.message || 'Failed to send reply'); }
+      }
+      const item = (queue.find((c) => c.id === caseId)) || SAMPLE_QUEUE.find((c) => c.id === caseId);
+      if (item) item.snippet = text; // Sidebar snippet update karne ke liye
     }
+    
+    toast('Reply sent successfully ✓');
+    await loadQueue();
+    if (caseId === selectedId) refreshCase(caseId, { resetDrafts: false });
+  } catch (err) { 
+    toast(err.message || 'Failed to send reply'); 
+  }
+}
 
     function startUndoCountdown(caseId, text, customerName) {
       const msgId = 'pending-' + Date.now();
