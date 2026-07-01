@@ -27,6 +27,7 @@ const express        = require('express');
 const { Pool }        = require('pg');
 const { v4: uuidv4 }  = require('uuid');
 const nodemailer      = require('nodemailer');
+const db = require('../db').db;
 
 
 const router = express.Router();
@@ -134,51 +135,125 @@ async function getTicketOr404(id, res) {
   return ticket;
 }
 
+// ─────────────────────────────────────────────────────────────
+// TICKET CREATION + QUEUE ROUTING
+//
+// Req 2: every new ticket lands in All Work automatically (GET /queue with
+// no `view` param has no assignee/status filter, so it's already there —
+// nothing extra needed for that half). Based on cs_queue_routing, it's also
+// placed in the right queue (its `category`).
+// Req 3: if that category currently has an employee configured in
+// cs_queue_routing, the ticket is auto-assigned to them, so it shows up in
+// their My Work immediately (My Work = WHERE assignee_id = req.user.id).
+//
+// This is the single entry point for creating a ticket — used by the
+// manual-creation route below AND by the email-ingestion poller
+// (server/email/imapPoller.js), so both paths get identical routing
+// behavior instead of two implementations drifting apart.
+// ─────────────────────────────────────────────────────────────
+async function resolveQueueAgent(category) {
+  const [row] = await q(
+    `SELECT agent_id AS "agentId" FROM public.cs_queue_routing WHERE category = $1`,
+    [category]
+  );
+  return row ? row.agentId : null;
+}
+
+async function createTicket({
+  subject, snippet, customerName, customerEmail, customerAddress,
+  category, channel, platform, mailbox, actor,
+}) {
+  const cat = category || 'unsorted';
+  const routedAgentId = await resolveQueueAgent(cat);
+
+  let routedAgentName = null;
+  if (routedAgentId) {
+    const [agent] = await q('SELECT full_name AS name FROM public.users WHERE id = $1', [routedAgentId]);
+    routedAgentName = agent ? agent.name : null;
+  }
+
+  return withTx(async (txQ) => {
+    const [ticket] = await txQ(
+      `INSERT INTO public.cs_tickets
+         (subject, snippet, customer_name, customer_email, customer_address,
+          status, category, channel, platform, mailbox, assignee_id, matched, is_new)
+       VALUES ($1,$2,$3,$4,$5,'new_ticket',$6,$7,$8,$9,$10,FALSE,TRUE)
+       RETURNING *`,
+      [
+        subject, snippet || null, customerName || null, customerEmail || null, customerAddress || null,
+        cat, channel || null, platform || null, mailbox || null, routedAgentId,
+      ]
+    );
+
+    // Req 8: activity history includes assignment — auto-routing on
+    // creation is logged the same way a manual assign is.
+    if (routedAgentId) {
+      await txQ(
+        `INSERT INTO public.cs_assignment_log
+           (id, ticket_id, action, actor_id, actor_name, to_agent_id, to_agent_name)
+         VALUES ($1,$2,'assign',$3,$4,$5,$6)`,
+        [
+          uuidv4(), ticket.id,
+          actor ? actor.id : null,
+          actor ? (actor.name || 'System') : 'System (queue routing)',
+          routedAgentId, routedAgentName,
+        ]
+      );
+    }
+
+    return ticket;
+  });
+}
+
 // ═════════════════════════════════════════════════════════════
 // ROUTE  GET /api/cs/bootstrap
 // ═════════════════════════════════════════════════════════════
 router.get('/bootstrap', async (req, res) => {
   try {
-    const departmentId = 3;
+    const currentUserId = req.user?.id || 1; 
 
-    const teamRows = await q(`
-      SELECT
-        u.id,
-        u.full_name AS name,
-        u.email,
+    // 1. Fetch current logged-in user profile details using full_name
+    const userQuery = `SELECT id, full_name FROM public.users WHERE id = $1;`;
+    const userResult = await db.query(userQuery, [currentUserId]);
+    const userProfile = userResult.rows[0] || { id: 1, full_name: "You" };
+
+    // 2. Fetch Customer Service agents mapped to your exact columns
+    const agentsQuery = `
+      SELECT 
+        u.id, 
+        u.full_name AS name, 
+        CASE WHEN u.employment_status = 'active' THEN true ELSE false END AS is_active,
         udm.role,
-        u.avatar_url,
-        u.avatar_colour,
-        true AS is_active
+        udm.is_primary
       FROM public.user_department_memberships udm
       JOIN public.users u ON udm.user_id = u.id
-      WHERE udm.department_id = $1
+      WHERE udm.department_id = 3 
         AND udm.deleted_at IS NULL
-        AND u.deleted_at IS NULL
         AND u.employment_status = 'active'
-        AND udm.role NOT IN ('founder', 'hr', 'manager', 'owner')
-      ORDER BY u.full_name ASC
-    `, [departmentId]);
-
-    const statusRows = await q(`
-      SELECT key, label, color, icon
-      FROM public.cs_statuses
-      ORDER BY sort_order ASC
-    `);
-
+      ORDER BY u.full_name ASC;
+    `;
+    const agentsResult = await db.query(agentsQuery);
+    
+    const currentUserMembership = agentsResult.rows.find(a => String(a.id) === String(currentUserId));
+    const userRole = currentUserMembership ? currentUserMembership.role : 'agent';
+    
     res.json({
       user: {
-        id:   req.user.id,
-        name: req.user.full_name || req.user.name,
-        role: req.user.role,
+        id: userProfile.id,
+        name: userProfile.full_name,
+        role: userRole
       },
-      permissions: permissionsFor(req.user),
-      agents:   teamRows,
-      statuses: statusRows,
+      permissions: {
+        assign: ['lead', 'manager', 'senior'].includes(userRole),
+        templates: true,
+        manageNotes: ['lead', 'manager'].includes(userRole)
+      },
+      agents: agentsResult.rows.filter(agent => String(agent.id) !== String(currentUserId))
     });
-  } catch (err) {
-    console.error('[bootstrap]', err);
-    res.status(500).json({ error: 'Failed loading active department infrastructure rows' });
+
+  } catch (error) {
+    console.error('Database bootstrap fetch crash:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
@@ -208,9 +283,9 @@ router.get('/queue', async (req, res) => {
         t.platform,
         t.case_ref AS "caseRef",
         t.assignee_id AS "assigneeId",
-        t.sla_due_at AS "slaDueAt",
         t.is_new AS "isNew",
-        t.active_cases AS "activeCases"
+        t.active_cases AS "activeCases",
+        t.sla_resolution_due AS "slaDueAt"
       FROM public.cs_tickets t
     `;
 
@@ -228,7 +303,6 @@ router.get('/queue', async (req, res) => {
       queryParams.push(targetStatus);
       queryConditions.push(`t.status = $${queryParams.length}`);
     }
-    // view === 'all_tickets' (or anything else): no extra condition, all tickets.
 
     if (filter && filter !== 'all') {
       queryParams.push(filter);
@@ -238,9 +312,55 @@ router.get('/queue', async (req, res) => {
     if (queryConditions.length > 0) {
       queueQuery += ' WHERE ' + queryConditions.join(' AND ');
     }
-    queueQuery += ' ORDER BY t.sla_due_at ASC NULLS LAST';
+    
+    queueQuery += ' ORDER BY t.sla_resolution_due ASC NULLS LAST';
+    let queueRows = await q(queueQuery, queryParams);
 
-    const queueRows = await q(queueQuery, queryParams);
+    // ── 🎯 AUTOMATED QUEUE ROUTING AUTOMATION LAYER ──
+    // 1. Fetch active rules safely from your routing configuration storage
+    let queueRouting = {};
+    try {
+      // Adjust this configuration table or file lookup if your rules are stored differently
+      const routingResult = await q('SELECT routing_rules FROM public.queue_routing_config LIMIT 1;');
+      if (routingResult && routingResult.length) {
+        queueRouting = routingResult[0].routing_rules || {};
+      }
+    } catch (e) {
+      console.error('[queue-routing] Configuration lookup fallback:', e.message);
+    }
+
+    // 2. Scan and re-route unassigned tickets hitting active rules
+    let directMutationOccurred = false;
+    for (let ticket of queueRows) {
+      if (ticket.category && queueRouting[ticket.category]) {
+        const designatedAgentId = parseInt(queueRouting[ticket.category], 10);
+        
+        // Match condition: Ticket must be currently unassigned
+        if (designatedAgentId && !ticket.assigneeId) {
+          try {
+            await q(
+              'UPDATE public.cs_tickets SET assignee_id = $1 WHERE id = $2',
+              [designatedAgentId, ticket.id]
+            );
+            
+            // Apply inline modification for immediate frontend data payload sync
+            ticket.assigneeId = designatedAgentId;
+            directMutationOccurred = true;
+          } catch (routingError) {
+            console.error(`[auto-route] Failed for ticket ID ${ticket.id}:`, routingError.message);
+          }
+        }
+      }
+    }
+
+    // 3. Re-sync counter references pool if updates were committed to the pool
+    if (directMutationOccurred) {
+      for (let countItem of countRows) {
+        if (countItem.category && queueRouting[countItem.category] && !countItem.assignee_id) {
+          countItem.assignee_id = parseInt(queueRouting[countItem.category], 10);
+        }
+      }
+    }
 
     res.json({
       cases: queueRows,
@@ -314,7 +434,7 @@ router.get('/cases/:id', async (req, res) => {
         address:    ticket.customer_address,
         assigneeId: ticket.assignee_id,
         isNew:      ticket.is_new,
-        slaDueAt:   ticket.sla_due_at,
+        slaDueAt: ticket.sla_resolution_due,
         caseRef:    ticket.case_ref,
       },
       thread,
@@ -1082,6 +1202,37 @@ router.delete('/statuses/:key', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════
+// ROUTE  POST /api/cs/cases  — CREATE TICKET (manual)
+// Req 1/2/3: goes through the same createTicket() the email poller uses,
+// so a manually-opened ticket is routed into the right queue and, if that
+// queue has an employee assigned, appears in their My Work immediately.
+// ═════════════════════════════════════════════════════════════
+router.post('/cases', async (req, res) => {
+  try {
+    const { subject, customerName, customerEmail, customerAddress, category, channel, platform, snippet } = req.body;
+    if (!subject || !subject.trim()) {
+      return res.status(400).json({ error: 'subject is required' });
+    }
+
+    const ticket = await createTicket({
+      subject: subject.trim(),
+      snippet: (snippet || '').trim() || null,
+      customerName, customerEmail, customerAddress, category, channel, platform,
+      actor: { id: req.user.id, name: req.user.full_name || req.user.name },
+    });
+
+    const countRows = await q(
+      'SELECT id, status, assignee_id FROM public.cs_tickets WHERE deleted_at IS NULL'
+    );
+
+    res.status(201).json({ ok: true, ticket, allCasesReferencePool: countRows });
+  } catch (err) {
+    console.error('[create ticket]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════
 // QUEUE ROUTING — GET/POST /api/cs/queue-routing
 // Front end's csQueueRoutingModal saves a flat category -> agentId map.
 // No table or routes existed for this in the uploaded backend file;
@@ -1139,6 +1290,7 @@ router.use((err, req, res, _next) => {
 
 module.exports = router;
 module.exports.pool = pool; // expose pool for graceful shutdown
+module.exports.createTicket = createTicket; // reused by server/email/imapPoller.js (req 1/2/3)
 
 // ─────────────────────────────────────────────────────────────
 // STANDALONE

@@ -1083,11 +1083,11 @@ let currentChipFilter = 'all';
       { id: '6', customer: 'Lisa Chen', subject: 'Refund status update', snippet: 'Return received at warehouse — when will refund hit?', category: 'claims', platform: 'ebay', status: 'refund', caseRef: 'EBY-55288', matched: true, assigneeId: 1, slaDueAt: hoursFromNow(3.8), isNew: false },
     ];
 
-    const SAMPLE_TEAM = [
-      { id: 2, name: 'Tasha Klein' },
-      { id: 3, name: 'Marcus Idowu' },
-      { id: 4, name: 'Sofia Reyes' },
-    ];
+    // const SAMPLE_TEAM = [
+    //   { id: 2, name: 'Tasha Klein' },
+    //   { id: 3, name: 'Marcus Idowu' },
+    //   { id: 4, name: 'Sofia Reyes' },
+    // ];
 
     // -----------------------------------------------------------------------
     // Customer order history: when a customer's email has placed more than
@@ -1387,12 +1387,17 @@ async function saveNote() {
       return j;
     }
 
-    async function initBootstrap() {
+async function initBootstrap() {
       try {
         bootstrap = await api('/bootstrap');
+        
+        // Ensure we fall back to empty array if database returns null for agents
         if (bootstrap && bootstrap.agents) {
           useApi = true; 
+        } else {
+          bootstrap.agents = [];
         }
+
         if (Array.isArray(bootstrap.statuses) && bootstrap.statuses.length) {
           STATUSES = bootstrap.statuses;
         }
@@ -1400,15 +1405,11 @@ async function saveNote() {
         templates = tpl.templates || [];
         categories = (tpl.categories && tpl.categories.length) ? tpl.categories : ['General'];
         
-        // 🟢 INITIALIZE MASTER CACHE PIPELINE ON LOAD
+        // Initialize Master Cache Pipeline on load
         if (useApi) {
           const data = await api('/queue?view=all_tickets&filter=all');
           queue = data.cases || [];
-          if (data.allCasesReferencePool) {
-            window._csMasterTicketCache = data.allCasesReferencePool;
-          } else {
-            window._csMasterTicketCache = queue;
-          }
+          window._csMasterTicketCache = data.allCasesReferencePool || queue;
         }
       } catch (e) {
         console.error("API Error - falling back to local simulation paths:", e);
@@ -1417,7 +1418,7 @@ async function saveNote() {
         bootstrap = { 
           user: { id: 1, name: 'You', role: 'Team Lead' }, 
           permissions: { assign: true, templates: true, manageNotes: true }, 
-          agents: SAMPLE_TEAM 
+          agents: [] // Will be populated by sample data locally if API fails
         };
       }
 
@@ -1431,29 +1432,25 @@ async function saveNote() {
 
       if (bootstrap.permissions.templates) $('#csNavTemplates').style.display = '';
       $('#csReassign').disabled = !bootstrap.permissions.assign;
-      // Queue Routing: visible to Team Leads only
+      
       if (bootstrap.permissions.assign) {
         const routingBtn = $('#csNavQueueRouting');
         if (routingBtn) routingBtn.style.display = '';
-        // Load saved routing rules (from API or localStorage)
         try {
           if (useApi) {
             const r = await api('/queue-routing');
             if (r && r.routing) queueRouting = { ...queueRouting, ...r.routing };
-          } else {
-            const saved = localStorage.getItem('cs_queue_routing');
-            if (saved) queueRouting = { ...queueRouting, ...JSON.parse(saved) };
           }
-        } catch (e) { /* Routing rules not found, keeping defaults */ }
+        } catch (e) { console.error('Routing rules loading skipped:', e); }
       }
       
       renderStatusNav();
       populateStatusSelect();
 
+      // Fire UI drawing cycles with database values
       if (typeof renderEmployeeList === 'function') renderEmployeeList();
       if (typeof renderTeamMembersSidebar === 'function') renderTeamMembersSidebar();
 
-      // RUN REAL-TIME METRIC COMPILATION
       updateNavCounts();
     }
 
@@ -1833,7 +1830,7 @@ async function loadQueue() {
           const data = await api('/queue?' + params.toString());
           queue = data.cases || [];
           
-          // 🟢 LIVE COUNTER CACHE RE-TICK
+          // Sync with the master real-time count cache pool metrics
           if (data.allCasesReferencePool) {
             window._csMasterTicketCache = data.allCasesReferencePool;
           }
@@ -1841,31 +1838,64 @@ async function loadQueue() {
           const statusAgentMatch = /^status_agent:(.+):([^:]+)$/.exec(queueView);
           const statusKey = !statusAgentMatch && queueView.startsWith('status:') ? queueView.slice(7) : null;
           const agentKey = !statusAgentMatch && queueView.startsWith('agent:') ? queueView.slice(6) : null;
+          
           queue = SAMPLE_QUEUE.filter((c) => {
             if (queueView === 'all_tickets') return true;
             if (statusAgentMatch) return c.status === statusAgentMatch[1] && String(c.assigneeId) === String(statusAgentMatch[2]);
             if (statusKey) return c.status === statusKey;
-            if (queueView === 'unassigned') return !c.matched || c.assigneeId == null;
-            if (agentKey) return String(c.assigneeId) === String(agentKey);
-            return c.matched && String(c.assigneeId) === String(bootstrap.user.id);
+            if (queueView === 'unassigned') return c.assigneeId == null || c.assignee_id == null;
+            if (agentKey) return String(c.assigneeId || c.assignee_id) === String(agentKey);
+            return String(c.assigneeId || c.assignee_id) === String(bootstrap.user.id);
           });
         }
+        
         queue.forEach((c) => { if (c.isNew) unreadIds.add(c.id); });
 
-        // ── Queue Routing: auto-assign unassigned new tickets based on routing rules ──
-        if (bootstrap.permissions.assign) {
-          const unassignedNew = queue.filter(c => (!c.assigneeId && !c.assignee_id) && c.category && queueRouting[c.category]);
-          for (const ticket of unassignedNew) {
-            const targetAgentId = queueRouting[ticket.category];
-            if (!targetAgentId) continue;
-            try {
-              if (useApi) {
-                await api('/cases/' + ticket.id + '/assign', { method: 'POST', body: JSON.stringify({ agentId: targetAgentId, user_id: targetAgentId }) });
+        // ── 🎯 AUTOMATED ROUTING ENGINE: ALL WORK -> QUEUE -> MY WORK ──
+        const targetPool = (useApi && window._csMasterTicketCache) ? window._csMasterTicketCache : queue;
+        
+        for (const ticket of targetPool) {
+          if (ticket.category && queueRouting[ticket.category]) {
+            const designatedAgentId = queueRouting[ticket.category];
+            
+            // If the designated queue routing agent matches an active employee ID fetched from the database
+            if (designatedAgentId) {
+              const agentExists = bootstrap.agents.some(a => String(a.id) === String(designatedAgentId)) || 
+                                  (bootstrap.user && String(bootstrap.user.id) === String(designatedAgentId));
+              
+              if (agentExists && !ticket.assigneeId && !ticket.assignee_id) {
+                try {
+                  if (useApi) {
+                    await api('/cases/' + ticket.id + '/assign', { 
+                      method: 'POST', 
+                      body: JSON.stringify({ agentId: designatedAgentId, user_id: designatedAgentId }) 
+                    });
+                  }
+                  // Instantly mirrors visibility directly inside the employee's "My Work" folder layout view
+                  ticket.assigneeId = designatedAgentId;
+                  ticket.assignee_id = designatedAgentId;
+                } catch (e) {
+                  console.error('Queue routing synchronization skipped:', e);
+                }
               }
-              ticket.assigneeId = targetAgentId;
-              ticket.assignee_id = targetAgentId;
-            } catch (e) { /* Silent — if routing fails, ticket remains unassigned */ }
+            }
           }
+        }
+
+        // Re-filter active array views following auto-assignment execution cycles cleanly
+        if (!useApi) {
+          const statusAgentMatch = /^status_agent:(.+):([^:]+)$/.exec(queueView);
+          const statusKey = !statusAgentMatch && queueView.startsWith('status:') ? queueView.slice(7) : null;
+          const agentKey = !statusAgentMatch && queueView.startsWith('agent:') ? queueView.slice(6) : null;
+          
+          queue = (SAMPLE_QUEUE.length ? SAMPLE_QUEUE : queue).filter((c) => {
+            if (queueView === 'all_tickets') return true;
+            if (statusAgentMatch) return c.status === statusAgentMatch[1] && String(c.assigneeId) === String(statusAgentMatch[2]);
+            if (statusKey) return c.status === statusKey;
+            if (queueView === 'unassigned') return c.assigneeId == null || c.assignee_id == null;
+            if (agentKey) return String(c.assigneeId || c.assignee_id) === String(agentKey);
+            return String(c.assigneeId || c.assignee_id) === String(bootstrap.user.id);
+          });
         }
 
         sortQueueBySla();
@@ -3325,7 +3355,7 @@ async function commitPendingReply() {
     function openQueueRoutingModal() {
       const team = (bootstrap.agents && bootstrap.agents.length) ? bootstrap.agents : SAMPLE_TEAM;
       const allAgents = [bootstrap.user, ...team.filter(a => String(a.id) !== String(bootstrap.user?.id))];
-      const optionsHtml = '<option value="">— Unassigned (koi nahi) —</option>' +
+      const optionsHtml = '<option value="">— Unassigned (no one) —</option>' +
         allAgents.map(a => `<option value="${a.id}">${esc(a.name)}${String(a.id) === String(bootstrap.user?.id) ? ' (you)' : ''}</option>`).join('');
       $('#csQueueRoutingBody').innerHTML = QUEUE_ROUTING_QUEUES.map(q => `
         <div style="display:flex;align-items:center;gap:10px">
